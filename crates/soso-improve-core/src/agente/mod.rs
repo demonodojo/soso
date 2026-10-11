@@ -19,7 +19,7 @@ use crate::entorno::Entorno;
 use crate::tiempo::Reloj;
 use crate::Resultado;
 
-pub use herramientas::{ejecutar, Politica, Respuesta};
+pub use herramientas::{ejecutar, Forja, Politica, Respuesta};
 
 /// Quien contesta. `peticion` es el cuerpo JSON de `/v1/chat/completions`; devuelve el cuerpo JSON.
 pub trait Modelo {
@@ -126,7 +126,7 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
         }
         let plazo = cfg.plazo_turno_ms.min(cfg.plazo_total_ms - gastado);
         let peticion = json!({
-            "model": cfg.modelo, "messages": mensajes, "tools": herramientas::definiciones(),
+            "model": cfg.modelo, "messages": mensajes, "tools": herramientas::definiciones(pol),
             "temperature": cfg.temperatura, "max_tokens": cfg.max_tokens, "stream": false,
         })
         .to_string();
@@ -199,3 +199,18 @@ PASOS:\n\
 3. Llama a `reemplazar_texto` con `filePath`, `buscar` (un fragmento corto de lo que leíste; los espacios no importan) y `nuevo`. Cambio mínimo: no toques otros archivos. Si dice que no lo encuentra o que aparece varias veces, repite con otro fragmento.\n\
 4. Llama a `bash` con las comprobaciones de TASK.md (`cargo test …`) y lee el resultado.\n\
 5. Informe final en texto corto: qué cambiaste, qué comprobaciones corrieron y su salida resumida, y lo que no pudiste hacer. No inventes resultados.";
+
+/// Prompt del perfil Forja (T37): el agente edita fuentes de userspace y compila **en el host** por
+/// la herramienta `forja`; el diagnóstico vuelve a él sin que nadie lo copie.
+pub const SISTEMA_FORJA: &str = "Eres el agente de mejora de soso. Trabajas dentro del checkout /src/soso, en un sistema sin shell: sólo tienes las herramientas.\n\n\
+PROTOCOLO (obligatorio):\n\
+- En cada respuesta escribes **una sola llamada a una herramienta y nada más**: sin texto antes ni después.\n\
+- El resultado de la herramienta llega en el mensaje siguiente. **Nunca lo inventes**: espera a recibirlo.\n\
+- No edites un archivo sin haberlo leído antes con `read`.\n\
+- Sólo cuando hayas terminado todos los pasos respondes con texto: el informe final.\n\n\
+PASOS:\n\
+1. Llama a `read` con el archivo que indica la tarea.\n\
+2. Llama a `reemplazar_texto` con `filePath`, `buscar` (un fragmento corto de lo que leíste; los espacios no importan) y `nuevo`. Cambio mínimo.\n\
+3. Llama a `forja` con `accion` = `all`: sube las fuentes, compila en el host y aplica el binario. Si devuelve un error de compilación, léelo, corrige el archivo con `reemplazar_texto` y vuelve a llamar a `forja`.\n\
+4. Llama a `bash` con `/bin/hola-std` para comprobar lo que imprime el programa ya compilado.\n\
+5. Informe final en texto corto: qué cambiaste y qué imprimió el programa. No inventes resultados.";

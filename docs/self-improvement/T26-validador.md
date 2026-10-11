@@ -1,6 +1,6 @@
 # T26 — Validar candidatos y promover solo los aceptados
 
-**Hito:** SI-4 · **Tipo:** Implementación portable con adaptadores host/guest · **Estado:** pendiente.
+**Hito:** SI-4 · **Tipo:** Implementación portable con adaptadores host/guest · **Estado:** **hecha** en host (2026-10-11; [resultado](../../target/self-improvement/tasks/T26/resultado.md), [seguimiento](seguimiento/T26.md)); validación nativa pendiente.
 
 **Dependencias:** [T24](T24-checkout.md), [T25](T25-ejecutor.md)
 
@@ -47,9 +47,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 Los checks completos de C6 son puerta de promoción aunque se hayan pasado tests focalizados durante edición.
 

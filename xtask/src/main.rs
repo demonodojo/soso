@@ -53,6 +53,12 @@ fn main() {
             args.push("--agente-nativo".into());
             test_llm_api::run(&args);
         }
+        // T37: agente nativo + Forja (agente=soso, inferencia=soso, build=host).
+        "test-agent-forja" => {
+            let mut args: Vec<String> = std::env::args().skip(2).collect();
+            args.push("--agente-forja".into());
+            test_llm_api::run(&args);
+        }
         "test" => {
             test::run();
             if matches!(

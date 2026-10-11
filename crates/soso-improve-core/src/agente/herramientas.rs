@@ -32,6 +32,18 @@ pub struct Politica {
     pub resultados_max: usize,
     /// Variables que se **añaden** al entorno de las órdenes (p. ej. `CARGO_HOME`).
     pub entorno: Vec<(String, String)>,
+    /// Build remoto (Forja): si está, el agente dispone de la herramienta `forja`.
+    pub forja: Option<Forja>,
+}
+
+/// Cómo se llama a Forja. El **token no pasa por el modelo**: lo pone el adaptador al lanzar la orden.
+#[derive(Debug, Clone)]
+pub struct Forja {
+    /// Ejecutable del cliente, p. ej. `["/bin/soso-forja"]`.
+    pub argv: Vec<String>,
+    pub host: String,
+    pub token: String,
+    pub plazo_s: u32,
 }
 
 impl Politica {
@@ -55,6 +67,7 @@ impl Politica {
             lineas_por_defecto: 2000,
             resultados_max: 100,
             entorno: Vec::new(),
+            forja: None,
         }
     }
 }
@@ -77,8 +90,8 @@ impl Respuesta {
 }
 
 /// Definiciones en el formato de la API (`tools` de `/v1/chat/completions`).
-pub fn definiciones() -> Value {
-    json!([
+pub fn definiciones(pol: &Politica) -> Value {
+    let mut v = json!([
         {"type": "function", "function": {
             "name": "read",
             "description": "Lee un archivo (con líneas numeradas) o lista un directorio. Para archivos largos usa offset y limit.",
@@ -116,7 +129,18 @@ pub fn definiciones() -> Value {
             "parameters": {"type": "object", "properties": {
                 "command": {"type": "string", "description": "La orden, p. ej. cargo test -p soso-http"}},
                 "required": ["command"]}}}
-    ])
+    ]);
+    if pol.forja.is_some() {
+        if let Some(a) = v.as_array_mut() {
+            a.push(json!({"type": "function", "function": {
+                "name": "forja",
+                "description": "Compila en el servidor de build remoto (Forja) las fuentes de /src/soso y aplica el binario resultante. `accion`: `all` = subir fuentes + compilar + aplicar; `sync` = sólo subir; `build` = compilar lo subido. Devuelve el diagnóstico del compilador: si falla, léelo y corrige el archivo.",
+                "parameters": {"type": "object", "properties": {
+                    "accion": {"type": "string", "enum": ["all", "sync", "build"]}},
+                    "required": ["accion"]}}}));
+        }
+    }
+    v
 }
 
 /// Ejecuta una herramienta por nombre. Un nombre desconocido o argumentos mal formados son una
@@ -128,8 +152,9 @@ pub fn ejecutar<E: Entorno>(e: &mut E, pol: &Politica, nombre: &str, args: &Valu
         "glob" => listar_glob(e, pol, args),
         "reemplazar_texto" => reemplazar(e, pol, args),
         "bash" => orden(e, pol, args),
+        "forja" if pol.forja.is_some() => forja(e, pol, args),
         otro => Ok(Respuesta::mal(format!(
-            "La herramienta «{otro}» no existe. Las disponibles son: read, grep, glob, reemplazar_texto y bash."
+            "La herramienta «{otro}» no existe. Las disponibles son: read, grep, glob, reemplazar_texto, bash{}.", if pol.forja.is_some() { " y forja" } else { "" }
         ))),
     };
     match r {
@@ -625,4 +650,26 @@ fn orden<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<Respu
         (None, None) => "no terminó".to_string(),
     };
     Ok(Respuesta { texto: format!("{cabecera}\n{}", s.texto()), error: s.codigo != Some(0) })
+}
+
+// ---------------------------------------------------------------- forja
+
+fn forja<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<Respuesta> {
+    let f = pol.forja.as_ref().ok_or_else(|| Error::uso("Forja no está configurada"))?;
+    let accion = cadena(args, "accion")?;
+    if !["all", "sync", "build"].contains(&accion) {
+        return Ok(Respuesta::mal(format!("la acción «{accion}» no existe: usa all, sync o build")));
+    }
+    let mut argv = f.argv.clone();
+    argv.extend([accion.to_string(), "--host".to_string(), f.host.clone(), "--token".to_string(), f.token.clone()]);
+    let o = Orden { argv, cwd: pol.raiz.clone(), stdin: Vec::new(), timeout_s: Some(f.plazo_s), entorno: pol.entorno.clone() };
+    let s = e.ejecutar(&o)?;
+    let cabecera = match (s.codigo, &s.motivo) {
+        (Some(c), _) => format!("exit code: {c}"),
+        (None, Some(m)) => format!("no terminó: {m}"),
+        (None, None) => "no terminó".to_string(),
+    };
+    // El token no debe volver al modelo aunque la salida lo repita.
+    let texto = s.texto().replace(f.token.as_str(), "***");
+    Ok(Respuesta { texto: format!("{cabecera}\n{texto}"), error: s.codigo != Some(0) })
 }

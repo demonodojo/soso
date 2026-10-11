@@ -7,7 +7,7 @@
 //! distintas según dónde corriera.
 //!
 //! `ejecutar` (T25) corre el agente nativo sobre la copia; validar al candidato
-//! (T26) sigue sin existir y se rechaza con su ficha: no se simula.
+//! `validar` (T26) reconstruye la base desde la captura, aplica el paquete y decide sólo por códigos de salida.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -47,6 +47,7 @@ pub fn despachar(sub: &str, op: &Opciones) -> Result<i32, Error> {
         "copiar" => copiar(op),
         "exportar" => exportar(op),
         "ejecutar" => crate::agente::ejecutar_tarea(op),
+        "validar" => validar(op),
         "reanudar" => ver(op, true),
         "informe" => ver(op, false),
         // `capacidades().exigir` ya rechazó `ejecutar` y `validar` con su
@@ -173,4 +174,58 @@ fn nombre_op(o: &soso_improve_core::delta::Operacion) -> &'static str {
         Modificacion { .. } => "modificacion",
         Borrado { .. } => "borrado",
     }
+}
+
+/// `tarea validar` (T26): exporta el candidato de la copia, lo envía al validador por contenido y
+/// decide. Aquí el «validador» es otro directorio del mismo host: la separación por **instancia**
+/// (receptor soso) es T43; el informe lo dice.
+fn validar(op: &Opciones) -> Result<i32, Error> {
+    use soso_improve_core::validate::{self, Exigencias, Sitios, Veredicto};
+    let r = reanudacion(op)?;
+    let captura = op.exigido("captura")?;
+    let man = manifiesto(captura)?;
+    let copia = workspace::leer_marca(&Host, op.exigido("copia")?)?;
+    if copia.run_id != r.manifiesto.run_id {
+        return Err(Error::uso(format!("esa copia es de {}, no de {}", copia.run_id, r.manifiesto.run_id)));
+    }
+    let ex: Exigencias = serde_json::from_slice(
+        &std::fs::read(op.exigido("exigencias")?).map_err(|e| Error::entorno(format!("no pude leer las exigencias: {e}")))?,
+    )
+    .map_err(|e| Error::formato(format!("exigencias ilegibles: {e}")))?;
+    let trabajo = op.exigido("trabajo")?.trim_end_matches('/').to_string();
+    let referencias = op.exigido("referencias")?.to_string();
+    let campana = op.exigido("campana")?;
+    std::fs::create_dir_all(&trabajo).map_err(|e| Error::entorno(format!("no pude crear {trabajo}: {e}")))?;
+
+    let mut host = Host;
+    if op.bandera("publicar-base") {
+        let g = validate::publicar_base(&mut host, &referencias, campana, &soso_improve_core::captura::huella(&man.inventario))?;
+        println!("validar: base de «{campana}» publicada (generación {g})");
+    }
+    let politica = man.politica.clone();
+    let exp = workspace::exportar(&Host, &copia, &man, &politica)?;
+    if exp.vacia() {
+        return Err(Error::uso("el candidato no cambió nada: no hay nada que validar"));
+    }
+    let objetos = format!("{trabajo}/objetos");
+    let n = validate::empaquetar_objetos(&mut host, &copia.ruta, &exp.paquete, &objetos)?;
+    println!("validar: paquete de {} operación(es), {n} objeto(s) enviados al validador", exp.paquete.operaciones.len());
+    let arbol = format!("{trabajo}/arbol");
+    let sitios = Sitios { captura, objetos: &objetos, arbol: &arbol, referencias: &referencias, campana };
+    let inf = validate::validar_candidato(
+        &mut host,
+        &sitios,
+        &exp.paquete,
+        op.uno("paquete-hash").filter(|h| !h.is_empty()),
+        &r.spec,
+        &ex,
+        Some((op.exigido("estado")?, op.exigido("run")?)),
+    )?;
+    print!("{}", validate::resumen(&inf));
+    println!("validar: el validador comparte host con el agente; la separación por instancia es T43");
+    Ok(match inf.veredicto {
+        Veredicto::Aceptado => Codigo::Exito.como_i32(),
+        Veredicto::Rechazado => Codigo::Verificacion.como_i32(),
+        Veredicto::Bloqueado => Codigo::Error.como_i32(),
+    })
 }

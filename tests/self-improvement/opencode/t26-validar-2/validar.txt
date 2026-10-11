@@ -1,0 +1,7 @@
+validar: base de «r03» publicada (generación 0)
+validar: paquete de 1 operación(es), 1 objeto(s) enviados al validador
+validar: Aceptado (paquete 6470dd45f9e3fe793a6b737c94ccf59324d8f5eeaa522b352fa4d1c93aff0075)
+  cargo test -p soso-http → 0
+  · todos los requisitos en verde; base promovida
+  base promovida (generación 1)
+validar: el validador comparte host con el agente; la separación por instancia es T43

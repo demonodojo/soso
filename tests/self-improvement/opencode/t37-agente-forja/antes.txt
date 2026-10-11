@@ -1,0 +1,8 @@
+bienvenido a soso 0.1
+un OS minimalista en Rust con filesystem CoW propio
+desde live, instalar en un NVMe: soso-install
+sosh — escribe 'help' para la ayuda
+sosh: marca lista pid=22 prefault=0ms write=94ms
+$ /bin/hola-std
+hola desde soso-std
+$ exit

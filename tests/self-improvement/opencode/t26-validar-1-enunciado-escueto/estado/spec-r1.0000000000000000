@@ -1,0 +1,2 @@
+e0e6bdf0ff17a6294757d5557f242c1c33bf1b822ffaaec6605be0be8e9dbd16
+{"schema_version":1,"id":"R03","base":"9f737f423602724bc1a553bbec87a4dbc47cd2aa6c5e4c8c6cf70f03d13dfc7c","problema":"header_value distingue mayusculas: debe ser insensible (RFC 9110)","rutas_editables":["crates/soso-http/src"],"comprobaciones":[{"argv":["cargo","test","-p","soso-http"],"cwd":".","timeout_s":900}],"limites":{"intentos_max":3,"herramientas_max":30,"segundos_max":7200},"hashes_entrada":{}}

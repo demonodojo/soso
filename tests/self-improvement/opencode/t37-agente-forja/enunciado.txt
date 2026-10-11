@@ -1,0 +1,13 @@
+bienvenido a soso 0.1
+un OS minimalista en Rust con filesystem CoW propio
+desde live, instalar en un NVMe: soso-install
+sosh — escribe 'help' para la ayuda
+sosh: marca lista pid=17 prefault=0ms write=90ms
+$ echo Tarea: el programa de /src/soso/user/hola-std/src/main.rs imprime la linea hola desde soso-std. > /tmp/t37.txt
+$ echo Cambia esa linea para que imprima exactamente hola-t37-forja y nada mas en su lugar. >> /tmp/t37.txt
+$ echo Despues compila con la herramienta forja y comprueba el resultado ejecutando /bin/hola-std. >> /tmp/t37.txt
+$ cat /tmp/t37.txt
+Tarea: el programa de /src/soso/user/hola-std/src/main.rs imprime la linea hola desde soso-std.
+Cambia esa linea para que imprima exactamente hola-t37-forja y nada mas en su lugar.
+Despues compila con la herramienta forja y comprueba el resultado ejecutando /bin/hola-std.
+$ exit

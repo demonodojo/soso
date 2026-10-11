@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, exit};
+use std::process::{Child, Command, Stdio, exit};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -56,6 +56,8 @@ struct Args {
     /// T35: el agente nativo corriendo **dentro** del guest contra el modelo del mismo guest.
     /// Como `--orden`, es lo único que se corre.
     agente_nativo: bool,
+    /// T37: además, el agente compila en el host por Forja y se ejecuta el binario resultante.
+    agente_forja: bool,
 }
 
 #[derive(Default)]
@@ -118,6 +120,7 @@ fn parse(from: &[String]) -> Args {
     let mut caso = None;
     let mut orden = None;
     let mut agente_nativo = false;
+    let mut agente_forja = false;
     let mut i = 0;
     while i < from.len() {
         match from[i].as_str() {
@@ -141,6 +144,7 @@ fn parse(from: &[String]) -> Args {
                 caso = from.get(i).cloned();
             }
             "--agente-nativo" => agente_nativo = true,
+            "--agente-forja" => agente_forja = true,
             "--orden" => {
                 i += 1;
                 orden = from.get(i).map(PathBuf::from);
@@ -154,11 +158,12 @@ fn parse(from: &[String]) -> Args {
         model_dir,
         profile,
         inspect_argv,
-        campana: campana || orden.is_some() || agente_nativo,
+        campana: campana || orden.is_some() || agente_nativo || agente_forja,
         repeticiones,
         caso,
         orden,
         agente_nativo,
+        agente_forja,
     }
 }
 
@@ -330,6 +335,7 @@ fn run_guest(root: &Path, arte: &Path, model_dir: &Path, catalog: &str, args: &A
         caso: args.caso.as_deref(),
         orden: args.orden.as_deref(),
         agente_nativo: args.agente_nativo,
+        agente_forja: args.agente_forja,
     });
     let cierre = run_guest_inner(
         &key,
@@ -391,6 +397,7 @@ struct Campana<'a> {
     caso: Option<&'a str>,
     orden: Option<&'a Path>,
     agente_nativo: bool,
+    agente_forja: bool,
 }
 
 /// Informe de una campaña. El nombre lleva el modelo: el 7B no puede
@@ -421,6 +428,9 @@ fn ruta_informe_campana(
 /// justo por eso, así que aquí se distingue «no pude medir» de «medí y salió
 /// que no», y sólo lo primero marca el paso como malo.
 fn correr_campana(key: &Path, catalog: &str, c: &Campana<'_>) -> StepResult {
+    if c.agente_forja {
+        return correr_agente_forja(key, catalog);
+    }
     if c.agente_nativo {
         return correr_agente_nativo(key, catalog);
     }
@@ -561,6 +571,110 @@ fn correr_agente_nativo(key: &Path, catalog: &str) -> StepResult {
         name: "agente_nativo",
         ok,
         detail: format!("editado={editado} terminado={termino} sesion_durable={sesion_ok} ({}s)", t0.elapsed().as_secs()),
+    }
+}
+
+/// T37: agente=soso, inferencia=soso, build=host. El agente (ELF del guest) edita `hola-std`, llama a
+/// Forja (servidor en el host), recibe el diagnóstico y ejecuta el binario aplicado. Luego **otra**
+/// sesión SSH comprueba el efecto y los dos rechazos de recibo de T36.
+fn correr_agente_forja(key: &Path, catalog: &str) -> StepResult {
+    const MARCA: &str = "hola-t37-forja";
+    const TOKEN_FORJA: &str = "soso-t37";
+    let root = crate::project_root();
+    let dir = root.join("tests/self-improvement/opencode/t37-agente-forja");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::create_dir_all(&dir);
+    let mal = |d: String| StepResult { name: "agente_forja", ok: false, detail: d };
+    println!("test-llm-api: agente nativo + Forja contra el endpoint vivo (puerto {LLM_PORT})");
+    let t0 = Instant::now();
+
+    let work = root.join("target/forja-work-t37");
+    let _ = fs::remove_dir_all(&work);
+    if let Err(e) = crate::test::seed_forja_hola_work(&root, &work) {
+        return mal(format!("sembrar el árbol de Forja: {e}"));
+    }
+    let bin = match crate::test::build_forja_server(&root) {
+        Ok(b) => b,
+        Err(e) => return mal(e),
+    };
+    let mut srv = match Command::new(&bin)
+        .env("SOSO_FORJA_RELEASE", "hola-std")
+        .env("SOSO_FORJA_BIND", "0.0.0.0:8740")
+        .env("SOSO_FORJA_TOKEN", TOKEN_FORJA)
+        .env("SOSO_FORJA_WORK", &work)
+        .current_dir(&root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return mal(format!("servidor de Forja: {e}")),
+    };
+    let resultado = (|| -> Result<String, String> {
+        crate::test::esperar_tcp("127.0.0.1:8740", Duration::from_secs(15))?;
+        let sesion = |guion: &str, limite: u64, nombre: &str| -> Result<String, String> {
+            let r = ssh_guion(key, SSH_PORT, guion, Duration::from_secs(limite));
+            let txt = match &r {
+                Ok(t) => t.clone(),
+                Err(e) => format!("ERROR: {e}"),
+            };
+            let _ = fs::write(dir.join(nombre), &txt);
+            r
+        };
+        // El enunciado se escribe con `echo` (la shell de soso no tiene comillas ni heredocs).
+        let tarea = format!(
+            "echo Tarea: el programa de /src/soso/user/hola-std/src/main.rs imprime la linea hola desde soso-std. > /tmp/t37.txt\n\
+             echo Cambia esa linea para que imprima exactamente {MARCA} y nada mas en su lugar. >> /tmp/t37.txt\n\
+             echo Despues compila con la herramienta forja y comprueba el resultado ejecutando /bin/hola-std. >> /tmp/t37.txt\n\
+             cat /tmp/t37.txt\nexit\n"
+        );
+        sesion(&tarea, 120, "enunciado.txt")?;
+        let antes = sesion("/bin/hola-std\nexit\n", 120, "antes.txt")?;
+        if antes.contains(MARCA) {
+            return Err("el binario ya imprimía la marca antes de empezar".into());
+        }
+        let guion = format!(
+            "soso-improve agente --repo /src/soso --tarea @/tmp/t37.txt --modelo {catalog} --puerto 7422 --token {TOKEN} --sesion /tmp/t37.sesion --max-turnos 14 --forja-host 10.0.2.2 --forja-token {TOKEN_FORJA} --perfil forja\nexit\n"
+        );
+        let agente = sesion(&guion, 7200, "agente.txt")?;
+        let despues = sesion("/bin/hola-std\ncat /src/soso/user/hola-std/src/main.rs\nexit\n", 120, "despues.txt")?;
+        // T36: un recibo que no es de este sync se rechaza sin escribir nada, y sin sync previo no se construye.
+        let negativas = sesion(
+            &format!(
+                "echo build-id=noesmio > /var/forja-cache/ultimo-sync.txt\n\
+                 echo source-manifest-sha256=00 >> /var/forja-cache/ultimo-sync.txt\n\
+                 soso-forja build --host 10.0.2.2 --token {TOKEN_FORJA}\n\
+                 rm /var/forja-cache/ultimo-sync.txt\n\
+                 soso-forja build --host 10.0.2.2 --token {TOKEN_FORJA}\nexit\n"
+            ),
+            300,
+            "negativas.txt",
+        )?;
+        let _ = fs::write(dir.join("segundos.txt"), t0.elapsed().as_secs().to_string());
+        let mut faltan = Vec::new();
+        if !agente.contains("agente: Terminado") {
+            faltan.push("el agente no terminó");
+        }
+        if !agente.contains("forja") {
+            faltan.push("el agente no llamó a forja");
+        }
+        if !despues.contains(MARCA) {
+            faltan.push("el binario aplicado no imprime la marca");
+        }
+        if !negativas.contains("forja: recibo rechazado") || !negativas.contains("no hay un sync previo") {
+            faltan.push("los rechazos de recibo no se vieron");
+        }
+        if faltan.is_empty() {
+            Ok(format!("ok ({}s)", t0.elapsed().as_secs()))
+        } else {
+            Err(faltan.join("; "))
+        }
+    })();
+    let _ = srv.kill();
+    let _ = srv.wait();
+    match resultado {
+        Ok(d) => StepResult { name: "agente_forja", ok: true, detail: d },
+        Err(e) => mal(e),
     }
 }
 

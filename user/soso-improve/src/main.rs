@@ -581,6 +581,7 @@ fn agente(orden: &cli::Orden) -> Resultado<usize> {
     };
     let sistema = match orden.uno("sistema").filter(|s| !s.is_empty()) {
         Some(f) => String::from_utf8(Soso.leer(f)?).map_err(|_| Error::formato(format!("{f} no es UTF-8")))?,
+        None if orden.uno("perfil") == Some("forja") => soso_improve_core::agente::SISTEMA_FORJA.to_string(),
         None => SISTEMA.to_string(),
     };
     let num = |c: &str, d: u64| -> Resultado<u64> {
@@ -594,7 +595,20 @@ fn agente(orden: &cli::Orden) -> Resultado<usize> {
     cfg.max_turnos = num("max-turnos", cfg.max_turnos as u64)? as usize;
     cfg.max_tokens = num("max-tokens", cfg.max_tokens as u64)? as u32;
     cfg.plazo_turno_ms = num("plazo-ms", cfg.plazo_turno_ms)?;
-    let pol = PolAgente::nueva(&repo);
+    let mut pol = PolAgente::nueva(&repo);
+    // Perfil de Forja (T37): el agente compila en el host a través de la herramienta `forja` y sólo
+    // puede ejecutar el binario que ha producido. El token lo pone el adaptador, no pasa por el modelo.
+    if let Some(host) = orden.uno("forja-host").filter(|h| !h.is_empty()) {
+        pol.forja = Some(soso_improve_core::agente::Forja {
+            argv: alloc::vec![String::from("/bin/soso-forja")],
+            host: host.to_string(),
+            token: orden.uno("forja-token").unwrap_or("").to_string(),
+            plazo_s: 900,
+        });
+    }
+    if orden.uno("perfil") == Some("forja") {
+        pol.ejecutables = alloc::vec![alloc::vec![String::from("/bin/hola-std")]];
+    }
     let reloj = RelojSoso;
     let conector = ConectorSoso;
     let mut modelo = ModeloHttp {

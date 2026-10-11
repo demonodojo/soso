@@ -1,0 +1,2 @@
+validar: base de «r03» publicada (generación 0)
+error: uso: el candidato no cambió nada: no hay nada que validar

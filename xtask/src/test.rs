@@ -2416,7 +2416,7 @@ fn ssh_forja_hola_run(
     Ok(())
 }
 
-fn build_forja_server(root: &Path) -> Result<PathBuf, String> {
+pub(crate) fn build_forja_server(root: &Path) -> Result<PathBuf, String> {
     let status = Command::new("cargo")
         .current_dir(root)
         .args(["build", "-q", "-p", "soso-forja-server"])
@@ -2435,7 +2435,7 @@ fn build_forja_server(root: &Path) -> Result<PathBuf, String> {
     Ok(bin)
 }
 
-fn seed_forja_hola_work(root: &Path, work: &Path) -> Result<(), String> {
+pub(crate) fn seed_forja_hola_work(root: &Path, work: &Path) -> Result<(), String> {
     fs::create_dir_all(work.join("user")).map_err(|e| e.to_string())?;
     fs::create_dir_all(work.join("crates")).map_err(|e| e.to_string())?;
     fs::create_dir_all(work.join("user/.cargo")).map_err(|e| e.to_string())?;
@@ -2502,7 +2502,7 @@ fn copy_dir_skip_target(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn esperar_tcp(addr: &str, limite: Duration) -> Result<(), String> {
+pub(crate) fn esperar_tcp(addr: &str, limite: Duration) -> Result<(), String> {
     let t0 = Instant::now();
     loop {
         if TcpStream::connect(addr).is_ok() {

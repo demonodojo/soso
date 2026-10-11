@@ -303,3 +303,26 @@ fn una_llamada_sin_resultado_se_descarta_al_reanudar() {
     normalizar(&mut ms);
     assert_eq!(ms.len(), 4, "la llamada sin resultado se quita, la completa se queda");
 }
+
+#[test]
+fn la_herramienta_forja_existe_solo_si_se_configura_y_el_token_no_viaja_al_modelo() {
+    use soso_improve_core::agente::{herramientas::definiciones, Forja};
+    let sin = definiciones(&Politica::nueva(R));
+    assert!(!sin.to_string().contains("\"forja\""));
+    let mut e = repo();
+    let r = ejecutar(&mut e, &Politica::nueva(R), "forja", &json!({"accion": "all"}));
+    assert!(r.error && r.texto.contains("no existe"), "{}", r.texto);
+
+    let mut pol = Politica::nueva(R);
+    pol.forja = Some(Forja { argv: vec!["/bin/soso-forja".into()], host: "10.0.2.2".into(), token: "secreto-123".into(), plazo_s: 600 });
+    let con = definiciones(&pol);
+    assert!(con.to_string().contains("\"forja\"") && !con.to_string().contains("secreto-123"));
+    let r = ejecutar(&mut e, &pol, "forja", &json!({"accion": "all"}));
+    assert!(!r.error && r.texto.starts_with("exit code: 0"), "{}", r.texto);
+    assert_eq!(e.ordenes.borrow()[0], ["/bin/soso-forja", "all", "--host", "10.0.2.2", "--token", "secreto-123"]);
+    // Una acción inventada no llega a ejecutar nada.
+    let n = e.ordenes.borrow().len();
+    let r = ejecutar(&mut e, &pol, "forja", &json!({"accion": "apply; rm -rf /"}));
+    assert!(r.error && r.texto.contains("no existe"));
+    assert_eq!(e.ordenes.borrow().len(), n);
+}

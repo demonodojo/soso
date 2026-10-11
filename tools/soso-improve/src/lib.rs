@@ -74,6 +74,7 @@ pub fn capacidades() -> Capacidades {
             Capacidad::AgentePrueba,
             Capacidad::TareaPreparar,
             Capacidad::TareaEjecutar,
+            Capacidad::TareaValidar,
             Capacidad::TareaReanudar,
             Capacidad::TareaInforme,
             Capacidad::TareaCopiar,
@@ -96,7 +97,8 @@ uso: soso-improve <orden> [opciones]
               reanudar|informe --estado <ruta> --run <id>
               ejecutar --estado <ruta> --run <id> --copia <ruta> [--modelo m] [--puerto 17299] [--token t]
                        [--max-turnos N] [--max-tokens N] [--cargo-home <ruta>]
-              (validar: T26, todavía no)
+              validar  --estado <ruta> --run <id> --captura <ruta> --copia <ruta> --exigencias <json>
+                       --trabajo <dir> --referencias <dir> --campana <nombre> [--publicar-base] [--paquete-hash <h>]
   modelo      perfil    --modelo <dir .som> --original <dir> --out <ruta>
               comparar  --modelo <dir .som> [--fixtures <dir>] [--json <ruta>]
               detalle   --modelo <dir .som> --caso <nombre> [--desde N] [--n N]
@@ -191,7 +193,7 @@ const CLAVES: &[&str] = &[
     "respuesta", "modelo", "original", "fixtures", "json", "desde", "n", "solo", "timeout",
     "revision", "origen", "sin-herramientas", "con-referencia", "puerto", "token",
     "repeticiones", "plazo-ms", "semilla", "caso", "contexto", "modelo-dir",
-    "tarea", "sistema", "sesion", "reanudar", "sembrar", "copia", "estado", "run", "max-turnos", "max-tokens", "cargo-home",
+    "tarea", "sistema", "sesion", "reanudar", "sembrar", "copia", "estado", "run", "exigencias", "trabajo", "referencias", "campana", "publicar-base", "paquete-hash", "max-turnos", "max-tokens", "cargo-home",
 ];
 
 pub fn despachar(orden: &str, args: &[String]) -> Result<i32, Error> {

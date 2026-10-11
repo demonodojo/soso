@@ -14,7 +14,7 @@
 > modelo declara `"temperature": true`; los modelos comprimen espacios al copiar (`reemplazar_texto` en `.opencode/tools/`);
 > la atención dispersa del planificador rompía el contexto largo del guest (ahora opt-in); el prefill del guest es 2,7× más rápido
 > ([T82](T82-prefill-por-lotes.md), pasadas 1–3: atención por grupos GQA repartida entre hilos).
-> **Lo siguiente:** T35 **cerrada** (agente nativo, D10; [resultado](../../target/self-improvement/tasks/T35/resultado.md)). T25 **cerrada en host** (ejecutor con límites sobre el agente nativo; [resultado](../../target/self-improvement/tasks/T25/resultado.md)). Habilitadas: **T26** (validador) y **T37** (mejora nativa con build remoto); T43 espera a T37. La identidad de modelo para T25–T29 es `qwen2.5-coder-14b` (D9).
+> **Lo siguiente:** T35 **cerrada** (agente nativo, D10; [resultado](../../target/self-improvement/tasks/T35/resultado.md)). T25 **cerrada en host** (ejecutor con límites sobre el agente nativo; [resultado](../../target/self-improvement/tasks/T25/resultado.md)). T26 **cerrada en host** (validador y promoción de la base; [resultado](../../target/self-improvement/tasks/T26/resultado.md)). Habilitada: **T37** (mejora nativa con build remoto); T43 espera a T37. La identidad de modelo para T25–T29 es `qwen2.5-coder-14b` (D9).
 
 
 **Ficha cerrada: [T42 — C, ensamblador y empaquetado por perfil](T42-c-link-imagen.md)**
@@ -157,7 +157,7 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T23](T23-estado-coordinador.md) | Crear el formato de tareas y estados del coordinador | SI-4 | T01, T02, T46, T45 | Completada (guest acreditado; destapó T63) |
 | [T24](T24-checkout.md) | Preparar una copia de tarea y exportar su parche | SI-4 | T23, T50 | Completada (guest acreditado) |
 | [T25](T25-ejecutor.md) | Ejecutar OpenCode con límites y logs | SI-4 | T21, T24, T47, T48 | **Hecha en host** (2026-10-11): ejecutor sobre el agente nativo; 14B real por `tarea ejecutar` con verificador 0 |
-| [T26](T26-validador.md) | Validar candidatos y promover solo los aceptados | SI-4 | T24, T25 | Pendiente |
+| [T26](T26-validador.md) | Validar candidatos y promover solo los aceptados | SI-4 | T24, T25 | **Hecha en host** (2026-10-11): validador y promoción durable; ciclo real con el 14B aceptado |
 | [T27](T27-reanudacion.md) | Reanudar tras caída sin repetir efectos | SI-4 | T23, T25, T26 | Pendiente |
 | [T28](T28-conocimiento.md) | Guardar y recuperar aprendizaje verificado | SI-4 | T26 | Pendiente |
 | [T29](T29-campana.md) | Ejecutar una campaña reproducible de diez tareas | SI-4 | T22, T27, T28, T49 | Pendiente |

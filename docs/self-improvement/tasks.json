@@ -977,7 +977,7 @@
       "title": "Validar candidatos y promover solo los aceptados",
       "milestone": "SI-4",
       "kind": "Implementación portable con adaptadores host/guest",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T24",
         "T25"
@@ -1001,6 +1001,18 @@
         ],
         "evidence": [],
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      },
+      "tracking": {
+        "updated_at": "2026-10-11T19:00:00+02:00",
+        "summary": "Validador portable (validate.rs) y `tarea validar` en host: hash exacto, alcance/rutas protegidas/pruebas borradas, base reconstruida desde la captura, regresión sobre la base, requisitos por código de salida, `aceptada` sólo por el validador y promoción durable condicionada. 10 pruebas; ciclo real con el 14B sobre R03 aceptado y base movida. Límites: mismo host (T43), sin guest.",
+        "evidence": [
+          "docs/self-improvement/seguimiento/T26.md",
+          "target/self-improvement/tasks/T26/resultado.md",
+          "crates/soso-improve-core/tests/validate.rs",
+          "tests/self-improvement/opencode/t26-validar-2"
+        ],
+        "blocker": "",
+        "next_step": "Cerrada en host. Siguiente habilitada: T37 (mejora nativa con build remoto); T43 espera a T37."
       }
     },
     {

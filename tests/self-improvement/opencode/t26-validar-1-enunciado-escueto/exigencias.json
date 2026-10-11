@@ -1,0 +1,1 @@
+{"requisitos":[{"nombre":"cargo test -p soso-http","argv":["cargo","test","-p","soso-http"],"cwd":".","timeout_s":900}],"rutas_protegidas":["tests"],"regresion":null}

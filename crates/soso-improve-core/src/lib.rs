@@ -71,6 +71,7 @@ pub mod receta;
 #[cfg(feature = "std")]
 pub mod sysroot;
 pub mod tiempo;
+pub mod validate;
 pub mod transporte;
 pub mod ignorar;
 pub mod programa;

@@ -1,0 +1,2 @@
+adbc7f6475231d0a0fd783ac05b2d148012be3fcb73917a6fc7f0b08f98073cb
+{"schema_version":1,"run_id":"r1","task_id":"R03","creado_ms":1791731994283,"estado":"verificando","intentos":[{"numero":0,"inicio_ms":0,"fin_ms":479092,"estado":"verificando","herramientas":3,"tokens":7366,"artefactos":["/home/jmdiez/Trabajo/demonodojo/soso/target/self-improvement/first-improvement/estado-t26/r1-intento0.eventos.json"]}]}

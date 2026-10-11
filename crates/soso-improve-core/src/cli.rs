@@ -147,7 +147,6 @@ impl Capacidad {
             Capacidad::VerificarPrograma => Some("T40"),
             Capacidad::VerificarRepo => Some("T41"),
             Capacidad::Suites => Some("T47"),
-            Capacidad::TareaValidar => Some("T26"),
             _ => None,
         }
     }
