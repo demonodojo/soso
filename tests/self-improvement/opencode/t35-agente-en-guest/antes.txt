@@ -1,0 +1,13 @@
+bienvenido a soso 0.1
+un OS minimalista en Rust con filesystem CoW propio
+desde live, instalar en un NVMe: soso-install
+sosh — escribe 'help' para la ayuda
+sosh: marca lista pid=19 prefault=0ms write=108ms
+$ cat /tmp/g/src/lib.rs
+pub fn header_value<'a>(headers: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
+}
+$ exit

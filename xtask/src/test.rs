@@ -855,6 +855,15 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 || ssh_improve_procesos(key, port),
             );
         });
+        filter.if_step(sid, "soso-improve: herramientas del agente (T35)", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "soso-improve: herramientas del agente (T35)",
+                || ssh_improve_agente(key, port),
+            );
+        });
         filter.if_step(sid, "soso-improve: eco, reloj y plazos", || {
             report.paso_ssh_sys(
                 &mut qemu,
@@ -1821,6 +1830,35 @@ fn ssh_improve_procesos(key: &Path, ssh_port: u16) -> Result<(), String> {
     }
     if !salida.contains("procesos: 0 caso(s) mal") {
         return Err(format!("algún caso de procesos falló: {salida:?}"));
+    }
+    Ok(())
+}
+
+/// T35: las herramientas del agente nativo (archivos, procesos, rechazos) con un modelo guionizado,
+/// ejecutadas dentro de soso.
+fn ssh_improve_agente(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(
+        key,
+        ssh_port,
+        "soso-improve agente-prueba\nexit\n",
+        Duration::from_secs(120),
+    )?;
+    for esperado in [
+        "el bucle termina: ok",
+        "grep rechaza regex: ok",
+        "reemplazar_texto escribe: ok",
+        "bash rechaza shell: ok",
+        "bash ejecuta lo permitido: ok",
+        "read no sale del checkout: ok",
+        "la sesión sobrevive al agente: ok",
+        "otro agente la retoma: ok",
+    ] {
+        if !salida.contains(esperado) {
+            return Err(format!("falta «{esperado}» en la salida: {salida:?}"));
+        }
+    }
+    if !salida.contains("agente-prueba: 0 caso(s) mal") {
+        return Err(format!("alguna herramienta del agente falló: {salida:?}"));
     }
     Ok(())
 }

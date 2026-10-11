@@ -6,9 +6,8 @@
 //! mismo criterio. Si esa política se duplicara, una campaña diría cosas
 //! distintas según dónde corriera.
 //!
-//! Lo que **no** está: ejecutar al candidato (T25) y validarlo (T26). Esas dos
-//! órdenes existen en el CLI compartido y se rechazan con su ficha; no se
-//! simula que hicieron algo.
+//! `ejecutar` (T25) corre el agente nativo sobre la copia; validar al candidato
+//! (T26) sigue sin existir y se rechaza con su ficha: no se simula.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -47,6 +46,7 @@ pub fn despachar(sub: &str, op: &Opciones) -> Result<i32, Error> {
         "preparar" => preparar(op),
         "copiar" => copiar(op),
         "exportar" => exportar(op),
+        "ejecutar" => crate::agente::ejecutar_tarea(op),
         "reanudar" => ver(op, true),
         "informe" => ver(op, false),
         // `capacidades().exigir` ya rechazó `ejecutar` y `validar` con su

@@ -417,6 +417,7 @@ fn capacidades() -> Capacidades {
             Capacidad::TareaInforme,
             // El agente nativo (T35): modelo por TCP + herramientas sobre el árbol y los procesos de soso.
             Capacidad::Agente,
+            Capacidad::AgentePrueba,
             // Comprobar la receta es **leer ficheros**: no depende de la
             // plataforma, así que el guest la tiene igual que el host. Otra
             // cosa es que aquí haya todavía un vendor al que apuntar.
@@ -571,7 +572,7 @@ fn serde_json_core_compat<T: serde::de::DeserializeOwned>(datos: &[u8]) -> Resul
 /// Devuelve 0 si el modelo terminó la tarea por su pie y 1 si no (el veredicto sobre el código lo da
 /// el verificador, no el agente).
 fn agente(orden: &cli::Orden) -> Resultado<usize> {
-    use soso_improve_core::agente::{correr, http::ModeloHttp, Config, Fin, Politica as PolAgente, SISTEMA};
+    use soso_improve_core::agente::{correr, correr_desde, http::ModeloHttp, sesion, Config, Fin, Politica as PolAgente, SISTEMA};
     let repo = orden.exigido("repo")?.trim_end_matches('/').to_string();
     let tarea = orden.exigido("tarea")?;
     let tarea = match tarea.strip_prefix('@') {
@@ -603,10 +604,10 @@ fn agente(orden: &cli::Orden) -> Resultado<usize> {
         plazo_conexion_ms: 10_000,
         token: orden.uno("token").filter(|t| !t.is_empty()).map(|t| t.to_string()),
     };
-    let sesion = orden.uno("sesion").filter(|s| !s.is_empty()).map(|s| s.to_string());
+    let sesion_dir = orden.uno("sesion").filter(|s| !s.is_empty()).map(|s| s.to_string());
     println!("agente: modelo {} en 127.0.0.1:{puerto}, checkout {repo}", cfg.modelo);
     let mut entorno = Soso;
-    let informe = correr(&mut entorno, &mut modelo, &reloj, &pol, &cfg, &tarea, &mut |mensajes| {
+    let mut al_turno = |e: &mut Soso, mensajes: &[serde_json::Value]| {
         if let Some(m) = mensajes.iter().rev().find(|m| m["role"] == "assistant") {
             if let Some(ll) = m["tool_calls"].as_array() {
                 for l in ll {
@@ -615,12 +616,24 @@ fn agente(orden: &cli::Orden) -> Resultado<usize> {
                 }
             }
         }
-        if let Some(s) = &sesion {
-            if let Ok(b) = serde_json::to_vec(mensajes) {
-                let _ = Soso.escribir(s, &b, 0o644);
+        if let Some(dir) = &sesion_dir {
+            if let Err(err) = sesion::guardar(e, dir, mensajes) {
+                println!("agente: no se pudo guardar la sesión: {err}");
             }
         }
-    });
+    };
+    let previa = match (&sesion_dir, orden.bandera("reanudar")) {
+        (Some(dir), true) => sesion::cargar(&entorno, dir)?,
+        (None, true) => return Err(Error::uso("--reanudar necesita --sesion <directorio>")),
+        _ => None,
+    };
+    let informe = match previa {
+        Some(m) => {
+            println!("agente: reanudando sesión ({} mensaje(s))", m.len());
+            correr_desde(&mut entorno, &mut modelo, &reloj, &pol, &cfg, m, &mut al_turno)
+        }
+        None => correr(&mut entorno, &mut modelo, &reloj, &pol, &cfg, &tarea, &mut al_turno),
+    };
     println!("agente: {:?} tras {} turno(s) y {} llamada(s)", informe.fin, informe.turnos, informe.llamadas);
     if let Some(e) = &informe.error {
         println!("agente: {e}");
@@ -629,6 +642,28 @@ fn agente(orden: &cli::Orden) -> Resultado<usize> {
         println!("--- informe del agente ---\n{}", informe.respuesta_final);
     }
     Ok(if informe.fin == Fin::Terminado { 0 } else { 1 })
+}
+
+/// Las herramientas del agente, con un modelo guionizado, **dentro de soso** (T35): archivos,
+/// procesos con plazo y rechazos sobre el árbol real del guest.
+fn agente_prueba(orden: &cli::Orden) -> Resultado<usize> {
+    let mut entorno = Soso;
+    if let Some(raiz) = orden.uno("sembrar").filter(|r| !r.is_empty()) {
+        soso_improve_core::agente::prueba::sembrar(&mut entorno, raiz.trim_end_matches('/'))?;
+        println!("sembrado: {raiz}");
+        return Ok(0);
+    }
+    let r = soso_improve_core::agente::prueba::autoprueba(&mut entorno, &RelojSoso, "/tmp/agente-prueba", &["/bin/soso-improve", "capacidades"])?;
+    let mal = r.iter().filter(|(_, ok, _)| !ok).count();
+    for (n, ok, d) in &r {
+        if *ok {
+            println!("{n}: ok");
+        } else {
+            println!("{n}: FALLA {d:?}");
+        }
+    }
+    println!("agente-prueba: {mal} caso(s) mal");
+    Ok(mal)
 }
 
 /// Ejecuta una orden ya interpretada y devuelve cuántos problemas encontró.
@@ -649,6 +684,7 @@ fn ejecutar(orden: &cli::Orden) -> Resultado<usize> {
             orden.exigido("respuesta")?,
         ),
         Capacidad::Agente => agente(orden),
+        Capacidad::AgentePrueba => agente_prueba(orden),
         Capacidad::Procesos => procesos(),
         Capacidad::Pruebas => pruebas(orden.uno("banco")),
         Capacidad::Delta => delta_prueba(),

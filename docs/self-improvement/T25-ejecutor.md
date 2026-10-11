@@ -1,6 +1,6 @@
 # T25 — Ejecutar OpenCode con límites y logs
 
-**Hito:** SI-4 · **Tipo:** Implementación portable con adaptadores host/guest · **Estado:** pendiente.
+**Hito:** SI-4 · **Tipo:** Implementación portable con adaptadores host/guest · **Estado:** **hecha** en host (2026-10-11; [resultado](../../target/self-improvement/tasks/T25/resultado.md), [seguimiento](seguimiento/T25.md)); validación nativa pendiente.
 
 **Dependencias:** [T21](T21-opencode-contrato.md), [T24](T24-checkout.md), [T47](T47-procesos-nativos.md), [T48](T48-reloj-red.md)
 
@@ -47,9 +47,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 La falta de soporte fiable para un límite se declara y se suple con un límite verificable de tiempo/herramientas; no inventar consumo.
 

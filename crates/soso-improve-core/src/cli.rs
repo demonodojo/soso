@@ -105,6 +105,8 @@ pub enum Capacidad {
     RecetaComprobar,
     /// Agente nativo: modelo + herramientas sobre un checkout (T35, D10).
     Agente,
+    /// Autoprueba de las herramientas del agente con un modelo guionizado (T35).
+    AgentePrueba,
 }
 
 impl Capacidad {
@@ -134,6 +136,7 @@ impl Capacidad {
             Capacidad::TareaExportar => "tarea exportar",
             Capacidad::RecetaComprobar => "receta comprobar",
             Capacidad::Agente => "agente",
+            Capacidad::AgentePrueba => "agente-prueba",
         }
     }
 
@@ -144,7 +147,6 @@ impl Capacidad {
             Capacidad::VerificarPrograma => Some("T40"),
             Capacidad::VerificarRepo => Some("T41"),
             Capacidad::Suites => Some("T47"),
-            Capacidad::TareaEjecutar => Some("T25"),
             Capacidad::TareaValidar => Some("T26"),
             _ => None,
         }
@@ -271,6 +273,7 @@ impl Orden {
             ("eco", _) => Ok(Capacidad::Eco),
             ("evaluar", _) => Ok(Capacidad::Evaluar),
             ("agente", _) => Ok(Capacidad::Agente),
+            ("agente-prueba", _) => Ok(Capacidad::AgentePrueba),
             ("procesos", _) => Ok(Capacidad::Procesos),
             ("pruebas", _) => Ok(Capacidad::Pruebas),
             ("delta", _) => Ok(Capacidad::Delta),

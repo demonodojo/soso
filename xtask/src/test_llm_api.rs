@@ -53,6 +53,9 @@ struct Args {
     /// la inferencia del guest). Implica `--campana`: es lo único que se corre.
     /// Recibe `SOSO_LLM_API_KEY`, `SOSO_LLM_PORT` y `SOSO_LLM_MODEL`.
     orden: Option<PathBuf>,
+    /// T35: el agente nativo corriendo **dentro** del guest contra el modelo del mismo guest.
+    /// Como `--orden`, es lo único que se corre.
+    agente_nativo: bool,
 }
 
 #[derive(Default)]
@@ -114,6 +117,7 @@ fn parse(from: &[String]) -> Args {
     let mut repeticiones = None;
     let mut caso = None;
     let mut orden = None;
+    let mut agente_nativo = false;
     let mut i = 0;
     while i < from.len() {
         match from[i].as_str() {
@@ -136,6 +140,7 @@ fn parse(from: &[String]) -> Args {
                 i += 1;
                 caso = from.get(i).cloned();
             }
+            "--agente-nativo" => agente_nativo = true,
             "--orden" => {
                 i += 1;
                 orden = from.get(i).map(PathBuf::from);
@@ -149,10 +154,11 @@ fn parse(from: &[String]) -> Args {
         model_dir,
         profile,
         inspect_argv,
-        campana: campana || orden.is_some(),
+        campana: campana || orden.is_some() || agente_nativo,
         repeticiones,
         caso,
         orden,
+        agente_nativo,
     }
 }
 
@@ -166,6 +172,7 @@ fn uso() {
     eprintln!("                       **en vez de** los invariantes de T19");
     eprintln!("  --repeticiones N     por caso (T14 usó 3; 1 para una pasada rápida)");
     eprintln!("  --caso Qxx           un solo caso, para no pagar la campaña entera");
+    eprintln!("  --agente-nativo      T35: el agente nativo dentro del guest contra su propio modelo");
     eprintln!("  --orden <script>     ejecuta el script con el endpoint vivo (SOSO_LLM_API_KEY,");
     eprintln!("                       SOSO_LLM_PORT, SOSO_LLM_MODEL) en vez de la campaña (T22)");
 }
@@ -322,6 +329,7 @@ fn run_guest(root: &Path, arte: &Path, model_dir: &Path, catalog: &str, args: &A
         repeticiones: args.repeticiones.as_deref(),
         caso: args.caso.as_deref(),
         orden: args.orden.as_deref(),
+        agente_nativo: args.agente_nativo,
     });
     let cierre = run_guest_inner(
         &key,
@@ -382,6 +390,7 @@ struct Campana<'a> {
     repeticiones: Option<&'a str>,
     caso: Option<&'a str>,
     orden: Option<&'a Path>,
+    agente_nativo: bool,
 }
 
 /// Informe de una campaña. El nombre lleva el modelo: el 7B no puede
@@ -411,7 +420,10 @@ fn ruta_informe_campana(
 /// que no. `evaluar` ya sale con el código de verificación (no el de error)
 /// justo por eso, así que aquí se distingue «no pude medir» de «medí y salió
 /// que no», y sólo lo primero marca el paso como malo.
-fn correr_campana(catalog: &str, c: &Campana<'_>) -> StepResult {
+fn correr_campana(key: &Path, catalog: &str, c: &Campana<'_>) -> StepResult {
+    if c.agente_nativo {
+        return correr_agente_nativo(key, catalog);
+    }
     if let Some(orden) = c.orden {
         return correr_orden(catalog, orden);
     }
@@ -500,6 +512,58 @@ fn correr_campana(catalog: &str, c: &Campana<'_>) -> StepResult {
     }
 }
 
+/// T35: el agente nativo como **ELF de soso**, con el modelo servido por el mismo guest. El cambio
+/// lo valida **otra** sesión SSH leyendo el archivo; el agente no se juzga a sí mismo.
+fn correr_agente_nativo(key: &Path, catalog: &str) -> StepResult {
+    let root = crate::project_root();
+    let dir = root.join("tests/self-improvement/opencode/t35-agente-en-guest");
+    let _ = fs::create_dir_all(&dir);
+    let sesion = |guion: &str, limite: u64, nombre: &str| -> Result<String, String> {
+        let r = ssh_guion(key, SSH_PORT, guion, Duration::from_secs(limite));
+        let txt = match &r {
+            Ok(t) => t.clone(),
+            Err(e) => format!("ERROR: {e}"),
+        };
+        let _ = fs::write(dir.join(nombre), &txt);
+        r
+    };
+    println!("test-llm-api: agente nativo dentro del guest contra el endpoint vivo (puerto {LLM_PORT})");
+    let mal = |d: String| StepResult { name: "agente_nativo", ok: false, detail: d };
+    let t0 = Instant::now();
+    if let Err(e) = sesion("soso-improve agente-prueba --sembrar /tmp/g\nexit\n", 120, "siembra.txt") {
+        return mal(format!("sembrar: {e}"));
+    }
+    let antes = match sesion("cat /tmp/g/src/lib.rs\nexit\n", 120, "antes.txt") {
+        Ok(t) => t,
+        Err(e) => return mal(format!("leer antes: {e}")),
+    };
+    if !antes.contains("k == key") {
+        return mal(format!("el árbol sembrado no trae el fallo: {antes:?}"));
+    }
+    let guion = format!(
+        "soso-improve agente --repo /tmp/g --tarea @/tmp/g/TASK.md --modelo {catalog} --puerto 7422 --token {TOKEN} --sesion /tmp/g/.sesion --max-turnos 12\nexit\n"
+    );
+    let agente = match sesion(&guion, 7200, "agente.txt") {
+        Ok(t) => t,
+        Err(e) => return mal(format!("agente: {e}")),
+    };
+    let despues = match sesion("cat /tmp/g/src/lib.rs\nexit\n", 120, "despues.txt") {
+        Ok(t) => t,
+        Err(e) => return mal(format!("leer después: {e}")),
+    };
+    let ls = sesion("ls /tmp/g/.sesion\nexit\n", 120, "sesion-ls.txt").unwrap_or_default();
+    let _ = fs::write(dir.join("segundos.txt"), t0.elapsed().as_secs().to_string());
+    let editado = despues.contains("eq_ignore_ascii_case") && !despues.contains("k == key");
+    let termino = agente.contains("agente: Terminado");
+    let sesion_ok = ls.contains("sesion.json.");
+    let ok = editado && termino && sesion_ok;
+    StepResult {
+        name: "agente_nativo",
+        ok,
+        detail: format!("editado={editado} terminado={termino} sesion_durable={sesion_ok} ({}s)", t0.elapsed().as_secs()),
+    }
+}
+
 /// Ejecuta un programa externo con el endpoint del guest vivo y deja su código
 /// de salida como veredicto del paso. El arnés sólo presta el endpoint: qué se
 /// hace con él (T22: OpenCode) y cómo se juzga es cosa del programa.
@@ -573,7 +637,7 @@ fn run_guest_inner(
     // necesita: se corre y se vuelve, sin los invariantes de T19.
     if let Some(c) = campana {
         let t = Instant::now();
-        let paso = correr_campana(catalog, c);
+        let paso = correr_campana(key, catalog, c);
         let parcial = c.caso.is_some() || c.repeticiones.is_some();
         let malo = !paso.ok;
         let detalle = paso.detail.clone();

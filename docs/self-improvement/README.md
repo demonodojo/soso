@@ -14,7 +14,7 @@
 > modelo declara `"temperature": true`; los modelos comprimen espacios al copiar (`reemplazar_texto` en `.opencode/tools/`);
 > la atención dispersa del planificador rompía el contexto largo del guest (ahora opt-in); el prefill del guest es 2,7× más rápido
 > ([T82](T82-prefill-por-lotes.md), pasadas 1–3: atención por grupos GQA repartida entre hilos).
-> **Lo siguiente:** T35 en curso: **agente nativo en Rust** (D10, decidida por el usuario el 2026-10-11) en vez de portar OpenCode/Bun ([seguimiento/T35.md](seguimiento/T35.md)). La identidad de modelo para T25–T29 está decidida: `qwen2.5-coder-14b` (D9; GO 10/10 en T14).
+> **Lo siguiente:** T35 **cerrada** (agente nativo, D10; [resultado](../../target/self-improvement/tasks/T35/resultado.md)). T25 **cerrada en host** (ejecutor con límites sobre el agente nativo; [resultado](../../target/self-improvement/tasks/T25/resultado.md)). Habilitadas: **T26** (validador) y **T37** (mejora nativa con build remoto); T43 espera a T37. La identidad de modelo para T25–T29 es `qwen2.5-coder-14b` (D9).
 
 
 **Ficha cerrada: [T42 — C, ensamblador y empaquetado por perfil](T42-c-link-imagen.md)**
@@ -67,7 +67,7 @@ son compartidos. T08/T18/T45/T46 ya están terminadas: no recomendarlas otra vez
   ni compilación incremental. El std de soso (`library/std/src/sys/pal/soso/`)
   ya exporta `malloc`, claves TLS de pthread, reloj y entropía para el C que
   cargo arrastra (libgit2, OpenSSL). T75 está cerrada.
-- **Nativo:** T32–T34 inventarían y prueban sustrato; T35 todavía no tiene un
+- **Nativo:** T32–T34 inventarían y prueban sustrato; T35 (agente nativo, hecha) corre ya como ELF del guest; antes no tenía un
   runtime OpenCode portado. Backlog N-xxx: 7 hechas, 2 decisiones tomadas,
   1 aplazada, 2 pendientes y 1 decisión pendiente. «Decidida» no significa
   capacidad implementada. El cierre SI-6/SI-7 sigue pendiente.
@@ -156,7 +156,7 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T22](T22-primera-mejora.md) | Resolver una tarea real usando la inferencia guest | SI-3 | T02, T19, T21 | Hecha (2026-10-10): 14B a T=0 resuelve R03 en host y en guest (verificador exit 0); el 7B no resuelve R03 a T=0 |
 | [T23](T23-estado-coordinador.md) | Crear el formato de tareas y estados del coordinador | SI-4 | T01, T02, T46, T45 | Completada (guest acreditado; destapó T63) |
 | [T24](T24-checkout.md) | Preparar una copia de tarea y exportar su parche | SI-4 | T23, T50 | Completada (guest acreditado) |
-| [T25](T25-ejecutor.md) | Ejecutar OpenCode con límites y logs | SI-4 | T21, T24, T47, T48 | Pendiente |
+| [T25](T25-ejecutor.md) | Ejecutar OpenCode con límites y logs | SI-4 | T21, T24, T47, T48 | **Hecha en host** (2026-10-11): ejecutor sobre el agente nativo; 14B real por `tarea ejecutar` con verificador 0 |
 | [T26](T26-validador.md) | Validar candidatos y promover solo los aceptados | SI-4 | T24, T25 | Pendiente |
 | [T27](T27-reanudacion.md) | Reanudar tras caída sin repetir efectos | SI-4 | T23, T25, T26 | Pendiente |
 | [T28](T28-conocimiento.md) | Guardar y recuperar aprendizaje verificado | SI-4 | T26 | Pendiente |
@@ -168,7 +168,7 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T65](T65-o-excl-no-excluye.md) | `O_EXCL` no excluye mientras el primer descriptor sigue abierto | SI-4 | — | Completada (reserva el nombre al abrir) |
 | [T66](T66-guarda-de-pila-fingida.md) | La guarda de pila de los hilos no existe, y el código finge que sí | SI-4 | — | Completada (deja de fingir; la guarda es N-002) |
 | [T34](T34-tickets-port.md) | Convertir huecos del port en fichas implementables | SI-6 | T32, T33 | Completada (11 fichas N-xxx) |
-| [T35](T35-opencode-nativo.md) | Agente nativo en modo no interactivo (antes: OpenCode nativo; D10) | SI-6 | T19, T34 | En curso (2026-10-11): agente nativo hecho y acreditado en el host con el 14B (R03, verificador 0); falta el guest |
+| [T35](T35-opencode-nativo.md) | Agente nativo en modo no interactivo (antes: OpenCode nativo; D10) | SI-6 | T19, T34 | **Hecha** (2026-10-11): agente nativo; ELF del guest con el modelo del guest, sesión durable; validación nativa parcial |
 | [T36](T36-forja-trazabilidad.md) | Vincular fuentes, build y artefacto de Forja | SI-6 | T01 | Completada (recibo v2, 2026-09-25) |
 | [T37](T37-mejora-nativa-forja.md) | Cerrar una mejora desde OpenCode nativo con build remoto | SI-6 | T22, T35, T36 | Pendiente |
 | [T38](T38-toolchain-inventario.md) | Fijar revisiones y dependencias de la toolchain nativa | SI-7 | T01 | Completada (2026-09-25; abrió T67 y T68) |

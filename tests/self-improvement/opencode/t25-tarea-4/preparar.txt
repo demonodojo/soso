@@ -1,0 +1,2 @@
+tarea: preparada r4 para R03
+  estado en /home/jmdiez/Trabajo/demonodojo/soso/target/self-improvement/first-improvement/estado-tarea

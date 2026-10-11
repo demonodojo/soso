@@ -1,0 +1,3 @@
+ejecución r3 · tarea R03 · estado verificando
+  intento 0 verificando  herramientas 3 tokens 20981 artefactos 1
+  intentos restantes: 2

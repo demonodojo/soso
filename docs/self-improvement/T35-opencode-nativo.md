@@ -1,6 +1,6 @@
 # T35 — Agente nativo en modo no interactivo (antes: OpenCode nativo)
 
-**Hito:** SI-6 · **Tipo:** Integración condicionada al port · **Estado:** en curso (2026-10-11): redefinida por la decisión **D10** (agente nativo en Rust en vez de portar OpenCode/Bun; ver [DECISIONES.md](DECISIONES.md) y [seguimiento/T35.md](seguimiento/T35.md)).
+**Hito:** SI-6 · **Tipo:** Integración condicionada al port · **Estado:** **hecha** (2026-10-11; [resultado](../../target/self-improvement/tasks/T35/resultado.md)); redefinida por la decisión **D10** (agente nativo en Rust en vez de portar OpenCode/Bun; ver [DECISIONES.md](DECISIONES.md) y [seguimiento/T35.md](seguimiento/T35.md)).
 
 **Dependencias:** [T19](T19-qemu-e2e.md), [T34](T34-tickets-port.md)
 
@@ -44,9 +44,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 Un CLI puente o un agente en Linux conectado a SSH no satisface este cierre.
 

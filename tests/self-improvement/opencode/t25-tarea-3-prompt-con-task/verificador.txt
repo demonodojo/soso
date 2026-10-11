@@ -1,0 +1,37 @@
+R03 (tal cual): fallo (exit Some(101))
+
+running 13 tests
+.............
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+devuelve_la_primera_aparicion --- FAILED
+encuentra_con_cualquier_combinacion_de_mayusculas --- FAILED
+.
+failures:
+
+---- devuelve_la_primera_aparicion stdout ----
+
+thread 'devuelve_la_primera_aparicion' (121445) panicked at crates/soso-http/tests/aceptacion_R03.rs:36:5:
+assertion `left == right` failed
+  left: None
+ right: Some("uno")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- encuentra_con_cualquier_combinacion_de_mayusculas stdout ----
+
+thread 'encuentra_con_cualquier_combinacion_de_mayusculas' (121446) panicked at crates/soso-http/tests/aceptacion_R03.rs:16:5:
+assertion `left == right` failed
+  left: None
+ right: Some("12")
+
+
+failures:
+    devuelve_la_primera_aparicion
+    encuentra_con_cualquier_combinacion_de_mayusculas
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p soso-http --test aceptacion_R03`
+

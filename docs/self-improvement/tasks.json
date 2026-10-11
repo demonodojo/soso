@@ -930,7 +930,7 @@
       "title": "Ejecutar OpenCode con límites y logs",
       "milestone": "SI-4",
       "kind": "Implementación portable con adaptadores host/guest",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T21",
         "T24",
@@ -957,6 +957,18 @@
         ],
         "evidence": [],
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      },
+      "tracking": {
+        "updated_at": "2026-10-11T17:30:00+02:00",
+        "summary": "Ejecutor con límites y registro sobre el agente nativo (D10): runner portable (proceso y nativo), `tarea ejecutar` en el host. 16 pruebas; el 14B real resuelve R03 por `tarea ejecutar` con verificador 0. Límites: proceso externo sólo a posteriori salvo plazo; sin contención de código candidato; sin guest.",
+        "evidence": [
+          "docs/self-improvement/seguimiento/T25.md",
+          "target/self-improvement/tasks/T25/resultado.md",
+          "crates/soso-improve-core/tests/runner.rs",
+          "tests/self-improvement/opencode/t25-tarea-4"
+        ],
+        "blocker": "",
+        "next_step": "Cerrada en host. Siguientes habilitadas: T26 (validador) y T37 (mejora nativa con build remoto); T43 sigue esperando a T37."
       }
     },
     {
@@ -1291,7 +1303,7 @@
       "title": "Agente nativo en modo no interactivo (antes: OpenCode nativo)",
       "milestone": "SI-6",
       "kind": "Integración condicionada al port",
-      "status": "in_progress",
+      "status": "done",
       "depends_on": [
         "T19",
         "T34"
@@ -1309,27 +1321,34 @@
         "xtask/src/test.rs"
       ],
       "native_validation": {
-        "status": "pending",
+        "status": "partial",
         "requires": [
           "T47",
           "T49"
         ],
-        "evidence": [],
-        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+        "evidence": [
+          "target/self-improvement/tasks/T35/xtask-agente-1.txt",
+          "tests/self-improvement/opencode/t35-agente-en-guest",
+          "target/self-improvement/tasks/T35/resultado.md"
+        ],
+        "note": "El agente corre como ELF de soso con el modelo servido por el mismo guest y edita un archivo validado desde otra sesión; la sesión es durable. Falta R03 completo con cargo en el guest (memoria) y reanudar tras matar al agente con el modelo real."
       },
       "tracking": {
-        "updated_at": "2026-10-11T15:00:00+02:00",
-        "summary": "Agente nativo implementado (módulo agente en soso-improve-core, orden agente en host y guest) y acreditado en el HOST con el 14B: R03 resuelta con verificador exit 0 en 6 turnos (t35-agente-3). 9 pruebas unitarias con modelo guionizado. Guest compila, sin ejecutar. Contra la inferencia del guest (QEMU, 14B) el agente host da el mismo parche y verificador 0 (t35-agente-guest).",
+        "updated_at": "2026-10-11T15:30:00+02:00",
+        "summary": "Cerrada (D10). Agente nativo portable (herramientas, HTTP, bucle, sesión durable), órdenes agente/agente-prueba en host y guest, cargo xtask test-agent-native. R03 resuelta por el 14B en host y con la inferencia del guest; el ELF del guest con el modelo del guest edita un archivo validado desde otra sesión SSH.",
         "evidence": [
           "docs/self-improvement/native/backlog.json",
           "docs/self-improvement/seguimiento/T34.md",
           "docs/self-improvement/seguimiento/T35.md",
           "crates/soso-improve-core/tests/agente.rs",
           "tests/self-improvement/opencode/t35-agente-3",
-          "tests/self-improvement/opencode/t35-agente-guest"
+          "tests/self-improvement/opencode/t35-agente-guest",
+          "target/self-improvement/tasks/T35/xtask-agente-1.txt",
+          "tests/self-improvement/opencode/t35-agente-en-guest",
+          "target/self-improvement/tasks/T35/resultado.md"
         ],
         "blocker": "",
-        "next_step": "Guest: ejecutar el agente en QEMU (cargo xtask test-agent-native) con el modelo servido por soso-llm, sesión durable por generaciones, target/self-improvement/tasks/T35/resultado.md y cierre de los cuatro sitios."
+        "next_step": "Cerrada. Siguientes habilitadas: T25 (ejecutor con límites) y T43; R03 con cargo en el guest queda como mejora de validación nativa."
       }
     },
     {

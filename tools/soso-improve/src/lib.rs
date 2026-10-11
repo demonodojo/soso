@@ -71,7 +71,9 @@ pub fn capacidades() -> Capacidades {
             Capacidad::Modelo,
             Capacidad::Evaluar,
             Capacidad::Agente,
+            Capacidad::AgentePrueba,
             Capacidad::TareaPreparar,
+            Capacidad::TareaEjecutar,
             Capacidad::TareaReanudar,
             Capacidad::TareaInforme,
             Capacidad::TareaCopiar,
@@ -92,7 +94,9 @@ uso: soso-improve <orden> [opciones]
               copiar   --estado <ruta> --run <id> --captura <ruta> --destino <ruta>
               exportar --estado <ruta> --run <id> --captura <ruta> --copia <ruta> [--out <json>]
               reanudar|informe --estado <ruta> --run <id>
-              (ejecutar y validar: T25 y T26, todavía no)
+              ejecutar --estado <ruta> --run <id> --copia <ruta> [--modelo m] [--puerto 17299] [--token t]
+                       [--max-turnos N] [--max-tokens N] [--cargo-home <ruta>]
+              (validar: T26, todavía no)
   modelo      perfil    --modelo <dir .som> --original <dir> --out <ruta>
               comparar  --modelo <dir .som> [--fixtures <dir>] [--json <ruta>]
               detalle   --modelo <dir .som> --caso <nombre> [--desde N] [--n N]
@@ -101,8 +105,9 @@ uso: soso-improve <orden> [opciones]
               [--contexto <tokens>] [--modelo-dir <dir>]
               [--caso Q07[,Q04]]   (repetir sólo esos casos)
   agente      --repo <ruta> --tarea <texto|@archivo> [--modelo soso-coder] [--puerto 17299]
-              [--max-turnos 40] [--max-tokens 2048] [--sistema <archivo>] [--sesion <json>]
+              [--max-turnos 40] [--max-tokens 2048] [--sistema <archivo>] [--sesion <dir> [--reanudar]]
               [--plazo-ms 7200000] [--cargo-home <ruta>] [--token <t>|SOSO_LLM_API_KEY]
+  agente-prueba   (autoprueba de las herramientas con un modelo guionizado)
   verificar   programa  --caso <id> --candidato <ruta> [--reservado <ruta>]
               protocolo --caso <id> --respuesta <ruta> [--reservado <ruta>]
               repo      --caso <id> --arbol <ruta> [--con-referencia]
@@ -186,7 +191,7 @@ const CLAVES: &[&str] = &[
     "respuesta", "modelo", "original", "fixtures", "json", "desde", "n", "solo", "timeout",
     "revision", "origen", "sin-herramientas", "con-referencia", "puerto", "token",
     "repeticiones", "plazo-ms", "semilla", "caso", "contexto", "modelo-dir",
-    "tarea", "sistema", "sesion", "max-turnos", "max-tokens", "cargo-home",
+    "tarea", "sistema", "sesion", "reanudar", "sembrar", "copia", "estado", "run", "max-turnos", "max-tokens", "cargo-home",
 ];
 
 pub fn despachar(orden: &str, args: &[String]) -> Result<i32, Error> {
@@ -211,6 +216,7 @@ pub fn despachar(orden: &str, args: &[String]) -> Result<i32, Error> {
             "banco" => banco::despachar(&sub, &op),
             "evaluar" => evaluar::evaluar(&op),
             "agente" => agente::agente(&op),
+            "agente-prueba" => agente::prueba(&op),
             "modelo" => modelo::despachar(&sub, &op),
             "tarea" => tarea::despachar(&sub, &op),
             "receta" => receta::despachar(&sub, &op),
@@ -231,6 +237,7 @@ pub fn despachar(orden: &str, args: &[String]) -> Result<i32, Error> {
         }
         "evaluar" => evaluar::evaluar(&Opciones::parsear(args)?),
         "agente" => agente::agente(&Opciones::parsear(args)?),
+        "agente-prueba" => agente::prueba(&Opciones::parsear(args)?),
         "modelo" => {
             let sub = args
                 .first()

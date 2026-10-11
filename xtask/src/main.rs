@@ -47,6 +47,12 @@ fn main() {
             let args: Vec<String> = std::env::args().skip(2).collect();
             test_llm_api::run(&args);
         }
+        // T35: el agente nativo dentro del guest contra el modelo del mismo guest.
+        "test-agent-native" => {
+            let mut args: Vec<String> = std::env::args().skip(2).collect();
+            args.push("--agente-nativo".into());
+            test_llm_api::run(&args);
+        }
         "test" => {
             test::run();
             if matches!(

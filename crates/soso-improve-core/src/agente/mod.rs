@@ -6,6 +6,8 @@
 
 pub mod herramientas;
 pub mod http;
+pub mod prueba;
+pub mod sesion;
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -35,6 +37,8 @@ pub struct Config {
     pub plazo_turno_ms: u64,
     /// Plazo de toda la tarea.
     pub plazo_total_ms: u64,
+    /// Tope de llamadas a herramientas, aplicado **antes** de ejecutar la que lo rebasaría.
+    pub max_llamadas: Option<usize>,
 }
 
 impl Config {
@@ -47,6 +51,7 @@ impl Config {
             temperatura: 0.0,
             plazo_turno_ms: 2 * 60 * 60 * 1000,
             plazo_total_ms: 6 * 60 * 60 * 1000,
+            max_llamadas: None,
         }
     }
 }
@@ -59,6 +64,8 @@ pub enum Fin {
     SinTurnos,
     /// Se agotó el plazo total.
     SinTiempo,
+    /// El siguiente turno rebasaba el tope de llamadas a herramientas.
+    SinLlamadas,
     /// El modelo falló (red, estado, formato).
     ErrorModelo,
 }
@@ -74,7 +81,8 @@ pub struct Informe {
     pub mensajes: Vec<Value>,
 }
 
-/// Ejecuta una tarea. `al_turno` recibe la conversación tras cada turno (para persistirla).
+/// Ejecuta una tarea. `al_turno` recibe el entorno y la conversación tras cada turno (para
+/// persistirla; ver [`sesion`]).
 pub fn correr<E: Entorno, M: Modelo, R: Reloj>(
     e: &mut E,
     modelo: &mut M,
@@ -82,12 +90,32 @@ pub fn correr<E: Entorno, M: Modelo, R: Reloj>(
     pol: &Politica,
     cfg: &Config,
     tarea: &str,
-    al_turno: &mut dyn FnMut(&[Value]),
+    al_turno: &mut dyn FnMut(&mut E, &[Value]),
 ) -> Informe {
-    let mut mensajes: Vec<Value> = alloc::vec![
+    let mensajes: Vec<Value> = alloc::vec![
         json!({"role": "system", "content": cfg.sistema}),
         json!({"role": "user", "content": tarea}),
     ];
+    correr_desde(e, modelo, reloj, pol, cfg, mensajes, al_turno)
+}
+
+/// Sigue una conversación ya empezada (sesión recuperada). Una llamada del asistente sin sus
+/// resultados (el agente murió a mitad de turno) se descarta: no se re-ejecuta nada a ciegas, el
+/// modelo vuelve a decidir con lo que sí consta.
+pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
+    e: &mut E,
+    modelo: &mut M,
+    reloj: &R,
+    pol: &Politica,
+    cfg: &Config,
+    mut mensajes: Vec<Value>,
+    al_turno: &mut dyn FnMut(&mut E, &[Value]),
+) -> Informe {
+    sesion::normalizar(&mut mensajes);
+    if sesion::terminada(&mensajes) {
+        let r = mensajes.last().and_then(|m| m["content"].as_str()).unwrap_or("").to_string();
+        return Informe { fin: Fin::Terminado, turnos: 0, llamadas: 0, respuesta_final: r, error: None, mensajes };
+    }
     let t0 = reloj.ahora_ms();
     let mut informe = Informe { fin: Fin::SinTurnos, turnos: 0, llamadas: 0, respuesta_final: String::new(), error: None, mensajes: Vec::new() };
     for _ in 0..cfg.max_turnos {
@@ -126,7 +154,13 @@ pub fn correr<E: Entorno, M: Modelo, R: Reloj>(
         if llamadas.is_empty() {
             informe.fin = Fin::Terminado;
             informe.respuesta_final = texto;
-            al_turno(&mensajes);
+            al_turno(e, &mensajes);
+            break;
+        }
+        if cfg.max_llamadas.map_or(false, |m| informe.llamadas + llamadas.len() > m) {
+            // Sin ejecutar nada: la llamada que rebasa el presupuesto no se lanza.
+            mensajes.pop();
+            informe.fin = Fin::SinLlamadas;
             break;
         }
         for (i, ll) in llamadas.iter().enumerate() {
@@ -145,7 +179,7 @@ pub fn correr<E: Entorno, M: Modelo, R: Reloj>(
             };
             mensajes.push(json!({"role": "tool", "tool_call_id": id, "content": r.texto}));
         }
-        al_turno(&mensajes);
+        al_turno(e, &mensajes);
     }
     informe.mensajes = mensajes;
     informe

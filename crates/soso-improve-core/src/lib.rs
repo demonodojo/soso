@@ -66,6 +66,7 @@ pub mod durable;
 pub mod entorno;
 pub mod evaluacion;
 pub mod pruebas;
+pub mod runner;
 pub mod receta;
 #[cfg(feature = "std")]
 pub mod sysroot;

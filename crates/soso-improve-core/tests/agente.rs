@@ -47,6 +47,9 @@ impl Archivos for Mem {
                 }
             }
         }
+        if v.is_empty() && dir.ends_with(".sesion") {
+            return Ok(vec![]);
+        }
         if v.is_empty() {
             return Err(Error::entorno("no existe"));
         }
@@ -201,7 +204,7 @@ fn el_bucle_lee_edita_prueba_y_termina() {
     );
     let reloj = RelojSimulado::nuevo(0);
     let mut vistos = 0;
-    let inf = correr(&mut e, &mut m, &reloj, &Politica::nueva(R), &Config::nueva("m", "eres un agente"), "arregla", &mut |_| vistos += 1);
+    let inf = correr(&mut e, &mut m, &reloj, &Politica::nueva(R), &Config::nueva("m", "eres un agente"), "arregla", &mut |_, _| vistos += 1);
     assert_eq!(inf.fin, Fin::Terminado, "{:?}", inf.error);
     assert_eq!((inf.turnos, inf.llamadas, vistos), (4, 3, 4));
     assert_eq!(inf.respuesta_final, "Listo: corregí la comparación.");
@@ -219,7 +222,7 @@ fn argumentos_ilegibles_se_devuelven_al_modelo() {
     let mut e = repo();
     let malo = json!({"role": "assistant", "content": "", "tool_calls": [{"id": "x", "function": {"name": "read", "arguments": "{no json"}}]});
     let mut m = Guion(vec![malo, json!({"role": "assistant", "content": "ok"})], vec![]);
-    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), "t", &mut |_| {});
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), "t", &mut |_, _| {});
     assert_eq!(inf.fin, Fin::Terminado);
     assert!(m.1[1].contains("no son un objeto JSON"));
 }
@@ -230,9 +233,73 @@ fn tope_de_turnos_y_error_del_modelo() {
     let bucle: Vec<Value> = (0..5).map(|_| llamada("read", json!({"filePath": "README.md"}))).collect();
     let mut cfg = Config::nueva("m", "s");
     cfg.max_turnos = 3;
-    let inf = correr(&mut e, &mut Guion(bucle, vec![]), &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg, "t", &mut |_| {});
+    let inf = correr(&mut e, &mut Guion(bucle, vec![]), &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg, "t", &mut |_, _| {});
     assert_eq!((inf.fin, inf.turnos), (Fin::SinTurnos, 3));
-    let inf = correr(&mut e, &mut Guion(vec![], vec![]), &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), "t", &mut |_| {});
+    let inf = correr(&mut e, &mut Guion(vec![], vec![]), &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), "t", &mut |_, _| {});
     assert_eq!(inf.fin, Fin::ErrorModelo);
     assert!(inf.error.unwrap().contains("sin más guion"));
+}
+
+#[test]
+fn la_autoprueba_pasa_sobre_un_entorno_en_memoria() {
+    let mut e = Mem::default();
+    e.f.insert("/w/.keep".into(), vec![]);
+    let r = soso_improve_core::agente::prueba::autoprueba(&mut e, &RelojSimulado::nuevo(0), "/w", &["cargo", "test"]).unwrap();
+    let malos: Vec<_> = r.iter().filter(|(_, ok, _)| !ok).collect();
+    assert!(malos.is_empty(), "{malos:?}");
+    assert!(r.len() >= 11);
+}
+
+impl soso_improve_core::durable::Durable for Mem {
+    fn crear_exclusivo(&mut self, r: &str, d: &[u8]) -> Resultado<()> {
+        if self.f.contains_key(r) {
+            return Err(Error::uso("ya existe"));
+        }
+        self.f.insert(r.to_string(), d.to_vec());
+        Ok(())
+    }
+    fn sincronizar(&mut self, _r: &str) -> Resultado<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn la_sesion_se_recupera_tras_morir_el_agente() {
+    use soso_improve_core::agente::{correr_desde, sesion};
+    let mut e = repo();
+    // Primer agente: dos llamadas y se acaba el modelo (el proceso «muere»).
+    let mut m = Guion(vec![llamada("read", json!({"filePath": "README.md"})), llamada("grep", json!({"pattern": "k == key"}))], vec![]);
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), "t", &mut |h, ms| {
+        sesion::guardar(h, "/w/.sesion", ms).unwrap();
+    });
+    assert_eq!(inf.fin, Fin::ErrorModelo);
+    let previa = sesion::cargar(&e, "/w/.sesion").unwrap().expect("hay sesión");
+    // 2 de arranque + 2 × (asistente + herramienta)
+    assert_eq!(previa.len(), 6);
+    // Otro proceso la recoge y termina sin repetir el trabajo ya hecho.
+    let mut m2 = Guion(vec![json!({"role": "assistant", "content": "fin"})], vec![]);
+    let inf = correr_desde(&mut e, &mut m2, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), previa, &mut |h, ms| {
+        sesion::guardar(h, "/w/.sesion", ms).unwrap();
+    });
+    assert_eq!((inf.fin, inf.turnos, inf.llamadas), (Fin::Terminado, 1, 0));
+    assert!(m2.1[0].contains("src/lib.rs:2:"), "el modelo ve lo que ya se hizo");
+    // Una sesión ya terminada no vuelve a llamar al modelo.
+    let hecha = sesion::cargar(&e, "/w/.sesion").unwrap().unwrap();
+    let mut m3 = Guion(vec![], vec![]);
+    let inf = correr_desde(&mut e, &mut m3, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), hecha, &mut |_, _| {});
+    assert_eq!((inf.fin, inf.respuesta_final.as_str(), m3.1.len()), (Fin::Terminado, "fin", 0));
+}
+
+#[test]
+fn una_llamada_sin_resultado_se_descarta_al_reanudar() {
+    use soso_improve_core::agente::sesion::normalizar;
+    let mut ms = vec![
+        json!({"role": "system", "content": "s"}),
+        json!({"role": "user", "content": "t"}),
+        llamada("read", json!({"filePath": "a"})),
+        json!({"role": "tool", "tool_call_id": "c", "content": "x"}),
+        llamada("bash", json!({"command": "cargo test"})),
+    ];
+    normalizar(&mut ms);
+    assert_eq!(ms.len(), 4, "la llamada sin resultado se quita, la completa se queda");
 }

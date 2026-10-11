@@ -1,0 +1,2 @@
+9ef590703639ef45903bdfb6d5d192fe1142e14b6ee51d4cb176598dcef3e5cf
+{"schema_version":1,"run_id":"r1","task_id":"R03","creado_ms":1791724403686,"estado":"bloqueada","intentos":[{"numero":0,"inicio_ms":0,"fin_ms":1,"estado":"bloqueada","herramientas":0,"tokens":{"desconocida":"el endpoint no informó de uso"},"artefactos":["/home/jmdiez/Trabajo/demonodojo/soso/target/self-improvement/first-improvement/estado-tarea/r1-intento0.eventos.json"]}]}

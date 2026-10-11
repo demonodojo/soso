@@ -1,0 +1,2 @@
+tarea: intento ErrorModelo: 1 paso(s), 0 herramienta(s), 0 token(s) de entrada y 0 de salida; límites en vivo
+tarea: entorno: conectar a 127.0.0.1:7441: Connection refused (os error 111)
