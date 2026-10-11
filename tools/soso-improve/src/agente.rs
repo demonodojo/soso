@@ -47,6 +47,7 @@ pub fn agente(op: &Opciones) -> Result<i32, Error> {
     let reloj = RelojHost::default();
     let conector = ConectorHost;
     let mut modelo = ModeloHttp { conector: &conector, reloj: &reloj, destino: Destino::local(puerto), plazo_conexion_ms: 10_000,
+        dormir: |ms| std::thread::sleep(std::time::Duration::from_millis(ms)),
         token: op.uno("token").filter(|t| !t.is_empty()).map(|t| t.to_string()).or_else(|| std::env::var("SOSO_LLM_API_KEY").ok()) };
     let sesion = op.uno("sesion").filter(|s| !s.is_empty()).map(|s| s.to_string());
     let mut host = Host;
@@ -137,6 +138,7 @@ pub fn ejecutar_tarea(op: &Opciones) -> Result<i32, Error> {
         reloj: &reloj,
         destino: Destino::local(puerto),
         plazo_conexion_ms: 10_000,
+        dormir: |ms| std::thread::sleep(std::time::Duration::from_millis(ms)),
         token: op.uno("token").filter(|t| !t.is_empty()).map(|t| t.to_string()).or_else(|| std::env::var("SOSO_LLM_API_KEY").ok()),
     };
     let mut host = Host;

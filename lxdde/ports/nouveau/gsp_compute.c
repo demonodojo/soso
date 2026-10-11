@@ -913,28 +913,29 @@ int gsp_compute_encode_qmd(struct gsp_compute *cp, const GspQmdV05 *qmd,
         memcpy(cp_data(cp, G4F_QMD_OFF), qmd->words, qmd_bytes);
         set_object = NVC7C0_SET_OBJECT;
         send_pcas = NVC7C0_SEND_PCAS_A;
-        send_sig = NVC7C0_SEND_SIGNALING_PCAS_B;
-        sig_action = NVC7C0_SEND_SIGNALING_PCAS_B_INVALIDATE_TRUE |
-                     NVC7C0_SEND_SIGNALING_PCAS_B_SCHEDULE_TRUE;
     } else {
         qmd_bytes = (unsigned)sizeof(GspQmdV05);
         memcpy(cp_data(cp, G4F_QMD_OFF), qmd->words, qmd_bytes);
         set_object = NVCEC0_SET_OBJECT;
         send_pcas = NVCEC0_SEND_PCAS_A;
-        send_sig = NVCEC0_SEND_SIGNALING_PCAS2_B;
-        sig_action = NVCEC0_SEND_SIGNALING_PCAS2_B_PCAS_ACTION_INVALIDATE_COPY_SCHEDULE;
     }
+    /* Ampere y Blackwell lanzan igual: SEND_PCAS_A (VA>>8) y luego
+     * SEND_SIGNALING_PCAS2_B con INVALIDATE_COPY_SCHEDULE. El COPY trae el
+     * QMD desde esa VA al SKED; no es una dependencia de otro QMD. Mesa
+     * (nvk_CmdDispatchBase) usa PCAS_B solo hasta Turing y PCAS2 desde
+     * Ampere. PCAS_B en la GA104 deja el SKED sin QMD y el PBDMA se queda
+     * en PBDMA_HANG_DURING_HTE.
+     *
+     * No se manda SET_QMD_VERSION. La versión va en el blob (major 3, minor
+     * 0). El método, con 0x03000300 y con 0x00030003, lo contestó la GA104
+     * con GR_CLASS_ERROR (ROG, 2026-10-11) y a partir de ahí la inferencia
+     * cae a CPU. */
+    send_sig = NVC7C0_SEND_SIGNALING_PCAS2_B;
+    sig_action = NVC7C0_SEND_SIGNALING_PCAS2_B_PCAS_ACTION_INVALIDATE_COPY_SCHEDULE;
     __asm__ __volatile__("mfence" ::: "memory");
 
     cp_pb_set_object(c, &pos, GSP_COMPUTE_SUBCHANNEL, set_object, cp->cls);
     cp_pb_immd(c, &pos, 0u, NVC86F_WFI, 0u);
-    /* Ampere no hereda la versión del blob: hay que decirla en el método.
-     * El dato no cabe en un inmediato (0x00030003). El 0x03000300 de antes
-     * era la versión 768 y la clase respondía GR_CLASS_ERROR. */
-    if (cp->caps && cp->caps->qmd_version == GSP_QMD_VERSION_AMPERE) {
-        cp_pb_method(c, &pos, GSP_COMPUTE_SUBCHANNEL, NVC7C0_SET_QMD_VERSION, 1);
-        cp_pb_write(c, &pos, GSP_QMD_AMPERE_ENGINE_VERSION_WORD);
-    }
     cp_pb_method(c, &pos, GSP_COMPUTE_SUBCHANNEL, send_pcas, 1);
     cp_pb_write(c, &pos, (uint32_t)(qmd_va >> 8));
     cp_pb_immd(c, &pos, GSP_COMPUTE_SUBCHANNEL, send_sig, sig_action);

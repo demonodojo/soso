@@ -754,21 +754,19 @@ typedef struct NVC0B5_ALLOCATION_PARAMETERS {
 #define NVC7C0_SET_QMD_VERSION               0x00000288u
 #define NVC7C0_CHECK_QMD_VERSION             0x00000290u
 #define NVC7C0_SEND_PCAS_A                   0x000002b4u
-/* Ampere lanza con SEND_SIGNALING_PCAS_B (invalidate|schedule). PCAS2
- * (0x2c0, acción INVALIDATE_COPY_SCHEDULE) es el de Hopper/Blackwell: en
- * GA10x el «copy» no tiene un QMD dependiente y el SKED falla. */
+/* Ampere (clase 0xc7c0) lanza con SEND_SIGNALING_PCAS2_B, igual que
+ * Hopper/Blackwell. Mesa usa PCAS_B solo hasta Turing: el COPY de la
+ * acción 0x3 es el que mete en el SKED el QMD apuntado por SEND_PCAS_A.
+ * Sin esa copia la GA104 se queda en PBDMA_HANG_DURING_HTE. */
 #define NVC7C0_SEND_SIGNALING_PCAS_B         0x000002bcu
 #define NVC7C0_SEND_SIGNALING_PCAS_B_INVALIDATE_TRUE 0x1u
 #define NVC7C0_SEND_SIGNALING_PCAS_B_SCHEDULE_TRUE   0x2u
 #define NVC7C0_SEND_SIGNALING_PCAS2_B        0x000002c0u
 #define NVC7C0_SEND_SIGNALING_PCAS2_B_PCAS_ACTION_INVALIDATE_COPY_SCHEDULE 0x3u
 
-/* SET/CHECK_QMD_VERSION (`clc7c0.h`): CURRENT en 15:0, OLDEST en 31:16.
- * Los dos valen 3 (QMD v03_00). 0x03000300 ponía 768 en cada mitad y la
- * clase contestaba GR_CLASS_ERROR; sin el método, el motor parsea el
- * blob v03 con el layout por defecto y el primer matvec es GR_EXCEPTION
- * + PBDMA_WRITE_DURING_HTE (ROG GA104). */
-#define GSP_QMD_AMPERE_ENGINE_VERSION_WORD   0x00030003u
+/* SET_QMD_VERSION existe en la clase, pero la GA104 lo rechaza
+ * (GR_CLASS_ERROR) tanto con 0x03000300 como con 0x00030003. La versión
+ * que el motor lee es la del blob QMD v03_00. No emitir el método. */
 
 /* Y GR0 es el 1, la primera entrada útil de esa misma tabla (el 0 es NULL). Hace
  * falta porque un objeto de compute NO se puede colgar de un canal de copia: RM

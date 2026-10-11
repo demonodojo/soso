@@ -772,34 +772,33 @@ static int check_family_caps(void)
                 cp_amp.chan = &ch;
                 if (gsp_compute_encode_qmd(&cp_amp, (const GspQmdV05 *)&q2,
                                            &off, &len) != 0 ||
-                    len != 32u) {
-                    printf("FALLO: encode QMD Ampere len=%u (esperaba 32: "
-                           "SET_OBJECT+WFI+SET_QMD_VERSION+PCAS+PCAS_B)\n",
+                    len != 24u) {
+                    printf("FALLO: encode QMD Ampere len=%u (esperaba 24: "
+                           "SET_OBJECT+WFI+PCAS+PCAS2)\n",
                            len);
                     return -1;
                 }
                 {
                     const uint32_t *w = (const uint32_t *)(pb + off);
-                    uint32_t set_hdr =
+                    uint32_t pcas_a =
                         (NVC56F_DMA_INCR_OPCODE_VALUE << 29) | (1u << 16) |
-                        (1u << 13) | ((NVC7C0_SET_QMD_VERSION >> 2) & 0xfffu);
-                    uint32_t pcas_b =
+                        (1u << 13) | ((NVC7C0_SEND_PCAS_A >> 2) & 0xfffu);
+                    uint32_t pcas2 =
                         (NVC56F_DMA_SEC_OP_IMMD_DATA_METHOD << 29) |
-                        ((NVC7C0_SEND_SIGNALING_PCAS_B_INVALIDATE_TRUE |
-                          NVC7C0_SEND_SIGNALING_PCAS_B_SCHEDULE_TRUE) << 16) |
+                        (NVC7C0_SEND_SIGNALING_PCAS2_B_PCAS_ACTION_INVALIDATE_COPY_SCHEDULE
+                         << 16) |
                         (1u << 13) |
-                        ((NVC7C0_SEND_SIGNALING_PCAS_B >> 2) & 0xfffu);
+                        ((NVC7C0_SEND_SIGNALING_PCAS2_B >> 2) & 0xfffu);
 
-                    if (w[3] != set_hdr ||
-                        w[4] != GSP_QMD_AMPERE_ENGINE_VERSION_WORD) {
-                        printf("FALLO: SET_QMD_VERSION Ampere hdr=%08x dato=%08x "
-                               "(esperaba versión 3, 0x%08x)\n",
-                               w[3], w[4], GSP_QMD_AMPERE_ENGINE_VERSION_WORD);
+                    if (w[3] != pcas_a) {
+                        printf("FALLO: SEND_PCAS_A Ampere hdr=%08x "
+                               "(esperaba 0x%08x, sin SET_QMD_VERSION)\n",
+                               w[3], pcas_a);
                         return -1;
                     }
-                    if (w[7] != pcas_b) {
-                        printf("FALLO: Ampere debe cerrar con SEND_SIGNALING_PCAS_B "
-                               "(invalidate|schedule), hdr=%08x\n", w[7]);
+                    if (w[5] != pcas2) {
+                        printf("FALLO: Ampere debe cerrar con SEND_SIGNALING_PCAS2_B "
+                               "(INVALIDATE_COPY_SCHEDULE), hdr=%08x\n", w[5]);
                         return -1;
                     }
                 }

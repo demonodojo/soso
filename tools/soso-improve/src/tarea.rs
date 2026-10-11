@@ -262,6 +262,7 @@ fn continuar(op: &Opciones) -> Result<i32, Error> {
         reloj: &reloj,
         destino: Destino::local(puerto),
         plazo_conexion_ms: 10_000,
+        dormir: |ms| std::thread::sleep(std::time::Duration::from_millis(ms)),
         token: op.uno("token").filter(|t| !t.is_empty()).map(|t| t.to_string()).or_else(|| std::env::var("SOSO_LLM_API_KEY").ok()),
     };
     let estado = op.exigido("estado")?.to_string();

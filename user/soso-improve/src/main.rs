@@ -616,6 +616,9 @@ fn agente(orden: &cli::Orden) -> Resultado<usize> {
         reloj: &reloj,
         destino: Destino::local(puerto),
         plazo_conexion_ms: 10_000,
+        dormir: |ms| {
+            let _ = sys::sleep_ms(ms);
+        },
         token: orden.uno("token").filter(|t| !t.is_empty()).map(|t| t.to_string()),
     };
     let sesion_dir = orden.uno("sesion").filter(|s| !s.is_empty()).map(|s| s.to_string());

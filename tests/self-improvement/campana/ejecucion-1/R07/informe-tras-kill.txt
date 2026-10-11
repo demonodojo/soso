@@ -1,0 +1,3 @@
+ejecución r-R07 · tarea R07 · estado bloqueada
+  intento 0 bloqueada    herramientas 0 tokens ? (el endpoint no informó de uso) artefactos 1
+  intentos restantes: 1

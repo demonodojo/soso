@@ -345,3 +345,36 @@ fn un_archivo_largo_avisa_de_que_no_se_recorra_por_tramos() {
     let (t, _) = llama(&mut e, "read", json!({"filePath": "src/lib.rs"}));
     assert!(t.contains("Fin del archivo") && !t.contains("grep"), "{t}");
 }
+
+#[test]
+fn un_429_ocupado_se_espera_y_se_reintenta_sin_contar_como_fallo_del_modelo() {
+    use soso_improve_core::agente::http::{ModeloHttp, ESPERA_BUSY_MS};
+    use soso_improve_core::tiempo::{Plazo, Reloj};
+    use soso_improve_core::transporte::{Conector, Destino, TransporteSimulado};
+    use std::cell::{Cell, RefCell};
+
+    struct Conn {
+        respuestas: RefCell<Vec<Vec<u8>>>,
+        intentos: Cell<usize>,
+    }
+    impl Conector for Conn {
+        type Enlace = TransporteSimulado;
+        fn conectar(&self, _: &Destino, _: Plazo, _: &dyn Reloj) -> Resultado<TransporteSimulado> {
+            self.intentos.set(self.intentos.get() + 1);
+            let r = self.respuestas.borrow_mut().remove(0);
+            Ok(TransporteSimulado::byte_a_byte(&r))
+        }
+    }
+    thread_local! { static DORMIDO: Cell<u64> = Cell::new(0); }
+    fn dormir(ms: u64) {
+        DORMIDO.with(|d| d.set(d.get() + ms));
+    }
+    let busy = b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 2\r\n\r\n{}".to_vec();
+    let ok = b"HTTP/1.1 200 OK\r\nContent-Length: 17\r\n\r\n{\"choices\":[]}  ".to_vec();
+    let c = Conn { respuestas: RefCell::new(vec![busy.clone(), busy.clone(), ok]), intentos: Cell::new(0) };
+    let reloj = RelojSimulado::nuevo(0);
+    let mut m = ModeloHttp { conector: &c, reloj: &reloj, destino: Destino::local(1), plazo_conexion_ms: 1000, token: None, dormir };
+    let r = m.completar("{}", 60_000).unwrap();
+    assert!(r.contains("choices"));
+    assert_eq!((c.intentos.get(), DORMIDO.with(|d| d.get())), (3, 2 * ESPERA_BUSY_MS), "dos 429 seguidos: dos esperas y un tercer intento bueno");
+}

@@ -1,0 +1,1 @@
+error: entorno: el intento no terminó: ErrorModelo entorno: el servidor contestó Some(429): {"error":{"message":"generacion en curso","type":"invalid_request_error","code":"busy"}}

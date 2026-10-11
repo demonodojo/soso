@@ -21,11 +21,12 @@ pub struct ModeloHttp<'a, C: Conector, R: Reloj> {
     pub plazo_conexion_ms: u64,
     /// Clave de la API (`Authorization: Bearer`). `None` = sin cabecera.
     pub token: Option<String>,
+    /// Cómo esperar (ms) cuando el servidor contesta `429` («generación en curso»): lo pone el adaptador.
+    pub dormir: fn(u64),
 }
 
-impl<'a, C: Conector, R: Reloj> Modelo for ModeloHttp<'a, C, R> {
-    fn completar(&mut self, peticion: &str, plazo_ms: u64) -> Resultado<String> {
-        let plazo = Plazo::en(self.reloj, plazo_ms);
+impl<'a, C: Conector, R: Reloj> ModeloHttp<'a, C, R> {
+    fn una_vez(&mut self, peticion: &str, plazo: Plazo) -> Resultado<Vec<u8>> {
         let con = Plazo::en(self.reloj, self.plazo_conexion_ms);
         let mut enlace = self.conector.conectar(&self.destino, con, self.reloj)?;
         let auth = self.token.as_ref().map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
@@ -39,8 +40,37 @@ impl<'a, C: Conector, R: Reloj> Modelo for ModeloHttp<'a, C, R> {
         escribir_todo(&mut enlace, self.reloj, plazo, &bytes)?;
         let crudo = leer_hasta_fin(&mut enlace, self.reloj, plazo, 8 * 1024 * 1024);
         enlace.cerrar();
-        cuerpo_de(&crudo?)
+        crudo
     }
+}
+
+/// Espera entre reintentos cuando el servidor está ocupado.
+pub const ESPERA_BUSY_MS: u64 = 5_000;
+
+impl<'a, C: Conector, R: Reloj> Modelo for ModeloHttp<'a, C, R> {
+    /// Un servidor con una sola generación a la vez contesta `429` mientras genera para otro cliente (o
+    /// para uno que murió a mitad). Eso **no** es un fallo del modelo: se espera y se reintenta hasta
+    /// agotar el plazo del turno.
+    fn completar(&mut self, peticion: &str, plazo_ms: u64) -> Resultado<String> {
+        let plazo = Plazo::en(self.reloj, plazo_ms);
+        loop {
+            let crudo = self.una_vez(peticion, plazo)?;
+            if estado_de(&crudo) == Some(429) {
+                if plazo.vencido(self.reloj) {
+                    return Err(Error::plazo("el servidor siguió ocupado (429) hasta agotar el plazo del turno"));
+                }
+                (self.dormir)(ESPERA_BUSY_MS);
+                continue;
+            }
+            return cuerpo_de(&crudo);
+        }
+    }
+}
+
+/// Código de estado de una respuesta HTTP cruda, si se puede leer.
+pub fn estado_de(crudo: &[u8]) -> Option<u16> {
+    let fin = crudo.windows(2).position(|w| w == b"\r\n").unwrap_or(crudo.len().min(64));
+    String::from_utf8_lossy(&crudo[..fin]).split_whitespace().nth(1).and_then(|c| c.parse().ok())
 }
 
 /// Valida estado 200 y devuelve el cuerpo (decodificando `chunked` si hace falta).

@@ -135,24 +135,26 @@ if ! grep -q 'GSP_FAM_AMPERE.*GSP_QMD_VERSION_AMPERE' "$compute"; then
     echo "FALLO: gsp_compute.c no declara qmd_version=GSP_QMD_VERSION_AMPERE para Ampere" >&2
     exit 1
 fi
-if ! grep -q 'NVC7C0_SET_QMD_VERSION' "$nvrm" ||
-   ! grep -q 'GSP_QMD_AMPERE_ENGINE_VERSION_WORD   0x00030003u' "$nvrm" ||
-   ! grep -q 'NVC7C0_SEND_SIGNALING_PCAS_B' "$nvrm" ||
+if ! grep -q 'NVC7C0_SEND_SIGNALING_PCAS2_B' "$nvrm" ||
    ! grep -q 'NVC6C0_QMDV03_00_QMD_MAJOR_VERSION_V03' "$nvrm"; then
-    echo "FALLO: nvrm_r570.h sin QMD v03 (major=3) ni SET_QMD_VERSION=0x00030003" >&2
+    echo "FALLO: nvrm_r570.h sin QMD v03 (major=3) ni PCAS2 de Ampere" >&2
     exit 1
 fi
-if grep -q 'GSP_QMD_AMPERE_ENGINE_VERSION_WORD   0x03000300u' "$nvrm"; then
-    echo "FALLO: 0x03000300 es la versión 768; SET_QMD_VERSION debe ser 0x00030003" >&2
+if grep -q 'GSP_QMD_AMPERE_ENGINE_VERSION_WORD' "$nvrm"; then
+    echo "FALLO: SET_QMD_VERSION no se emite: la GA104 lo rechaza con GR_CLASS_ERROR" >&2
     exit 1
 fi
 if ! grep -q 'NVC6C0_QMDV03_00_QMD_MAJOR_VERSION_V03' "$compute"; then
     echo "FALLO: gsp_compute.c no rellena QMD major=3 (v03_00) en el descriptor Ampere" >&2
     exit 1
 fi
-if ! grep -q 'NVC7C0_SET_QMD_VERSION' "$compute" ||
-   ! grep -q 'NVC7C0_SEND_SIGNALING_PCAS_B' "$compute"; then
-    echo "FALLO: el pushbuffer Ampere tiene que emitir SET_QMD_VERSION y PCAS_B" >&2
+if grep -q 'NVC7C0_SET_QMD_VERSION' "$compute" ||
+   grep -q 'NVC7C0_SEND_SIGNALING_PCAS_B' "$compute"; then
+    echo "FALLO: el pushbuffer Ampere no debe emitir SET_QMD_VERSION ni PCAS_B" >&2
+    exit 1
+fi
+if ! grep -q 'NVC7C0_SEND_SIGNALING_PCAS2_B' "$compute"; then
+    echo "FALLO: el pushbuffer Ampere tiene que cerrar con SEND_SIGNALING_PCAS2_B" >&2
     exit 1
 fi
 if [[ -d "$root/lxdde/reference" ]]; then
