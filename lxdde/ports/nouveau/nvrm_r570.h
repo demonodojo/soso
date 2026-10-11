@@ -754,11 +754,21 @@ typedef struct NVC0B5_ALLOCATION_PARAMETERS {
 #define NVC7C0_SET_QMD_VERSION               0x00000288u
 #define NVC7C0_CHECK_QMD_VERSION             0x00000290u
 #define NVC7C0_SEND_PCAS_A                   0x000002b4u
+/* Ampere lanza con SEND_SIGNALING_PCAS_B (invalidate|schedule). PCAS2
+ * (0x2c0, acción INVALIDATE_COPY_SCHEDULE) es el de Hopper/Blackwell: en
+ * GA10x el «copy» no tiene un QMD dependiente y el SKED falla. */
+#define NVC7C0_SEND_SIGNALING_PCAS_B         0x000002bcu
+#define NVC7C0_SEND_SIGNALING_PCAS_B_INVALIDATE_TRUE 0x1u
+#define NVC7C0_SEND_SIGNALING_PCAS_B_SCHEDULE_TRUE   0x2u
 #define NVC7C0_SEND_SIGNALING_PCAS2_B        0x000002c0u
 #define NVC7C0_SEND_SIGNALING_PCAS2_B_PCAS_ACTION_INVALIDATE_COPY_SCHEDULE 0x3u
 
-/* QMD v03_00: current/oldest en SET/CHECK (15:0 y 31:16). */
-#define GSP_QMD_AMPERE_ENGINE_VERSION_WORD   0x03000300u
+/* SET/CHECK_QMD_VERSION (`clc7c0.h`): CURRENT en 15:0, OLDEST en 31:16.
+ * Los dos valen 3 (QMD v03_00). 0x03000300 ponía 768 en cada mitad y la
+ * clase contestaba GR_CLASS_ERROR; sin el método, el motor parsea el
+ * blob v03 con el layout por defecto y el primer matvec es GR_EXCEPTION
+ * + PBDMA_WRITE_DURING_HTE (ROG GA104). */
+#define GSP_QMD_AMPERE_ENGINE_VERSION_WORD   0x00030003u
 
 /* Y GR0 es el 1, la primera entrada útil de esa misma tabla (el 0 es NULL). Hace
  * falta porque un objeto de compute NO se puede colgar de un canal de copia: RM

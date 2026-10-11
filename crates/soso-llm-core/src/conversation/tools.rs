@@ -15,6 +15,11 @@ use super::validate::{validate_assistant_turn, MAX_ARGUMENTOS_BYTES};
 
 const OPEN: &str = "<tool_call>";
 const CLOSE: &str = "</tool_call>";
+/// El 14B envuelve a veces la llamada en `<tools>…</tools>` (el nombre de la sección de la
+/// plantilla con la lista de herramientas) en vez de `<tool_call>`. Se acepta **sólo** si el
+/// cuerpo es una llamada JSON válida; si no, es texto (T14, Q07, 2026-10-11).
+const OPEN_ALT: &str = "<tools>";
+const CLOSE_ALT: &str = "</tools>";
 
 /// Turno de asistente reconstruido desde texto generado.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +46,8 @@ pub struct ToolCallParser {
     fence_open: String,
     id_next: u32,
     tool_call: Option<ToolCall>,
+    /// La llamada en curso se abrió con `<tools>` y no con `<tool_call>`.
+    alias: bool,
     /// Devolver la llamada aunque no cuadre con el esquema o nombre una herramienta no
     /// declarada: lo decide el cliente (ver [`ToolCallParser::pasante`]).
     pasante: bool,
@@ -56,6 +63,7 @@ impl ToolCallParser {
             fence_open: String::new(),
             id_next,
             tool_call: None,
+            alias: false,
             pasante: false,
         }
     }
@@ -114,6 +122,23 @@ impl ToolCallParser {
             self.text.push_str(&self.body);
             self.body.clear();
             self.phase = Phase::Text;
+        }
+        if matches!(self.phase, Phase::InCall) && self.alias {
+            // `<tools>` sin cerrar: llamada si el cuerpo lo es; si no, texto.
+            let cuerpo = self.body.trim().to_string();
+            match parse_body(&cuerpo, self.id_next) {
+                Ok(llamada) => {
+                    self.tool_call = Some(llamada);
+                    self.phase = Phase::AfterCall;
+                }
+                Err(_) => {
+                    self.text.push_str(OPEN_ALT);
+                    self.text.push_str(&self.body);
+                    self.body.clear();
+                    self.phase = Phase::Text;
+                }
+            }
+            self.alias = false;
         }
         if matches!(self.phase, Phase::InCall | Phase::InFence) {
             // El modelo suele cerrar el turno (token de parada) sin escribir `</tool_call>`
@@ -174,6 +199,15 @@ impl ToolCallParser {
                         self.text.push_str(&data[..pos]);
                         data = &data[pos + OPEN.len()..];
                         self.phase = Phase::InCall;
+                        self.alias = false;
+                        self.body.clear();
+                        continue;
+                    }
+                    Some(NextOpen::Alias(pos)) => {
+                        self.text.push_str(&data[..pos]);
+                        data = &data[pos + OPEN_ALT.len()..];
+                        self.phase = Phase::InCall;
+                        self.alias = true;
                         self.body.clear();
                         continue;
                     }
@@ -198,16 +232,36 @@ impl ToolCallParser {
                     }
                 },
                 Phase::InCall => {
-                    if let Some(pos) = data.find(CLOSE) {
+                    let (cierre, long_cierre) = if self.alias { (CLOSE_ALT, CLOSE_ALT.len()) } else { (CLOSE, CLOSE.len()) };
+                    if let Some(pos) = data.find(cierre) {
                         self.body.push_str(&data[..pos]);
-                        data = &data[pos + CLOSE.len()..];
+                        data = &data[pos + long_cierre..];
+                        if self.alias {
+                            // `<tools>…</tools>`: llamada si el cuerpo lo es; si no, era texto.
+                            self.alias = false;
+                            match parse_body(self.body.trim(), self.id_next) {
+                                Ok(llamada) => {
+                                    self.id_next += 1;
+                                    self.tool_call = Some(llamada);
+                                    self.phase = Phase::AfterCall;
+                                }
+                                Err(_) => {
+                                    self.text.push_str(OPEN_ALT);
+                                    self.text.push_str(&self.body);
+                                    self.text.push_str(CLOSE_ALT);
+                                    self.body.clear();
+                                    self.phase = Phase::Text;
+                                }
+                            }
+                            continue;
+                        }
                         let llamada = parse_body(&self.body, self.id_next)?;
                         self.id_next += 1;
                         self.tool_call = Some(llamada);
                         self.phase = Phase::AfterCall;
                         continue;
                     }
-                    let (committed, partial) = split_partial_suffix(data, CLOSE);
+                    let (committed, partial) = split_partial_suffix(data, cierre);
                     self.body.push_str(&committed);
                     self.hold = partial;
                     break;
@@ -316,6 +370,7 @@ fn historial(motivo: impl Into<String>) -> ChatError {
 
 enum NextOpen {
     Tool(usize),
+    Alias(usize),
     Fence { at: usize, len: usize },
     Hold(usize),
 }
@@ -328,23 +383,33 @@ enum FenceScan {
 
 /// Primera apertura: `<tool_call>` o una cerca Markdown al inicio de línea.
 fn next_open(data: &str) -> Option<NextOpen> {
-    let tool = data.find(OPEN);
+    // La primera de las dos aperturas de llamada (`<tool_call>` o el alias `<tools>`).
+    let tool = match (data.find(OPEN), data.find(OPEN_ALT)) {
+        (Some(a), Some(b)) if b < a => Some(NextOpen::Alias(b)),
+        (Some(a), _) => Some(NextOpen::Tool(a)),
+        (None, Some(b)) => Some(NextOpen::Alias(b)),
+        (None, None) => None,
+    };
+    let pos_tool = tool.as_ref().map(|t| match t {
+        NextOpen::Tool(p) | NextOpen::Alias(p) => *p,
+        _ => usize::MAX,
+    });
     match scan_fence(data) {
         FenceScan::Open { at, len } => {
-            if tool.is_some_and(|t| t < at) {
-                Some(NextOpen::Tool(tool.unwrap()))
+            if pos_tool.is_some_and(|t| t < at) {
+                tool
             } else {
                 Some(NextOpen::Fence { at, len })
             }
         }
         FenceScan::NeedMore { at } => {
-            if tool.is_some_and(|t| t < at) {
-                Some(NextOpen::Tool(tool.unwrap()))
+            if pos_tool.is_some_and(|t| t < at) {
+                tool
             } else {
                 Some(NextOpen::Hold(at))
             }
         }
-        FenceScan::None => tool.map(NextOpen::Tool),
+        FenceScan::None => tool,
     }
 }
 
@@ -469,7 +534,7 @@ fn hold_open_prefix(data: &str) -> (String, String) {
         }
         let suf = &data[split..];
         let line_ok = split == 0 || data.as_bytes().get(split - 1) == Some(&b'\n');
-        let tool_ok = OPEN.starts_with(suf);
+        let tool_ok = OPEN.starts_with(suf) || OPEN_ALT.starts_with(suf);
         let fence_ok = line_ok
             && ("```json".starts_with(suf) || "```JSON".starts_with(suf) || "```".starts_with(suf));
         if tool_ok || fence_ok {

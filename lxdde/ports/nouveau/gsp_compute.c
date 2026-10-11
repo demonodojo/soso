@@ -913,8 +913,9 @@ int gsp_compute_encode_qmd(struct gsp_compute *cp, const GspQmdV05 *qmd,
         memcpy(cp_data(cp, G4F_QMD_OFF), qmd->words, qmd_bytes);
         set_object = NVC7C0_SET_OBJECT;
         send_pcas = NVC7C0_SEND_PCAS_A;
-        send_sig = NVC7C0_SEND_SIGNALING_PCAS2_B;
-        sig_action = NVC7C0_SEND_SIGNALING_PCAS2_B_PCAS_ACTION_INVALIDATE_COPY_SCHEDULE;
+        send_sig = NVC7C0_SEND_SIGNALING_PCAS_B;
+        sig_action = NVC7C0_SEND_SIGNALING_PCAS_B_INVALIDATE_TRUE |
+                     NVC7C0_SEND_SIGNALING_PCAS_B_SCHEDULE_TRUE;
     } else {
         qmd_bytes = (unsigned)sizeof(GspQmdV05);
         memcpy(cp_data(cp, G4F_QMD_OFF), qmd->words, qmd_bytes);
@@ -927,10 +928,13 @@ int gsp_compute_encode_qmd(struct gsp_compute *cp, const GspQmdV05 *qmd,
 
     cp_pb_set_object(c, &pos, GSP_COMPUTE_SUBCHANNEL, set_object, cp->cls);
     cp_pb_immd(c, &pos, 0u, NVC86F_WFI, 0u);
-    /* Ampere: la versión va en el descriptor QMD v03_00 (major/minor en el
-     * blob). SET/CHECK_QMD_VERSION en el pushbuffer levantó GR_CLASS_ERROR en
-     * GA107 (2026-09): mismo layout de 24 B que Blackwell (SET_OBJECT+WFI+
-     * SEND_PCAS+PCAS2). */
+    /* Ampere no hereda la versión del blob: hay que decirla en el método.
+     * El dato no cabe en un inmediato (0x00030003). El 0x03000300 de antes
+     * era la versión 768 y la clase respondía GR_CLASS_ERROR. */
+    if (cp->caps && cp->caps->qmd_version == GSP_QMD_VERSION_AMPERE) {
+        cp_pb_method(c, &pos, GSP_COMPUTE_SUBCHANNEL, NVC7C0_SET_QMD_VERSION, 1);
+        cp_pb_write(c, &pos, GSP_QMD_AMPERE_ENGINE_VERSION_WORD);
+    }
     cp_pb_method(c, &pos, GSP_COMPUTE_SUBCHANNEL, send_pcas, 1);
     cp_pb_write(c, &pos, (uint32_t)(qmd_va >> 8));
     cp_pb_immd(c, &pos, GSP_COMPUTE_SUBCHANNEL, send_sig, sig_action);

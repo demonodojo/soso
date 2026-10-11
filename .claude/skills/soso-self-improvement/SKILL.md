@@ -171,7 +171,7 @@ siguió ejecutándose sobre un fallo anterior sin sentido.
 | Chat dominio | `crates/soso-llm-core/src/conversation.rs` |
 | Coordinador | `crates/soso-improve-core`, `tools/soso-improve`, `user/soso-improve` |
 
-Perfil elegido: **Qwen2.5-Coder-7B-Instruct** (`qwen2.5-coder-7b`, id `soso-coder`). El 3B es el candidato anterior.
+Perfil de trabajo: **Qwen2.5-Coder-14B-Instruct** (`qwen2.5-coder-14b`, id `soso-coder`, D9); el **7B** es el perfil ligero (T20/T21). El 3B es el candidato anterior.
 T52/T53: segmentación BPE **igual** a la referencia (5/5). T06 no puede
 debilitar eso a una comparación aproximada.
 
@@ -215,7 +215,7 @@ Estado vigente y siguiente ficha en [README](../../../docs/self-improvement/READ
 **10-oct-2026:** T22 está **hecha** con Qwen2.5-Coder-14B a T=0 (OpenCode + herramienta propia
 `reemplazar_texto`, verificador exit 0) en el host **y en el guest** (14 GiB); el perfil T14 sigue siendo el 7B (a T=0 no
 resuelve R03). OpenCode sólo envía `temperature` si el modelo declara `"temperature": true` en `opencode.json`.
-Siguiente: identidad de modelo para T25–T29 y T35.
+**Modelo de trabajo de T25–T29: `qwen2.5-coder-14b`** (D9, aceptada 11-oct; GO 10/10 en T14, lock `model-lock-14b.json`); el 7B es el perfil ligero. Siguiente: T35.
 
 Revisión del **2-oct-2026**: el perfil elegido es `qwen2.5-coder-7b` (campaña 10×3, cobertura `completa`, **GO 10/10**; el 3B quedó NO-GO 8/10). **T20** está pendiente con esa identidad. **T40 y T41 están cerradas** (2026-10-02: `cargo build --offline` compila en el guest un workspace de dos crates, uno con `build.rs`, y `soso-abi`). **T40, T41 y T80 están cerradas; T42 en curso** (2026-10-03: `mkfs-soso` compila en el guest —2 min 28 s— y su imagen se verifica con el `sosofs` del host; faltan C-113 `-Zbuild-std`, C-115…C-117 C/ensamblador/objcopy y la imagen arrancable). Truco: `SOSO_REUSE_DATA=1 cargo xtask run` conserva lo que el guest escribió.
 

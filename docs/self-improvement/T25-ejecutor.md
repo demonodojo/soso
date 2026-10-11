@@ -4,6 +4,8 @@
 
 **Dependencias:** [T21](T21-opencode-contrato.md), [T24](T24-checkout.md), [T47](T47-procesos-nativos.md), [T48](T48-reloj-red.md)
 
+**Modelo de trabajo:** `qwen2.5-coder-14b` (decisión D9 de [DECISIONES.md](DECISIONES.md), 2026-10-11): GO 10/10 en T14 y único que resuelve R03 a T=0 con OpenCode. Lock: `target/self-improvement/tasks/T14/model-lock-14b.json`; el 7B queda como perfil ligero.
+
 ## Objetivo y entrega
 
 Run deja estado y logs aun si OpenCode muere; ninguna herramienta fuera de presupuesto inicia otra iteración.

@@ -1,11 +1,32 @@
 # Perfil del modelo candidato
 
 **Ficha:** [T03](T03-perfil-modelo.md). **Fecha:** 16 de septiembre de 2026.
-**Estado (27-sep-2026):** el perfil elegido es **Qwen2.5-Coder-7B-Instruct**
-(`qwen2.5-coder-7b`, id `soso-coder`). T14 midió GO 10/10 con cobertura
-completa. El 3B queda como candidato anterior, NO-GO 8/10.
+**Estado (11-oct-2026):** el **modelo de trabajo** de las campañas de automejora (T25–T29) es
+**Qwen2.5-Coder-14B-Instruct** (`qwen2.5-coder-14b`, id `soso-coder`), decisión **D9** del
+usuario: T14 midió GO 10/10 con cobertura completa y es el único que resuelve R03 a T=0 con
+OpenCode (host y guest, T22). El **7B** (`qwen2.5-coder-7b`, GO 10/10 el 27-sep) queda como
+**perfil ligero**: es la identidad con la que se acreditaron T20 y T21, y cabe en un guest
+de 8 GiB. El 3B queda como candidato anterior, NO-GO 8/10.
 
-## Perfil elegido
+## Modelo de trabajo: 14B
+
+| Campo | Valor |
+|---|---|
+| Repositorio | `Qwen/Qwen2.5-Coder-14B-Instruct` (pesos del GGUF `Qwen/Qwen2.5-Coder-14B-Instruct-GGUF`, `qwen2.5-coder-14b-instruct-q4_k_m.gguf`, revisión `main` sin fijar) |
+| Familia | `qwen2` |
+| Capas / vocab / contexto | 48 · 152 064 · 131 072 (hidden 5 120, 40 cabezas, 8 KV, FFN 13 824) |
+| Pesos | 9,2 GiB: 70 % Q4_K y 30 % Q8_0 (las capas `attn_v`/`ffn_down` que eran Q6_K) |
+| Convertido en | `target/qwen2.5-coder-14b-model` (`gguf2som`) |
+| Nombre en el lock | `qwen2.5-coder-14b` |
+| Lock | `target/self-improvement/tasks/T14/model-lock-14b.json` |
+| Medición | GO 10/10 (30/30 intentos), 11-oct-2026, `campana-t14-qwen2.5-coder-14b.json`; la primera tirada fue NO-GO 9/10 (Q07, etiqueta `<tools>`) y se corrigió en el parser |
+| Presupuesto | mediana 11 607 ms, máximo 137 454 ms, timeout sugerido 274 908 ms, tokens de salida máx 22 |
+| Coste | guest de **14 GiB** y 4 vCPU; primer turno de OpenCode ≈ 29 min (prefill en frío, 4 085 tokens), pasos siguientes 4–6 min con el KV reutilizado |
+
+Evidencia: `tests/self-improvement/opencode/t14-campana-14b/` y
+`tests/self-improvement/opencode/r03-guest-14b-t0-parada-corregida/`.
+
+## Perfil ligero (7B, el elegido en T14)
 
 | Campo | Valor |
 |---|---|

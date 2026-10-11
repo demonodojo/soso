@@ -3,7 +3,7 @@
 Versión fijada: **OpenCode 1.18.34** (`~/.opencode/bin/opencode`). Esquema: `https://opencode.ai/config.json`, descargado el 2026-10-07 (`target/self-improvement/tasks/T20/config-schema.json`).
 
 ## Archivos
-- [`opencode.json`](../../opencode.json): proveedor `soso` (`@ai-sdk/openai-compatible`, `http://127.0.0.1:7422/v1`), un solo modelo `soso-coder` (= `qwen2.5-coder-7b`, perfil con GO 10/10), `model` y `small_model` apuntan a él.
+- [`opencode.json`](../../opencode.json): proveedor `soso` (`@ai-sdk/openai-compatible`, `http://127.0.0.1:7422/v1`), un solo modelo `soso-coder` (= `qwen2.5-coder-14b` desde D9, 2026-10-11; antes `qwen2.5-coder-7b`, perfil con GO 10/10), `model` y `small_model` apuntan a él.
 - [`.opencode/agents/soso-improve.md`](../../.opencode/agents/soso-improve.md): agente por defecto.
 
 ## Decisiones
@@ -13,11 +13,12 @@ Versión fijada: **OpenCode 1.18.34** (`~/.opencode/bin/opencode`). Esquema: `ht
 - **Protocolo en el prompt del agente (T22, 2026-10-08)**: con el prompt vago original el 7B narraba en vez de llamar a herramientas; con un protocolo explícito (una sola llamada por respuesta y nada más, no inventar resultados ni escribir `<tool_response>`, no editar sin leer, pasos 1–5) lee `TASK.md` y el archivo de verdad. Ver `seguimiento/T22.md`.
 - **Permisos de `soso-improve`**: leer/buscar/editar sí; `bash` denegado salvo `cargo test|check|build|fmt` y `git status|diff|log`; `task`, `webfetch`, `websearch` y `external_directory` denegados. No hay autoaprobación universal. `steps: 40`.
 - **Límites**: `limit.context` 32768 y `limit.output` 2048. **Son declarados, no medidos**: el banco de T14 sólo mide salidas de ≤19 tokens; T21 comprobará con tráfico real. El servidor devuelve 422 `context_length_exceeded` si se pasan (C3).
-- **Timeouts** (de la campaña T14, `campana-t14-qwen2.5-coder-7b.json`: mediana 160 212 ms, máximo 593 024 ms): `timeout` y `chunkTimeout` = **1 186 048 ms** (el sugerido, 2× el máximo). `chunkTimeout` debe cubrir el primer token, que es lo más lento.
+- **Timeouts**: `timeout` y `chunkTimeout` = **7 200 000 ms (2 h)**. Antes 1 186 048 ms (el sugerido por la campaña del 7B, que sólo mide salidas de ≤ 19 tokens); no cubría el **primer turno real** de una sesión de OpenCode: con el 14B en el guest, el prefill en frío de ~4 000 tokens tarda ≈ 29 min (1,7 M ms) y los arneses ya lo subían a 5 h. `chunkTimeout` debe cubrir el primer token.
 
 ## Hashes (sha256)
-- `opencode.json`: `73dc1e89e55a2da24496596f924e42afb1cc297ab9931802057ba787098188c9`
-- `.opencode/agents/soso-improve.md`: `94a4b3e78970c8fcbf0160af6c33bafd468bad1e18ff9c2a9a0bd37b69034949`
+- `opencode.json`: `601131eb0af528b16c50d95d6d8dd3ced3209fdd4043a60e157cf9a36f0ce19c` (regenerado 2026-10-11)
+- `.opencode/agents/soso-improve.md`: `e2555cb46478109bcc593b6a144e53261947c8b7ad81133b8beb245699c9682d` (regenerado 2026-10-11)
+- `.opencode/tools/reemplazar_texto.ts`: `0b763095f37ab8c26de9b5e7ebba6ba05940d902a46e34eaad1336d565faf1bf`
 - Proveedor: `@ai-sdk/openai-compatible` (OpenCode lo resuelve en ejecución; la versión exacta se fija en T35, que instala sin red).
 
 ## Cómo se comprobó (sin lanzar inferencia)

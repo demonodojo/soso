@@ -772,10 +772,36 @@ static int check_family_caps(void)
                 cp_amp.chan = &ch;
                 if (gsp_compute_encode_qmd(&cp_amp, (const GspQmdV05 *)&q2,
                                            &off, &len) != 0 ||
-                    len != 24u) {
-                    printf("FALLO: encode QMD Ampere len=%u (esperaba 24)\n",
+                    len != 32u) {
+                    printf("FALLO: encode QMD Ampere len=%u (esperaba 32: "
+                           "SET_OBJECT+WFI+SET_QMD_VERSION+PCAS+PCAS_B)\n",
                            len);
                     return -1;
+                }
+                {
+                    const uint32_t *w = (const uint32_t *)(pb + off);
+                    uint32_t set_hdr =
+                        (NVC56F_DMA_INCR_OPCODE_VALUE << 29) | (1u << 16) |
+                        (1u << 13) | ((NVC7C0_SET_QMD_VERSION >> 2) & 0xfffu);
+                    uint32_t pcas_b =
+                        (NVC56F_DMA_SEC_OP_IMMD_DATA_METHOD << 29) |
+                        ((NVC7C0_SEND_SIGNALING_PCAS_B_INVALIDATE_TRUE |
+                          NVC7C0_SEND_SIGNALING_PCAS_B_SCHEDULE_TRUE) << 16) |
+                        (1u << 13) |
+                        ((NVC7C0_SEND_SIGNALING_PCAS_B >> 2) & 0xfffu);
+
+                    if (w[3] != set_hdr ||
+                        w[4] != GSP_QMD_AMPERE_ENGINE_VERSION_WORD) {
+                        printf("FALLO: SET_QMD_VERSION Ampere hdr=%08x dato=%08x "
+                               "(esperaba versión 3, 0x%08x)\n",
+                               w[3], w[4], GSP_QMD_AMPERE_ENGINE_VERSION_WORD);
+                        return -1;
+                    }
+                    if (w[7] != pcas_b) {
+                        printf("FALLO: Ampere debe cerrar con SEND_SIGNALING_PCAS_B "
+                               "(invalidate|schedule), hdr=%08x\n", w[7]);
+                        return -1;
+                    }
                 }
             }
         }

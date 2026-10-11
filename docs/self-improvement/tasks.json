@@ -801,8 +801,8 @@
       },
       "tracking": {
         "blocker": "",
-        "updated_at": "2026-10-10T23:30:00+02:00",
-        "summary": "Cerrada en el host (2026-10-10), por decisión del usuario, con Qwen2.5-Coder-14B a T=0 real: OpenCode 1.18.34 + herramienta propia reemplazar_texto resuelve R03 (verificador independiente exit 0, parche de una línea, 1 ronda, intento 32). Hallazgos: OpenCode sólo envía temperature con \"temperature\": true en el modelo; los modelos comprimen espacios al copiar oldString (a T=0 también); bug MoE q_dim!=hidden arreglado con test; a T=0 el 7B NO resuelve R03 (intento 30) y el 30B no cabe en este host. Límites: host (no guest), perfil T14 es el 7B, una ejecución, el modelo no ejecutó cargo test ni informó. cargo xtask test TODO OK; cargo xtask check exit 1 por 2 fallos ya presentes en HEAD (forja hola_std, banco huella). Actualización (15:00): el 7B del guest contestaba en prosa por la atención dispersa del planificador (se activaba sola con window>=256 y descartaba el contexto largo); arreglado (opt-in) con test. Con atención exacta el guest ya llama a herramientas y reproduce el recorrido del host a T=0 (misma edición equivocada del 7B). Falta un modelo que resuelva R03 en el guest (14B: más RAM y ~1,5-3 h de prefill). ACTUALIZACIÓN: el 14B resuelve R03 TAMBIÉN EN EL GUEST (14 GiB, 4 vCPU, T=0 real, reemplazar_texto, 3 rondas): verificador exit 0 en la ronda 3, 3 516 s en total. Para llegar: atención por grupos GQA/F16C repartida entre hilos, H2O sólo cerca de la ventana, swiglu vectorial, RoPE con tabla (prefill 14B del guest 2,7x más rápido; banco 4,7x); atención dispersa del planificador (opt-in); KV int8 sólo si el f16 no da para 8192 tokens; y parada Qwen: el guest no paraba en <|endoftext|> (arreglado, repetición en curso). Salvedades: rondas 1-2 con turno vacío en el paso 4; el modelo no ejecutó cargo test de verdad (alucinó su salida por el fallo de parada); sin xtask check/boot QEMU del candidato; perfil T14 es el 7B. EJECUCIÓN LIMPIA EN EL GUEST (23:13, parada Qwen corregida): 14B, 3 rondas, verificador exit 0 en 3389 s; en la ronda 3 hace read→grep→read→reemplazar_texto→bash cargo test REAL (13 ok)→informe veraz. Rondas 1-2 con turno vacío en el paso 4 (hipótesis: casi-empate numérico, sin comprobar). Pool de hilos del host (HostPool, HILOS=N).",
+        "updated_at": "2026-10-11T12:00:00+02:00",
+        "summary": "Cerrada en el host (2026-10-10), por decisión del usuario, con Qwen2.5-Coder-14B a T=0 real: OpenCode 1.18.34 + herramienta propia reemplazar_texto resuelve R03 (verificador independiente exit 0, parche de una línea, 1 ronda, intento 32). Hallazgos: OpenCode sólo envía temperature con \"temperature\": true en el modelo; los modelos comprimen espacios al copiar oldString (a T=0 también); bug MoE q_dim!=hidden arreglado con test; a T=0 el 7B NO resuelve R03 (intento 30) y el 30B no cabe en este host. Límites: host (no guest), perfil T14 es el 7B, una ejecución, el modelo no ejecutó cargo test ni informó. cargo xtask test TODO OK; cargo xtask check exit 1 por 2 fallos ya presentes en HEAD (forja hola_std, banco huella). Actualización (15:00): el 7B del guest contestaba en prosa por la atención dispersa del planificador (se activaba sola con window>=256 y descartaba el contexto largo); arreglado (opt-in) con test. Con atención exacta el guest ya llama a herramientas y reproduce el recorrido del host a T=0 (misma edición equivocada del 7B). Falta un modelo que resuelva R03 en el guest (14B: más RAM y ~1,5-3 h de prefill). ACTUALIZACIÓN: el 14B resuelve R03 TAMBIÉN EN EL GUEST (14 GiB, 4 vCPU, T=0 real, reemplazar_texto, 3 rondas): verificador exit 0 en la ronda 3, 3 516 s en total. Para llegar: atención por grupos GQA/F16C repartida entre hilos, H2O sólo cerca de la ventana, swiglu vectorial, RoPE con tabla (prefill 14B del guest 2,7x más rápido; banco 4,7x); atención dispersa del planificador (opt-in); KV int8 sólo si el f16 no da para 8192 tokens; y parada Qwen: el guest no paraba en <|endoftext|> (arreglado, repetición en curso). Salvedades: rondas 1-2 con turno vacío en el paso 4; el modelo no ejecutó cargo test de verdad (alucinó su salida por el fallo de parada); sin xtask check/boot QEMU del candidato; perfil T14 es el 7B. EJECUCIÓN LIMPIA EN EL GUEST (23:13, parada Qwen corregida): 14B, 3 rondas, verificador exit 0 en 3389 s; en la ronda 3 hace read→grep→read→reemplazar_texto→bash cargo test REAL (13 ok)→informe veraz. Rondas 1-2 con turno vacío en el paso 4 (hipótesis: casi-empate numérico, sin comprobar). Pool de hilos del host (HostPool, HILOS=N). 2026-10-11: campaña T14 del 14B: NO-GO 9/10 (Q07: llamada en <tools>) -> GO 10/10 con alias <tools> en el parser; propuesta D9 (usar el 14B para T25-T29, pendiente de confirmar). check: 1 fallo previo y ajeno (receta std T75); forja y banco arreglados.",
         "evidence": [
           "docs/self-improvement/seguimiento/T22.md",
           "target/self-improvement/first-improvement/temperaturas.txt",
@@ -828,9 +828,11 @@
           "crates/soso-llm-core/tests/tokens_de_parada_qwen.rs",
           "docs/self-improvement/T82-prefill-por-lotes.md",
           "tests/self-improvement/opencode/r03-guest-14b-t0-parada-corregida/",
-          "crates/soso-llm-api/tests/host_pool.rs"
+          "crates/soso-llm-api/tests/host_pool.rs",
+          "tests/self-improvement/opencode/t14-campana-14b/",
+          "docs/self-improvement/DECISIONES.md#D9"
         ],
-        "next_step": "Cuando termine la repetición del guest con la parada corregida, adjuntar su evidencia; decidir la identidad de modelo para T25-T29; T35; arreglar los 2 fallos previos de cargo xtask check."
+        "next_step": "Confirmar D9 (identidad de modelo para T25-T29); T35 (OpenCode nativo); ficha para la receta de std (T75) que diverge del script; boot QEMU del candidato."
       }
     },
     {
@@ -935,7 +937,9 @@
         "T47",
         "T48"
       ],
-      "entry_conditions": [],
+      "entry_conditions": [
+        "Modelo de trabajo: qwen2.5-coder-14b (D9, 2026-10-11; GO 10/10 en T14 y único que resuelve R03 a T=0). El 7B queda como perfil ligero; si cambia el modelo durante la campaña, registrar nueva versión (T29)."
+      ],
       "contract_sections": "C5",
       "context": [
         "crates/soso-improve-core/src/entorno.rs",
@@ -966,7 +970,9 @@
         "T24",
         "T25"
       ],
-      "entry_conditions": [],
+      "entry_conditions": [
+        "Modelo de trabajo: qwen2.5-coder-14b (D9, 2026-10-11; GO 10/10 en T14 y único que resuelve R03 a T=0). El 7B queda como perfil ligero; si cambia el modelo durante la campaña, registrar nueva versión (T29)."
+      ],
       "contract_sections": "C5–C6",
       "context": [
         "xtask/src/check.rs",
@@ -997,7 +1003,9 @@
         "T25",
         "T26"
       ],
-      "entry_conditions": [],
+      "entry_conditions": [
+        "Modelo de trabajo: qwen2.5-coder-14b (D9, 2026-10-11; GO 10/10 en T14 y único que resuelve R03 a T=0). El 7B queda como perfil ligero; si cambia el modelo durante la campaña, registrar nueva versión (T29)."
+      ],
       "contract_sections": "C5",
       "context": [
         "crates/soso-improve-core/src/entorno.rs",
@@ -1034,7 +1042,9 @@
       "depends_on": [
         "T26"
       ],
-      "entry_conditions": [],
+      "entry_conditions": [
+        "Modelo de trabajo: qwen2.5-coder-14b (D9, 2026-10-11; GO 10/10 en T14 y único que resuelve R03 a T=0). El 7B queda como perfil ligero; si cambia el modelo durante la campaña, registrar nueva versión (T29)."
+      ],
       "contract_sections": "C5",
       "context": [
         "docs/ESTADO.md",
@@ -1063,7 +1073,9 @@
         "T28",
         "T49"
       ],
-      "entry_conditions": [],
+      "entry_conditions": [
+        "Modelo de trabajo: qwen2.5-coder-14b (D9, 2026-10-11; GO 10/10 en T14 y único que resuelve R03 a T=0). El 7B queda como perfil ligero; si cambia el modelo durante la campaña, registrar nueva versión (T29)."
+      ],
       "contract_sections": "C5–C6",
       "context": [
         "SELF_IMPROVEMENT.md",

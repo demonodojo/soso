@@ -14,7 +14,7 @@
 > modelo declara `"temperature": true`; los modelos comprimen espacios al copiar (`reemplazar_texto` en `.opencode/tools/`);
 > la atención dispersa del planificador rompía el contexto largo del guest (ahora opt-in); el prefill del guest es 2,7× más rápido
 > ([T82](T82-prefill-por-lotes.md), pasadas 1–3: atención por grupos GQA repartida entre hilos).
-> **Lo siguiente:** decidir la identidad de modelo para T25–T29 (14B con campaña T14 o seguir con el 7B) y T35 (OpenCode nativo).
+> **Lo siguiente:** T35 (OpenCode nativo). La identidad de modelo para T25–T29 está decidida: `qwen2.5-coder-14b` (D9; GO 10/10 en T14).
 
 
 **Ficha cerrada: [T42 — C, ensamblador y empaquetado por perfil](T42-c-link-imagen.md)**
@@ -28,8 +28,7 @@ Mantenimiento del 8-oct: [C-144](native/C-144.md) integra jobserver corregido
 como fuentes versionadas, con resolución local y pruebas host; validación
 guest de esa corrección pendiente.
 [T80](T80-proc-macros.md) (proc macros) está cerrada y [T41](T41-cargo-offline.md) también.
-El perfil elegido es `qwen2.5-coder-7b` (GO 10/10, cobertura `completa`,
-27-sep). El 3B queda como candidato anterior, NO-GO 8/10.
+El perfil elegido en T14 es `qwen2.5-coder-7b` (GO 10/10, cobertura `completa`, 27-sep; ahora perfil ligero). El **modelo de trabajo de T25–T29 es `qwen2.5-coder-14b`** (D9, 2026-10-11; GO 10/10). El 3B queda como candidato anterior, NO-GO 8/10.
 [T20](T20-opencode-config.md) está **hecha** (2026-10-07, [opencode.md](opencode.md)); T21 también está hecha; T22 está hecha en el host (2026-10-10).
 
 | Prioridad | Trabajo | Condición de salida |

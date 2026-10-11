@@ -672,3 +672,70 @@ fn llamada_json_en_cerca_bash() {
     let t = parse_assistant_output(&entrada, "```bash\nls -la\n```", 1).expect("texto");
     assert!(t.tool_call.is_none());
 }
+
+// T14 / Q07 (2026-10-11): el 14B escribe la llamada bien formada pero dentro de `<tools>…</tools>`
+// (el nombre de la sección de la plantilla) en vez de `<tool_call>…</tool_call>`.
+fn entrada_leer_archivo() -> ChatInput {
+    ChatInput::nuevo(vec![Message::user("Enséñame las primeras 20 líneas de kernel/src/main.rs")])
+        .con_herramientas(
+            vec![ToolDefinition::nueva(
+                "leer_archivo",
+                None,
+                json!({"type": "object", "properties": {
+                    "ruta": {"type": "string"}, "lineas": {"type": "integer"}},
+                    "required": ["ruta", "lineas"]}),
+            )],
+            ToolChoice::Required,
+        )
+}
+
+#[test]
+fn llamada_en_etiqueta_tools_del_14b() {
+    let entrada = entrada_leer_archivo();
+    let texto = "<tools>\n{\n  \"name\": \"leer_archivo\",\n  \"arguments\": {\n    \"ruta\": \"kernel/src/main.rs\",\n    \"lineas\": 20\n  }\n}\n</tools>";
+    let t = parse_assistant_output(&entrada, texto, 1).expect("alias <tools>");
+    let c = t.tool_call.expect("llamada");
+    assert_eq!(c.name, "leer_archivo");
+    assert_eq!(c.argumentos().unwrap(), json!({"ruta": "kernel/src/main.rs", "lineas": 20}));
+    assert_eq!(t.content, None);
+    // Con texto delante y sin cerrar la etiqueta (el modelo para antes de escribirla).
+    let abierta = "Claro.\n<tools>\n{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"a.rs\", \"lineas\": 3}}";
+    let t = parse_assistant_output(&entrada, abierta, 1).expect("alias sin cerrar");
+    assert_eq!(t.content.as_deref(), Some("Claro.\n"));
+    assert_eq!(t.tool_call.expect("llamada").name, "leer_archivo");
+}
+
+#[test]
+fn llamada_en_etiqueta_tools_alimentada_de_a_un_caracter() {
+    let entrada = entrada_leer_archivo();
+    let texto = "Voy.\n<tools>\n{\"name\": \"leer_archivo\", \"arguments\": {\"ruta\": \"a.rs\", \"lineas\": 3}}\n</tools>";
+    let mut p = ToolCallParser::new(1);
+    for c in texto.chars() {
+        p.push(&c.to_string()).expect("push");
+    }
+    let t = p.finish(&entrada).expect("finish");
+    assert_eq!(t.content.as_deref(), Some("Voy.\n"));
+    assert_eq!(t.tool_call.expect("llamada").name, "leer_archivo");
+}
+
+#[test]
+fn tools_que_no_es_una_llamada_sigue_siendo_texto() {
+    // Con `Auto`: con `Required` un turno sin llamada es, correctamente, un error de validación.
+    let entrada = ChatInput::nuevo(vec![Message::user("hola")]).con_herramientas(
+        vec![ToolDefinition::nueva(
+            "leer_archivo",
+            None,
+            json!({"type": "object", "properties": {"ruta": {"type": "string"}}, "required": ["ruta"]}),
+        )],
+        ToolChoice::Auto,
+    );
+    // El modelo cita la sección de herramientas sin que sea una llamada.
+    let texto = "Tengo estas herramientas: <tools>leer_archivo(ruta, lineas)</tools> ¿cuál uso?";
+    let t = parse_assistant_output(&entrada, texto, 1).expect("texto");
+    assert!(t.tool_call.is_none());
+    assert_eq!(t.content.as_deref(), Some(texto));
+    // Y abierta sin cerrar, también.
+    let t = parse_assistant_output(&entrada, "Mira <tools>algo", 1).expect("texto abierto");
+    assert!(t.tool_call.is_none());
+    assert_eq!(t.content.as_deref(), Some("Mira <tools>algo"));
+}

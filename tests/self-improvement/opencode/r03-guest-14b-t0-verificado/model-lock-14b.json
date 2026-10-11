@@ -30,8 +30,8 @@
     "familia": null,
     "max_position_embeddings": null,
     "pad_token": null,
-    "repositorio": "Qwen/Qwen2.5-Coder-14B-Instruct",
-    "revision": "gguf q4_k_m (bartowski/Qwen)",
+    "repositorio": "Qwen/Qwen2.5-Coder-14B-Instruct-GGUF",
+    "revision": "main (sin fijar); qwen2.5-coder-14b-instruct-q4_k_m.gguf convertido con gguf2som",
     "vocab_size": null
   },
   "schema_version": 1,

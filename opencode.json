@@ -14,12 +14,12 @@
       "options": {
         "baseURL": "http://127.0.0.1:7422/v1",
         "apiKey": "{env:SOSO_LLM_API_KEY}",
-        "timeout": 1186048,
-        "chunkTimeout": 1186048
+        "timeout": 7200000,
+        "chunkTimeout": 7200000
       },
       "models": {
         "soso-coder": {
-          "name": "soso coder (qwen2.5-coder-7b)",
+          "name": "soso coder (qwen2.5-coder-14b)",
           "tool_call": true,
         "temperature": true,
           "limit": {

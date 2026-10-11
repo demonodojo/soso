@@ -123,3 +123,16 @@ lo usan los servidores (guest y host). Un bloque ``` que no empieza por `{` es t
 Catálogo, ficha, fila del índice y seguimiento se actualizan juntos. Los
 recuentos salen de `tasks.json`, no de números copiados entre documentos.
 Las decisiones históricas y sus alternativas siguen en las fichas y resúmenes.
+
+## D9 — Identidad de modelo para T25–T29: **aceptada** (2026-10-11, por el usuario: «usa 14B para T25–29»)
+
+**Situación.** El perfil elegido en T14 es `qwen2.5-coder-7b` (GO 10/10). Con OpenCode real, a T=0 y sin pistas de edición: el **7B no resuelve R03** (host y guest repiten la misma edición
+equivocada) y el **14B sí**, en el host y en el guest (T22). El 14B también pasa la campaña de T14: **GO 10/10** (tras aceptar la etiqueta `<tools>` en el parser). El 30B no cabe en este
+host. Coste del 14B: guest de 14 GiB (frente a 8 GiB) y primer turno ≈ 29 min (frente a ≈ 20 min).
+
+**Decisión.** `qwen2.5-coder-14b` es el modelo de trabajo de las campañas de automejora (T25–T29), con `model-lock-14b.json`; el 7B queda como perfil ligero. T14, T20 y T21 conservan su
+acreditación con la identidad 7B (no se repiten: el 14B tiene su propia campaña T14, GO 10/10).
+
+**Hecho al aceptarla (2026-10-11):** `modelo.md` (modelo de trabajo y perfil ligero), `opencode.json` (nombre del modelo y timeouts de 2 h, ver `opencode.md`), `entry_conditions` de T25–T29 en `tasks.json`
+y una línea de «Modelo de trabajo» en cada ficha. **Pendiente:** el selector del live USB (hoy sólo ofrece los modelos instalados) y confirmar que el 14B cabe en las máquinas objetivo (≈ 9 GB de pesos + KV).
+
