@@ -1567,7 +1567,7 @@ fn repl_ask() -> Option<u8> {
     let (conf_modelo, max) = leer_conf_modelo();
     let Some(modelo) = modelo_efectivo(&conf_modelo) else {
         println!("ask: no hay ningún modelo en /models");
-        return Some(1);
+        return None;
     };
     println!("ask: modelo {modelo}, máx {max} tokens");
     println!("ask: escribe la pregunta; «salir» o Ctrl-D para terminar");
@@ -1576,7 +1576,10 @@ fn repl_ask() -> Option<u8> {
         print!("?> ");
         let linea = match lector.siguiente() {
             Ok(Some(l)) => l,
-            Ok(None) => return Some(0),
+            // `None` = seguir en sosh. `Some` cierra la shell, e init con
+            // código 0 apaga userspace («shell cerrada») y deja el teclado
+            // sin prompt.
+            Ok(None) => return None,
             Err(e) => {
                 println!("sosh: tty: {}", errno_str(e));
                 return Some(1);
@@ -1587,16 +1590,15 @@ fn repl_ask() -> Option<u8> {
             continue;
         }
         if texto == "salir" || texto == "exit" {
-            return Some(0);
+            return None;
         }
         if let Some(t) = resto_de(":eco", texto) {
             println!("{t}");
             continue;
         }
-        let code = preguntar_via_askd(texto);
-        if code != 0 {
-            return Some(code);
-        }
+        // Ctrl-C o un fallo de la pregunta vuelven a `?>`. `Some` aquí
+        // cerraría sosh.
+        let _ = preguntar_via_askd(texto);
         println!();
     }
 }

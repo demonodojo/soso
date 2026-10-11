@@ -124,6 +124,14 @@ pub fn definiciones(pol: &Politica) -> Value {
                 "nuevo": {"type": "string", "description": "Texto que lo sustituye"}},
                 "required": ["filePath", "buscar", "nuevo"]}}},
         {"type": "function", "function": {
+            "name": "insertar",
+            "description": "Inserta texto NUEVO (por ejemplo una función entera) después de una línea. `linea` es el número de línea que te mostró `read` (0 = al principio del archivo). Úsala para AÑADIR código; para cambiar un fragmento existente usa reemplazar_texto. El texto debe traer sus llaves completas.",
+            "parameters": {"type": "object", "properties": {
+                "filePath": {"type": "string", "description": "Ruta del archivo, relativa a la raíz del checkout"},
+                "linea": {"type": "integer", "description": "Se inserta después de esta línea (0 = al principio)"},
+                "texto": {"type": "string", "description": "Texto a insertar, con su sangría"}},
+                "required": ["filePath", "linea", "texto"]}}},
+        {"type": "function", "function": {
             "name": "bash",
             "description": "Ejecuta UNA orden (sin shell: sin ; & | > < $ ni comodines). Permitidas: cargo test, cargo check, cargo build, cargo fmt, git status, git diff, git log.",
             "parameters": {"type": "object", "properties": {
@@ -151,10 +159,11 @@ pub fn ejecutar<E: Entorno>(e: &mut E, pol: &Politica, nombre: &str, args: &Valu
         "grep" => buscar(e, pol, args),
         "glob" => listar_glob(e, pol, args),
         "reemplazar_texto" => reemplazar(e, pol, args),
+        "insertar" => insertar(e, pol, args),
         "bash" => orden(e, pol, args),
         "forja" if pol.forja.is_some() => forja(e, pol, args),
         otro => Ok(Respuesta::mal(format!(
-            "La herramienta «{otro}» no existe. Las disponibles son: read, grep, glob, reemplazar_texto, bash{}.", if pol.forja.is_some() { " y forja" } else { "" }
+            "La herramienta «{otro}» no existe. Las disponibles son: read, grep, glob, reemplazar_texto, insertar, bash{}.", if pol.forja.is_some() { " y forja" } else { "" }
         ))),
     };
     match r {
@@ -598,12 +607,192 @@ fn reemplazar<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<
     nuevo_texto.push_str(&texto[..ini]);
     nuevo_texto.push_str(nuevo);
     nuevo_texto.push_str(&texto[fin..]);
+    if let Some(m) = desequilibrio(&rel, &texto, &nuevo_texto) {
+        return Ok(Respuesta::mal(m));
+    }
     let modo = e.metadatos(&abs).map(|m| m.modo).unwrap_or(0o644);
     e.escribir(&abs, nuevo_texto.as_bytes(), modo)?;
     Ok(Respuesta::ok(format!(
         "Hecho en {}, línea {linea}.\nAntes:\n{antes}\nDespués:\n{nuevo}",
         mostrar(&rel)
     )))
+}
+
+// ---------------------------------------------------------------- insertar
+
+fn insertar<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<Respuesta> {
+    let (abs, rel) = resolver(pol, cadena(args, "filePath")?)?;
+    let nuevo = cadena(args, "texto")?;
+    let linea = entero(args, "linea").ok_or_else(|| Error::uso("falta el argumento «linea» (entero: 0 = al principio, N = después de la línea N de `read`)"))?;
+    if nuevo.trim().is_empty() {
+        return Err(Error::uso("`texto` está vacío"));
+    }
+    let datos = e.leer(&abs).map_err(|_| no_existe(e, pol, &rel))?;
+    let texto = String::from_utf8(datos).map_err(|_| Error::uso(format!("«{}» no es UTF-8", mostrar(&rel))))?;
+    let mut lineas: Vec<&str> = texto.split('\n').collect();
+    let terminaba_en_salto = lineas.last() == Some(&"");
+    if terminaba_en_salto {
+        lineas.pop();
+    }
+    if linea > lineas.len() {
+        return Err(Error::uso(format!("«{}» tiene {} línea(s): no se puede insertar después de la {linea}", mostrar(&rel), lineas.len())));
+    }
+    let mut nuevo_texto = String::new();
+    for (i, l) in lineas.iter().enumerate() {
+        if i == linea {
+            nuevo_texto.push_str(nuevo.trim_end_matches('\n'));
+            nuevo_texto.push('\n');
+        }
+        nuevo_texto.push_str(l);
+        nuevo_texto.push('\n');
+    }
+    if linea == lineas.len() {
+        nuevo_texto.push_str(nuevo.trim_end_matches('\n'));
+        nuevo_texto.push('\n');
+    }
+    if !terminaba_en_salto {
+        nuevo_texto.pop();
+    }
+    if let Some(m) = desequilibrio(&rel, &texto, &nuevo_texto) {
+        return Ok(Respuesta::mal(m));
+    }
+    let modo = e.metadatos(&abs).map(|m| m.modo).unwrap_or(0o644);
+    e.escribir(&abs, nuevo_texto.as_bytes(), modo)?;
+    Ok(Respuesta::ok(format!(
+        "Hecho: {} línea(s) insertadas en {} después de la línea {linea}.\nInsertado:\n{nuevo}",
+        nuevo.trim_end_matches('\n').matches('\n').count() + 1,
+        mostrar(&rel)
+    )))
+}
+
+// ---------------------------------------------------------------- equilibrio de delimitadores
+
+/// Diferencia (aperturas − cierres) de `()`, `[]` y `{}` en código Rust, ignorando comentarios, cadenas,
+/// cadenas crudas y caracteres. No es un parser: sólo lo bastante léxico para no contar los `{` de un
+/// literal de texto.
+fn equilibrio_rs(t: &str) -> [i64; 3] {
+    let b: Vec<char> = t.chars().collect();
+    let mut n = [0i64; 3];
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        let sig = b.get(i + 1).copied();
+        match c {
+            '/' if sig == Some('/') => {
+                while i < b.len() && b[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            '/' if sig == Some('*') => {
+                let mut prof = 1;
+                i += 2;
+                while i < b.len() && prof > 0 {
+                    if b[i] == '/' && b.get(i + 1) == Some(&'*') {
+                        prof += 1;
+                        i += 2;
+                    } else if b[i] == '*' && b.get(i + 1) == Some(&'/') {
+                        prof -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            'r' if matches!(sig, Some('"') | Some('#')) => {
+                let mut j = i + 1;
+                let mut almohadillas = 0;
+                while b.get(j) == Some(&'#') {
+                    almohadillas += 1;
+                    j += 1;
+                }
+                if b.get(j) == Some(&'"') {
+                    j += 1;
+                    'crudo: while j < b.len() {
+                        if b[j] == '"' {
+                            let mut k = 0;
+                            while k < almohadillas && b.get(j + 1 + k) == Some(&'#') {
+                                k += 1;
+                            }
+                            if k == almohadillas {
+                                j += 1 + almohadillas;
+                                break 'crudo;
+                            }
+                        }
+                        j += 1;
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+            '"' => {
+                i += 1;
+                while i < b.len() && b[i] != '"' {
+                    if b[i] == '\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i += 1;
+                continue;
+            }
+            '\'' => {
+                // Carácter (`'a'`, `'\n'`) o vida útil (`'a`): sólo el primero se salta.
+                if sig == Some('\\') {
+                    i += 2;
+                    while i < b.len() && b[i] != '\'' {
+                        i += 1;
+                    }
+                    i += 1;
+                    continue;
+                } else if b.get(i + 2) == Some(&'\'') {
+                    i += 3;
+                    continue;
+                }
+            }
+            '(' => n[0] += 1,
+            ')' => n[0] -= 1,
+            '[' => n[1] += 1,
+            ']' => n[1] -= 1,
+            '{' => n[2] += 1,
+            '}' => n[2] -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    n
+}
+
+/// Si el archivo es Rust y estaba equilibrado, una edición que lo desequilibra **no se escribe**: lo más
+/// frecuente en un modelo pequeño es cortar una cabecera `fn …{` o un `match` por la mitad. El mensaje
+/// dice qué delimitador y cuánto, que es lo que necesita para corregirlo.
+fn desequilibrio(rel: &str, antes: &str, despues: &str) -> Option<String> {
+    if !rel.ends_with(".rs") {
+        return None;
+    }
+    let a = equilibrio_rs(antes);
+    if a != [0, 0, 0] {
+        return None;
+    }
+    let d = equilibrio_rs(despues);
+    if d == [0, 0, 0] {
+        return None;
+    }
+    let nombres = ["paréntesis ( )", "corchetes [ ]", "llaves { }"];
+    let mut m = format!("No he escrito el cambio: dejaría {} con los delimitadores desequilibrados.", mostrar(rel));
+    for (i, x) in d.iter().enumerate() {
+        if *x != 0 {
+            m.push_str(&format!(
+                " En {}: {} {} de más.",
+                nombres[i],
+                x.abs(),
+                if *x > 0 { "apertura(s)" } else { "cierre(s)" }
+            ));
+        }
+    }
+    m.push_str(" Cambia **bloques completos**: si añades una función o una rama, incluye su `{` y su `}`; si sustituyes sólo una línea, no toques las llaves de alrededor. Para añadir código nuevo usa `insertar`.");
+    Some(m)
 }
 
 // ---------------------------------------------------------------- bash

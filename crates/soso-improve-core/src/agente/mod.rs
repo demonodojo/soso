@@ -39,6 +39,9 @@ pub struct Config {
     pub plazo_total_ms: u64,
     /// Tope de llamadas a herramientas, aplicado **antes** de ejecutar la que lo rebasaría.
     pub max_llamadas: Option<usize>,
+    /// Cuántas veces se le recuerda al modelo, sin gastar una llamada a herramienta, que no ha acabado: respuesta vacía,
+    /// llamada escrita como texto, cambio sin comprobar o comprobación fallida. Se cuentan en el informe.
+    pub empujones: usize,
 }
 
 impl Config {
@@ -52,6 +55,7 @@ impl Config {
             plazo_turno_ms: 2 * 60 * 60 * 1000,
             plazo_total_ms: 6 * 60 * 60 * 1000,
             max_llamadas: None,
+            empujones: 2,
         }
     }
 }
@@ -77,6 +81,8 @@ pub struct Informe {
     pub llamadas: usize,
     pub respuesta_final: String,
     pub error: Option<String>,
+    /// Recordatorios enviados al modelo (ver `Config::empujones`).
+    pub empujones: usize,
     /// Conversación completa (formato de la API), para auditar.
     pub mensajes: Vec<Value>,
 }
@@ -114,10 +120,10 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
     sesion::normalizar(&mut mensajes);
     if sesion::terminada(&mensajes) {
         let r = mensajes.last().and_then(|m| m["content"].as_str()).unwrap_or("").to_string();
-        return Informe { fin: Fin::Terminado, turnos: 0, llamadas: 0, respuesta_final: r, error: None, mensajes };
+        return Informe { fin: Fin::Terminado, turnos: 0, llamadas: 0, respuesta_final: r, error: None, empujones: 0, mensajes };
     }
     let t0 = reloj.ahora_ms();
-    let mut informe = Informe { fin: Fin::SinTurnos, turnos: 0, llamadas: 0, respuesta_final: String::new(), error: None, mensajes: Vec::new() };
+    let mut informe = Informe { fin: Fin::SinTurnos, turnos: 0, llamadas: 0, respuesta_final: String::new(), error: None, empujones: 0, mensajes: Vec::new() };
     for _ in 0..cfg.max_turnos {
         let gastado = reloj.ahora_ms().saturating_sub(t0);
         if gastado >= cfg.plazo_total_ms {
@@ -152,6 +158,14 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
         }
         mensajes.push(asistente);
         if llamadas.is_empty() {
+            if informe.empujones < cfg.empujones {
+                if let Some(aviso) = aviso_de_empuje(&mensajes, &texto) {
+                    informe.empujones += 1;
+                    mensajes.push(json!({"role": "user", "content": aviso}));
+                    al_turno(e, &mensajes);
+                    continue;
+                }
+            }
             informe.fin = Fin::Terminado;
             informe.respuesta_final = texto;
             al_turno(e, &mensajes);
@@ -196,7 +210,7 @@ PROTOCOLO (obligatorio):\n\
 PASOS:\n\
 1. Llama a `read` con `TASK.md` (raíz del checkout): contiene el objetivo, el archivo que puedes tocar y las comprobaciones.\n\
 2. Localiza el código. Si el archivo es corto (menos de 150 líneas) lee entero; si es largo, **no lo recorras por tramos**: llama primero a `grep` con el nombre de la función o un texto que aparezca en ella y después a `read` sólo del tramo que rodea la línea (`offset` y `limit`).\n\
-3. Llama a `reemplazar_texto` con `filePath`, `buscar` (un fragmento corto de lo que leíste; los espacios no importan) y `nuevo`. Cambio mínimo: no toques otros archivos. Si dice que no lo encuentra o que aparece varias veces, repite con otro fragmento.\n\
+3. Para **cambiar** algo que ya existe, llama a `reemplazar_texto` con `filePath`, `buscar` (un fragmento corto de lo que leíste; los espacios no importan) y `nuevo`. Para **añadir** código nuevo (una función, una rama), llama a `insertar` con `filePath`, `linea` (el número que te mostró `read`; se inserta después de esa línea) y `texto`. Siempre bloques completos: con su `{` y su `}`. Cambio mínimo: no toques otros archivos. Si una herramienta dice que no lo encuentra, que aparece varias veces o que desequilibra las llaves, corrige y repite.\n\
 4. Llama a `bash` con las comprobaciones de TASK.md (`cargo test …`) y lee el resultado.\n\
 5. Informe final en texto corto: qué cambiaste, qué comprobaciones corrieron y su salida resumida, y lo que no pudiste hacer. No inventes resultados.";
 
@@ -214,3 +228,48 @@ PASOS:\n\
 3. Llama a `forja` con `accion` = `all`: sube las fuentes, compila en el host y aplica el binario. Si devuelve un error de compilación, léelo, corrige el archivo con `reemplazar_texto` y vuelve a llamar a `forja`.\n\
 4. Llama a `bash` con `/bin/hola-std` para comprobar lo que imprime el programa ya compilado.\n\
 5. Informe final en texto corto: qué cambiaste y qué imprimió el programa. No inventes resultados.";
+
+/// ¿Ha acabado el modelo de verdad o se ha quedado a medias? Devuelve el recordatorio que toca, si toca.
+/// Casos (por este orden): la llamada escrita como texto; respuesta vacía; un cambio hecho y nunca
+/// comprobado; la última comprobación falló y el modelo se rinde.
+fn aviso_de_empuje(mensajes: &[Value], texto: &str) -> Option<String> {
+    let t = texto.trim();
+    if t.contains("\"arguments\"") && t.contains("\"name\"") {
+        return Some("Has escrito la llamada a la herramienta como texto y así no se ejecuta. Hazla como una llamada de herramienta (una sola, sin texto antes ni después).".to_string());
+    }
+    if t.is_empty() {
+        return Some("Tu respuesta estaba vacía. Haz ahora la siguiente llamada a una herramienta (una sola, sin texto).".to_string());
+    }
+    // Recorrido: ¿hay un cambio sin comprobar? ¿falló la última comprobación?
+    let mut nombres: Vec<(String, String)> = Vec::new();
+    let (mut sin_comprobar, mut ultima_fallo) = (false, false);
+    for m in mensajes {
+        if m["role"] == "assistant" {
+            for l in m["tool_calls"].as_array().map(|v| v.as_slice()).unwrap_or(&[]) {
+                nombres.push((l["id"].as_str().unwrap_or("").to_string(), l.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or("").to_string()));
+            }
+        } else if m["role"] == "tool" {
+            let id = m["tool_call_id"].as_str().unwrap_or("");
+            let nombre = nombres.iter().rev().find(|(i, _)| i == id).map(|(_, n)| n.as_str()).unwrap_or("");
+            let c = m["content"].as_str().unwrap_or("");
+            match nombre {
+                "reemplazar_texto" | "insertar" if c.starts_with("Hecho") => {
+                    sin_comprobar = true;
+                    ultima_fallo = false;
+                }
+                "bash" | "forja" => {
+                    sin_comprobar = false;
+                    ultima_fallo = !c.starts_with("exit code: 0");
+                }
+                _ => {}
+            }
+        }
+    }
+    if sin_comprobar {
+        return Some("Todavía no has comprobado tu cambio. Llama ahora a `bash` con las comprobaciones de la tarea (una sola llamada, sin texto antes ni después).".to_string());
+    }
+    if ultima_fallo {
+        return Some("La última comprobación ha fallado. Lee el error que te devolvió, corrige el archivo con `reemplazar_texto` o `insertar` y vuelve a ejecutar la comprobación. No termines con la prueba en rojo.".to_string());
+    }
+    None
+}

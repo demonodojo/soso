@@ -1,0 +1,4 @@
+  ejecutado: r-R07/lanzar/0
+  ejecutado: r-R07/exportar/0
+  ejecutado: r-R07/validar/0
+tarea: Rechazado

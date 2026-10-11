@@ -1,0 +1,10 @@
+{
+ "id": "R04",
+ "resultado": "bloqueada",
+ "intentos": 1,
+ "segundos": 657,
+ "nota": "el candidato no cambi\u00f3 nada",
+ "fallo": "protocolo",
+ "herramientas": 3,
+ "tokens": 13266
+}

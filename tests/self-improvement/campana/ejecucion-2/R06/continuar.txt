@@ -1,0 +1,5 @@
+  base de «campana-R06» publicada (generación 0)
+  ejecutado: r-R06/lanzar/0
+  ejecutado: r-R06/exportar/0
+  ejecutado: r-R06/validar/0
+tarea: Rechazado

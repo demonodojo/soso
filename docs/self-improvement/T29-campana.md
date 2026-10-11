@@ -1,6 +1,6 @@
 # T29 — Ejecutar una campaña reproducible de diez tareas
 
-**Hito:** SI-4 · **Tipo:** Integración y evaluación · **Estado:** pendiente.
+**Hito:** SI-4 · **Tipo:** Integración y evaluación · **Estado:** **hecha con NO-GO publicado** (2026-10-11; 1 de 10 aceptadas; [campaña](campana.md), [seguimiento](seguimiento/T29.md)). SI-4 no se cierra.
 
 **Dependencias:** [T22](T22-primera-mejora.md), [T27](T27-reanudacion.md), [T28](T28-conocimiento.md), [T49](T49-pruebas-guest.md)
 
@@ -46,9 +46,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 No rellenar mejoras con cambios triviales ajenos a las tareas fijadas ni quitar fallos del denominador.
 

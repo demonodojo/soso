@@ -1,0 +1,5 @@
+  base de «campana-R08» publicada (generación 0)
+  ejecutado: r-R08/lanzar/0
+  ejecutado: r-R08/exportar/0
+  ejecutado: r-R08/validar/0
+tarea: Rechazado

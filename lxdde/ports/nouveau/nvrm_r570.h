@@ -753,6 +753,18 @@ typedef struct NVC0B5_ALLOCATION_PARAMETERS {
 #define NVC7C0_SET_OBJECT                    0x00000000u
 #define NVC7C0_SET_QMD_VERSION               0x00000288u
 #define NVC7C0_CHECK_QMD_VERSION             0x00000290u
+/* Mesa invalida la caché del SKED antes del primer PCAS. Sin eso, una
+ * entrada vieja (o la de reset) se traduce y el PBDMA se queda en
+ * PBDMA_HANG_DURING_HTE. El bit 0 es el que invalida. */
+#define NVC7C0_INVALIDATE_SKED_CACHES        0x00000298u
+#define NVC7C0_INVALIDATE_SKED_CACHES_V_TRUE 0x1u
+/* Huecos de Mesa (nvk_push_dispatch_state_init) para que un acceso local o
+ * compartido no caiga en la VA 0. Van por debajo de 4 GiB; nuestras VAs
+ * empiezan en GSP_VA_BASE (512 GiB). */
+#define NVC7C0_SET_SHADER_SHARED_MEMORY_WINDOW_A 0x000002a0u
+#define NVC7C0_SET_SHADER_LOCAL_MEMORY_WINDOW_A  0x000007b0u
+#define NVC7C0_SHADER_SHARED_WINDOW              0xfe000000u
+#define NVC7C0_SHADER_LOCAL_WINDOW               0xff000000u
 #define NVC7C0_SEND_PCAS_A                   0x000002b4u
 /* Ampere (clase 0xc7c0) lanza con SEND_SIGNALING_PCAS2_B, igual que
  * Hopper/Blackwell. Mesa usa PCAS_B solo hasta Turing: el COPY de la
@@ -1276,6 +1288,13 @@ typedef char gsp_qmd_v05_size_check[sizeof(GspQmdV05) == GSP_QMD_INLINE_WORDS * 
 #define QMDV03_CONSTANT_BUFFER_SIZE_SHIFTED4_0    1075u, 1087u
 #define QMDV03_PROGRAM_ADDRESS_LOWER              1536u, 1567u
 #define QMDV03_PROGRAM_ADDRESS_UPPER              1568u, 1584u
+/* Prefetch del programa (clc6c0qmd.h). El tipo 0 es PREFETCH_LAUNCH: con la
+ * dirección y el tamaño a cero el SKED traduce la VA 0 al lanzar. La
+ * dirección va en bloques de 256 B (>>8); el tamaño, en los mismos bloques. */
+#define QMDV03_PROGRAM_PREFETCH_ADDR_LOWER_SHIFTED 256u, 287u
+#define QMDV03_PROGRAM_PREFETCH_ADDR_UPPER_SHIFTED 1632u, 1640u
+#define QMDV03_PROGRAM_PREFETCH_SIZE               1641u, 1649u
+#define QMDV03_PROGRAM_PREFETCH_TYPE               1650u, 1651u
 
 #define NVC6C0_QMDV03_00_QMD_MAJOR_VERSION_V03                    0x00000003u
 #define NVC6C0_QMDV03_00_QMD_VERSION_V00                          0x00000000u

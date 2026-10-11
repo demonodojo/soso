@@ -1,0 +1,10 @@
+{"id": "R01", "resultado": "rechazada", "intentos": 1, "segundos": 404, "nota": "", "fallo": "programacion", "herramientas": 4, "tokens": 12988}
+{"id": "R02", "resultado": "rechazada", "intentos": 1, "segundos": 1051, "nota": "", "fallo": "programacion", "herramientas": 5, "tokens": 30200, "inyeccion": {"que": "agente matado (kill -9) y coordinador reiniciado", "recuperada": true}}
+{"id": "R03", "resultado": "aceptada", "intentos": 1, "segundos": 833, "nota": "", "herramientas": 6, "tokens": 30651}
+{"id": "R04", "resultado": "bloqueada", "intentos": 1, "segundos": 657, "nota": "el candidato no cambi\u00f3 nada", "fallo": "protocolo", "herramientas": 3, "tokens": 13266}
+{"id": "R05", "resultado": "rechazada", "intentos": 1, "segundos": 528, "nota": "", "fallo": "programacion", "herramientas": 3, "tokens": 11250}
+{"id": "R06", "resultado": "rechazada", "intentos": 1, "segundos": 510, "nota": "", "fallo": "programacion", "herramientas": 5, "tokens": 15389}
+{"id": "R07", "resultado": "rechazada", "intentos": 1, "segundos": 1117, "nota": "", "fallo": "programacion", "herramientas": 5, "tokens": 31445, "inyeccion": {"que": "agente matado (kill -9) y coordinador reiniciado", "recuperada": true}}
+{"id": "R08", "resultado": "rechazada", "intentos": 1, "segundos": 401, "nota": "", "fallo": "programacion", "herramientas": 4, "tokens": 10317}
+{"id": "R09", "resultado": "rechazada", "intentos": 1, "segundos": 814, "nota": "", "fallo": "programacion", "herramientas": 5, "tokens": 25711}
+{"id": "R10", "resultado": "rechazada", "intentos": 1, "segundos": 558, "nota": "", "fallo": "programacion", "herramientas": 4, "tokens": 16127}

@@ -157,6 +157,11 @@ if ! grep -q 'NVC7C0_SEND_SIGNALING_PCAS2_B' "$compute"; then
     echo "FALLO: el pushbuffer Ampere tiene que cerrar con SEND_SIGNALING_PCAS2_B" >&2
     exit 1
 fi
+if ! grep -q 'NVC7C0_INVALIDATE_SKED_CACHES' "$compute" ||
+   ! grep -q 'QMDV03_PROGRAM_PREFETCH_ADDR_LOWER_SHIFTED' "$compute"; then
+    echo "FALLO: Ampere tiene que invalidar el SKED y rellenar PROGRAM_PREFETCH" >&2
+    exit 1
+fi
 if [[ -d "$root/lxdde/reference" ]]; then
     qmd_hdrs=$(find "$root/lxdde/reference" -iname '*qmd*.h' 2>/dev/null | wc -l | tr -d ' ')
     cla0c0="$root/lxdde/reference/open-gpu-kernel-modules-570.144/src/common/sdk/nvidia/inc/class/cla0c0qmd.h"

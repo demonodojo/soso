@@ -6,7 +6,7 @@ R0=/home/jmdiez/Trabajo/demonodojo/soso
 OUT=$1; shift
 TAREAS=${@:-R01 R02 R03 R04 R05 R06 R07 R08 R09 R10}
 BIN=$R0/target/debug/soso-improve
-CAMP=$R0/tests/self-improvement/campaign.json
+CAMP=${CAMPANA_JSON:-$R0/tests/self-improvement/campaign.json}
 PORT=7441
 mkdir -p $OUT/registros
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-/tmp/campana-target}

@@ -752,6 +752,7 @@ static int check_family_caps(void)
             k_amp.regcount = sv->regcount;
             k_amp.cbank_size = sv->cbank_size;
             k_amp.sass_va = G4F_SASS_VA;
+            k_amp.sass_len = sv->sass_len;
             k_amp.staged = 1;
             gsp_compute_fill_qmd_grid(&cp_amp, &k_amp, (GspQmdV05 *)&q2, 4, 1, 0);
             if (check_qmd_v02_fields(&cp_amp, &k_amp, 4, &q2) != 0)
@@ -772,14 +773,27 @@ static int check_family_caps(void)
                 cp_amp.chan = &ch;
                 if (gsp_compute_encode_qmd(&cp_amp, (const GspQmdV05 *)&q2,
                                            &off, &len) != 0 ||
-                    len != 24u) {
-                    printf("FALLO: encode QMD Ampere len=%u (esperaba 24: "
-                           "SET_OBJECT+WFI+PCAS+PCAS2)\n",
+                    len != 52u) {
+                    printf("FALLO: encode QMD Ampere len=%u (esperaba 52: "
+                           "SET_OBJECT+WFI+SKED+ventanas+PCAS+PCAS2)\n",
                            len);
                     return -1;
                 }
                 {
                     const uint32_t *w = (const uint32_t *)(pb + off);
+                    uint32_t sked =
+                        (NVC56F_DMA_SEC_OP_IMMD_DATA_METHOD << 29) |
+                        (NVC7C0_INVALIDATE_SKED_CACHES_V_TRUE << 16) |
+                        (1u << 13) |
+                        ((NVC7C0_INVALIDATE_SKED_CACHES >> 2) & 0xfffu);
+                    uint32_t win_shared =
+                        (NVC56F_DMA_INCR_OPCODE_VALUE << 29) | (2u << 16) |
+                        (1u << 13) |
+                        ((NVC7C0_SET_SHADER_SHARED_MEMORY_WINDOW_A >> 2) & 0xfffu);
+                    uint32_t win_local =
+                        (NVC56F_DMA_INCR_OPCODE_VALUE << 29) | (2u << 16) |
+                        (1u << 13) |
+                        ((NVC7C0_SET_SHADER_LOCAL_MEMORY_WINDOW_A >> 2) & 0xfffu);
                     uint32_t pcas_a =
                         (NVC56F_DMA_INCR_OPCODE_VALUE << 29) | (1u << 16) |
                         (1u << 13) | ((NVC7C0_SEND_PCAS_A >> 2) & 0xfffu);
@@ -790,15 +804,24 @@ static int check_family_caps(void)
                         (1u << 13) |
                         ((NVC7C0_SEND_SIGNALING_PCAS2_B >> 2) & 0xfffu);
 
-                    if (w[3] != pcas_a) {
-                        printf("FALLO: SEND_PCAS_A Ampere hdr=%08x "
-                               "(esperaba 0x%08x, sin SET_QMD_VERSION)\n",
-                               w[3], pcas_a);
+                    if (w[3] != sked || w[4] != win_shared ||
+                        w[5] != 0u || w[6] != NVC7C0_SHADER_SHARED_WINDOW ||
+                        w[7] != win_local || w[8] != 0u ||
+                        w[9] != NVC7C0_SHADER_LOCAL_WINDOW) {
+                        printf("FALLO: preámbulo Ampere SKED/ventanas "
+                               "%08x %08x %08x %08x %08x %08x %08x\n",
+                               w[3], w[4], w[5], w[6], w[7], w[8], w[9]);
                         return -1;
                     }
-                    if (w[5] != pcas2) {
+                    if (w[10] != pcas_a) {
+                        printf("FALLO: SEND_PCAS_A Ampere hdr=%08x "
+                               "(esperaba 0x%08x, sin SET_QMD_VERSION)\n",
+                               w[10], pcas_a);
+                        return -1;
+                    }
+                    if (w[12] != pcas2) {
                         printf("FALLO: Ampere debe cerrar con SEND_SIGNALING_PCAS2_B "
-                               "(INVALIDATE_COPY_SCHEDULE), hdr=%08x\n", w[5]);
+                               "(INVALIDATE_COPY_SCHEDULE), hdr=%08x\n", w[12]);
                         return -1;
                     }
                 }
@@ -2338,6 +2361,28 @@ static int check_qmd_v02_fields(const struct gsp_compute *cp,
                (unsigned long long)prog, (unsigned long long)k->sass_va,
                k->name);
         return -1;
+    }
+    {
+        uint64_t pref = k->sass_va >> 8;
+        unsigned blocks = (k->sass_len + 255u) >> 8;
+        uint64_t got;
+
+        if (blocks == 0u) {
+            blocks = 1u;
+        }
+        got = qmd_get_bits(w, QMDV03_PROGRAM_PREFETCH_ADDR_UPPER_SHIFTED);
+        got = (got << 32) |
+              qmd_get_bits(w, QMDV03_PROGRAM_PREFETCH_ADDR_LOWER_SHIFTED);
+        if (got != pref || w[8] != (uint32_t)pref ||
+            qmd_get_bits(w, QMDV03_PROGRAM_PREFETCH_SIZE) != blocks ||
+            qmd_get_bits(w, QMDV03_PROGRAM_PREFETCH_TYPE) != 0u) {
+            printf("FALLO: PROGRAM_PREFETCH=0x%llx/%u (esperaba VA>>8 "
+                   "0x%llx, %u bloques de 256 B)\n",
+                   (unsigned long long)got,
+                   qmd_get_bits(w, QMDV03_PROGRAM_PREFETCH_SIZE),
+                   (unsigned long long)pref, blocks);
+            return -1;
+        }
     }
     if (qmd_get_bits(w, QMDV03_REGISTER_COUNT_V) != k->regcount ||
         qmd_get_bits(w, QMDV03_CTA_RASTER_WIDTH) != grid ||

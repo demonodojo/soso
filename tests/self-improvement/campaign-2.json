@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "nombre": "campana-si4-2",
+  "fijada": "2026-10-11",
+  "nota": "Segunda campaña, con el agente mejorado tras el NO-GO de campana-si4-1 (1/10). Mismas diez tareas, mismo orden, mismos límites e inyecciones: sólo cambia el agente. Se fijó ANTES de ejecutar y no se toca después de ver resultados.",
+  "modelo": {
+    "id": "qwen2.5-coder-14b",
+    "lock": "target/self-improvement/tasks/T14/model-lock-14b.json",
+    "temperatura": 0,
+    "agente": "agente nativo (T35) con las herramientas read, grep, glob, reemplazar_texto, bash"
+  },
+  "base_inicial": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "como": "git archive del commit; después, cada tarea parte de la base aceptada por el validador (secuencial)"
+  },
+  "limites_por_defecto": {
+    "intentos_max": 1,
+    "herramientas_max": 30,
+    "segundos_max": 3600
+  },
+  "criterio": {
+    "aceptadas_minimas": 5,
+    "recuperacion_acreditada": true,
+    "base_final": "verde (checks de C6 sobre lo promovido)"
+  },
+  "tareas": [
+    {
+      "id": "R01",
+      "banco": "tests/self-improvement/cases",
+      "origen": "reproduccion (T02)"
+    },
+    {
+      "id": "R02",
+      "banco": "tests/self-improvement/cases",
+      "origen": "mejora_especificada (T02)",
+      "inyeccion": {
+        "tipo": "matar_agente_y_reiniciar_coordinador",
+        "a_los_segundos": 75,
+        "intentos_max": 2
+      }
+    },
+    {
+      "id": "R03",
+      "banco": "tests/self-improvement/cases",
+      "origen": "mejora_especificada (T02)"
+    },
+    {
+      "id": "R04",
+      "banco": "tests/self-improvement/cases",
+      "origen": "mejora_especificada (T02)"
+    },
+    {
+      "id": "R05",
+      "banco": "tests/self-improvement/cases",
+      "origen": "mejora_especificada (T02)"
+    },
+    {
+      "id": "R06",
+      "banco": "tests/self-improvement/campana",
+      "origen": "mejora_especificada (T29)"
+    },
+    {
+      "id": "R07",
+      "banco": "tests/self-improvement/campana",
+      "origen": "mejora_especificada (T29)",
+      "inyeccion": {
+        "tipo": "matar_agente_y_reiniciar_coordinador",
+        "a_los_segundos": 45,
+        "intentos_max": 2
+      }
+    },
+    {
+      "id": "R08",
+      "banco": "tests/self-improvement/campana",
+      "origen": "mejora_especificada (T29)"
+    },
+    {
+      "id": "R09",
+      "banco": "tests/self-improvement/campana",
+      "origen": "mejora_especificada (T29)"
+    },
+    {
+      "id": "R10",
+      "banco": "tests/self-improvement/campana",
+      "origen": "mejora_especificada (T29)"
+    }
+  ],
+  "cambios_respecto_a_campana-si4-1": [
+    "reemplazar_texto e insertar NO escriben una edición que desequilibre (), [] o {} en un .rs que estaba equilibrado, y dicen cuál y cuánto",
+    "herramienta insertar (añadir bloques completos después de una línea de read)",
+    "hasta 2 recordatorios cuando el modelo acaba a medias: respuesta vacía, llamada escrita como texto, cambio sin comprobar o comprobación fallida",
+    "cliente HTTP del agente: espera y reintenta ante 429 (ya estaba en la ejecución 2 de campana-si4-1)"
+  ]
+}

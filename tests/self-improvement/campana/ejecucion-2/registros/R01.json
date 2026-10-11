@@ -1,0 +1,10 @@
+{
+ "id": "R01",
+ "resultado": "rechazada",
+ "intentos": 1,
+ "segundos": 404,
+ "nota": "",
+ "fallo": "programacion",
+ "herramientas": 4,
+ "tokens": 12988
+}

@@ -1107,7 +1107,7 @@
       "title": "Ejecutar una campaña reproducible de diez tareas",
       "milestone": "SI-4",
       "kind": "Integración y evaluación",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T22",
         "T27",
@@ -1130,6 +1130,20 @@
         ],
         "evidence": [],
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      },
+      "tracking": {
+        "updated_at": "2026-10-11T22:45:00+02:00",
+        "summary": "Campaña de diez tareas ejecutada y publicada: NO-GO. Ejecución 1: 0/10 (cinco tareas perdidas por 429 tras matar al agente: infraestructura). Ejecución 2 (cliente corregido): 1/10 aceptada (R03), 8 rechazadas por programación y 1 bloqueada por protocolo; recuperación T27 acreditada con kill -9 real en R02 y R07; base final verde. SI-4 NO se cierra.",
+        "evidence": [
+          "docs/self-improvement/campana.md",
+          "docs/self-improvement/seguimiento/T29.md",
+          "target/self-improvement/tasks/T29/resultado.md",
+          "tests/self-improvement/campaign.json",
+          "tests/self-improvement/campana",
+          "crates/soso-improve-core/tests/report.rs"
+        ],
+        "blocker": "SI-4 no alcanza el umbral (1 de 10 aceptadas; mínimo 5). T30 y lo que exija GO de la campaña no se habilita.",
+        "next_step": "Decidir (usuario): mejorar el agente (comprobar `cargo check` tras cada edición, herramienta de inserción de bloques, más intentos) y lanzar una campaña NUEVA con nombre y hash nuevos; no reescribir ésta."
       }
     },
     {

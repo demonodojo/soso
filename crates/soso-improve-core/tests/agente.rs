@@ -214,7 +214,7 @@ fn el_bucle_lee_edita_prueba_y_termina() {
     let ult: Value = serde_json::from_str(&m.1[3]).unwrap();
     assert_eq!(ult["temperature"], 0.0);
     assert_eq!(ult["stream"], false);
-    assert_eq!(ult["tools"].as_array().unwrap().len(), 5);
+    assert_eq!(ult["tools"].as_array().unwrap().len(), 6);
 }
 
 #[test]
@@ -377,4 +377,85 @@ fn un_429_ocupado_se_espera_y_se_reintenta_sin_contar_como_fallo_del_modelo() {
     let r = m.completar("{}", 60_000).unwrap();
     assert!(r.contains("choices"));
     assert_eq!((c.intentos.get(), DORMIDO.with(|d| d.get())), (3, 2 * ESPERA_BUSY_MS), "dos 429 seguidos: dos esperas y un tercer intento bueno");
+}
+
+const RS: &str = "pub fn f(a: &str) -> bool {\n    let s = \"llave { en texto\";\n    // comentario con }\n    a == s\n}\n";
+
+#[test]
+fn una_edicion_que_desequilibra_llaves_no_se_escribe_y_dice_cuanto() {
+    let mut e = repo().con("/w/src/b.rs", RS);
+    let (t, err) = llama(&mut e, "reemplazar_texto", json!({"filePath": "src/b.rs", "buscar": "a == s", "nuevo": "a == s }"}));
+    assert!(err && t.contains("No he escrito el cambio") && t.contains("llaves") && t.contains("1 cierre"), "{t}");
+    assert_eq!(e.f["/w/src/b.rs"], RS.as_bytes(), "el archivo no cambia");
+    // Cortar la cabecera a medias también se rechaza.
+    let (t, err) = llama(&mut e, "reemplazar_texto", json!({"filePath": "src/b.rs", "buscar": "pub fn f(a: &str) -> bool {", "nuevo": "pub fn g() {}\npub fn f(a: &str) -> bool"}));
+    assert!(err && t.contains("1 cierre"), "{t}");
+    // Un cambio equilibrado pasa aunque haya llaves en cadenas y comentarios.
+    let (t, err) = llama(&mut e, "reemplazar_texto", json!({"filePath": "src/b.rs", "buscar": "a == s", "nuevo": "a.eq_ignore_ascii_case(s)"}));
+    assert!(!err, "{t}");
+    // En archivos que no son Rust no se mira.
+    let (_, err) = llama(&mut e, "reemplazar_texto", json!({"filePath": "README.md", "buscar": "hola", "nuevo": "hola {"}));
+    assert!(!err);
+}
+
+#[test]
+fn insertar_anade_bloques_completos_en_la_linea_pedida() {
+    let mut e = repo().con("/w/src/b.rs", RS);
+    let (t, err) = llama(&mut e, "insertar", json!({"filePath": "src/b.rs", "linea": 5, "texto": "pub fn nueva() -> u8 {\n    1\n}"}));
+    assert!(!err && t.contains("3 línea"), "{t}");
+    let nuevo = String::from_utf8(e.f["/w/src/b.rs"].clone()).unwrap();
+    assert!(nuevo.ends_with("}\npub fn nueva() -> u8 {\n    1\n}\n"), "{nuevo:?}");
+    let (_, err) = llama(&mut e, "insertar", json!({"filePath": "src/b.rs", "linea": 0, "texto": "// cabecera"}));
+    assert!(!err);
+    assert!(String::from_utf8(e.f["/w/src/b.rs"].clone()).unwrap().starts_with("// cabecera\npub fn f"));
+    let (t, err) = llama(&mut e, "insertar", json!({"filePath": "src/b.rs", "linea": 2, "texto": "fn rota() {"}));
+    assert!(err && t.contains("llaves"), "{t}");
+    let (t, err) = llama(&mut e, "insertar", json!({"filePath": "src/b.rs", "linea": 99, "texto": "x"}));
+    assert!(err && t.contains("línea(s)"), "{t}");
+}
+
+#[test]
+fn el_modelo_que_acaba_a_medias_recibe_un_recordatorio_en_vez_de_darse_por_terminado() {
+    // Cambio hecho y nunca comprobado → recordatorio → comprueba → termina.
+    let edita = llamada("reemplazar_texto", json!({"filePath": "src/lib.rs", "buscar": "k == key", "nuevo": "k == *key"}));
+    let mut e = repo();
+    let mut m = Guion(vec![edita.clone(), json!({"role": "assistant", "content": "Continuar"}), llamada("bash", json!({"command": "cargo test"})), json!({"role": "assistant", "content": "hecho"})], vec![]);
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), "t", &mut |_, _| {});
+    assert_eq!((inf.fin, inf.empujones, inf.llamadas), (Fin::Terminado, 1, 2), "{:?}", inf.error);
+    assert!(m.1[2].contains("Todavía no has comprobado"), "el recordatorio llega al modelo");
+    // Respuesta vacía y llamada escrita como texto.
+    let mut e = repo();
+    let mut m = Guion(vec![json!({"role": "assistant", "content": ""}), json!({"role": "assistant", "content": "{\"name\": \"bash\", \"arguments\": {\"command\": \"x\"}}"}), json!({"role": "assistant", "content": "fin"})], vec![]);
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), "t", &mut |_, _| {});
+    assert_eq!((inf.fin, inf.empujones), (Fin::Terminado, 2));
+    assert!(m.1[1].contains("estaba vacía") && m.1[2].contains("como texto"));
+}
+
+#[test]
+fn una_comprobacion_fallida_empuja_a_corregir_y_los_recordatorios_tienen_tope() {
+    struct Rojo(Mem);
+    // bash siempre falla: el modelo se rinde tres veces; sólo se le empuja dos.
+    impl Archivos for Rojo {
+        fn leer(&self, r: &str) -> Resultado<Vec<u8>> { self.0.leer(r) }
+        fn escribir(&mut self, r: &str, d: &[u8], m: u32) -> Resultado<()> { self.0.escribir(r, d, m) }
+        fn existe(&self, r: &str) -> bool { self.0.existe(r) }
+        fn listar(&self, r: &str) -> Resultado<Vec<Entrada>> { self.0.listar(r) }
+        fn metadatos(&self, r: &str) -> Resultado<Entrada> { self.0.metadatos(r) }
+        fn crear_directorio(&mut self, r: &str) -> Resultado<()> { self.0.crear_directorio(r) }
+        fn borrar(&mut self, r: &str) -> Resultado<()> { self.0.borrar(r) }
+    }
+    impl Procesos for Rojo {
+        fn ejecutar(&self, _: &Orden) -> Resultado<Salida> {
+            Ok(Salida { codigo: Some(101), stdout: b"error[E0599]: algo".to_vec(), stderr: vec![], motivo: None })
+        }
+    }
+    let mut e = Rojo(repo());
+    let mut m = Guion(
+        vec![llamada("bash", json!({"command": "cargo test"})), json!({"role": "assistant", "content": "no pude"}), json!({"role": "assistant", "content": "sigo sin poder"}), json!({"role": "assistant", "content": "me rindo"})],
+        vec![],
+    );
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), "t", &mut |_, _| {});
+    assert_eq!((inf.fin, inf.empujones), (Fin::Terminado, 2), "dos recordatorios y entonces se acepta que termine");
+    assert!(m.1[2].contains("ha fallado"));
+    assert_eq!(inf.respuesta_final, "me rindo");
 }

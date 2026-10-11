@@ -779,6 +779,28 @@ static void gsp_compute_fill_qmd_v02_grid(struct gsp_compute *cp,
                  (uint32_t)(prog_va & 0xffffffffu));
     qmd_set_bits(qmd->words, QMDV03_PROGRAM_ADDRESS_UPPER,
                  (uint32_t)((prog_va >> 32) & 0x1ffffu));
+    /* PROGRAM_PREFETCH_TYPE sale a 0, que es PREFETCH_LAUNCH. Sin dirección
+     * ni tamaño el SKED prefetcha la VA 0 al hacer el PCAS y el PBDMA se
+     * queda en PBDMA_HANG_DURING_HTE con un fallo de MMU (ROG, 2026-10-11,
+     * después de quitar SET_QMD_VERSION). La dirección es la del SASS >>8
+     * y el tamaño, el blob en bloques de 256 B. */
+    {
+        uint64_t pref = prog_va >> 8;
+        unsigned pref_blocks = (k->sass_len + 255u) >> 8;
+
+        if (pref_blocks == 0u) {
+            pref_blocks = 1u;
+        }
+        if (pref_blocks > 511u) {
+            pref_blocks = 511u;
+        }
+        qmd_set_bits(qmd->words, QMDV03_PROGRAM_PREFETCH_ADDR_LOWER_SHIFTED,
+                     (uint32_t)pref);
+        qmd_set_bits(qmd->words, QMDV03_PROGRAM_PREFETCH_ADDR_UPPER_SHIFTED,
+                     (uint32_t)((pref >> 32) & 0x1ffu));
+        qmd_set_bits(qmd->words, QMDV03_PROGRAM_PREFETCH_SIZE, pref_blocks);
+        qmd_set_bits(qmd->words, QMDV03_PROGRAM_PREFETCH_TYPE, 0u);
+    }
 
     qmd_set_bits(qmd->words, QMDV03_REGISTER_COUNT_V, k->regcount);
     qmd_set_bits(qmd->words, QMDV03_BARRIER_COUNT, 0u);
@@ -919,12 +941,13 @@ int gsp_compute_encode_qmd(struct gsp_compute *cp, const GspQmdV05 *qmd,
         set_object = NVCEC0_SET_OBJECT;
         send_pcas = NVCEC0_SEND_PCAS_A;
     }
-    /* Ampere y Blackwell lanzan igual: SEND_PCAS_A (VA>>8) y luego
+    /* Los dos cierran igual: SEND_PCAS_A (VA>>8) y luego
      * SEND_SIGNALING_PCAS2_B con INVALIDATE_COPY_SCHEDULE. El COPY trae el
      * QMD desde esa VA al SKED; no es una dependencia de otro QMD. Mesa
      * (nvk_CmdDispatchBase) usa PCAS_B solo hasta Turing y PCAS2 desde
      * Ampere. PCAS_B en la GA104 deja el SKED sin QMD y el PBDMA se queda
-     * en PBDMA_HANG_DURING_HTE.
+     * en PBDMA_HANG_DURING_HTE. Ampere, además, invalida el SKED y programa
+     * las ventanas local/compartida antes del PCAS.
      *
      * No se manda SET_QMD_VERSION. La versión va en el blob (major 3, minor
      * 0). El método, con 0x03000300 y con 0x00030003, lo contestó la GA104
@@ -936,6 +959,22 @@ int gsp_compute_encode_qmd(struct gsp_compute *cp, const GspQmdV05 *qmd,
 
     cp_pb_set_object(c, &pos, GSP_COMPUTE_SUBCHANNEL, set_object, cp->cls);
     cp_pb_immd(c, &pos, 0u, NVC86F_WFI, 0u);
+    if (cp->caps && cp->caps->qmd_version == GSP_QMD_VERSION_AMPERE) {
+        /* Igual que nvk_cmd_buffer_begin_compute / nvk_push_dispatch_state_init:
+         * invalidar el SKED y apartar las ventanas local y compartida de la
+         * VA 0 antes del PCAS. En la GA104 el lanzamiento sin eso acaba en
+         * MMUfault + PBDMA_HANG_DURING_HTE (ROG, 2026-10-11). */
+        cp_pb_immd(c, &pos, GSP_COMPUTE_SUBCHANNEL, NVC7C0_INVALIDATE_SKED_CACHES,
+                   NVC7C0_INVALIDATE_SKED_CACHES_V_TRUE);
+        cp_pb_method(c, &pos, GSP_COMPUTE_SUBCHANNEL,
+                     NVC7C0_SET_SHADER_SHARED_MEMORY_WINDOW_A, 2);
+        cp_pb_write(c, &pos, 0u);
+        cp_pb_write(c, &pos, NVC7C0_SHADER_SHARED_WINDOW);
+        cp_pb_method(c, &pos, GSP_COMPUTE_SUBCHANNEL,
+                     NVC7C0_SET_SHADER_LOCAL_MEMORY_WINDOW_A, 2);
+        cp_pb_write(c, &pos, 0u);
+        cp_pb_write(c, &pos, NVC7C0_SHADER_LOCAL_WINDOW);
+    }
     cp_pb_method(c, &pos, GSP_COMPUTE_SUBCHANNEL, send_pcas, 1);
     cp_pb_write(c, &pos, (uint32_t)(qmd_va >> 8));
     cp_pb_immd(c, &pos, GSP_COMPUTE_SUBCHANNEL, send_sig, sig_action);
