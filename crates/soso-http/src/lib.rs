@@ -178,7 +178,7 @@ impl<'a, T: TcpTransport> TlsSession<'a, T> {
         if !self.outgoing_pending.is_empty() {
             self.transport
                 .write_all(self.fd, &self.outgoing_pending)
-                .map_err(|e| map_transport_err(e, HttpError::Io("write_all del transporte")))?;
+                .map_err(map_tls_write_err)?;
             self.outgoing_pending.clear();
         }
         Ok(())
@@ -618,11 +618,23 @@ struct AuthOrigin {
     port: u16,
 }
 
+/// El `write` TCP del ClientHello vence igual que la lectura del handshake.
+/// Sin esto, `EAGAIN` se veía como un fallo de transporte genérico y no se
+/// reintentaba la conexión.
+fn map_tls_write_err(e: i64) -> HttpError {
+    if e == -(soso_abi::EAGAIN as i64) {
+        HttpError::Io("plazo agotado escribiendo el handshake TLS")
+    } else {
+        map_transport_err(e, HttpError::Io("write_all del transporte"))
+    }
+}
+
 fn tls_handshake_io_retryable(err: &HttpError) -> bool {
     matches!(
         err,
         HttpError::Io(
             "plazo agotado esperando bytes del handshake TLS"
+                | "plazo agotado escribiendo el handshake TLS"
                 | "el par cerró TCP antes de completar el handshake TLS"
                 | "lectura TLS falló durante el handshake"
         )
@@ -1146,6 +1158,15 @@ mod tests {
         set_wall_clock(stale);
         assert_eq!(client_config().unwrap_err(), HttpError::Clock);
         set_wall_clock(test_wall_clock);
+    }
+
+    #[test]
+    fn handshake_write_timeout_is_retryable() {
+        let err = map_tls_write_err(-(soso_abi::EAGAIN as i64));
+        assert!(tls_handshake_io_retryable(&err));
+        assert!(!tls_handshake_io_retryable(&HttpError::Io(
+            "write_all del transporte"
+        )));
     }
 
     #[test]

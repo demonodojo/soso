@@ -1,0 +1,22 @@
+diff --git a/crates/soso-update-core/src/plan.rs b/crates/soso-update-core/src/plan.rs
+index 4fe995a..4a8d537 100644
+--- a/crates/soso-update-core/src/plan.rs
++++ b/crates/soso-update-core/src/plan.rs
+@@ -38,6 +38,17 @@ impl Span {
+     pub fn oversized(&self, span_max: u64) -> bool {
+         self.len() > span_max
+     }
++
++    /// ¿Cae `offset` dentro del tramo `[start, end)`? El final no cuenta.
++    pub fn contains(&self, offset: u64) -> bool {
++        offset >= self.start && offset < self.end
++    }
++
++    /// ¿Comparten algún byte los dos tramos? Dos tramos que sólo se tocan (uno acaba donde empieza el
++    /// otro) no se solapan, y un tramo vacío no se solapa con nada.
++    pub fn overlaps(&self, other: &Span) -> bool {
++        !self.is_empty() && !other.is_empty() && self.start < other.end && other.start < self.end
++    }
+ }
+ 
+ /// Agrupa las entradas pendientes en tramos de descarga.

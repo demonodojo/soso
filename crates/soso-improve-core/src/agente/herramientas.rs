@@ -243,6 +243,37 @@ fn mostrar(rel: &str) -> &str {
     }
 }
 
+// ---------------------------------------------------------------- «no existe» que ayuda
+
+/// «No existe», pero diciendo qué sí hay: el ancestro más cercano que existe y sus entradas. Un
+/// modelo que recibe sólo «no existe» adivina otra ruta o se rinde; con la lista, corrige.
+fn no_existe<E: Entorno>(e: &E, pol: &Politica, rel: &str) -> Error {
+    let mut partes: Vec<&str> = rel.split('/').filter(|p| !p.is_empty()).collect();
+    loop {
+        let r = partes.join("/");
+        let abs = if r.is_empty() { pol.raiz.clone() } else { format!("{}/{r}", pol.raiz) };
+        if let Ok(m) = e.metadatos(&abs) {
+            if m.tipo == Tipo::Directorio {
+                if let Ok(mut v) = e.listar(&abs) {
+                    v.sort_by(|a, b| a.ruta.cmp(&b.ruta));
+                    let total = v.len();
+                    let nombres: Vec<String> = v.into_iter().take(40).map(|x| if x.tipo == Tipo::Directorio { format!("{}/", x.ruta) } else { x.ruta }).collect();
+                    return Error::uso(format!(
+                        "«{}» no existe. Las rutas son relativas a la raíz del checkout. En «{}» hay{}: {}",
+                        mostrar(rel),
+                        mostrar(&r),
+                        if total > 40 { format!(" {total} entradas, las primeras 40") } else { String::new() },
+                        nombres.join(", ")
+                    ));
+                }
+            }
+        }
+        if partes.pop().is_none() {
+            return Error::uso(format!("«{}» no existe", mostrar(rel)));
+        }
+    }
+}
+
 // ---------------------------------------------------------------- read
 
 const LINEA_MAX: usize = 2000;
@@ -250,7 +281,7 @@ const ARCHIVO_MAX: u64 = 4 * 1024 * 1024;
 
 fn leer<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<Respuesta> {
     let (abs, rel) = resolver(pol, cadena(args, "filePath")?)?;
-    let meta = e.metadatos(&abs).map_err(|_| Error::uso(format!("«{}» no existe", mostrar(&rel))))?;
+    let meta = e.metadatos(&abs).map_err(|_| no_existe(e, pol, &rel))?;
     if meta.tipo == Tipo::Directorio {
         let mut nombres: Vec<String> = e
             .listar(&abs)?
@@ -450,7 +481,7 @@ fn buscar<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<Resp
     let aguja = patron.as_bytes();
 
     let mut archivos: Vec<(String, String)> = Vec::new();
-    let meta = e.metadatos(&abs).map_err(|_| Error::uso(format!("«{}» no existe", mostrar(&rel))))?;
+    let meta = e.metadatos(&abs).map_err(|_| no_existe(e, pol, &rel))?;
     if meta.tipo == Tipo::Directorio {
         recorrer(e, &abs, &rel, 0, &mut |a, r| {
             let nombre = r.rsplit('/').next().unwrap_or(r);
@@ -520,7 +551,7 @@ fn reemplazar<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<
     let (abs, rel) = resolver(pol, cadena(args, "filePath")?)?;
     let buscar = cadena(args, "buscar")?;
     let nuevo = cadena(args, "nuevo")?;
-    let datos = e.leer(&abs).map_err(|_| Error::uso(format!("«{}» no existe", mostrar(&rel))))?;
+    let datos = e.leer(&abs).map_err(|_| no_existe(e, pol, &rel))?;
     let texto = String::from_utf8(datos).map_err(|_| Error::uso(format!("«{}» no es UTF-8", mostrar(&rel))))?;
     // El texto sin espacios y la posición (en bytes) de cada carácter que se conserva: así el
     // fragmento se localiza aunque el modelo haya comprimido o cambiado la sangría.

@@ -41,6 +41,8 @@ pub mod agente;
 pub mod receta;
 pub mod banco;
 pub mod captura;
+pub mod reporte;
+pub mod conocimiento;
 pub mod evaluar;
 pub mod git;
 pub mod modelo;
@@ -72,6 +74,8 @@ pub fn capacidades() -> Capacidades {
             Capacidad::Evaluar,
             Capacidad::Agente,
             Capacidad::AgentePrueba,
+            Capacidad::Conocimiento,
+            Capacidad::Reporte,
             Capacidad::TareaPreparar,
             Capacidad::TareaEjecutar,
             Capacidad::TareaValidar,
@@ -95,6 +99,7 @@ uso: soso-improve <orden> [opciones]
               copiar   --estado <ruta> --run <id> --captura <ruta> --destino <ruta>
               exportar --estado <ruta> --run <id> --captura <ruta> --copia <ruta> [--out <json>]
               reanudar|informe --estado <ruta> --run <id>
+                       [reanudar --continuar --captura <r> --copia <r> --exigencias <j> --trabajo <d> --referencias <d> --campana <n> [--adoptar-copia] [--modelo m] [--puerto p]]
               ejecutar --estado <ruta> --run <id> --copia <ruta> [--modelo m] [--puerto 17299] [--token t]
                        [--max-turnos N] [--max-tokens N] [--cargo-home <ruta>]
               validar  --estado <ruta> --run <id> --captura <ruta> --copia <ruta> --exigencias <json>
@@ -110,6 +115,12 @@ uso: soso-improve <orden> [opciones]
               [--max-turnos 40] [--max-tokens 2048] [--sistema <archivo>] [--sesion <dir> [--reanudar]]
               [--plazo-ms 7200000] [--cargo-home <ruta>] [--token <t>|SOSO_LLM_API_KEY]
   agente-prueba   (autoprueba de las herramientas con un modelo guionizado)
+  conocimiento proponer   --notas <dir> --captura <r> --problema <t> --solucion <t> --rutas a,b [--pruebas p1,p2]
+                          [--evidencia <archivo>] [--paquete-hash <h>] [--fallido]
+              confirmar   --notas <dir> --id <id> --referencias <dir> --campana <n>
+              invalidar   --notas <dir> --captura <r>
+              recuperar   --notas <dir> --estado <r> --run <id> [--presupuesto 4000] [--reservado-prefijos a,b]
+  report      --campana-json <campaign.json> --registros <dir> [--base-final verde|roja] [--out <md>]
   verificar   programa  --caso <id> --candidato <ruta> [--reservado <ruta>]
               protocolo --caso <id> --respuesta <ruta> [--reservado <ruta>]
               repo      --caso <id> --arbol <ruta> [--con-referencia]
@@ -193,7 +204,7 @@ const CLAVES: &[&str] = &[
     "respuesta", "modelo", "original", "fixtures", "json", "desde", "n", "solo", "timeout",
     "revision", "origen", "sin-herramientas", "con-referencia", "puerto", "token",
     "repeticiones", "plazo-ms", "semilla", "caso", "contexto", "modelo-dir",
-    "tarea", "sistema", "sesion", "reanudar", "sembrar", "copia", "estado", "run", "exigencias", "trabajo", "referencias", "campana", "publicar-base", "paquete-hash", "max-turnos", "max-tokens", "cargo-home",
+    "tarea", "sistema", "sesion", "reanudar", "sembrar", "copia", "estado", "run", "exigencias", "trabajo", "referencias", "campana", "publicar-base", "paquete-hash", "continuar", "adoptar-copia", "campana-json", "registros", "base-final", "notas", "problema", "solucion", "rutas", "pruebas", "evidencia", "fallido", "id", "presupuesto", "reservado-prefijos", "max-turnos", "max-tokens", "cargo-home",
 ];
 
 pub fn despachar(orden: &str, args: &[String]) -> Result<i32, Error> {
@@ -219,6 +230,8 @@ pub fn despachar(orden: &str, args: &[String]) -> Result<i32, Error> {
             "evaluar" => evaluar::evaluar(&op),
             "agente" => agente::agente(&op),
             "agente-prueba" => agente::prueba(&op),
+            "report" => reporte::reporte(&op),
+            "conocimiento" => conocimiento::despachar(&sub, &op),
             "modelo" => modelo::despachar(&sub, &op),
             "tarea" => tarea::despachar(&sub, &op),
             "receta" => receta::despachar(&sub, &op),
@@ -240,6 +253,11 @@ pub fn despachar(orden: &str, args: &[String]) -> Result<i32, Error> {
         "evaluar" => evaluar::evaluar(&Opciones::parsear(args)?),
         "agente" => agente::agente(&Opciones::parsear(args)?),
         "agente-prueba" => agente::prueba(&Opciones::parsear(args)?),
+        "report" => reporte::reporte(&Opciones::parsear(args)?),
+        "conocimiento" => {
+            let sub = args.first().ok_or_else(|| Error::uso("conocimiento necesita proponer|confirmar|invalidar|recuperar"))?;
+            conocimiento::despachar(sub, &Opciones::parsear(&args[1..])?)
+        }
         "modelo" => {
             let sub = args
                 .first()

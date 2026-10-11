@@ -14,7 +14,7 @@
 > modelo declara `"temperature": true`; los modelos comprimen espacios al copiar (`reemplazar_texto` en `.opencode/tools/`);
 > la atención dispersa del planificador rompía el contexto largo del guest (ahora opt-in); el prefill del guest es 2,7× más rápido
 > ([T82](T82-prefill-por-lotes.md), pasadas 1–3: atención por grupos GQA repartida entre hilos).
-> **Lo siguiente:** T35 **cerrada** (agente nativo, D10; [resultado](../../target/self-improvement/tasks/T35/resultado.md)). T25 **cerrada en host** (ejecutor con límites sobre el agente nativo; [resultado](../../target/self-improvement/tasks/T25/resultado.md)). T26 **cerrada en host** (validador y promoción de la base; [resultado](../../target/self-improvement/tasks/T26/resultado.md)). Habilitada: **T37** (mejora nativa con build remoto); T43 espera a T37. La identidad de modelo para T25–T29 es `qwen2.5-coder-14b` (D9).
+> **Lo siguiente:** T35 **cerrada** (agente nativo, D10; [resultado](../../target/self-improvement/tasks/T35/resultado.md)). T25 **cerrada en host** (ejecutor con límites sobre el agente nativo; [resultado](../../target/self-improvement/tasks/T25/resultado.md)). T26 **cerrada en host** (validador y promoción de la base; [resultado](../../target/self-improvement/tasks/T26/resultado.md)). T37 **cerrada** (agente e inferencia en soso, build remoto; [primera tarea](native/primera-tarea.md)). T27 **cerrada en host** (reanudación sin repetir efectos) y T28 **cerrada en host** (conocimiento verificado; [resultado](../../target/self-improvement/tasks/T28/resultado.md)). Habilitada: **T29** (campaña de mejoras: depende de T22, T27, T28 y T49, todas hechas); T43 sigue bloqueada (T31 ← T30 ← T29). La identidad de modelo para T25–T29 es `qwen2.5-coder-14b` (D9).
 
 
 **Ficha cerrada: [T42 — C, ensamblador y empaquetado por perfil](T42-c-link-imagen.md)**
@@ -158,8 +158,8 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T24](T24-checkout.md) | Preparar una copia de tarea y exportar su parche | SI-4 | T23, T50 | Completada (guest acreditado) |
 | [T25](T25-ejecutor.md) | Ejecutar OpenCode con límites y logs | SI-4 | T21, T24, T47, T48 | **Hecha en host** (2026-10-11): ejecutor sobre el agente nativo; 14B real por `tarea ejecutar` con verificador 0 |
 | [T26](T26-validador.md) | Validar candidatos y promover solo los aceptados | SI-4 | T24, T25 | **Hecha en host** (2026-10-11): validador y promoción durable; ciclo real con el 14B aceptado |
-| [T27](T27-reanudacion.md) | Reanudar tras caída sin repetir efectos | SI-4 | T23, T25, T26 | Pendiente |
-| [T28](T28-conocimiento.md) | Guardar y recuperar aprendizaje verificado | SI-4 | T26 | Pendiente |
+| [T27](T27-reanudacion.md) | Reanudar tras caída sin repetir efectos | SI-4 | T23, T25, T26 | **Hecha en host** (2026-10-11): diario + reconciliación; 34 cortes simulados |
+| [T28](T28-conocimiento.md) | Guardar y recuperar aprendizaje verificado | SI-4 | T26 | **Hecha en host** (2026-10-11): notas verificadas con caducidad y recuperación acotada |
 | [T29](T29-campana.md) | Ejecutar una campaña reproducible de diez tareas | SI-4 | T22, T27, T28, T49 | Pendiente |
 | [T30](T30-hardware.md) | Medir servicio e inferencia en una máquina física identificada | SI-5 | T19, T29, T48 | Pendiente |
 | [T31](T31-restauracion.md) | Demostrar recuperación completa de la instalación | SI-5 | T30 | Pendiente |
@@ -170,7 +170,7 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T34](T34-tickets-port.md) | Convertir huecos del port en fichas implementables | SI-6 | T32, T33 | Completada (11 fichas N-xxx) |
 | [T35](T35-opencode-nativo.md) | Agente nativo en modo no interactivo (antes: OpenCode nativo; D10) | SI-6 | T19, T34 | **Hecha** (2026-10-11): agente nativo; ELF del guest con el modelo del guest, sesión durable; validación nativa parcial |
 | [T36](T36-forja-trazabilidad.md) | Vincular fuentes, build y artefacto de Forja | SI-6 | T01 | Completada (recibo v2, 2026-09-25) |
-| [T37](T37-mejora-nativa-forja.md) | Cerrar una mejora desde OpenCode nativo con build remoto | SI-6 | T22, T35, T36 | Pendiente |
+| [T37](T37-mejora-nativa-forja.md) | Cerrar una mejora desde OpenCode nativo con build remoto | SI-6 | T22, T35, T36 | **Hecha** (2026-10-11): agente e inferencia en soso, build en el host (Forja) |
 | [T38](T38-toolchain-inventario.md) | Fijar revisiones y dependencias de la toolchain nativa | SI-7 | T01 | Completada (2026-09-25; abrió T67 y T68) |
 | [T39](T39-bootstrap-libstd.md) | Hacer reproducible el bootstrap de libstd para soso | SI-7 | T38, T50, T72, T75 | **Completada** (2026-09-26; build-std, manifiesto, humo guest; native_validation pending) |
 | [T40](T40-compilador-nativo.md) | Descomponer y acreditar el port del compilador | SI-7 | T38, T39 | **Completada** (2026-09-29; `/tmp/t` imprime `hola-t40` y sale con 7; native_validation parcial) |

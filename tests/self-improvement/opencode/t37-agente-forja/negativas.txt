@@ -1,0 +1,16 @@
+bienvenido a soso 0.1
+un OS minimalista en Rust con filesystem CoW propio
+desde live, instalar en un NVMe: soso-install
+sosh — escribe 'help' para la ayuda
+sosh: marca lista pid=31 prefault=0ms write=83ms
+$ echo build-id=noesmio > /var/forja-cache/ultimo-sync.txt
+$ echo source-manifest-sha256=00 >> /var/forja-cache/ultimo-sync.txt
+$ soso-forja build --host 10.0.2.2 --token soso-t37
+forja: recibo rechazado: build-id 41ff125d3ad721f9 pero el sync dio noesmio
+forja: no se escribió nada en /var/actualiza-prueba
+sosh: [soso-forja salió con código 1]
+$ rm /var/forja-cache/ultimo-sync.txt
+$ soso-forja build --host 10.0.2.2 --token soso-t37
+forja: no hay un sync previo en esta máquina; corre `soso-forja sync`
+sosh: [soso-forja salió con código 1]
+$ exit

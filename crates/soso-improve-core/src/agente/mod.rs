@@ -209,7 +209,7 @@ PROTOCOLO (obligatorio):\n\
 - No edites un archivo sin haberlo leído antes con `read`.\n\
 - Sólo cuando hayas terminado todos los pasos respondes con texto: el informe final.\n\n\
 PASOS:\n\
-1. Llama a `read` con el archivo que indica la tarea.\n\
+1. Llama a `read` con el archivo que indica la tarea. Las rutas son **relativas a /src/soso** (por ejemplo `user/hola-std/src/main.rs`); si una ruta no existe, la respuesta te dice qué hay en el directorio más cercano: úsala.\n\
 2. Llama a `reemplazar_texto` con `filePath`, `buscar` (un fragmento corto de lo que leíste; los espacios no importan) y `nuevo`. Cambio mínimo.\n\
 3. Llama a `forja` con `accion` = `all`: sube las fuentes, compila en el host y aplica el binario. Si devuelve un error de compilación, léelo, corrige el archivo con `reemplazar_texto` y vuelve a llamar a `forja`.\n\
 4. Llama a `bash` con `/bin/hola-std` para comprobar lo que imprime el programa ya compilado.\n\

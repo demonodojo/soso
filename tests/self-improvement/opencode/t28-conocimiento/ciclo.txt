@@ -1,0 +1,29 @@
+conocimiento: nota 208736ecc4e48cd1 propuesta (hipótesis o limitación)
+conocimiento: nota 5aaa96e227a6d51d propuesta (hipótesis o limitación)
+id hipotesis 208736ecc4e48cd1
+--- recuperar antes de confirmar
+[5aaa96e227a6d51d] LIMITACIÓN · vigente (base 9f737f423602, paquete -)
+Problema: pegar TASK.md en el mensaje del encargo
+Solución: el 14B no edita: dejar que lea TASK.md con read
+Archivos: crates/soso-http/src/lib.rs
+Pruebas: 
+
+conocimiento: 1 nota(s) entregada(s) de 2 guardadas; 0 fuera de presupuesto; 0 excluida(s) por reservadas o secretas
+--- confirmar
+conocimiento: nota 208736ecc4e48cd1 confirmada como hecho
+--- recuperar despues
+[208736ecc4e48cd1] HECHO verificado · vigente (base 9f737f423602, paquete 6470dd45f9e3)
+Problema: header_value distingue mayusculas en soso-http
+Solución: comparar el nombre con eq_ignore_ascii_case, un solo cambio en la linea del find
+Archivos: crates/soso-http/src/lib.rs
+Pruebas: cargo test -p soso-http
+
+[5aaa96e227a6d51d] LIMITACIÓN · vigente (base 9f737f423602, paquete -)
+Problema: pegar TASK.md en el mensaje del encargo
+Solución: el 14B no edita: dejar que lea TASK.md con read
+Archivos: crates/soso-http/src/lib.rs
+Pruebas: 
+
+conocimiento: 2 nota(s) entregada(s) de 2 guardadas; 0 fuera de presupuesto; 0 excluida(s) por reservadas o secretas
+--- invalidar (misma base)
+conocimiento: 0 nota(s) desactualizada(s) por el cambio de base

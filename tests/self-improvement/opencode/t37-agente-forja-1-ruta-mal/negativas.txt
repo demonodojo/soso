@@ -1,0 +1,19 @@
+bienvenido a soso 0.1
+un OS minimalista en Rust con filesystem CoW propio
+desde live, instalar en un NVMe: soso-install
+sosh — escribe 'help' para la ayuda
+sosh: marca lista pid=29 prefault=0ms write=81ms
+$ echo build-id=noesmio > /var/forja-cache/ultimo-sync.txt
+sosh: echo: no existe
+$ echo source-manifest-sha256=00 >> /var/forja-cache/ultimo-sync.txt
+sosh: echo: no existe
+$ soso-forja build --host 10.0.2.2 --token soso-t37
+forja: no hay un sync previo en esta máquina; corre `soso-forja sync`
+sosh: [soso-forja salió con código 1]
+$ rm /var/forja-cache/ultimo-sync.txt
+rm: /var/forja-cache/ultimo-sync.txt: no existe
+sosh: [rm salió con código 1]
+$ soso-forja build --host 10.0.2.2 --token soso-t37
+forja: no hay un sync previo en esta máquina; corre `soso-forja sync`
+sosh: [soso-forja salió con código 1]
+$ exit

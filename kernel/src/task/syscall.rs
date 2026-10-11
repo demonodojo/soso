@@ -937,6 +937,12 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
         if n > 0 {
             return Ok(n);
         }
+        // Sin plazo, un `can_send` que no vuelve deja el proceso dormido para
+        // siempre. El ClientHello del handshake se escribe **antes** de la
+        // lectura con plazo: si esta escritura no regresa, ese plazo no llega
+        // a armarse (`soso-update aplicar` se queda en «conectado»). Cada
+        // escritura que sí encola bytes vuelve y el llamante repite, así que
+        // el plazo es de progreso, no de la transferencia entera.
         super::block_current(
             ctx_from_frame(f),
             State::WaitingSocket {
@@ -947,7 +953,7 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
                 accept: false,
                 connect: false,
                 result_fd: 0,
-                deadline_ms: 0,
+                deadline_ms: socket_deadline(TCP_WRITE_DEADLINE_MS),
             },
         );
     }
@@ -2442,6 +2448,9 @@ fn sys_tcp_listen(port: u64) -> Result<u64, i64> {
     let slot = crate::net::tcp_listen(port as u16)?;
     super::with_current(|p| alloc_fd(p, Fd::Tcp { slot }))
 }
+
+/// Un `write` TCP sin un byte encolado en este tiempo devuelve `EAGAIN`.
+const TCP_WRITE_DEADLINE_MS: u64 = 30_000;
 
 fn socket_deadline(timeout_ms: u64) -> u64 {
     if timeout_ms == 0 {

@@ -250,6 +250,9 @@ fn map_http_err(e: soso_http::HttpError) -> &'static str {
                 "plazo agotado esperando bytes del cuerpo HTTP" => {
                     "plazo agotado en la descarga HTTP"
                 }
+                "plazo agotado escribiendo el handshake TLS" => {
+                    "plazo agotado escribiendo el handshake TLS"
+                }
                 "cuerpo HTTP incompleto (Content-Length)" => "descarga HTTP incompleta",
                 "tcp_connect (reintento TLS)" => "plazo agotado reconectando tras fallo TLS",
                 "tcp_connect" => "plazo agotado al conectar",

@@ -1003,7 +1003,7 @@
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
       },
       "tracking": {
-        "updated_at": "2026-10-11T19:00:00+02:00",
+        "updated_at": "2026-10-11T16:30:00+02:00",
         "summary": "Validador portable (validate.rs) y `tarea validar` en host: hash exacto, alcance/rutas protegidas/pruebas borradas, base reconstruida desde la captura, regresión sobre la base, requisitos por código de salida, `aceptada` sólo por el validador y promoción durable condicionada. 10 pruebas; ciclo real con el 14B sobre R03 aceptado y base movida. Límites: mismo host (T43), sin guest.",
         "evidence": [
           "docs/self-improvement/seguimiento/T26.md",
@@ -1021,7 +1021,7 @@
       "title": "Reanudar tras caída sin repetir efectos",
       "milestone": "SI-4",
       "kind": "Implementación portable con adaptadores host/guest",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T23",
         "T25",
@@ -1048,12 +1048,16 @@
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
       },
       "tracking": {
-        "updated_at": "2026-09-24",
-        "base": "da8934b31 + diff sucio",
-        "summary": "Sin empezar. T63 quitó el impedimento de fondo: una caída encallaba la referencia durable y reanudar era imposible por construcción.",
-        "evidence": [],
-        "blocker": "Depende de T25 y T26, todavía pendientes.",
-        "next_step": "Esperar a T25 y T26."
+        "updated_at": "2026-10-11T18:00:00+02:00",
+        "summary": "Reanudación con diario de intención/resultado (claves estables) y reconciliación con la evidencia: barrido de 34 cortes (antes y después de cada escritura) acaba en aceptación con una sola promoción o bloquea sin duplicar; promoción ya aplicada reconocida por referencia+hash; presupuesto no se reinicia. Cortes simulados; sin guest.",
+        "evidence": [
+          "docs/self-improvement/seguimiento/T27.md",
+          "target/self-improvement/tasks/T27/resultado.md",
+          "crates/soso-improve-core/tests/recovery.rs",
+          "tests/self-improvement/opencode/t27-reanudar"
+        ],
+        "blocker": "",
+        "next_step": "Cerrada en host. Siguiente habilitada: T28 (aprendizaje verificado); T29 necesita T28 y T49."
       }
     },
     {
@@ -1062,7 +1066,7 @@
       "title": "Guardar y recuperar aprendizaje verificado",
       "milestone": "SI-4",
       "kind": "Implementación portable con adaptadores host/guest",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T26"
       ],
@@ -1082,6 +1086,19 @@
         ],
         "evidence": [],
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      },
+      "tracking": {
+        "updated_at": "2026-10-11T18:30:00+02:00",
+        "summary": "Notas de conocimiento verificado (knowledge.rs): hipótesis/limitación/hecho, confirmación sólo contra la referencia de base del validador y evidencia con hash, caducidad por cambio de base con historial, recuperación determinista con presupuesto y exclusión de reservados/secretos. 7 pruebas; ciclo real sobre los artefactos de T26. Sin guest.",
+        "evidence": [
+          "docs/self-improvement/seguimiento/T28.md",
+          "target/self-improvement/tasks/T28/resultado.md",
+          "docs/self-improvement/conocimiento/FORMATO.md",
+          "crates/soso-improve-core/tests/knowledge.rs",
+          "tests/self-improvement/opencode/t28-conocimiento"
+        ],
+        "blocker": "",
+        "next_step": "Cerrada en host. T29 (campaña) necesita además T49 (hecha) y T22/T27 (hechas): habilitada."
       }
     },
     {
@@ -1401,7 +1418,7 @@
       "title": "Cerrar una mejora desde OpenCode nativo con build remoto",
       "milestone": "SI-6",
       "kind": "Integración",
-      "status": "pending",
+      "status": "done",
       "depends_on": [
         "T22",
         "T35",
@@ -1414,12 +1431,26 @@
         "user/soso-forja/src/main.rs"
       ],
       "native_validation": {
-        "status": "pending",
+        "status": "partial",
         "requires": [
           "T51"
         ],
-        "evidence": [],
-        "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+        "evidence": [
+          "tests/self-improvement/opencode/t37-agente-forja"
+        ],
+        "note": "Agente e inferencia en soso; build remoto (Forja). T51 exige repetir sin Forja y reconstruir un candidato limpio."
+      },
+      "tracking": {
+        "updated_at": "2026-10-11T17:15:00+02:00",
+        "summary": "Agente nativo (ELF del guest) + inferencia del guest (14B) + build en el host por Forja: edita hola-std, compila, aplica y ejecuta; la comprobación la hace otra sesión; rechazos de recibo de T36 verificados. Etapa mixta (build remoto): T51 exige repetir sin Forja.",
+        "evidence": [
+          "docs/self-improvement/seguimiento/T37.md",
+          "docs/self-improvement/native/primera-tarea.md",
+          "target/self-improvement/tasks/T37/resultado.md",
+          "tests/self-improvement/opencode/t37-agente-forja"
+        ],
+        "blocker": "",
+        "next_step": "Cerrada. Habilitadas: T27 y T28; T43 sigue bloqueada (T31 ← T30 ← T29 ← T27/T28)."
       }
     },
     {

@@ -107,6 +107,10 @@ pub enum Capacidad {
     Agente,
     /// Autoprueba de las herramientas del agente con un modelo guionizado (T35).
     AgentePrueba,
+    /// Notas de conocimiento verificado entre tareas (T28).
+    Conocimiento,
+    /// Resumen de una campaña (T29).
+    Reporte,
 }
 
 impl Capacidad {
@@ -137,6 +141,8 @@ impl Capacidad {
             Capacidad::RecetaComprobar => "receta comprobar",
             Capacidad::Agente => "agente",
             Capacidad::AgentePrueba => "agente-prueba",
+            Capacidad::Conocimiento => "conocimiento",
+            Capacidad::Reporte => "report",
         }
     }
 
@@ -273,6 +279,9 @@ impl Orden {
             ("evaluar", _) => Ok(Capacidad::Evaluar),
             ("agente", _) => Ok(Capacidad::Agente),
             ("agente-prueba", _) => Ok(Capacidad::AgentePrueba),
+            ("report", _) => Ok(Capacidad::Reporte),
+            ("conocimiento", "proponer" | "confirmar" | "invalidar" | "recuperar") => Ok(Capacidad::Conocimiento),
+            ("conocimiento", otro) => Err(Error::uso(format!("conocimiento necesita proponer|confirmar|invalidar|recuperar, no «{otro}»"))),
             ("procesos", _) => Ok(Capacidad::Procesos),
             ("pruebas", _) => Ok(Capacidad::Pruebas),
             ("delta", _) => Ok(Capacidad::Delta),
@@ -319,7 +328,7 @@ impl Orden {
         };
         let nombre = *nombre;
         let (sub, resto) = match nombre {
-            "banco" | "verificar" | "modelo" | "tarea" | "receta" => match resto.split_first() {
+            "banco" | "verificar" | "modelo" | "tarea" | "receta" | "conocimiento" => match resto.split_first() {
                 Some((s, r)) if !s.starts_with("--") => (Some(*s), r),
                 _ => (None, resto),
             },

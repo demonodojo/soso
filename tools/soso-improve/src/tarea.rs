@@ -48,6 +48,7 @@ pub fn despachar(sub: &str, op: &Opciones) -> Result<i32, Error> {
         "exportar" => exportar(op),
         "ejecutar" => crate::agente::ejecutar_tarea(op),
         "validar" => validar(op),
+        "reanudar" if op.bandera("continuar") => continuar(op),
         "reanudar" => ver(op, true),
         "informe" => ver(op, false),
         // `capacidades().exigir` ya rechazó `ejecutar` y `validar` con su
@@ -85,7 +86,7 @@ fn ver(op: &Opciones, reanudar: bool) -> Result<i32, Error> {
         // Informar de por dónde va no es continuar, y la orden no puede dar a
         // entender lo contrario: repetir los efectos de un intento a medias es
         // justo lo que T27 tiene que evitar.
-        println!("tarea: continuar es T25 (ejecutor) y T26 (validador); aquí no se ejecuta nada");
+        println!("tarea: informar no continúa nada; `--continuar` reanuda (T27) con el diario, sin repetir efectos");
     }
     Ok(Codigo::Exito.como_i32())
 }
@@ -228,4 +229,85 @@ fn validar(op: &Opciones) -> Result<i32, Error> {
         Veredicto::Rechazado => Codigo::Verificacion.como_i32(),
         Veredicto::Bloqueado => Codigo::Error.como_i32(),
     })
+}
+
+/// `tarea reanudar --continuar` (T27): lleva la ejecución hasta el final desde donde se quedó, reconciliando el
+/// diario con la evidencia (copia, hash del paquete, referencia de base). No repite lo ya hecho; si no puede
+/// decidir qué hizo el agente al caerse, se bloquea y dice qué comprobar (`--adoptar-copia` lo resuelve).
+fn continuar(op: &Opciones) -> Result<i32, Error> {
+    use soso_improve_core::agente::{http::ModeloHttp, Config, Politica as PolAgente, SISTEMA};
+    use soso_improve_core::recovery::{avanzar, Contexto, Desenlace};
+    use soso_improve_core::transporte::Destino;
+    use soso_improve_core::validate::{Exigencias, Sitios, Veredicto};
+    let r = reanudacion(op)?;
+    let captura = op.exigido("captura")?;
+    let copia = std::fs::canonicalize(op.exigido("copia")?).map_err(|e| Error::uso(format!("--copia: {e}")))?.to_string_lossy().into_owned();
+    let ex: Exigencias = serde_json::from_slice(&std::fs::read(op.exigido("exigencias")?).map_err(|e| Error::entorno(format!("exigencias: {e}")))?)
+        .map_err(|e| Error::formato(format!("exigencias ilegibles: {e}")))?;
+    let trabajo = op.exigido("trabajo")?.trim_end_matches('/').to_string();
+    let referencias = op.exigido("referencias")?.to_string();
+    let objetos = format!("{trabajo}/objetos");
+    let arbol = format!("{trabajo}/arbol");
+    std::fs::create_dir_all(&trabajo).map_err(|e| Error::entorno(format!("no pude crear {trabajo}: {e}")))?;
+    let puerto: u16 = op.uno("puerto").and_then(|p| p.parse().ok()).unwrap_or(17299);
+    let cfg = Config::nueva(op.uno("modelo").filter(|s| !s.is_empty()).unwrap_or("soso-coder"), SISTEMA);
+    let mut pol = PolAgente::nueva(&copia);
+    if let Some(h) = op.uno("cargo-home").filter(|s| !s.is_empty()) {
+        pol.entorno.push(("CARGO_HOME".into(), h.to_string()));
+    }
+    let reloj = crate::sistema::RelojHost::default();
+    let conector = crate::sistema::ConectorHost;
+    let mut modelo = ModeloHttp {
+        conector: &conector,
+        reloj: &reloj,
+        destino: Destino::local(puerto),
+        plazo_conexion_ms: 10_000,
+        token: op.uno("token").filter(|t| !t.is_empty()).map(|t| t.to_string()).or_else(|| std::env::var("SOSO_LLM_API_KEY").ok()),
+    };
+    let estado = op.exigido("estado")?.to_string();
+    let run = op.exigido("run")?.to_string();
+    let cx = Contexto {
+        dir_estado: &estado,
+        run_id: &run,
+        captura,
+        copia: &copia,
+        sitios: Sitios { captura, objetos: &objetos, arbol: &arbol, referencias: &referencias, campana: op.exigido("campana")? },
+        spec: &r.spec,
+        exigencias: &ex,
+        adoptar_copia: op.bandera("adoptar-copia"),
+    };
+    let mut host = Host;
+    // La base de la campaña se publica la primera vez (sólo con la bandera): después la mueve únicamente el validador.
+    if op.bandera("publicar-base") && soso_improve_core::validate::base_vigente(&host, &referencias, cx.sitios.campana)?.is_none() {
+        let man = manifiesto(captura)?;
+        let g = soso_improve_core::validate::publicar_base(&mut host, &referencias, cx.sitios.campana, &soso_improve_core::captura::huella(&man.inventario))?;
+        println!("  base de «{}» publicada (generación {g})", cx.sitios.campana);
+    }
+    let res = avanzar(&mut host, &reloj, &cx, &mut |h: &mut Host| {
+        let inf = soso_improve_core::runner::ejecutar_intento(h, &mut modelo, &reloj, &estado, &run, &copia, &cfg, &pol)?;
+        if inf.fin != soso_improve_core::runner::Fin::Completo {
+            return Err(Error::entorno(format!("el intento no terminó: {:?} {}", inf.fin, inf.detalle)));
+        }
+        Ok(())
+    })?;
+    for x in &res.reutilizadas {
+        println!("  ya hecho: {x}");
+    }
+    for x in &res.ejecutadas {
+        println!("  ejecutado: {x}");
+    }
+    match res.desenlace {
+        Desenlace::Validado(Veredicto::Aceptado) => {
+            println!("tarea: aceptada");
+            Ok(Codigo::Exito.como_i32())
+        }
+        Desenlace::Validado(v) => {
+            println!("tarea: {v:?}");
+            Ok(Codigo::Verificacion.como_i32())
+        }
+        Desenlace::Bloqueado { motivo, comprobacion } => {
+            println!("tarea: BLOQUEADA — {motivo}\n  comprobación necesaria: {comprobacion}");
+            Ok(Codigo::Error.como_i32())
+        }
+    }
 }

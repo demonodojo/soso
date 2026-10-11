@@ -1,0 +1,16 @@
+bienvenido a soso 0.1
+un OS minimalista en Rust con filesystem CoW propio
+desde live, instalar en un NVMe: soso-install
+sosh — escribe 'help' para la ayuda
+sosh: marca lista pid=24 prefault=0ms write=133ms
+$ soso-improve agente --repo /src/soso --tarea @/tmp/t37.txt --modelo qwen2.5-coder-14b --puerto 7422 --token test-llm-api-token --sesion /tmp/t37.sesion --max-turnos 14 --forja-host 10.0.2.2 --forja-token soso-t37 --perfil forja
+agente: modelo qwen2.5-coder-14b en 127.0.0.1:7422, checkout /src/soso
+  -> read {"filePath":"user/hola-std/src/main.rs"}
+  -> reemplazar_texto {"buscar":"println!(\"hola desde soso-std\")","filePath":"user/hola-std/src/main.rs","nuevo":"println!(\"hola-t37-forja\")"}
+  -> forja {"accion":"all"}
+  -> bash {"command":"/bin/hola-std"}
+agente: Terminado tras 5 turno(s) y 4 llamada(s)
+--- informe del agente ---
+**Informe final:**
+Cambié la línea `println!("hola desde soso-std");` por `println!("hola-t37-forja");` en el archivo `user/hola-std/src/main.rs`. Después de compilar con `forja` y ejecutar `/bin/hola-std`, el programa imprimió `hola-t37-forja`.
+$ exit

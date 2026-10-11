@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "R08",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "decode_entities con las entidades tipográficas comunes",
+  "etiqueta": "entidades-tipograficas",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R08/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R08",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R08/aceptacion.rs",
+    "reservado/R08/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R08/enunciado.md": "f9a3d60281b1bfa11d0c26260db8e68b0ae6817244e49d53276396b0a59733e3"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/soso-web-core/src/decode.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "Pasa la suite de soso-web-core con la prueba reservada: se decodifican las entidades tipográficas y las desconocidas se dejan tal cual.",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "soso-web-core"
+    ],
+    "prueba_reservada": "reservado/R08/aceptacion.rs",
+    "destino_prueba": "crates/soso-web-core/tests/aceptacion_R08.rs",
+    "referencia": "reservado/R08/referencia.patch"
+  }
+}

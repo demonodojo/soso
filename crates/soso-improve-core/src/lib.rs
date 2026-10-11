@@ -68,12 +68,15 @@ pub mod evaluacion;
 pub mod pruebas;
 pub mod runner;
 pub mod receta;
+pub mod report;
+pub mod recovery;
 #[cfg(feature = "std")]
 pub mod sysroot;
 pub mod tiempo;
 pub mod validate;
 pub mod transporte;
 pub mod ignorar;
+pub mod knowledge;
 pub mod programa;
 pub mod referencia;
 pub mod protocolo;

@@ -623,7 +623,7 @@ fn correr_agente_forja(key: &Path, catalog: &str) -> StepResult {
         };
         // El enunciado se escribe con `echo` (la shell de soso no tiene comillas ni heredocs).
         let tarea = format!(
-            "echo Tarea: el programa de /src/soso/user/hola-std/src/main.rs imprime la linea hola desde soso-std. > /tmp/t37.txt\n\
+            "echo Tarea: el programa de user/hola-std/src/main.rs (relativo a /src/soso) imprime la linea hola desde soso-std. > /tmp/t37.txt\n\
              echo Cambia esa linea para que imprima exactamente {MARCA} y nada mas en su lugar. >> /tmp/t37.txt\n\
              echo Despues compila con la herramienta forja y comprueba el resultado ejecutando /bin/hola-std. >> /tmp/t37.txt\n\
              cat /tmp/t37.txt\nexit\n"

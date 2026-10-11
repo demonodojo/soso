@@ -317,7 +317,10 @@ pub fn validar_candidato<V: Entorno + Durable>(
 
 fn ejecutar<V: Entorno>(v: &V, raiz: &str, r: &Requisito) -> Evidencia {
     let cwd = if r.cwd.is_empty() || r.cwd == "." { raiz.to_string() } else { unir(raiz, &r.cwd) };
-    let o = Orden { argv: r.argv.clone(), cwd, stdin: Vec::new(), timeout_s: Some(r.timeout_s), entorno: Vec::new() };
+    // `{arbol}` en el argv es la raíz de validación: así un requisito puede apuntar el verificador (que
+    // vive fuera del candidato) al árbol reconstruido, sin ejecutar nada en una shell.
+    let argv: Vec<String> = r.argv.iter().map(|a| a.replace("{arbol}", raiz)).collect();
+    let o = Orden { argv, cwd, stdin: Vec::new(), timeout_s: Some(r.timeout_s), entorno: Vec::new() };
     match v.ejecutar(&o) {
         Ok(s) => Evidencia { nombre: r.nombre.clone(), codigo: s.codigo, motivo: s.motivo.clone(), bytes_salida: s.stdout.len() + s.stderr.len() },
         Err(e) => Evidencia { nombre: r.nombre.clone(), codigo: None, motivo: Some(e.to_string()), bytes_salida: 0 },
@@ -376,6 +379,13 @@ fn aplicar_paquete<V: Entorno>(v: &mut V, s: &Sitios<'_>, base: &[ArchivoBase], 
         }
     }
     Ok(())
+}
+
+/// Escribe el desenlace del validador en el estado de la ejecución (idempotente: si ya consta, no hace nada).
+pub fn marcar_veredicto<V: Entorno + Durable>(v: &mut V, dir: &str, run: &str, ver: &Veredicto) -> Resultado<()> {
+    let mut inf = InformeValidacion::nuevo("");
+    inf.veredicto = ver.clone();
+    cerrar_estado(v, dir, run, &inf)
 }
 
 fn cerrar_estado<V: Entorno + Durable>(v: &mut V, dir: &str, run: &str, inf: &InformeValidacion) -> Resultado<()> {

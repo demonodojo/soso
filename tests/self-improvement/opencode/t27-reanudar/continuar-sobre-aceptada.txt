@@ -1,0 +1,3 @@
+  ya hecho: r2 (terminal)
+tarea: aceptada
+exit 0

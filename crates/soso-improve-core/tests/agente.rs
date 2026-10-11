@@ -326,3 +326,12 @@ fn la_herramienta_forja_existe_solo_si_se_configura_y_el_token_no_viaja_al_model
     assert!(r.error && r.texto.contains("no existe"));
     assert_eq!(e.ordenes.borrow().len(), n);
 }
+
+#[test]
+fn un_no_existe_dice_que_hay_en_el_directorio_mas_cercano() {
+    let mut e = repo();
+    let (t, err) = llama(&mut e, "read", json!({"filePath": "src/soso/user/main.rs"}));
+    assert!(err && t.contains("relativas a la raíz") && t.contains("lib.rs") && t.contains("otro.rs"), "{t}");
+    let (t, err) = llama(&mut e, "reemplazar_texto", json!({"filePath": "nada/x.rs", "buscar": "a", "nuevo": "b"}));
+    assert!(err && t.contains("src/") && t.contains("README.md"), "{t}");
+}

@@ -1,6 +1,6 @@
 # T37 — Cerrar una mejora desde agente nativo (T35, D10) con build remoto
 
-**Hito:** SI-6 · **Tipo:** Integración · **Estado:** pendiente.
+**Hito:** SI-6 · **Tipo:** Integración · **Estado:** **hecha** (2026-10-11; [primera-tarea](native/primera-tarea.md), [seguimiento](seguimiento/T37.md)); etapa mixta: build remoto.
 
 **Dependencias:** [T22](T22-primera-mejora.md), [T35](T35-opencode-nativo.md), [T36](T36-forja-trazabilidad.md)
 
@@ -43,9 +43,9 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 
 ## Cierre y condición de bloqueo
 
-- [ ] Implementación o artefactos de esta ficha terminados.
-- [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
-- [ ] Resultado entregado con límites y dependencias restantes explícitos.
+- [x] Implementación o artefactos de esta ficha terminados.
+- [x] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
+- [x] Resultado entregado con límites y dependencias restantes explícitos.
 
 No cerrar SI-7 ni llamar compilación local a build-local, que hoy copia artefactos.
 
