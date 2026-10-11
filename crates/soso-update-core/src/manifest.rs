@@ -35,8 +35,34 @@ pub struct Manifest {
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParseError {
     BadMagic,
-    MissingField,
-    BadLine,
+    MissingField(&'static str),
+    BadLine {
+        line: usize,
+        field: &'static str,
+        expected: &'static str,
+    },
+    BadVersion(String),
+    Compatibility(crate::compat::CompatError),
+}
+
+impl core::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::BadMagic => write!(f, "cabecera incorrecta: se esperaba {MANIFEST_MAGIC}"),
+            Self::MissingField(field) => write!(f, "falta el campo {field}"),
+            Self::BadLine {
+                line,
+                field,
+                expected,
+            } => write!(f, "línea {line}, {field}: se esperaba {expected}"),
+            Self::BadVersion(v) => write!(f, "version={v:?}: se esperaba major.minor.patch"),
+            Self::Compatibility(crate::compat::CompatError::CampoInvalido(field)) => write!(
+                f,
+                "compatibilidad: {field} debe ser un entero sin signo de 32 bits"
+            ),
+            Self::Compatibility(e) => write!(f, "compatibilidad: {e:?}"),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -49,6 +75,31 @@ pub enum ValidateError {
     FileTooLarge { path: String, size: u64 },
     PackSizeMismatch,
     OverlappingFiles,
+}
+
+impl core::fmt::Display for ValidateError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::BadHash { field } => write!(
+                f,
+                "SHA-256 de {field}: se esperaban 64 dígitos hexadecimales"
+            ),
+            Self::BadPath { path } => write!(f, "ruta no permitida: {path:?}"),
+            Self::DuplicatePath { path } => write!(f, "ruta duplicada: {path:?}"),
+            Self::FileOutOfPack { path } => {
+                write!(f, "el fichero {path:?} queda fuera de rootfs.pack")
+            }
+            Self::EmptyFile { path } => write!(f, "el fichero {path:?} está vacío"),
+            Self::FileTooLarge { path, size } => write!(
+                f,
+                "el fichero {path:?} ocupa {size} B; límite del cliente: {MAX_FILE_SIZE} B"
+            ),
+            Self::PackSizeMismatch => {
+                write!(f, "el tamaño de rootfs.pack no coincide con sus ficheros")
+            }
+            Self::OverlappingFiles => write!(f, "hay ficheros con tramos solapados en rootfs.pack"),
+        }
+    }
 }
 
 /// Tamaño máximo de un fichero en el pack (512 MiB). `soso-update` sostiene
@@ -69,7 +120,12 @@ impl Manifest {
         let mut files = Vec::new();
         let mut saw_magic = false;
 
-        for line in text.lines() {
+        for (index, line) in text.lines().enumerate() {
+            let bad = |field, expected| ParseError::BadLine {
+                line: index + 1,
+                field,
+                expected,
+            };
             let line = line.trim();
             if line.is_empty() {
                 continue;
@@ -90,25 +146,36 @@ impl Manifest {
             } else if line.starts_with("kernel ") {
                 let parts: Vec<_> = line.split_whitespace().collect();
                 if parts.len() != 3 {
-                    return Err(ParseError::BadLine);
+                    return Err(bad("kernel", "kernel <sha256> <tamaño>"));
                 }
                 kernel_hash = parts[1].into();
-                kernel_size = parts[2].parse().map_err(|_| ParseError::BadLine)?;
+                kernel_size = parts[2]
+                    .parse()
+                    .map_err(|_| bad("tamaño de kernel", "un entero sin signo de 64 bits"))?;
             } else if line.starts_with("pack ") {
                 let parts: Vec<_> = line.split_whitespace().collect();
                 if parts.len() != 3 {
-                    return Err(ParseError::BadLine);
+                    return Err(bad("pack", "pack <sha256> <tamaño>"));
                 }
                 pack_hash = parts[1].into();
-                pack_size = parts[2].parse().map_err(|_| ParseError::BadLine)?;
+                pack_size = parts[2]
+                    .parse()
+                    .map_err(|_| bad("tamaño de pack", "un entero sin signo de 64 bits"))?;
             } else if line.starts_with("f ") {
                 let parts: Vec<_> = line.split_whitespace().collect();
                 if parts.len() < 5 {
-                    return Err(ParseError::BadLine);
+                    return Err(bad(
+                        "fichero",
+                        "f <sha256> <offset> <tamaño> <ruta> (posible manifiesto truncado)",
+                    ));
                 }
                 let hash_hex = parts[1].into();
-                let offset = parts[2].parse().map_err(|_| ParseError::BadLine)?;
-                let size = parts[3].parse().map_err(|_| ParseError::BadLine)?;
+                let offset = parts[2]
+                    .parse()
+                    .map_err(|_| bad("offset de fichero", "un entero sin signo de 64 bits"))?;
+                let size = parts[3]
+                    .parse()
+                    .map_err(|_| bad("tamaño de fichero", "un entero sin signo de 64 bits"))?;
                 let path = parts[4..].join(" ");
                 files.push(FileEntry {
                     path,
@@ -118,13 +185,17 @@ impl Manifest {
                 });
             }
         }
-        if !saw_magic || version_raw.is_empty() {
-            return Err(ParseError::MissingField);
+        if !saw_magic {
+            return Err(ParseError::BadMagic);
         }
-        let version = semver::parse(&version_raw).ok_or(ParseError::BadLine)?;
+        if version_raw.is_empty() {
+            return Err(ParseError::MissingField("version"));
+        }
+        let version = semver::parse(&version_raw)
+            .ok_or_else(|| ParseError::BadVersion(version_raw.clone()))?;
         let compat = match crate::compat::Compat::parse(text) {
             Some(Ok(c)) => Some(c),
-            Some(Err(_)) => return Err(ParseError::BadLine),
+            Some(Err(e)) => return Err(ParseError::Compatibility(e)),
             None => None,
         };
         Ok(Self {

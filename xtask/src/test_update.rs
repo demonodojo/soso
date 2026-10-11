@@ -323,6 +323,17 @@ fn preparar_release_prueba(root: &Path) {
         files,
     };
     std::fs::write(rel_dir.join("manifest.txt"), manifest.format()).expect("manifest");
+    // La lectura local antigua cortaba a 256 KiB incluso cuando el fichero
+    // seguía. Dejar la cabecera detrás de ese límite reproduce el defecto.
+    // Basta un fichero: esta fase prueba la lectura del manifiesto, no el
+    // hash de cientos de MiB de toolchain bajo TCG.
+    let mut grande = manifest.clone();
+    grande.files.truncate(1);
+    std::fs::write(
+        rel_dir.join("manifest-grande.txt"),
+        format!("{}{}", "\n".repeat(256 * 1024), grande.format()),
+    )
+    .expect("manifest-grande");
     std::fs::write(
         rel_dir.join("manifest-malo.txt"),
         format!(
@@ -1500,7 +1511,7 @@ fn fase_recuperacion_corte(
     Ok(())
 }
 
-/// Manifiesto con path `..` debe fallar antes de mutar el rootfs.
+/// Lee más de 256 KiB y rechaza una ruta `..` con el motivo, sin mutar rootfs.
 fn fase_manifiesto_invalido(
     code: &Path,
     vars: &Path,
@@ -1517,16 +1528,23 @@ fn fase_manifiesto_invalido(
     let salida = ssh_guion_hasta(
         key,
         SSH_PORT,
-        "cp /var/actualiza-prueba/manifest-malo.txt /var/actualiza-prueba/manifest.txt\n\
+        "cp /etc/actualiza-marca.txt /tmp/marca-antes\n\
+         cp /var/actualiza-prueba/manifest-grande.txt /var/actualiza-prueba/manifest.txt\n\
+         soso-update comprobar --local /var/actualiza-prueba\n\
+         cp /var/actualiza-prueba/manifest-malo.txt /var/actualiza-prueba/manifest.txt\n\
          soso-update aplicar --local /var/actualiza-prueba --forzar\n\
-         cat /etc/actualiza-marca.txt\nhalt\n",
+         diff /tmp/marca-antes /etc/actualiza-marca.txt && echo marca-intacta\n\
+         echo fin-manifiestos\nhalt\n",
         Duration::from_secs(180),
-        "manifest no válido",
+        "fin-manifiestos",
     )?;
-    if !salida.contains("manifest no válido") {
+    if !salida.contains(&format!("remoto: {TEST_VER}")) {
+        return Err(format!("comprobar no leyó el manifiesto de más de 256 KiB: {salida:?}"));
+    }
+    if !salida.contains("manifest no válido") || !salida.contains("ruta no permitida: \"../etc/passwd\"") {
         return Err(format!("aplicar no rechazó el manifiesto: {salida:?}"));
     }
-    if !salida.contains(MARCA_NUEVA.trim()) {
+    if !salida.lines().any(|l| l.trim() == "marca-intacta") {
         return Err(format!(
             "el manifiesto inválido mutó el rootfs (marca cambió): {salida:?}"
         ));

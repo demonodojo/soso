@@ -103,6 +103,8 @@ pub enum Capacidad {
     /// silencio: un `sed` que falla, o un script que aborta a la mitad, dejan
     /// exactamente ese estado y no hay forma de verlo salvo abriendo ficheros.
     RecetaComprobar,
+    /// Agente nativo: modelo + herramientas sobre un checkout (T35, D10).
+    Agente,
 }
 
 impl Capacidad {
@@ -131,6 +133,7 @@ impl Capacidad {
             Capacidad::TareaCopiar => "tarea copiar",
             Capacidad::TareaExportar => "tarea exportar",
             Capacidad::RecetaComprobar => "receta comprobar",
+            Capacidad::Agente => "agente",
         }
     }
 
@@ -267,6 +270,7 @@ impl Orden {
             ("modelo", _) => Ok(Capacidad::Modelo),
             ("eco", _) => Ok(Capacidad::Eco),
             ("evaluar", _) => Ok(Capacidad::Evaluar),
+            ("agente", _) => Ok(Capacidad::Agente),
             ("procesos", _) => Ok(Capacidad::Procesos),
             ("pruebas", _) => Ok(Capacidad::Pruebas),
             ("delta", _) => Ok(Capacidad::Delta),

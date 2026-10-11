@@ -61,7 +61,10 @@ fn una_ruta_absoluta_no_entra() {
 fn subir_de_directorio_no_entra() {
     for ruta in ["../etc/passwd", "bin/../../etc/passwd", ".."] {
         assert!(
-            matches!(valida(&[(ruta, 0, 10, 'c')]), Err(ValidateError::BadPath { .. })),
+            matches!(
+                valida(&[(ruta, 0, 10, 'c')]),
+                Err(ValidateError::BadPath { .. })
+            ),
             "{ruta} tenía que rechazarse"
         );
     }
@@ -163,4 +166,52 @@ fn el_mismo_numero_con_otro_build_es_otra_release() {
     let id_a = soso_update_core::txn::TxnId::from_manifest(a.as_bytes());
     let id_b = soso_update_core::txn::TxnId::from_manifest(b.as_bytes());
     assert_ne!(id_a, id_b, "misma versión y otro build son otra operación");
+}
+
+#[test]
+fn el_error_de_sintaxis_identifica_linea_y_campo() {
+    let t = texto(&[("bin/sosh", 0, 10, 'c')]);
+    let t = t.replace(" 0 10 bin/sosh", " roto 10 bin/sosh");
+    let e = Manifest::parse(&t).unwrap_err();
+    assert!(matches!(
+        e,
+        ParseError::BadLine {
+            line: 7,
+            field: "offset de fichero",
+            ..
+        }
+    ));
+    assert!(e.to_string().contains("línea 7, offset de fichero"));
+}
+
+#[test]
+fn el_error_de_compatibilidad_conserva_el_campo() {
+    let t = texto(&[]) + "abi=no-es-un-numero\n";
+    let e = Manifest::parse(&t).unwrap_err();
+    assert_eq!(
+        e,
+        ParseError::Compatibility(soso_update_core::compat::CompatError::CampoInvalido("abi"))
+    );
+    assert!(e.to_string().contains("abi debe ser un entero"));
+}
+
+#[test]
+fn version_ausente_y_version_ilegible_se_distinguen() {
+    assert_eq!(
+        Manifest::parse(MANIFEST_MAGIC).unwrap_err(),
+        ParseError::MissingField("version")
+    );
+    let e = Manifest::parse(&format!("{MANIFEST_MAGIC}\nversion=rota\n")).unwrap_err();
+    assert_eq!(e, ParseError::BadVersion("rota".into()));
+    assert!(e.to_string().contains("version=\"rota\""));
+}
+
+#[test]
+fn el_error_de_tamano_muestra_ruta_tamano_y_limite() {
+    let size = soso_update_core::manifest::MAX_FILE_SIZE + 1;
+    let e = valida(&[("bin/rustc", 0, size, 'c')]).unwrap_err();
+    let msg = e.to_string();
+    assert!(msg.contains("bin/rustc"));
+    assert!(msg.contains(&size.to_string()));
+    assert!(msg.contains(&soso_update_core::manifest::MAX_FILE_SIZE.to_string()));
 }

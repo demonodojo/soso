@@ -415,6 +415,8 @@ fn capacidades() -> Capacidades {
             Capacidad::TareaPreparar,
             Capacidad::TareaReanudar,
             Capacidad::TareaInforme,
+            // El agente nativo (T35): modelo por TCP + herramientas sobre el árbol y los procesos de soso.
+            Capacidad::Agente,
             // Comprobar la receta es **leer ficheros**: no depende de la
             // plataforma, así que el guest la tiene igual que el host. Otra
             // cosa es que aquí haya todavía un vendor al que apuntar.
@@ -564,6 +566,71 @@ fn serde_json_core_compat<T: serde::de::DeserializeOwned>(datos: &[u8]) -> Resul
     serde_json::from_slice(datos).map_err(Error::formato)
 }
 
+/// `agente --repo <ruta> --tarea <texto|@archivo> [--modelo m] [--puerto 7422] [--token t]
+/// [--max-turnos N] [--max-tokens N] [--sesion <archivo>] [--sistema <archivo>] [--plazo-ms N]`.
+/// Devuelve 0 si el modelo terminó la tarea por su pie y 1 si no (el veredicto sobre el código lo da
+/// el verificador, no el agente).
+fn agente(orden: &cli::Orden) -> Resultado<usize> {
+    use soso_improve_core::agente::{correr, http::ModeloHttp, Config, Fin, Politica as PolAgente, SISTEMA};
+    let repo = orden.exigido("repo")?.trim_end_matches('/').to_string();
+    let tarea = orden.exigido("tarea")?;
+    let tarea = match tarea.strip_prefix('@') {
+        Some(f) => String::from_utf8(Soso.leer(f)?).map_err(|_| Error::formato(format!("{f} no es UTF-8")))?,
+        None => tarea.to_string(),
+    };
+    let sistema = match orden.uno("sistema").filter(|s| !s.is_empty()) {
+        Some(f) => String::from_utf8(Soso.leer(f)?).map_err(|_| Error::formato(format!("{f} no es UTF-8")))?,
+        None => SISTEMA.to_string(),
+    };
+    let num = |c: &str, d: u64| -> Resultado<u64> {
+        match orden.uno(c).filter(|v| !v.is_empty()) {
+            Some(v) => v.parse().map_err(|_| Error::uso(format!("--{c} no es un número: {v}"))),
+            None => Ok(d),
+        }
+    };
+    let puerto = num("puerto", 7422)? as u16;
+    let mut cfg = Config::nueva(orden.uno("modelo").filter(|s| !s.is_empty()).unwrap_or("soso-coder"), &sistema);
+    cfg.max_turnos = num("max-turnos", cfg.max_turnos as u64)? as usize;
+    cfg.max_tokens = num("max-tokens", cfg.max_tokens as u64)? as u32;
+    cfg.plazo_turno_ms = num("plazo-ms", cfg.plazo_turno_ms)?;
+    let pol = PolAgente::nueva(&repo);
+    let reloj = RelojSoso;
+    let conector = ConectorSoso;
+    let mut modelo = ModeloHttp {
+        conector: &conector,
+        reloj: &reloj,
+        destino: Destino::local(puerto),
+        plazo_conexion_ms: 10_000,
+        token: orden.uno("token").filter(|t| !t.is_empty()).map(|t| t.to_string()),
+    };
+    let sesion = orden.uno("sesion").filter(|s| !s.is_empty()).map(|s| s.to_string());
+    println!("agente: modelo {} en 127.0.0.1:{puerto}, checkout {repo}", cfg.modelo);
+    let mut entorno = Soso;
+    let informe = correr(&mut entorno, &mut modelo, &reloj, &pol, &cfg, &tarea, &mut |mensajes| {
+        if let Some(m) = mensajes.iter().rev().find(|m| m["role"] == "assistant") {
+            if let Some(ll) = m["tool_calls"].as_array() {
+                for l in ll {
+                    let a = l.pointer("/function/arguments").and_then(|v| v.as_str()).unwrap_or("");
+                    println!("  -> {} {}", l.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or("?"), a.chars().take(160).collect::<String>());
+                }
+            }
+        }
+        if let Some(s) = &sesion {
+            if let Ok(b) = serde_json::to_vec(mensajes) {
+                let _ = Soso.escribir(s, &b, 0o644);
+            }
+        }
+    });
+    println!("agente: {:?} tras {} turno(s) y {} llamada(s)", informe.fin, informe.turnos, informe.llamadas);
+    if let Some(e) = &informe.error {
+        println!("agente: {e}");
+    }
+    if !informe.respuesta_final.is_empty() {
+        println!("--- informe del agente ---\n{}", informe.respuesta_final);
+    }
+    Ok(if informe.fin == Fin::Terminado { 0 } else { 1 })
+}
+
 /// Ejecuta una orden ya interpretada y devuelve cuántos problemas encontró.
 /// Los efectos empiezan **después** de comprobar la capacidad.
 fn ejecutar(orden: &cli::Orden) -> Resultado<usize> {
@@ -581,6 +648,7 @@ fn ejecutar(orden: &cli::Orden) -> Resultado<usize> {
             orden.exigido("caso")?,
             orden.exigido("respuesta")?,
         ),
+        Capacidad::Agente => agente(orden),
         Capacidad::Procesos => procesos(),
         Capacidad::Pruebas => pruebas(orden.uno("banco")),
         Capacidad::Delta => delta_prueba(),

@@ -93,11 +93,15 @@ pub fn run(args: &[String]) {
     // Lo mismo que hace `soso-update` al bajarlo: una release que el cliente
     // rechaza no se publica (la 0.3.8 salió con `bin/rustc` por encima del
     // límite por fichero y ningún soso podía actualizarse).
-    if let Err(e) = manifest.validate() {
-        eprintln!("release: ABORTADO — el manifiesto no pasa la validación del cliente: {e:?}");
+    let manifest_text = manifest.format();
+    let leido = Manifest::parse(&manifest_text).unwrap_or_else(|e| {
+        eprintln!("release: ABORTADO — el cliente no puede leer el manifiesto: {e}");
+        exit(1);
+    });
+    if let Err(e) = leido.validate() {
+        eprintln!("release: ABORTADO — el manifiesto no pasa la validación del cliente: {e}");
         exit(1);
     }
-    let manifest_text = manifest.format();
     let manifest_path = out_dir.join("manifest.txt");
     std::fs::write(&manifest_path, &manifest_text).expect("manifest.txt");
 

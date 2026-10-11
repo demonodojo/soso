@@ -136,3 +136,19 @@ acreditación con la identidad 7B (no se repiten: el 14B tiene su propia campañ
 **Hecho al aceptarla (2026-10-11):** `modelo.md` (modelo de trabajo y perfil ligero), `opencode.json` (nombre del modelo y timeouts de 2 h, ver `opencode.md`), `entry_conditions` de T25–T29 en `tasks.json`
 y una línea de «Modelo de trabajo» en cada ficha. **Pendiente:** el selector del live USB (hoy sólo ofrece los modelos instalados) y confirmar que el 14B cabe en las máquinas objetivo (≈ 9 GB de pesos + KV).
 
+## D10 — Ruta de T35: agente nativo en Rust, no port de OpenCode/Bun (2026-10-11, decidida por el usuario)
+
+**Situación.** T35 pedía OpenCode como proceso de soso, y su entrada exigía N-005…N-008 (carga de código ajeno, libc/POSIX, pty, inotify), que no existen; T34 dejó la elección entre portar o reimplementar
+como decisión de plan del usuario. Portar Bun/OpenCode es del orden de meses y de riesgo alto (sin `dlopen`, módulos nativos `node-pty`/`@parcel/watcher`/tree-sitter, SQLite, ~90 paquetes npm).
+
+**Decisión.** El agente que corre **dentro** de soso es un **agente nativo en Rust**, que reutiliza lo que ya existe: la API de `soso-llm` (T16–T19), el parser de herramientas
+(`soso-llm-core::conversation`), los traits portables de `soso-improve-core` (`Entorno`, `Conector`, `Durable`, `Reloj`) y los sustitutos de `grep` y `sosh` (N-009, N-010, escritos
+«para las dos ramas»). OpenCode sigue siendo el agente del **host** (T22: el 14B resuelve R03 con él).
+
+**Consecuencias en el plan.**
+- **T35** se redefine: «agente nativo en modo no interactivo» (mismo criterio de cierre: ELF ejecutado en el guest, cambios reales de archivo validados desde otro proceso, respuesta del modelo guest,
+  recuperación de sesión tras reiniciar el agente). Caso de laboratorio `cargo xtask test-agent-native`. Un CLI puente o un agente en Linux conectado por SSH **sigue sin cerrar** la ficha.
+- **T37 y T51** donde dicen «OpenCode nativo» pasan a leer «agente nativo (T35)».
+- El **port de OpenCode/Bun** (N-005…N-008, N-011) queda **aplazado**, sin ficha de entrada, y puede recuperarse si algún día interesa; las N-xxx ya hechas no se pierden.
+- N-006 sigue aplazada (no hay consumidor de C).
+

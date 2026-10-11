@@ -1061,6 +1061,13 @@ descarga total: 1,3 MB
 `comprobar` no descarga nada: solo trae el manifiesto y te dice el tamaño real
 de la actualización antes de lanzarla.
 
+Si el manifiesto se rechaza, tanto `comprobar` como `aplicar` muestran el motivo
+antes del mensaje de error: el campo y la línea ilegibles, una ruta no permitida,
+un hash mal formado o el fichero que supera el límite del cliente, con su tamaño
+y el máximo admitido. Conserva esas líneas junto con el origen y la versión
+instalada para diagnosticarlo. Con `--local` se lee el manifiesto completo,
+también cuando supera los 256 KiB.
+
 Tras `aplicar`, **reinicia** para que el shim UEFI aplique el kernel nuevo.
 Si el arranque falla, el shim revierte al kernel anterior en el siguiente
 reinicio (backup en `SOSOKRN.BIN`, estado durable en `SOSOKRN.MET` en la ESP).

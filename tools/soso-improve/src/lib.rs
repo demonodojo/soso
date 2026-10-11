@@ -37,6 +37,7 @@ macro_rules! aviso {
     }};
 }
 
+pub mod agente;
 pub mod receta;
 pub mod banco;
 pub mod captura;
@@ -69,6 +70,7 @@ pub fn capacidades() -> Capacidades {
             Capacidad::VerificarRepo,
             Capacidad::Modelo,
             Capacidad::Evaluar,
+            Capacidad::Agente,
             Capacidad::TareaPreparar,
             Capacidad::TareaReanudar,
             Capacidad::TareaInforme,
@@ -98,6 +100,9 @@ uso: soso-improve <orden> [opciones]
               [--repeticiones 3] [--plazo-ms 600000] [--semilla 1] [--out <ruta>]
               [--contexto <tokens>] [--modelo-dir <dir>]
               [--caso Q07[,Q04]]   (repetir sólo esos casos)
+  agente      --repo <ruta> --tarea <texto|@archivo> [--modelo soso-coder] [--puerto 17299]
+              [--max-turnos 40] [--max-tokens 2048] [--sistema <archivo>] [--sesion <json>]
+              [--plazo-ms 7200000] [--cargo-home <ruta>] [--token <t>|SOSO_LLM_API_KEY]
   verificar   programa  --caso <id> --candidato <ruta> [--reservado <ruta>]
               protocolo --caso <id> --respuesta <ruta> [--reservado <ruta>]
               repo      --caso <id> --arbol <ruta> [--con-referencia]
@@ -181,6 +186,7 @@ const CLAVES: &[&str] = &[
     "respuesta", "modelo", "original", "fixtures", "json", "desde", "n", "solo", "timeout",
     "revision", "origen", "sin-herramientas", "con-referencia", "puerto", "token",
     "repeticiones", "plazo-ms", "semilla", "caso", "contexto", "modelo-dir",
+    "tarea", "sistema", "sesion", "max-turnos", "max-tokens", "cargo-home",
 ];
 
 pub fn despachar(orden: &str, args: &[String]) -> Result<i32, Error> {
@@ -204,6 +210,7 @@ pub fn despachar(orden: &str, args: &[String]) -> Result<i32, Error> {
             "suites" => captura::suites(&op),
             "banco" => banco::despachar(&sub, &op),
             "evaluar" => evaluar::evaluar(&op),
+            "agente" => agente::agente(&op),
             "modelo" => modelo::despachar(&sub, &op),
             "tarea" => tarea::despachar(&sub, &op),
             "receta" => receta::despachar(&sub, &op),
@@ -223,6 +230,7 @@ pub fn despachar(orden: &str, args: &[String]) -> Result<i32, Error> {
             banco::despachar(sub, &Opciones::parsear(&args[1..])?)
         }
         "evaluar" => evaluar::evaluar(&Opciones::parsear(args)?),
+        "agente" => agente::agente(&Opciones::parsear(args)?),
         "modelo" => {
             let sub = args
                 .first()

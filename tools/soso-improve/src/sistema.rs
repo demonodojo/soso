@@ -142,27 +142,55 @@ impl Procesos for Host {
                 let _ = stdin.write_all(&datos);
             });
         }
-        let (mut salida, mut error) = (Vec::new(), Vec::new());
-        let mut fin_stdout = hijo.stdout.take();
-        let mut fin_stderr = hijo.stderr.take();
-        let hilo_err = std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(e) = fin_stderr.as_mut() {
-                let _ = e.read_to_end(&mut buf);
+        // Los lectores acumulan en un búfer compartido: si hay que matar al hijo por plazo, lo que
+        // llevaba escrito se devuelve (un nieto puede mantener la tubería abierta y no se espera).
+        let acumular = |origen: Option<Box<dyn Read + Send>>| {
+            let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let b2 = buf.clone();
+            let h = std::thread::spawn(move || {
+                if let Some(mut o) = origen {
+                    let mut tmp = [0u8; 8192];
+                    while let Ok(n) = o.read(&mut tmp) {
+                        if n == 0 {
+                            break;
+                        }
+                        b2.lock().unwrap().extend_from_slice(&tmp[..n]);
+                    }
+                }
+            });
+            (buf, h)
+        };
+        let (b_out, h_out) = acumular(hijo.stdout.take().map(|s| Box::new(s) as Box<dyn Read + Send>));
+        let (b_err, h_err) = acumular(hijo.stderr.take().map(|s| Box::new(s) as Box<dyn Read + Send>));
+        let limite = orden.timeout_s.map(|s| std::time::Instant::now() + std::time::Duration::from_secs(s as u64));
+        let mut vencido = false;
+        let estado = loop {
+            match traducir(hijo.try_wait(), "esperar al proceso")? {
+                Some(e) => break e,
+                None => {
+                    if limite.map_or(false, |l| std::time::Instant::now() >= l) {
+                        vencido = true;
+                        let _ = hijo.kill();
+                        break traducir(hijo.wait(), "esperar al proceso")?;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
             }
-            buf
-        });
-        if let Some(s) = fin_stdout.as_mut() {
-            let _ = s.read_to_end(&mut salida);
+        };
+        if !vencido {
+            let _ = h_out.join();
+            let _ = h_err.join();
+        } else {
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        error.extend(hilo_err.join().unwrap_or_default());
-
-        let estado = traducir(hijo.wait(), "esperar al proceso")?;
+        let (salida, error) = (b_out.lock().unwrap().clone(), b_err.lock().unwrap().clone());
         Ok(Salida {
-            codigo: estado.code(),
+            codigo: if vencido { None } else { estado.code() },
             stdout: salida,
             stderr: error,
-            motivo: if estado.code().is_none() {
+            motivo: if vencido {
+                Some(format!("plazo de {} s agotado; el proceso se mató", orden.timeout_s.unwrap_or(0)))
+            } else if estado.code().is_none() {
                 Some("terminado por señal".to_string())
             } else {
                 None

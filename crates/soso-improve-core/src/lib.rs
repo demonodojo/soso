@@ -57,6 +57,7 @@ extern crate alloc;
 
 use alloc::string::{String, ToString};
 
+pub mod agente;
 pub mod captura;
 pub mod caso;
 pub mod cli;

@@ -115,6 +115,13 @@ Banco host: `cargo test -p soso-update-core --features std` (208 pruebas).
 
 ## Trampas que ya costaron una tarde
 
+- **El manifiesto supera los 256 KiB** con fuentes y toolchain (0.3.10:
+  374 822 B). La lectura local por prefijo lo cortaba dentro de una entrada;
+  ahora se lee el tamaño completo y se rechaza una lectura corta. Tanto
+  `comprobar` como `aplicar` muestran el motivo del parser/validador (línea,
+  campo, ruta o tamaño/límite); conservar ese detalle para diagnosticar placa.
+  `test-update manifiesto` cubre lectura grande y rechazo con motivo sin
+  modificar rootfs, también ejecutado como fase aislada.
 - **`cargo xtask build` no compila `soso-update`.** Dio verde con dos errores
   dentro. La verificación real de userspace pasa por empaquetar
   (`package-usb-live` / `test-update`).

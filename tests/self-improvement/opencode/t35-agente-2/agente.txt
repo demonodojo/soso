@@ -1,0 +1,1 @@
+agente: modelo qwen2.5-coder-14b en 127.0.0.1:7441, checkout /home/jmdiez/Trabajo/demonodojo/soso/target/self-improvement/first-improvement/trabajo-agente

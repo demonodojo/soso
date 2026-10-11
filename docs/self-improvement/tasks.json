@@ -1288,21 +1288,24 @@
     {
       "id": "T35",
       "file": "T35-opencode-nativo.md",
-      "title": "Probar OpenCode nativo en modo no interactivo",
+      "title": "Agente nativo en modo no interactivo (antes: OpenCode nativo)",
       "milestone": "SI-6",
       "kind": "Integración condicionada al port",
-      "status": "pending",
+      "status": "in_progress",
       "depends_on": [
         "T19",
         "T34"
       ],
       "entry_conditions": [
-        "Todas las fichas N-xxx obligatorias de T34 están implementadas y sus sondas pasan."
+        "D10 (2026-10-11): ruta de agente nativo en Rust; el port de OpenCode/Bun queda aplazado (N-005..N-008, N-011 ya no son condición de entrada)."
       ],
       "contract_sections": "C3–C6",
       "context": [
-        "user/init/src/main.rs",
-        "user/soso-std-test/src/main.rs",
+        "crates/soso-improve-core/src/entorno.rs",
+        "crates/soso-improve-core/src/transporte.rs",
+        "crates/soso-improve-core/src/durable.rs",
+        "user/soso-improve/src/main.rs",
+        "tools/soso-improve/src/evaluar.rs",
         "xtask/src/test.rs"
       ],
       "native_validation": {
@@ -1313,6 +1316,17 @@
         ],
         "evidence": [],
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
+      },
+      "tracking": {
+        "updated_at": "2026-10-11T13:30:00+02:00",
+        "summary": "Redefinida por D10 (agente nativo en Rust). Diseño: módulo portable agente en soso-improve-core con Entorno/Conector/Durable/Reloj, herramientas read/grep/glob/reemplazar_texto/bash(lista blanca, sin shell), sesión durable por generaciones; adaptadores host y guest; caso xtask test-agent-native.",
+        "evidence": [
+          "docs/self-improvement/native/backlog.json",
+          "docs/self-improvement/seguimiento/T34.md",
+          "docs/self-improvement/seguimiento/T35.md"
+        ],
+        "blocker": "",
+        "next_step": "Implementar el módulo agente y sus pruebas con un modelo simulado; adaptador host; prueba con el 14B en el host (R03); adaptador guest y test-agent-native."
       }
     },
     {

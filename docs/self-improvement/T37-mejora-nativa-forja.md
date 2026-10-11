@@ -1,4 +1,4 @@
-# T37 — Cerrar una mejora desde OpenCode nativo con build remoto
+# T37 — Cerrar una mejora desde agente nativo (T35, D10) con build remoto
 
 **Hito:** SI-6 · **Tipo:** Integración · **Estado:** pendiente.
 
@@ -28,7 +28,7 @@ con la reproducción; no ampliar esta tarea de forma silenciosa.
 ## Pasos
 
 1. Preparar una tarea pequeña de userspace sobre /src/soso, con fuente base conocida y aceptación externa.
-2. OpenCode nativo consulta modelo local, edita archivos y llama sync/build de Forja; recibe diagnósticos sin que un humano copie errores al prompt.
+2. agente nativo (T35, D10) consulta modelo local, edita archivos y llama sync/build de Forja; recibe diagnósticos sin que un humano copie errores al prompt.
 3. Validar recibo T36, ejecutar el artefacto en un destino candidato y devolver resultado al agente.
 4. Comprobar que la tarea termina y que el propio OpenCode/servidor permanecen operativos.
 5. Registrar ubicaciones reales: agente=soso, inferencia=soso, build=host. Repetir la aceptación sobre candidato limpio.

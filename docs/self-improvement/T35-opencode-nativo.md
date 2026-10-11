@@ -1,12 +1,12 @@
-# T35 — Probar OpenCode nativo en modo no interactivo
+# T35 — Agente nativo en modo no interactivo (antes: OpenCode nativo)
 
-**Hito:** SI-6 · **Tipo:** Integración condicionada al port · **Estado:** pendiente.
+**Hito:** SI-6 · **Tipo:** Integración condicionada al port · **Estado:** en curso (2026-10-11): redefinida por la decisión **D10** (agente nativo en Rust en vez de portar OpenCode/Bun; ver [DECISIONES.md](DECISIONES.md) y [seguimiento/T35.md](seguimiento/T35.md)).
 
 **Dependencias:** [T19](T19-qemu-e2e.md), [T34](T34-tickets-port.md)
 
 ## Objetivo y entrega
 
-OpenCode como proceso soso realiza lectura/edición y persiste sesión. El build del sistema puede seguir remoto.
+**(D10)** Un **agente nativo en Rust** como proceso soso, en modo no interactivo, realiza lectura/búsqueda/edición con herramientas, ejecuta comprobaciones, habla con el modelo guest por la API de `soso-llm` y persiste su sesión. El build del sistema puede seguir remoto. Texto original de la ficha (port de OpenCode): «OpenCode como proceso soso realiza lectura/edición y persiste sesión»; aplazado.
 
 ## Contexto mínimo
 
@@ -20,7 +20,7 @@ tras comprobar las entregas de las dependencias.
 
 ## Archivos que se pueden cambiar
 
-Crear receta Rust de empaquetado reproducible con dependencias fijadas, consumible dentro de soso; aserciones compartidas con T49 y caso de laboratorio en `xtask/src/test_opencode_native.rs`. Si exige portar un empaquetador, crear ficha N-xxx concreta.
+Módulo portable `agente` en `crates/soso-improve-core` (no_std + alloc), adaptadores en `tools/soso-improve` (host) y `user/soso-improve` (guest); aserciones compartidas con T49 y caso de laboratorio en `xtask/src/test_agent_native.rs`.
 
 Se permiten los ajustes de lockfiles y documentación exigidos por C6.
 Si hace falta cambiar lógica fuera de este alcance, registrar una ficha nueva
@@ -28,7 +28,7 @@ con la reproducción; no ampliar esta tarea de forma silenciosa.
 
 ## Pasos
 
-1. Entrada obligatoria: artefacto OpenCode compilado para soso, manifiesto de build T32 y todos los N-xxx obligatorios en verde. Verificar ELF/ABI y dependencias antes de empaquetar.
+1. Entrada: `soso-improve` guest compilado con el módulo `agente`, imagen con `soso-llm` y el modelo de trabajo (D9); verificar ELF/ABI.
 2. Arrancar QEMU limpio con ese binario; ejecutar --version y después run contra el modelo guest. Registrar PID, versión, kernel y modelo para acreditar dónde corren.
 3. Ejecutar lectura y edición de un archivo temporal con herramientas del agente; validar contenido desde un proceso separado.
 4. Terminar y arrancar otra vez el agente; recuperar sesión almacenada y comprobar una conversación posterior sin pérdida.
@@ -36,7 +36,7 @@ con la reproducción; no ampliar esta tarea de forma silenciosa.
 
 ## Comprobación
 
-Nuevo caso `cargo xtask test-opencode-native` tras registrarlo. Afirmar ELF ejecutado en guest, cambios reales de archivo, respuesta del modelo y recuperación de sesión.
+Nuevo caso `cargo xtask test-agent-native` tras registrarlo. Afirmar ELF ejecutado en guest, cambios reales de archivo, respuesta del modelo y recuperación de sesión.
 
 Los comandos de crates, scripts o subcomandos nuevos se ejecutan **después de
 crearlos en esta tarea o en sus dependencias**. Guardar salida y exit code;
@@ -48,7 +48,7 @@ los pesos reales/hardware necesarios son entradas, no fixtures inventados.
 - [ ] Comprobaciones ejecutadas y evidencia guardada según C5–C6.
 - [ ] Resultado entregado con límites y dependencias restantes explícitos.
 
-Un CLI puente o un OpenCode en Linux conectado a SSH no satisface este cierre. Si faltan N-xxx, informar la dependencia exacta.
+Un CLI puente o un agente en Linux conectado a SSH no satisface este cierre.
 
 Entregar `target/self-improvement/tasks/T35/resultado.md` y actualizar la
 fila de [README.md](README.md) al cerrar. No avanzar automáticamente al resto

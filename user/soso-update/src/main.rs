@@ -709,14 +709,47 @@ fn load_manifest(opts: &Opts) -> Result<Manifest, &'static str> {
 
 fn load_manifest_con_bytes(opts: &Opts) -> Result<(Manifest, String), &'static str> {
     let destino = opts.origen.artefacto("manifest.txt");
-    let data = if opts.origen.es_local() {
-        read_file(&destino, 256 * 1024).ok_or("manifest local")?
+    let bytes = if opts.origen.es_local() {
+        // El manifiesto ya supera 256 KiB con las fuentes y el toolchain.
+        // Leer sólo un prefijo puede rechazar una release válida o, peor,
+        // aceptar un inventario incompleto si el corte cae entre líneas.
+        let mut st = soso_abi::Stat::default();
+        let r = sys::stat(&destino, &mut st);
+        if r < 0 {
+            println!("  manifiesto: {destino}: stat falló (errno {})", -r);
+            return Err("no se pudo leer el manifiesto local");
+        }
+        read_file_span(&destino, 0, st.size).ok_or_else(|| {
+            println!("  manifiesto: {destino}: no se pudieron leer los {} B completos", st.size);
+            "lectura del manifiesto local incompleta"
+        })?
     } else {
-        let bytes = net::https_get_bytes(&destino, None)?;
-        String::from_utf8(bytes).map_err(|_| "manifest UTF-8")?
+        net::https_get_bytes(&destino, None)?
     };
-    let m = Manifest::parse(&data).map_err(|_| "manifest inválido")?;
-    m.validate().map_err(|_| "manifest no válido")?;
+    let data = String::from_utf8(bytes).map_err(|e| {
+        println!("  manifiesto: {destino}: UTF-8 inválido en el byte {}", e.utf8_error().valid_up_to());
+        "manifest UTF-8"
+    })?;
+    let m = Manifest::parse(&data).map_err(|e| {
+        println!("  manifiesto: {destino} ({} B): {e}", data.len());
+        // Una cabecera HTML o un prefijo HTTP no es lo mismo que una
+        // release mal formada. Acotar y escapar evita volcar el documento
+        // entero o secuencias de control del servidor a la consola.
+        let linea = match &e {
+            manifest::ParseError::BadMagic => data.lines().find(|l| !l.trim().is_empty()),
+            manifest::ParseError::BadLine { line, .. } => data.lines().nth(line - 1),
+            _ => None,
+        };
+        if let Some(linea) = linea {
+            let muestra: String = linea.chars().take(160).collect();
+            println!("  contenido recibido: {muestra:?}");
+        }
+        "manifest inválido"
+    })?;
+    m.validate().map_err(|e| {
+        println!("  manifiesto: versión {} ({} B): {e}", m.version_raw, data.len());
+        "manifest no válido"
+    })?;
     comprobar_compat(&m)?;
     Ok((m, data))
 }
