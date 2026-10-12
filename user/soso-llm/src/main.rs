@@ -731,7 +731,6 @@ fn ask_layer_tick(layer: u32, n: u32) {
             on_gpu
         );
     }
-    ask_keepalive_dot();
 }
 
 /// Punto de espera al cliente y traza en fd 3 al entrar en una capa.
@@ -745,7 +744,6 @@ fn ask_layer_enter(layer: u32, n: u32) {
         };
         libsoso::logln!("askd: forward capa 1/{n} (+{total} ms inferencia)");
     }
-    ask_keepalive_dot();
 }
 
 /// Generación para la API HTTP guest: sin stdout ni protocolo ask (T16).
@@ -847,8 +845,8 @@ pub(crate) fn generar_tokens(
         }
         // askd: sin clock_ms/refresh_mem (syscall en el matvec AVX2) y sin
         // planificador por token. `run` sigue con el camino cronometrado.
-        // Un punto por capa mientras espera: Mixtral tarda minutos en el
-        // prefill y, si no hay tráfico, el cliente corta a los 4 min.
+        // Un punto al arrancar el prefill (y otros en on_prefill): sin tráfico,
+        // el cliente corta a los ~4 min.
         if let Some(fd) = fd_out {
             let t_prefill = sys::uptime_ms();
             keepalive_dot(fd);
