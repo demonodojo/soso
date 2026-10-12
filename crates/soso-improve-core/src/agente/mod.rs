@@ -42,6 +42,9 @@ pub struct Config {
     /// Cuántas veces se le recuerda al modelo, sin gastar una llamada a herramienta, que no ha acabado: respuesta vacía,
     /// llamada escrita como texto, cambio sin comprobar o comprobación fallida. Se cuentan en el informe.
     pub empujones: usize,
+    /// Cuántas veces se acepta que el servidor rechace la respuesta del modelo por mal formada (`400`: texto tras
+    /// una llamada, argumentos que no son JSON…). Se le devuelve el motivo y se reintenta; pasado el tope, es error.
+    pub errores_de_formato: usize,
 }
 
 impl Config {
@@ -56,6 +59,7 @@ impl Config {
             plazo_total_ms: 6 * 60 * 60 * 1000,
             max_llamadas: None,
             empujones: 2,
+            errores_de_formato: 5,
         }
     }
 }
@@ -83,6 +87,8 @@ pub struct Informe {
     pub error: Option<String>,
     /// Recordatorios enviados al modelo (ver `Config::empujones`).
     pub empujones: usize,
+    /// Respuestas del modelo que el servidor rechazó por mal formadas y se le devolvieron para que se corrigiera.
+    pub formato: usize,
     /// Conversación completa (formato de la API), para auditar.
     pub mensajes: Vec<Value>,
 }
@@ -120,10 +126,10 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
     sesion::normalizar(&mut mensajes);
     if sesion::terminada(&mensajes) {
         let r = mensajes.last().and_then(|m| m["content"].as_str()).unwrap_or("").to_string();
-        return Informe { fin: Fin::Terminado, turnos: 0, llamadas: 0, respuesta_final: r, error: None, empujones: 0, mensajes };
+        return Informe { fin: Fin::Terminado, turnos: 0, llamadas: 0, respuesta_final: r, error: None, empujones: 0, formato: 0, mensajes };
     }
     let t0 = reloj.ahora_ms();
-    let mut informe = Informe { fin: Fin::SinTurnos, turnos: 0, llamadas: 0, respuesta_final: String::new(), error: None, empujones: 0, mensajes: Vec::new() };
+    let mut informe = Informe { fin: Fin::SinTurnos, turnos: 0, llamadas: 0, respuesta_final: String::new(), error: None, empujones: 0, formato: 0, mensajes: Vec::new() };
     for _ in 0..cfg.max_turnos {
         let gastado = reloj.ahora_ms().saturating_sub(t0);
         if gastado >= cfg.plazo_total_ms {
@@ -139,6 +145,18 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
         informe.turnos += 1;
         let cuerpo = match modelo.completar(&peticion, plazo) {
             Ok(c) => c,
+            Err(err) if err.to_string().contains("Some(400)") && informe.formato < cfg.errores_de_formato => {
+                // El servidor descartó una respuesta mal formada: no entra en el historial. Se le dice al modelo qué
+                // estuvo mal (el motivo viene del propio servidor) y se le deja corregirse.
+                informe.formato += 1;
+                let t = err.to_string();
+                let motivo = t.split("\"message\":\"").nth(1).and_then(|r| r.split('"').next()).unwrap_or("formato inválido");
+                mensajes.push(json!({"role": "user", "content": format!(
+                    "Tu última respuesta no fue una llamada válida a una herramienta ({motivo}). Hazla de nuevo: una sola llamada, con los argumentos como un objeto JSON válido, y sin texto antes ni después."
+                )}));
+                al_turno(e, &mensajes);
+                continue;
+            }
             Err(err) => {
                 informe.fin = Fin::ErrorModelo;
                 informe.error = Some(err.to_string());

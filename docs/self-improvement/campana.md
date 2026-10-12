@@ -1,6 +1,6 @@
 # Campaña de diez tareas (T29)
 
-**Estado:** terminada (2026-10-11). **NO-GO**: 1 aceptada de 10 en la ejecución 2 (la 1 se perdió por infraestructura). SI-4 **no** se cierra. Los resultados se añaden abajo; no se reescribe lo fijado.
+**Estado:** terminada (2026-10-12). **NO-GO** en las tres campañas: 1, 2 y 3 aceptadas de 10 con el agente cada vez mejorado (ver «Balance» al final). SI-4 **no** se cierra. Los resultados se añaden abajo; no se reescribe lo fijado.
 
 ## Lo que se fijó antes de ejecutar (no se cambia tras ver resultados)
 - Tareas, orden, límites e inyecciones: [`tests/self-improvement/campaign.json`](../../tests/self-improvement/campaign.json), sha256 `967ac3f73ca9e0beb7d48c9c4780a43da2f499d91db54df7a7f0dd1aac533df0`.
@@ -73,7 +73,7 @@ Misma selección, mismo modelo, mismo agente; sólo cambia el cliente (espera an
 
 # Campaña 2 (`campana-si4-2`)
 
-**Estado:** en ejecución (lanzada el 2026-10-11 22:32). Es una campaña **nueva**: la anterior no se retoca.
+**Estado:** terminada (2026-10-11 22:32–00:40). **NO-GO: 2 aceptadas de 10** (R06, R08). Es una campaña **nueva**: la anterior no se retoca.
 
 ## Lo que se fijó antes de ejecutar
 - [`tests/self-improvement/campaign-2.json`](../../tests/self-improvement/campaign-2.json), sha256 `3c16c600ea155bf41ae241899612eb3b588e22cae903f594909be202ddb68fd9`. **Mismas** diez tareas, orden, límites, inyecciones (R02 a los 75 s, R07 a los 45 s), modelo (14B, T=0) y criterio que `campana-si4-1`; sólo cambia el agente.
@@ -86,4 +86,68 @@ Misma selección, mismo modelo, mismo agente; sólo cambia el cliente (espera an
 - **Sin ensayo previo con tareas de la campaña** (el arnés ya estaba probado): el agente mejorado se estrena en la campaña.
 
 ## Resultados
-(pendiente)
+Evidencia: `tests/self-improvement/campana/ejecucion-3/` (el directorio se llama así por el orden de ejecuciones: ejecución 1 y 2 de `campana-si4-1`, ésta es la tercera). `registros-originales/` conserva lo que escribió el arnés; `registros/` lleva dos correcciones **hechas después y anotadas en cada registro**: el fallo de cinco tareas pasa de «infraestructura» a «protocolo», y el recuento de intentos/recuperación de R02 y R07 se recalcula desde `informe.txt`.
+
+| tarea | resultado | de quién | intentos | seg | qué pasó |
+|---|---|---|---|---|---|
+| R01 | error | protocolo | 1 | 519 | respuesta con argumentos que no son un objeto JSON → el servidor la rechazó con 400 y el agente se rindió |
+| R02 | error | protocolo | 2 | 1051 | **inyección** (kill a los 75 s); reanudó bien; el intento 1 acabó en un 400 de formato |
+| R03 | error | protocolo | 1 | 644 | 400: «varias llamadas o texto tras una llamada en un turno» |
+| R04 | bloqueada | protocolo | 1 | 814 | nunca editó (el recordatorio no bastó) |
+| R05 | error | protocolo | 1 | 868 | 400 de formato |
+| **R06** | **aceptada** | – | 1 | 475 | con `insertar` (antes: no compilaba) |
+| R07 | error | protocolo | 2 | 1259 | **inyección** (kill a los 45 s); reanudó bien; 400 de formato |
+| **R08** | **aceptada** | – | 1 | 328 | entidades añadidas dentro del `match` (antes: tras `_ => None`) |
+| R09 | rechazada | programación | 1 | 1041 | editó y la prueba reservada no pasa |
+| R10 | rechazada | programación | 1 | 626 | editó y la prueba reservada no pasa |
+
+**Resultado: 2 de 10 → NO-GO.** Base final (R06+R08 promovidas): `cargo test -p soso-http -p soso-web-core` sale 0. Recuperación (T27) acreditada otra vez con procesos reales (intento 0 cerrado como «caída sin efectos», intento 1 lanzado). Fallos: 6 de protocolo, 2 de programación, 0 de infraestructura.
+
+**Lectura.** Las mejoras de edición funcionan donde se probaron: el equilibrio de delimitadores y `insertar` convirtieron dos fallos de compilación (R06, R08) en aceptaciones, y los rechazos por llaves de más desaparecieron. Lo que mató cinco tareas fue otra cosa: el servidor **rechaza con 400** una respuesta mal formada del modelo (texto tras una llamada, varias llamadas, argumentos que no son JSON) y el agente trataba ese 400 como fin de la tarea en vez de decírselo al modelo. Eso es del agente, y es lo siguiente a corregir.
+
+---
+
+# Campaña 3 (`campana-si4-3`)
+
+**Estado:** terminada (2026-10-12 00:42–03:14). **NO-GO: 3 aceptadas de 10** (R03, R06, R08). Nueva campaña; las anteriores no se retocan.
+
+## Lo que se fijó antes de ejecutar
+- `tests/self-improvement/campaign-3.json` (hash en el propio documento de lanzamiento, abajo). Mismas diez tareas, orden, límites, inyecciones, modelo y criterio.
+- **Un solo cambio en el agente respecto a la campaña 2:** cuando el servidor rechaza con 400 la respuesta del modelo por mal formada, el agente **le devuelve el motivo literal del servidor** («varias llamadas o texto tras una llamada…») y le deja reintentar, hasta 5 veces por tarea (`Config::errores_de_formato`); pasado el tope es error. El arnés clasifica el 400 como **protocolo** (era «infraestructura»).
+
+## Resultados
+Evidencia: `tests/self-improvement/campana/ejecucion-4/` (misma organización que la anterior; las mismas dos correcciones anotadas en R02 y R07: intentos recontados desde `informe.txt` y herramientas/tokens sin medir por el intento matado).
+
+| tarea | resultado | de quién | intentos | seg | qué pasó |
+|---|---|---|---|---|---|
+| R01 | rechazada | programación | 1 | 668 | usó `insertar` y `reemplazar_texto` (3 recordatorios) y acabó escribiendo la llamada como texto; la prueba reservada no pasa |
+| R02 | rechazada | programación | 2 | 1466 | **inyección** (kill a los 75 s) recuperada; tras 3 recordatorios sigue sin compilar (`Error::BadCrc` no existe) |
+| **R03** | **aceptada** | – | 1 | 734 | |
+| R04 | bloqueada | protocolo | 1 | 688 | leyó y buscó; con 2 recordatorios nunca editó |
+| R05 | rechazada | programación | 1 | 1294 | añadió `split` con referencias a `pending` que no existe en el método; 4 recordatorios; se rinde |
+| **R06** | **aceptada** | – | 1 | 472 | |
+| R07 | bloqueada | protocolo | 2 | 1774 | **inyección** (kill a los 45 s) recuperada; el equilibrio de llaves rechazó su edición y no insistió |
+| **R08** | **aceptada** | – | 1 | 332 | |
+| R09 | rechazada | programación | 1 | 1049 | sus pruebas pasan (exit 0) pero la reservada no: entendió a medias el enunciado |
+| R10 | rechazada | programación | 1 | 624 | idem: compila y las pruebas del crate pasan, la reservada no |
+
+**Resultado: 3 de 10 → NO-GO.** Recuperación (T27) acreditada con procesos reales (R02, R07). Base final (R03+R06+R08): `cargo test -p soso-http -p soso-web-core` sale 0. Fallos: 2 de protocolo, 5 de programación, 0 de infraestructura. Del 400 de formato ya no muere ninguna tarea.
+
+---
+
+# Balance y advertencia metodológica
+
+| ejecución | agente | aceptadas |
+|---|---|---|
+| `campana-si4-1` / ej. 1 | v1 | 0 (cinco perdidas por infraestructura: 429) |
+| `campana-si4-1` / ej. 2 | v1 + espera ante 429 | **1** (R03) |
+| `campana-si4-2` | + equilibrio de llaves, `insertar`, recordatorios | **2** (R06, R08) |
+| `campana-si4-3` | + devolver el 400 de formato al modelo | **3** (R03, R06, R08) |
+
+**Estas tres campañas no son tres medidas independientes.** Cada cambio del agente se decidió **mirando los fallos de las mismas diez tareas**, y esas tareas (sobre todo R06–R10, que escribí yo) ya no son un banco ciego para este agente. Que la cifra suba de 1 a 3 enseña que los cambios arreglan fallos reales y generales (llaves de más, formato de las llamadas); **no** enseña cuánto resolvería el agente tareas nuevas. Por la misma razón, **un GO obtenido retocando el agente sobre estas diez tareas no valdría como acreditación de SI-4**: habría que usar tareas **nuevas** fijadas de antemano. Por eso se para aquí.
+
+**Lo que queda por hacer, en orden de rentabilidad** (según los fallos de la campaña 3):
+1. R09 y R10 compilan y pasan sus propias pruebas pero no la reservada: son fallos de **comprensión del enunciado** (casos límite); más intentos con el resultado de una **comprobación propia más estricta** (que el agente escriba una prueba por cada punto del enunciado) es la palanca natural.
+2. R04 y R07 **no editan**: el modelo lee y busca y se queda; un recordatorio más específico («ya sabes dónde está: edita») o más intentos.
+3. R01, R02, R05: el 14B no llega a código que compile con varias APIs a la vez; ahí el modelo pesa más que el agente.
+4. Un banco **nuevo** de tareas para la acreditación (no estas diez).

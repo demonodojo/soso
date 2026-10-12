@@ -89,7 +89,7 @@ elif "BLOQUEADA" in cont:
 elif "Rechazado" in cont or estado=="rechazada": res,fallo="rechazada","programacion"
 else:
     res="error"; nota=cont.strip().splitlines()[-1][:200] if cont.strip() else "sin salida"
-    fallo="protocolo" if re.search(r"LimiteHerramientas|LimitePasos",cont) else "infraestructura"
+    fallo="protocolo" if re.search(r"LimiteHerramientas|LimitePasos|Some\(400\)",cont) else "infraestructura"
 reg={"id":t,"resultado":res,"intentos":max(n,1) if res!="error" or n else 0,"segundos":seg,"nota":nota}
 if fallo: reg["fallo"]=fallo
 if hok and n: reg["herramientas"]=herr

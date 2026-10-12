@@ -459,3 +459,28 @@ fn una_comprobacion_fallida_empuja_a_corregir_y_los_recordatorios_tienen_tope() 
     assert!(m.1[2].contains("ha fallado"));
     assert_eq!(inf.respuesta_final, "me rindo");
 }
+
+#[test]
+fn una_respuesta_mal_formada_rechazada_con_400_se_devuelve_al_modelo_con_el_motivo() {
+    struct Mal400(Vec<Option<Value>>, Vec<String>);
+    impl Modelo for Mal400 {
+        fn completar(&mut self, p: &str, _t: u64) -> Resultado<String> {
+            self.1.push(p.to_string());
+            match self.0.remove(0) {
+                None => Err(Error::entorno("el servidor contestó Some(400): {\"error\":{\"message\":\"varias llamadas o texto tras una llamada en un turno\",\"code\":\"invalid_request\"}}")),
+                Some(m) => Ok(json!({"choices": [{"message": m}]}).to_string()),
+            }
+        }
+    }
+    let mut e = repo();
+    let mut m = Mal400(vec![None, Some(llamada("read", json!({"filePath": "README.md"}))), Some(json!({"role": "assistant", "content": "fin"}))], vec![]);
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), "t", &mut |_, _| {});
+    assert_eq!((inf.fin, inf.formato, inf.llamadas), (Fin::Terminado, 1, 1), "{:?}", inf.error);
+    assert!(m.1[1].contains("varias llamadas o texto tras una llamada") && m.1[1].contains("una sola llamada"), "el motivo del servidor llega al modelo");
+    // Con el tope agotado es un error del modelo, no un bucle.
+    let mut cfg = Config::nueva("m", "s");
+    cfg.errores_de_formato = 2;
+    let mut m = Mal400(vec![None, None, None, None], vec![]);
+    let inf = correr(&mut repo(), &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg, "t", &mut |_, _| {});
+    assert_eq!((inf.fin, inf.formato), (Fin::ErrorModelo, 2));
+}

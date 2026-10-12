@@ -1,6 +1,6 @@
 # T29 — Ejecutar una campaña reproducible de diez tareas
 
-**Hito:** SI-4 · **Tipo:** Integración y evaluación · **Estado:** **hecha con NO-GO publicado** (2026-10-11; 1 de 10 aceptadas; [campaña](campana.md), [seguimiento](seguimiento/T29.md)). SI-4 no se cierra.
+**Hito:** SI-4 · **Tipo:** Integración y evaluación · **Estado:** **hecha con NO-GO publicado** (2026-10-12; tres campañas: 1, 2 y 3 de 10 aceptadas; [campaña](campana.md), [seguimiento](seguimiento/T29.md)). SI-4 no se cierra.
 
 **Dependencias:** [T22](T22-primera-mejora.md), [T27](T27-reanudacion.md), [T28](T28-conocimiento.md), [T49](T49-pruebas-guest.md)
 

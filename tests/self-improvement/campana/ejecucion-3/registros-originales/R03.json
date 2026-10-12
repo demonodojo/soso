@@ -1,0 +1,10 @@
+{
+ "id": "R03",
+ "resultado": "error",
+ "intentos": 1,
+ "segundos": 644,
+ "nota": "error: entorno: el intento no termin\u00f3: ErrorModelo entorno: el servidor contest\u00f3 Some(400): {\"error\":{\"message\":\"historial inv\u00e1lido: varias llamadas o texto tras una llamada en un turno\",\"type\":\"inval",
+ "fallo": "infraestructura",
+ "herramientas": 5,
+ "tokens": 20283
+}

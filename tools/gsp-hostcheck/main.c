@@ -819,6 +819,12 @@ static int check_family_caps(void)
                                w[10], pcas_a);
                         return -1;
                     }
+                    if (w[11] != (uint32_t)(G4F_QMD_VRAM_VA >> 8)) {
+                        printf("FALLO: PCAS Ampere apunta a 0x%08x; el QMD va "
+                               "en VRAM 0x%llx\n",
+                               w[11], (unsigned long long)G4F_QMD_VRAM_VA);
+                        return -1;
+                    }
                     if (w[12] != pcas2) {
                         printf("FALLO: Ampere debe cerrar con SEND_SIGNALING_PCAS2_B "
                                "(INVALIDATE_COPY_SCHEDULE), hdr=%08x\n", w[12]);

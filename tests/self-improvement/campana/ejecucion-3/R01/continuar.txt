@@ -1,0 +1,2 @@
+  base de «campana-R01» publicada (generación 0)
+error: entorno: el intento no terminó: ErrorModelo entorno: el servidor contestó Some(400): {"error":{"message":"argumentos que no son un objeto JSON: call_4","type":"invalid_request_error","code":"invalid_request"}}

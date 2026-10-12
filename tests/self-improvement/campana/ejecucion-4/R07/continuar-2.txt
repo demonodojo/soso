@@ -1,0 +1,3 @@
+  ejecutado: r-R07/lanzar/0
+tarea: BLOQUEADA — el candidato no cambió nada
+  comprobación necesaria: revisar el registro del intento

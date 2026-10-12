@@ -1,0 +1,28 @@
+{
+  "total": 10,
+  "aceptadas": 2,
+  "rechazadas": 2,
+  "bloqueadas": 1,
+  "errores": 5,
+  "por_fallo": {
+    "protocolo": 6,
+    "programacion": 2
+  },
+  "segundos_total": 7625,
+  "segundos_por_aceptada": 3812,
+  "tokens_por_aceptada": null,
+  "intentos_por_aceptada": 6.0,
+  "herramientas_por_aceptada": null,
+  "sin_medir": [
+    "tokens: no se midió en R02",
+    "herramientas: no se midió en R02"
+  ],
+  "inyecciones": 2,
+  "recuperaciones_acreditadas": 2,
+  "base_final_verde": true,
+  "minimo_aceptadas": 5,
+  "cumple_si4": false,
+  "motivos_no_cumple": [
+    "2 aceptadas de 10: se exigen al menos 5"
+  ]
+}

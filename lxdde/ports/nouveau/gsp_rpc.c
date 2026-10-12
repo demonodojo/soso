@@ -500,6 +500,18 @@ int gsp_rpc_rc_triggered_log(const void *payload, uint32_t len)
         return -1;
     }
     fault = ((uint64_t)msg->mmuFaultAddrHi << 32) | (uint64_t)msg->mmuFaultAddrLo;
+    /* La GA104 imprime mmuFaultType fuera de 0..15. `partitionAttributionId`
+     * es NvU16 justo antes de los u32 de la falta: si el firmware va empaquetado
+     * y este struct no, lo y type salen corridos. Estas 12 palabras son el
+     * encabezado crudo (hasta el tamaño del journal) para leerlas sin el pad. */
+    if (len >= 48u) {
+        const uint32_t *w = (const uint32_t *)payload;
+
+        lx_printk("nouveau-lx: rc: hdr %08x %08x %08x %08x %08x %08x "
+                  "%08x %08x %08x %08x %08x %08x\n",
+                  w[0], w[1], w[2], w[3], w[4], w[5],
+                  w[6], w[7], w[8], w[9], w[10], w[11]);
+    }
     lx_printk("nouveau-lx: rc: engn=%08x chid=%u type=%u (%s) scope=%u part=%u\n",
               msg->nv2080EngineType, msg->chid, msg->exceptType,
               rc_except_name(msg->exceptType), msg->scope,

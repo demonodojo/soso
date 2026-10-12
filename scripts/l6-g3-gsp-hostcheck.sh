@@ -162,6 +162,10 @@ if ! grep -q 'NVC7C0_INVALIDATE_SKED_CACHES' "$compute" ||
     echo "FALLO: Ampere tiene que invalidar el SKED y rellenar PROGRAM_PREFETCH" >&2
     exit 1
 fi
+if ! grep -q 'G4F_QMD_VRAM_VA' "$compute"; then
+    echo "FALLO: el PCAS Ampere tiene que apuntar al QMD en VRAM (G4F_QMD_VRAM_VA)" >&2
+    exit 1
+fi
 if [[ -d "$root/lxdde/reference" ]]; then
     qmd_hdrs=$(find "$root/lxdde/reference" -iname '*qmd*.h' 2>/dev/null | wc -l | tr -d ' ')
     cla0c0="$root/lxdde/reference/open-gpu-kernel-modules-570.144/src/common/sdk/nvidia/inc/class/cla0c0qmd.h"

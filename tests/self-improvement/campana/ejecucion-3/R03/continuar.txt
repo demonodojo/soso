@@ -1,0 +1,2 @@
+  base de «campana-R03» publicada (generación 0)
+error: entorno: el intento no terminó: ErrorModelo entorno: el servidor contestó Some(400): {"error":{"message":"historial inválido: varias llamadas o texto tras una llamada en un turno","type":"invalid_request_error","code":"invalid_request"}}

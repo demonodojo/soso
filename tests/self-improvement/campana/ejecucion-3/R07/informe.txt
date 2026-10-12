@@ -1,0 +1,4 @@
+ejecución r-R07 · tarea R07 · estado bloqueada
+  intento 0 bloqueada    herramientas ? (caída sin efectos en la copia) tokens ? (caída sin efectos en la copia) artefactos 0
+  intento 1 bloqueada    herramientas 4 tokens 16336 artefactos 1
+  intentos restantes: 0

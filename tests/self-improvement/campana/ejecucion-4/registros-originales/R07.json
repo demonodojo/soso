@@ -1,0 +1,14 @@
+{
+ "id": "R07",
+ "resultado": "bloqueada",
+ "intentos": 1,
+ "segundos": 1774,
+ "nota": "el candidato no cambi\u00f3 nada",
+ "fallo": "protocolo",
+ "herramientas": 6,
+ "tokens": 62660,
+ "inyeccion": {
+  "que": "agente matado (kill -9) y coordinador reiniciado",
+  "recuperada": true
+ }
+}

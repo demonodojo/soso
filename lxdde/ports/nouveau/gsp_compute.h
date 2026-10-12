@@ -24,8 +24,13 @@
 #define G10_SASS_VA   (GSP_VA_BASE + 0x40000ull)     /* VRAM: blob SASS de softmax_rows */
 #define G11_SASS_VA   (GSP_VA_BASE + 0x50000ull)     /* VRAM: blob SASS de layernorm_rows */
 #define G_SASS_SLOT   0x10000ull                     /* hueco de los kernels cuantizados */
-/* QMD v05 (384 B) dentro de `cp->data`; SEND_PCAS_A exige alineación >>8. */
-#define G4F_QMD_OFF   0x1000u
+/* QMD v05 (384 B) dentro de `cp->data`; SEND_PCAS_A exige alineación >>8.
+ * En Ampere el SKED no traduce ese sysmem (PBDMA_HANG_DURING_HTE en la GA104,
+ * 2026-10-11, con el QMD ya en v03 y con prefetch). La página se copia con el
+ * CE al hueco libre de los 2 MiB de VRAM —entre el matvec (~+0x3280) y
+ * G7_SASS_VA (+0x10000)— y el PCAS apunta ahí. El semáforo se queda en sysmem. */
+#define G4F_QMD_OFF       0x1000u
+#define G4F_QMD_VRAM_VA   (GSP_VA_BASE + 0xE000ull)
 
 /* Sysmem coherente propia del compute, detrás de los búferes del canal. La CPU
  * escribe aquí directamente: sin BAR1 no hay ventana a la VRAM, así que el
@@ -130,6 +135,9 @@ struct gsp_compute {
     /* Canal de GR0: un objeto de compute NO se puede colgar del canal del CE
      * (ver NV2080_ENGINE_TYPE_GR0 en nvrm_r570.h). */
     struct gsp_chan *chan;
+    /* CE del bring-up. En Ampere copia el QMD de sysmem a VRAM antes del PCAS.
+     * Lo deja `gsp_compute_stage_sass`, que es quien tiene el puntero. */
+    struct gsp_ce *ce;
     uint32_t handle;
     uint32_t cls;      /* la que aceptó RM; la elige el catálogo del chip */
     struct gsp_kernel saxpy;
