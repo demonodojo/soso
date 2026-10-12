@@ -1,0 +1,466 @@
+//! Puente Rust ↔ nouveau-lx (GSP + compute G4/G5/G6).
+
+use core::ffi::c_void;
+
+unsafe extern "C" {
+    fn lx_nouveau_gsp_is_ready() -> i32;
+    fn lx_nouveau_gsp_phase() -> *const u8;
+    fn lx_nouveau_compute_saxpy(a: f32, x: *const f32, y: *mut f32, n: u32) -> i32;
+    fn lx_nouveau_compute_matvec_f32(
+        w: *const f32,
+        rows: u32,
+        cols: u32,
+        x: *const f32,
+        y: *mut f32,
+    ) -> i32;
+    fn lx_nouveau_compute_matvec_resident(
+        w_va: u64,
+        rows: u32,
+        cols: u32,
+        x: *const f32,
+        y: *mut f32,
+    ) -> i32;
+    fn lx_nouveau_compute_matvec_q_resident(
+        w_va: u64,
+        dtype: u32,
+        rows: u32,
+        cols: u32,
+        x: *const f32,
+        y: *mut f32,
+    ) -> i32;
+    fn lx_nouveau_compute_matmul_resident(
+        w_va: u64,
+        rows: u32,
+        cols: u32,
+        n: u32,
+        x: *const f32,
+        y: *mut f32,
+    ) -> i32;
+    fn lx_nouveau_compute_softmax_rows(x: *mut f32, rows: u32, cols: u32) -> i32;
+    fn lx_nouveau_compute_layernorm_rows(
+        x: *mut f32,
+        weight: *const f32,
+        bias: *const f32,
+        rows: u32,
+        cols: u32,
+        eps: f32,
+    ) -> i32;
+    fn lx_nouveau_compute_rmsnorm_rows(
+        x: *mut f32,
+        weight: *const f32,
+        rows: u32,
+        cols: u32,
+        eps: f32,
+    ) -> i32;
+    fn lx_nouveau_compute_wait(sem_slot: u32) -> i32;
+    fn lx_nouveau_compute_batch_begin();
+    fn lx_nouveau_compute_batch_end();
+    fn lx_nouveau_enqueue_matvec_resident(
+        w_va: u64,
+        rows: u32,
+        cols: u32,
+        x: *const f32,
+        y_va: u64,
+        sem_slot: u32,
+    ) -> i32;
+    fn lx_nouveau_enqueue_matvec_q_resident(
+        w_va: u64,
+        dtype: u32,
+        rows: u32,
+        cols: u32,
+        x: *const f32,
+        y_va: u64,
+        sem_slot: u32,
+    ) -> i32;
+    fn lx_nouveau_vram_total() -> u64;
+    fn lx_nouveau_gpu_name() -> *const u8;
+    fn lx_nouveau_device_buf_alloc(size: u64) -> u64;
+    fn lx_nouveau_device_bufs_ready() -> i32;
+    // `lx_nouveau_device_buf_upload` (sin offset) existe en la capa C y la usa el
+    // hostcheck; desde aquí siempre se sube con offset, aunque sea 0.
+    fn lx_nouveau_device_buf_upload_at(
+        va: u64,
+        offset: u64,
+        src: *const c_void,
+        size: u64,
+    ) -> i32;
+    fn lx_nouveau_device_buf_upload_dma(
+        va: u64,
+        offset: u64,
+        phys: *const u64,
+        npages: u32,
+        src_off: u32,
+        size: u64,
+    ) -> i32;
+    fn lx_nouveau_device_buf_free(va: u64) -> i32;
+    fn lx_nouveau_device_vram_free() -> u64;
+    fn lx_nouveau_device_pool_free() -> u64;
+    fn lx_nouveau_device_pt_free() -> u32;
+    fn lx_nouveau_set_boot0(boot0: u32, device_id: u32);
+    fn lx_nouveau_gsp_fini() -> i32;
+}
+
+pub fn notify_boot0(boot0: u32, device_id: u16) {
+    unsafe {
+        lx_nouveau_set_boot0(boot0, device_id as u32);
+    }
+}
+
+pub fn gsp_ready() -> bool {
+    unsafe { lx_nouveau_gsp_is_ready() != 0 }
+}
+
+pub fn gsp_phase() -> &'static str {
+    unsafe {
+        let p = lx_nouveau_gsp_phase();
+        if p.is_null() {
+            return "?";
+        }
+        let mut len = 0usize;
+        while *p.add(len) != 0 && len < 32 {
+            len += 1;
+        }
+        core::str::from_utf8(core::slice::from_raw_parts(p, len)).unwrap_or("?")
+    }
+}
+
+pub fn vram_total() -> u64 {
+    unsafe { lx_nouveau_vram_total() }
+}
+
+pub fn gpu_name() -> &'static str {
+    unsafe {
+        let p = lx_nouveau_gpu_name();
+        if p.is_null() || *p == 0 {
+            return "";
+        }
+        let mut len = 0usize;
+        while *p.add(len) != 0 && len < 64 {
+            len += 1;
+        }
+        core::str::from_utf8(core::slice::from_raw_parts(p, len)).unwrap_or("")
+    }
+}
+
+pub fn device_vram_free() -> u64 {
+    unsafe { lx_nouveau_device_vram_free() }
+}
+
+pub fn device_vram_pool_free() -> u64 {
+    unsafe { lx_nouveau_device_pool_free() }
+}
+
+pub fn device_g6_pt_free() -> u32 {
+    unsafe { lx_nouveau_device_pt_free() }
+}
+
+/// ¿El pool de búferes en VRAM existe? Más estricto que `gsp_ready()`, que es
+/// cierto con el GSP arrancado aunque no haya llegado a haber canal ni CE.
+pub fn device_bufs_ready() -> bool {
+    unsafe { lx_nouveau_device_bufs_ready() != 0 }
+}
+
+pub fn device_buf_alloc(size: u64) -> Result<u64, ()> {
+    let va = unsafe { lx_nouveau_device_buf_alloc(size) };
+    if va == 0 {
+        Err(())
+    } else {
+        Ok(va)
+    }
+}
+
+/// Sube `data` a `offset` bytes del principio del búfer. `offset` múltiplo de
+/// página; el último trozo puede no serlo.
+pub fn device_buf_upload_at(va: u64, offset: u64, data: &[u8]) -> Result<(), ()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    let rc = unsafe {
+        lx_nouveau_device_buf_upload_at(va, offset, data.as_ptr().cast(), data.len() as u64)
+    };
+    if rc < 0 { Err(()) } else { Ok(()) }
+}
+
+/// Sube `size` bytes a `offset` **sin copia de CPU**: `phys` son las páginas del
+/// origen, que la capa C mapea en el espacio de la GPU para que el CE lea de
+/// ellas. `src_off` es lo que le sobra al origen para caer en frontera de página
+/// (el payload de un shard empieza en el byte 64, así que casi nunca es 0).
+/// `Err` significa «no se cumplía algo y no se ha tocado el CE», así que el
+/// llamante puede rebotar por `device_buf_upload_at`.
+pub fn device_buf_upload_dma(
+    va: u64,
+    offset: u64,
+    phys: &[u64],
+    src_off: u32,
+    size: u64,
+) -> Result<(), ()> {
+    if phys.is_empty() || size == 0 || src_off >= 4096 {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_device_buf_upload_dma(
+            va,
+            offset,
+            phys.as_ptr(),
+            phys.len() as u32,
+            src_off,
+            size,
+        )
+    };
+    if rc < 0 { Err(()) } else { Ok(()) }
+}
+
+pub fn device_buf_free(va: u64) -> Result<(), ()> {
+    if unsafe { lx_nouveau_device_buf_free(va) } < 0 {
+        Err(())
+    } else {
+        Ok(())
+    }
+}
+
+/// Apaga GSP-RM y deja la GPU sin DMA. **Sin vuelta atrás** en este arranque:
+/// tras esto `gsp_ready()` es falso y el cómputo cae a CPU.
+///
+/// Hay que llamarlo antes de que el host suelte la tarjeta. Un reset de
+/// vfio-pci sobre un GSP vivo colgó el host el 2026-07-25 (ver `gsp_fini.h`).
+pub fn gsp_fini() -> bool {
+    unsafe { lx_nouveau_gsp_fini() == 0 }
+}
+
+pub fn submit_saxpy(a: f32, x: &[f32], y: &mut [f32]) -> Result<bool, ()> {
+    if x.len() != y.len() || x.is_empty() {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_compute_saxpy(a, x.as_ptr(), y.as_mut_ptr(), x.len() as u32)
+    };
+    if rc < 0 {
+        Err(())
+    } else {
+        Ok(rc > 0)
+    }
+}
+
+pub fn submit_matvec_f32(w: &[f32], rows: usize, cols: usize, x: &[f32], y: &mut [f32]) -> Result<bool, ()> {
+    if w.len() != rows * cols || x.len() != cols || y.len() != rows {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_compute_matvec_f32(
+            w.as_ptr(),
+            rows as u32,
+            cols as u32,
+            x.as_ptr(),
+            y.as_mut_ptr(),
+        )
+    };
+    if rc < 0 {
+        Err(())
+    } else {
+        Ok(rc > 0)
+    }
+}
+
+pub fn submit_matvec_resident(
+    w_va: u64,
+    rows: usize,
+    cols: usize,
+    x: &[f32],
+    y: &mut [f32],
+) -> Result<bool, ()> {
+    if w_va == 0 || x.len() != cols || y.len() != rows {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_compute_matvec_resident(
+            w_va,
+            rows as u32,
+            cols as u32,
+            x.as_ptr(),
+            y.as_mut_ptr(),
+        )
+    };
+    if rc < 0 {
+        Err(())
+    } else {
+        Ok(rc > 0)
+    }
+}
+
+/// Matriz **cuantizada** residente en VRAM: el kernel SASS decodifica los bloques
+/// al multiplicar, así que en la tarjeta viven los bytes del shard tal cual (8×
+/// menos VRAM y 8× menos ancho de banda por token que el plano f32).
+pub fn submit_matvec_q_resident(
+    w_va: u64,
+    dtype: u8,
+    rows: usize,
+    cols: usize,
+    x: &[f32],
+    y: &mut [f32],
+) -> Result<bool, ()> {
+    if w_va == 0 || x.len() != cols || y.len() != rows {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_compute_matvec_q_resident(
+            w_va,
+            dtype as u32,
+            rows as u32,
+            cols as u32,
+            x.as_ptr(),
+            y.as_mut_ptr(),
+        )
+    };
+    if rc < 0 { Err(()) } else { Ok(rc > 0) }
+}
+
+pub fn submit_matmul_resident(
+    w_va: u64,
+    rows: usize,
+    cols: usize,
+    n: usize,
+    x: &[f32],
+    y: &mut [f32],
+) -> Result<bool, ()> {
+    if w_va == 0 || x.len() != cols * n || y.len() != rows * n {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_compute_matmul_resident(
+            w_va,
+            rows as u32,
+            cols as u32,
+            n as u32,
+            x.as_ptr(),
+            y.as_mut_ptr(),
+        )
+    };
+    if rc < 0 { Err(()) } else { Ok(rc > 0) }
+}
+
+pub fn submit_softmax_rows(x: &mut [f32], rows: usize, cols: usize) -> Result<bool, ()> {
+    if x.len() != rows * cols {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_compute_softmax_rows(x.as_mut_ptr(), rows as u32, cols as u32)
+    };
+    if rc < 0 { Err(()) } else { Ok(rc > 0) }
+}
+
+pub fn submit_layernorm_rows(
+    x: &mut [f32],
+    weight: &[f32],
+    bias: &[f32],
+    rows: usize,
+    cols: usize,
+    eps: f32,
+) -> Result<bool, ()> {
+    if x.len() != rows * cols || weight.len() != cols || bias.len() != cols {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_compute_layernorm_rows(
+            x.as_mut_ptr(),
+            weight.as_ptr(),
+            bias.as_ptr(),
+            rows as u32,
+            cols as u32,
+            eps,
+        )
+    };
+    if rc < 0 { Err(()) } else { Ok(rc > 0) }
+}
+
+pub fn wait_fence(sem_slot: u32) -> Result<(), ()> {
+    let rc = unsafe { lx_nouveau_compute_wait(sem_slot) };
+    if rc < 0 { Err(()) } else { Ok(()) }
+}
+
+pub fn batch_begin() {
+    unsafe { lx_nouveau_compute_batch_begin() };
+}
+
+pub fn batch_end() {
+    unsafe { lx_nouveau_compute_batch_end() };
+}
+
+pub fn submit_rmsnorm_rows(
+    x: &mut [f32],
+    weight: &[f32],
+    rows: usize,
+    cols: usize,
+    eps: f32,
+) -> Result<bool, ()> {
+    if x.len() != rows * cols || weight.len() != cols {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_compute_rmsnorm_rows(
+            x.as_mut_ptr(),
+            weight.as_ptr(),
+            rows as u32,
+            cols as u32,
+            eps,
+        )
+    };
+    if rc < 0 { Err(()) } else { Ok(rc > 0) }
+}
+
+pub fn enqueue_matvec_resident(
+    w_va: u64,
+    rows: usize,
+    cols: usize,
+    x: &[f32],
+    y_va: u64,
+    sem_slot: u32,
+) -> Result<(), ()> {
+    if w_va == 0 || y_va == 0 || x.len() != cols {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_enqueue_matvec_resident(
+            w_va,
+            rows as u32,
+            cols as u32,
+            x.as_ptr(),
+            y_va,
+            sem_slot,
+        )
+    };
+    if rc < 0 { Err(()) } else { Ok(()) }
+}
+
+pub fn enqueue_matvec_q_resident(
+    w_va: u64,
+    dtype: u8,
+    rows: usize,
+    cols: usize,
+    x: &[f32],
+    y_va: u64,
+    sem_slot: u32,
+) -> Result<(), ()> {
+    if w_va == 0 || y_va == 0 || x.len() != cols {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_enqueue_matvec_q_resident(
+            w_va,
+            dtype as u32,
+            rows as u32,
+            cols as u32,
+            x.as_ptr(),
+            y_va,
+            sem_slot,
+        )
+    };
+    if rc < 0 { Err(()) } else { Ok(()) }
+}
+
+#[allow(dead_code)]
+pub fn init_module() -> i32 {
+    unsafe extern "C" {
+        fn lx_nouveau_init_module() -> i32;
+    }
+    unsafe { lx_nouveau_init_module() }
+}

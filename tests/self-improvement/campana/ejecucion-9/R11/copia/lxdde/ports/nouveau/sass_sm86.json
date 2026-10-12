@@ -1,0 +1,125 @@
+{
+  "arch": "sm_86",
+  "tag": "sm86",
+  "familia": "GSP_FAM_AMPERE",
+  "kernels": [
+    {
+      "kernel": "saxpy",
+      "simbolo": "saxpy",
+      "arch": "sm_86",
+      "bytes": 384,
+      "regcount": 10,
+      "param_base": 352,
+      "param_size": 28,
+      "cbank_size": 380,
+      "param_off": [
+        0,
+        8,
+        16,
+        24
+      ]
+    },
+    {
+      "kernel": "matvec",
+      "simbolo": "matvec_f32",
+      "arch": "sm_86",
+      "bytes": 4736,
+      "regcount": 40,
+      "param_base": 352,
+      "param_size": 32,
+      "cbank_size": 384,
+      "param_off": [
+        0,
+        8,
+        16,
+        24,
+        28
+      ]
+    },
+    {
+      "kernel": "matvec_q4k",
+      "simbolo": "matvec_q4k",
+      "arch": "sm_86",
+      "bytes": 6144,
+      "regcount": 40,
+      "param_base": 352,
+      "param_size": 32,
+      "cbank_size": 384,
+      "param_off": [
+        0,
+        8,
+        16,
+        24,
+        28
+      ]
+    },
+    {
+      "kernel": "matvec_q80",
+      "simbolo": "matvec_q80",
+      "arch": "sm_86",
+      "bytes": 3328,
+      "regcount": 40,
+      "param_base": 352,
+      "param_size": 32,
+      "cbank_size": 384,
+      "param_off": [
+        0,
+        8,
+        16,
+        24,
+        28
+      ]
+    },
+    {
+      "kernel": "matmul",
+      "simbolo": "matmul_xwt_f32",
+      "arch": "sm_86",
+      "bytes": 5504,
+      "regcount": 42,
+      "param_base": 352,
+      "param_size": 36,
+      "cbank_size": 388,
+      "param_off": [
+        0,
+        8,
+        16,
+        24,
+        28,
+        32
+      ]
+    },
+    {
+      "kernel": "softmax_rows",
+      "simbolo": "softmax_rows_f32",
+      "arch": "sm_86",
+      "bytes": 7808,
+      "regcount": 40,
+      "param_base": 352,
+      "param_size": 16,
+      "cbank_size": 368,
+      "param_off": [
+        0,
+        8,
+        12
+      ]
+    },
+    {
+      "kernel": "layernorm_rows",
+      "simbolo": "layernorm_rows_f32",
+      "arch": "sm_86",
+      "bytes": 12288,
+      "regcount": 40,
+      "param_base": 352,
+      "param_size": 36,
+      "cbank_size": 388,
+      "param_off": [
+        0,
+        8,
+        16,
+        24,
+        28,
+        32
+      ]
+    }
+  ]
+}

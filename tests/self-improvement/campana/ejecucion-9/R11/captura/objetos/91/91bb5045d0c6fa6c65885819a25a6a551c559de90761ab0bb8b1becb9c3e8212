@@ -1,0 +1,125 @@
+{
+  "arch": "sm_120",
+  "tag": "sm120",
+  "familia": "GSP_FAM_BLACKWELL",
+  "kernels": [
+    {
+      "kernel": "saxpy",
+      "simbolo": "saxpy",
+      "arch": "sm_120",
+      "bytes": 512,
+      "regcount": 10,
+      "param_base": 896,
+      "param_size": 28,
+      "cbank_size": 924,
+      "param_off": [
+        0,
+        8,
+        16,
+        24
+      ]
+    },
+    {
+      "kernel": "matvec",
+      "simbolo": "matvec_f32",
+      "arch": "sm_120",
+      "bytes": 4608,
+      "regcount": 48,
+      "param_base": 896,
+      "param_size": 32,
+      "cbank_size": 928,
+      "param_off": [
+        0,
+        8,
+        16,
+        24,
+        28
+      ]
+    },
+    {
+      "kernel": "matvec_q4k",
+      "simbolo": "matvec_q4k",
+      "arch": "sm_120",
+      "bytes": 6400,
+      "regcount": 40,
+      "param_base": 896,
+      "param_size": 32,
+      "cbank_size": 928,
+      "param_off": [
+        0,
+        8,
+        16,
+        24,
+        28
+      ]
+    },
+    {
+      "kernel": "matvec_q80",
+      "simbolo": "matvec_q80",
+      "arch": "sm_120",
+      "bytes": 3328,
+      "regcount": 40,
+      "param_base": 896,
+      "param_size": 32,
+      "cbank_size": 928,
+      "param_off": [
+        0,
+        8,
+        16,
+        24,
+        28
+      ]
+    },
+    {
+      "kernel": "matmul",
+      "simbolo": "matmul_xwt_f32",
+      "arch": "sm_120",
+      "bytes": 3968,
+      "regcount": 48,
+      "param_base": 896,
+      "param_size": 36,
+      "cbank_size": 932,
+      "param_off": [
+        0,
+        8,
+        16,
+        24,
+        28,
+        32
+      ]
+    },
+    {
+      "kernel": "softmax_rows",
+      "simbolo": "softmax_rows_f32",
+      "arch": "sm_120",
+      "bytes": 7552,
+      "regcount": 40,
+      "param_base": 896,
+      "param_size": 16,
+      "cbank_size": 912,
+      "param_off": [
+        0,
+        8,
+        12
+      ]
+    },
+    {
+      "kernel": "layernorm_rows",
+      "simbolo": "layernorm_rows_f32",
+      "arch": "sm_120",
+      "bytes": 11904,
+      "regcount": 40,
+      "param_base": 896,
+      "param_size": 36,
+      "cbank_size": 932,
+      "param_off": [
+        0,
+        8,
+        16,
+        24,
+        28,
+        32
+      ]
+    }
+  ]
+}

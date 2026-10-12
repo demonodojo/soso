@@ -1,0 +1,612 @@
+//! `ask`: preguntar al modelo escribiendo el texto tal cual.
+//!
+//! El modelo vive en `soso-llm askd` (sesión de máquina en 127.0.0.1:7420).
+//! Consola, SSH y reconexiones comparten la misma carga; sólo se recarga al
+//! cambiar de modelo, si el planificador necesita RAM, o al apagar.
+
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+
+use libsoso::{abi, print, println, sys};
+use soso_llm_core::chat;
+use soso_llm_core::plan::MemoryPlanConfig;
+use soso_llm_core::sample::Sampler;
+
+use crate::net::{parse_sock_addr, TcpFd};
+use crate::{generar_tokens, preparar_sesion_echo, Sesion};
+
+const CONF: &str = "/etc/llm.conf";
+pub const ASK_PORT: u16 = 7420;
+const ASK_ADDR: &str = "127.0.0.1:7420";
+/// Fin de respuesta en el protocolo askd↔cliente.
+pub const PROTO_FIN: u8 = 0xFF;
+const LINE_MAX: usize = 1024;
+
+/// Si `args` es `cmd` o empieza por `cmd `, devuelve el resto **literal**.
+pub fn resto_tras<'a>(cmd: &str, args: &'a str) -> Option<&'a str> {
+    let args = args.trim_start();
+    if args == cmd {
+        return Some("");
+    }
+    args.strip_prefix(cmd)
+        .filter(|r| r.starts_with(' '))
+        .map(|r| r[1..].trim_end())
+}
+
+pub struct Conf {
+    pub modelo: String,
+    pub max: usize,
+    pub temp: f32,
+    pub top_p: f32,
+    pub seed: u64,
+    pub plantilla: String,
+}
+
+pub const PLANTILLA_CRUDA: &str = "crudo";
+
+impl Default for Conf {
+    fn default() -> Self {
+        Conf {
+            modelo: String::new(),
+            max: 128,
+            temp: 0.7,
+            top_p: 0.9,
+            seed: 42,
+            plantilla: String::new(),
+        }
+    }
+}
+
+pub fn plantilla_efectiva<'a>(conf: &'a Conf, sesion: &'a Sesion) -> &'a str {
+    if !sesion.bundle.tokenizer.tiene_vocabulario() {
+        return "";
+    }
+    match conf.plantilla.as_str() {
+        PLANTILLA_CRUDA => "",
+        "" => sesion.bundle.rt.manifest.chat_template.as_str(),
+        otra => otra,
+    }
+}
+
+pub fn leer_conf() -> Conf {
+    let mut c = Conf::default();
+    let Some(texto) = leer_fichero(CONF) else {
+        return c;
+    };
+    for linea in texto.lines() {
+        let linea = linea.trim();
+        if linea.is_empty() || linea.starts_with('#') {
+            continue;
+        }
+        if let Some(v) = linea.strip_prefix("modelo=") {
+            c.modelo = v.trim().to_string();
+        } else if let Some(v) = linea.strip_prefix("max=") {
+            if let Ok(n) = v.trim().parse() {
+                c.max = n;
+            }
+        } else if let Some(v) = linea.strip_prefix("temp=") {
+            if let Ok(n) = v.trim().parse() {
+                c.temp = n;
+            }
+        } else if let Some(v) = linea.strip_prefix("top_p=") {
+            if let Ok(n) = v.trim().parse() {
+                c.top_p = n;
+            }
+        } else if let Some(v) = linea.strip_prefix("seed=") {
+            if let Ok(n) = v.trim().parse() {
+                c.seed = n;
+            }
+        } else if let Some(v) = linea.strip_prefix("plantilla=") {
+            c.plantilla = chat::desescapar(v.trim_start());
+        }
+    }
+    c
+}
+
+pub fn leer_fichero(path: &str) -> Option<String> {
+    let fd = sys::open(path, abi::O_RDONLY);
+    if fd < 0 {
+        return None;
+    }
+    let mut out = String::new();
+    let mut buf = [0u8; 512];
+    loop {
+        let n = sys::read(fd as u64, &mut buf);
+        if n <= 0 {
+            break;
+        }
+        out.push_str(core::str::from_utf8(&buf[..n as usize]).unwrap_or(""));
+    }
+    sys::close(fd as u64);
+    Some(out)
+}
+
+pub fn modelos() -> Vec<String> {
+    let mut out = Vec::new();
+    let fd = sys::open("/models", abi::O_RDONLY);
+    if fd < 0 {
+        return out;
+    }
+    let mut ents = [abi::Dirent::default(); 16];
+    loop {
+        let n = sys::getdents(fd as u64, &mut ents);
+        if n <= 0 {
+            break;
+        }
+        for d in &ents[..n as usize / abi::DIRENT_SIZE] {
+            if let Ok(nombre) = core::str::from_utf8(d.name_bytes()) {
+                out.push(nombre.to_string());
+            }
+        }
+    }
+    sys::close(fd as u64);
+    out
+}
+
+pub fn modelo_efectivo(conf: &Conf) -> Option<String> {
+    let disponibles = modelos();
+    if !conf.modelo.is_empty() && disponibles.iter().any(|m| *m == conf.modelo) {
+        return Some(conf.modelo.clone());
+    }
+    if !conf.modelo.is_empty() {
+        println!(
+            "ask: el modelo «{}» de {CONF} no está en /models; uso el primero",
+            conf.modelo
+        );
+    }
+    disponibles.into_iter().next()
+}
+
+fn socket_write(fd: u64, data: &[u8]) {
+    let _ = sys::write_all(fd, data);
+}
+
+fn socket_write_str(fd: u64, s: &str) {
+    socket_write(fd, s.as_bytes());
+}
+
+fn socket_fin(fd: u64) {
+    socket_write(fd, &[PROTO_FIN]);
+}
+
+fn askd_ms_desde(t0: i64) -> u64 {
+    (sys::uptime_ms() - t0).max(0) as u64
+}
+
+/// Diagnóstico en serie (SOSOLOG) y, si hay cliente, un trozo breve al socket.
+fn askd_trace(fd: u64, msg: &str) {
+    println!("askd: {msg}");
+    if fd != u64::MAX {
+        socket_write_str(fd, &format!("askd: {msg}\n"));
+    }
+}
+
+fn askd_trace_ms(fd: u64, msg: &str, t0: i64) {
+    askd_trace(fd, &format!("{msg} (+{} ms)", askd_ms_desde(t0)));
+}
+
+/// Respuesta completa al cliente en un solo `write` (texto + `PROTO_FIN`).
+fn socket_reply(fd: u64, s: &str) {
+    let mut bytes = alloc::vec::Vec::with_capacity(s.len() + 2);
+    bytes.extend_from_slice(s.as_bytes());
+    if !s.ends_with('\n') {
+        bytes.push(b'\n');
+    }
+    bytes.push(PROTO_FIN);
+    let _ = sys::write_all(fd, &bytes);
+}
+
+fn read_line_fd(fd: u64, buf: &mut [u8]) -> Option<usize> {
+    let mut pos = 0usize;
+    loop {
+        let mut b = [0u8; 1];
+        let n = sys::read_timeout(fd, &mut b, 120_000);
+        if n <= 0 {
+            return if pos > 0 { Some(pos) } else { None };
+        }
+        if b[0] == b'\n' {
+            return Some(pos);
+        }
+        if pos < buf.len() {
+            buf[pos] = b[0];
+            pos += 1;
+        }
+    }
+}
+
+fn spawn_askd() -> Result<u64, i64> {
+    let rc = sys::spawn_io(
+        "/bin/soso-llm",
+        "askd",
+        abi::FD_SERIAL_TTY,
+        abi::FD_SERIAL_TTY,
+        abi::FD_SERIAL_TTY,
+    );
+    if rc < 0 { Err(rc) } else { Ok(rc as u64) }
+}
+
+fn connect_askd() -> Result<TcpFd, i64> {
+    let addr = parse_sock_addr(ASK_ADDR).ok_or(-abi::EINVAL)?;
+    TcpFd::connect(&addr, 5_000)
+}
+
+/// Cliente: conecta (arrancando askd si hace falta), manda la línea, copia la
+/// respuesta a la tty hasta `PROTO_FIN`.
+pub fn preguntar_via_askd(texto: &str) -> u8 {
+    if let Ok(mut sock) = connect_askd() {
+        return preguntar_en_socket(&mut sock, texto);
+    }
+    if let Err(e) = spawn_askd() {
+        println!("ask: no pude lanzar /bin/soso-llm (errno {e})");
+        return 1;
+    }
+    let mut ultimo = 0i64;
+    for _ in 0..100 {
+        let _ = sys::sleep_ms(50);
+        match connect_askd() {
+            Ok(mut sock) => return preguntar_en_socket(&mut sock, texto),
+            Err(e) => ultimo = e,
+        }
+    }
+    println!("ask: el servicio no escuchó en {ASK_ADDR} tras 5 s (último errno {ultimo})");
+    1
+}
+
+fn preguntar_en_socket(sock: &mut TcpFd, texto: &str) -> u8 {
+    let mut linea = alloc::vec![0u8; LINE_MAX];
+    let bytes = texto.as_bytes();
+    let n = bytes.len().min(LINE_MAX - 1);
+    linea[..n].copy_from_slice(&bytes[..n]);
+    linea[n] = b'\n';
+    if sys::write_all(sock.fd, &linea[..=n]).is_err() {
+        println!("ask: error al enviar la pregunta");
+        return 1;
+    }
+    let mut buf = [0u8; 512];
+    let mut silencios = 0;
+    loop {
+        let n = sys::read_timeout(sock.fd, &mut buf, 120_000);
+        if n == -(abi::EAGAIN as i64) {
+            silencios += 1;
+            if silencios >= 2 {
+                println!("\nask: el servicio dejó de responder");
+                return 1;
+            }
+            continue;
+        }
+        silencios = 0;
+        if n <= 0 {
+            break;
+        }
+        for &b in &buf[..n as usize] {
+            if b == PROTO_FIN {
+                return 0;
+            }
+            let mut one = [b];
+            let _ = sys::write(1, &mut one);
+        }
+    }
+    0
+}
+
+pub fn run_ask(texto: &str) -> u8 {
+    if let Some(t) = resto_tras(":eco", texto) {
+        println!("{t}");
+        return 0;
+    }
+    if texto.is_empty() {
+        return repl_interactivo();
+    }
+    preguntar_via_askd(texto)
+}
+
+fn repl_interactivo() -> u8 {
+    let conf = leer_conf();
+    let Some(modelo) = modelo_efectivo(&conf) else {
+        println!("ask: no hay ningún modelo en /models");
+        return 1;
+    };
+    println!("ask: modelo {modelo}, máx {} tokens", conf.max);
+    println!("ask: escribe la pregunta; «salir» o Ctrl-D para terminar");
+    let mut lector = libsoso::linea::Lector::new();
+    loop {
+        print!("?> ");
+        let Some(linea) = lector.siguiente() else {
+            return 0;
+        };
+        let texto = linea.trim();
+        if texto.is_empty() {
+            continue;
+        }
+        if texto == "salir" || texto == "exit" {
+            return 0;
+        }
+        if let Some(t) = resto_tras(":eco", texto) {
+            println!("{t}");
+            continue;
+        }
+        let code = preguntar_via_askd(texto);
+        if code != 0 {
+            return code;
+        }
+        println!();
+    }
+}
+
+/// Demonio de máquina: escucha en loopback y atiende una pregunta por conexión.
+pub fn run_askd() -> u8 {
+    let listener = match TcpFd::listen(ASK_PORT) {
+        Ok(l) => l,
+        Err(e) if e == -abi::EADDRINUSE => return 0,
+        Err(e) => {
+            println!("askd: listen {ASK_PORT} falló ({e})");
+            return 1;
+        }
+    };
+    println!("askd: escuchando en {ASK_ADDR}");
+
+    let mut sesion: Option<Sesion> = None;
+    let mut conf = leer_conf();
+    let mut modelo = String::new();
+
+    loop {
+        let conn = match TcpFd::accept(&listener, 0) {
+            Ok(c) => c,
+            Err(e) if e == -abi::EAGAIN => {
+                let _ = sys::sleep_ms(50);
+                continue;
+            }
+            Err(e) => {
+                println!("askd: accept falló ({e})");
+                let _ = sys::sleep_ms(200);
+                continue;
+            }
+        };
+        let mut line_buf = [0u8; LINE_MAX];
+        let Some(n) = read_line_fd(conn.fd, &mut line_buf) else {
+            continue;
+        };
+        let texto = core::str::from_utf8(&line_buf[..n])
+            .unwrap_or("")
+            .trim();
+        if texto.is_empty() {
+            socket_fin(conn.fd);
+            continue;
+        }
+        let preview: String = texto.chars().take(48).collect();
+        askd_trace(
+            conn.fd,
+            &format!(
+                "conexión — «{preview}{}»",
+                if texto.len() > 48 { "…" } else { "" }
+            ),
+        );
+        let rc = tratar_linea_askd(
+            &mut sesion,
+            &mut conf,
+            &mut modelo,
+            texto,
+            conn.fd,
+        );
+        if rc != 0 {
+            socket_reply(conn.fd, "ask: error\n");
+        }
+        // Ceder el CPU: sosh está bloqueado en el socket y, si no salimos
+        // del hilo, en SMP el despertar del read puede tardar una rodaja.
+        let _ = sys::sleep_ms(1);
+    }
+}
+
+fn asegurar_modelo(
+    sesion: &mut Option<Sesion>,
+    conf: &Conf,
+    modelo: &mut String,
+    fd: u64,
+) -> Result<(), u8> {
+    let want = match modelo_efectivo(conf) {
+        Some(m) => m,
+        None => {
+            socket_write_str(fd, "ask: no hay ningún modelo en /models\n");
+            return Err(1);
+        }
+    };
+    let recargar = sesion
+        .as_ref()
+        .map(|s| s.modelo != want)
+        .unwrap_or(true);
+    if recargar {
+        let t_carga = sys::uptime_ms();
+        socket_write_str(fd, &format!("ask: cargando {want}...\n"));
+        askd_trace(fd, &format!("cargando {want} (catálogo + backend)"));
+        match preparar_sesion_echo(&want, false, MemoryPlanConfig::default(), false, false, Some(fd))
+        {
+            Ok(s) => {
+                askd_trace_ms(fd, &format!("{want} listo"), t_carga);
+                *sesion = Some(s);
+                *modelo = want;
+                // Sin hilo de staging: sosh está bloqueado en el socket y
+                // con SMP>1 el worker no llega a poner `done` (askd cuelga
+                // en generate; 2026-08-31). El prefetch va en este hilo.
+                if let Some(ses) = sesion.as_mut() {
+                    ses.bundle.source.disable_worker();
+                    if let Some(ref mut g) = ses.sys_gpu {
+                        if !g.probe_compute() {
+                            let msg = g
+                                .last_fail()
+                                .map(|r| {
+                                    format!(
+                                        "ask: GPU no calcula ({r}); inferencia muy lenta en CPU\n"
+                                    )
+                                })
+                                .unwrap_or_else(|| {
+                                    "ask: GPU no calcula; inferencia muy lenta en CPU\n"
+                                        .to_string()
+                                });
+                            socket_write_str(fd, &msg);
+                        }
+                    }
+                }
+            }
+            Err(c) => {
+                askd_trace(fd, &format!("no pude cargar {want} (código {c})"));
+                socket_write_str(fd, &format!("ask: no pude cargar «{want}» (código {c})\n"));
+                return Err(c);
+            }
+        }
+    } else {
+        askd_trace(fd, &format!("reutilizo sesión {want}"));
+    }
+    Ok(())
+}
+
+fn tratar_linea_askd(
+    sesion: &mut Option<Sesion>,
+    conf: &mut Conf,
+    modelo: &mut String,
+    texto: &str,
+    fd: u64,
+) -> u8 {
+    let t_req = sys::uptime_ms();
+    if let Some(t) = resto_tras(":eco", texto) {
+        socket_reply(fd, t);
+        return 0;
+    }
+    if texto == ":modelos" {
+        let mut out = String::new();
+        for m in modelos() {
+            let marca = if m == *modelo { '*' } else { ' ' };
+            out.push_str(&format!("{marca} {m}\n"));
+        }
+        socket_reply(fd, &out);
+        return 0;
+    }
+    if let Some(n) = resto_tras(":modelo", texto) {
+        let n = n.trim();
+        if n.is_empty() {
+            socket_reply(fd, &format!("ask: modelo actual: {modelo}\n"));
+            return 0;
+        }
+        if !modelos().iter().any(|m| m == n) {
+            socket_reply(fd, &format!("ask: no hay ningún modelo «{n}» en /models\n"));
+            return 0;
+        }
+        conf.modelo = n.to_string();
+        *sesion = None;
+        if asegurar_modelo(sesion, conf, modelo, fd).is_err() {
+            return 1;
+        }
+        socket_reply(fd, &format!("ask: modelo {modelo}\n"));
+        return 0;
+    }
+    if let Some(n) = resto_tras(":max", texto) {
+        match n.trim().parse() {
+            Ok(v) => {
+                conf.max = v;
+                // Cargar ya: el test de modelo residente hace `:max 4` para no
+                // generar 128 tokens, y espera «ask: cargando» en esa sesión.
+                // Sin esto el primer `ask` posterior puede reutilizar una
+                // sesión que el cliente no vio cargar.
+                if asegurar_modelo(sesion, conf, modelo, fd).is_err() {
+                    return 1;
+                }
+                socket_reply(fd, &format!("ask: máx {v} tokens\n"));
+            }
+            Err(_) => socket_reply(fd, "ask: :max necesita un número\n"),
+        }
+        return 0;
+    }
+
+    if asegurar_modelo(sesion, conf, modelo, fd).is_err() {
+        return 1;
+    }
+    let ses = sesion.as_mut().unwrap();
+
+    let plantilla = plantilla_efectiva(conf, ses);
+    let tokens = chat::render(plantilla, texto, &ses.bundle.tokenizer);
+    let vocab = ses.bundle.rt.manifest.vocab_size;
+    if let Some(t) = tokens.iter().find(|&&t| t >= vocab) {
+        socket_reply(
+            fd,
+            &format!(
+                "ask: este modelo sólo entiende {vocab} tokens y el texto usa el {t}\n"
+            ),
+        );
+        return 1;
+    }
+    let mut sampler = Sampler::new(conf.temp, conf.top_p, conf.seed);
+    let m = &ses.bundle.rt.manifest;
+    /* No sólo Mixtral: un denso de 27B en CPU (CE atascado, pool caído) se
+     * queda en «generando…» minutos sin decir por qué. */
+    if ses.sys_gpu.is_none() && (m.num_experts > 0 || m.num_layers >= 16) {
+        let atajo = if modelos().iter().any(|n| n == "tiny") {
+            " Para una respuesta ahora: ask :modelo tiny"
+        } else {
+            ""
+        };
+        socket_write_str(
+            fd,
+            &format!(
+                "ask: {modelo} en CPU (GPU sin cómputo usable); minutos por token.{atajo}\n"
+            ),
+        );
+    }
+    let backend = if ses.sys_gpu.is_some() {
+        "GPU"
+    } else {
+        "CPU"
+    };
+    askd_trace_ms(
+        fd,
+        &format!(
+            "generando — prompt={} max={} backend={backend}",
+            tokens.len(),
+            conf.max
+        ),
+        t_req,
+    );
+    socket_write_str(
+        fd,
+        &format!(
+            "ask: generando ({} tokens de contexto, máx {})...\n",
+            tokens.len(),
+            conf.max
+        ),
+    );
+    ses.bundle.source.disable_worker();
+    let t_infer = sys::uptime_ms();
+    askd_trace_ms(fd, "entrando inferencia (prefill + decode)", t_req);
+    let rc = generar_tokens(
+        ses,
+        &tokens,
+        conf.max,
+        &mut sampler,
+        false,
+        None,
+        Some(fd),
+        true,
+    );
+    if rc != 0 {
+        let (layer, key) = soso_llm_core::last_infer_op();
+        let gpu_fail = ses.sys_gpu.as_ref().and_then(|g| g.last_fail());
+        let mut msg = String::from("askd: inferencia falló");
+        if let Some(l) = layer {
+            msg.push_str(&format!(" capa {l}"));
+        }
+        if !key.is_empty() {
+            msg.push_str(&format!(" tensor {key}"));
+        }
+        if let Some(r) = gpu_fail {
+            msg.push_str(&format!(" gpu={r}"));
+        }
+        println!("{msg}");
+        socket_write_str(fd, &format!("ask: error — {msg}\n"));
+        if let Some(ref g) = ses.sys_gpu {
+            g.print_diagnostics();
+        }
+    }
+    let infer_ms = askd_ms_desde(t_infer);
+    let req_ms = askd_ms_desde(t_req);
+    println!("askd: generar rc={rc} (inferencia {infer_ms} ms, petición {req_ms} ms)");
+    rc
+}

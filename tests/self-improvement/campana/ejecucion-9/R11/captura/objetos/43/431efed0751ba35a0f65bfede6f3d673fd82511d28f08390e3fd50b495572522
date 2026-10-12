@@ -1,0 +1,43 @@
+# Rust / Cargo
+/target/
+**/target/
+
+# Imágenes de disco (bootloader BIOS y datos sosofs)
+*.img
+
+# Userspace: binarios ELF copiados por `cargo xtask` desde user/
+/rootfs/bin/
+
+# Artefactos de `cargo xtask test-update` (release de prueba y su marcador)
+/rootfs/etc/actualiza-marca.txt
+/rootfs/var/
+
+# Claves SSH generadas o inyectadas por mkfs-soso / xtask
+/rootfs/etc/authorized_key
+/rootfs/etc/soso-release
+/rootfs/etc/ssh_host_key
+
+# Configuración local de Claude Code
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# Logs de `cargo xtask test` (serial por shard en la raíz del repo)
+/test-*-serial.log
+
+# Bytecode de las pruebas Python (tests/self-improvement)
+__pycache__/
+
+# Editor / OS
+.DS_Store
+*~
+*.swp
+*.swo
+
+# Capa lxdde (Linux pinneado + artefactos de build)
+lxdde/linux/
+lxdde/reference/
+lxdde/ports-extern/
+lxdde/shim/src/generated_dummies.c
+drivers-extern.toml
+board.txt
+/vendor/rust/

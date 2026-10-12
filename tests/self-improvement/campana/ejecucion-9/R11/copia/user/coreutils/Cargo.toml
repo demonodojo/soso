@@ -1,0 +1,15 @@
+# Los coreutils de soso: un binario por fichero de src/bin/.
+[package]
+name = "coreutils"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+
+[lib]
+path = "src/lib.rs"
+name = "coreutils"
+
+[dependencies]
+libsoso = { workspace = true }
+gptdisk = { path = "../../crates/gptdisk" }
+sosomfs = { path = "../../crates/sosomfs" }

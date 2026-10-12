@@ -2,7 +2,7 @@ bienvenido a soso 0.1
 un OS minimalista en Rust con filesystem CoW propio
 desde live, instalar en un NVMe: soso-install
 sosh — escribe 'help' para la ayuda
-sosh: marca lista pid=17 prefault=0ms write=90ms
+sosh: marca lista pid=15 prefault=0ms write=87ms
 $ soso-improve agente-prueba --sembrar /tmp/g
 sembrado: /tmp/g
 $ exit

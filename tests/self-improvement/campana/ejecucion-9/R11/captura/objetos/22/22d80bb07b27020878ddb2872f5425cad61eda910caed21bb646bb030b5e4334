@@ -1,0 +1,17 @@
+[package]
+name = "soso-hf"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+
+[[bin]]
+name = "soso-hf"
+path = "src/main.rs"
+
+[dependencies]
+soso-abi = { workspace = true }
+libsoso = { workspace = true }
+getrandom = { workspace = true }
+soso-http = { path = "../../crates/soso-http" }
+gguf2som = { path = "../../crates/gguf2som", default-features = false }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }

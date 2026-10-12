@@ -1,0 +1,455 @@
+/*
+ * Driver Intel AX211 (8086:7f70) y AX200 (8086:2723) para soso/lxdde.
+ * Transporte PCIe gen2/gen3 + firmware TLV + scan/assoc/TX mínimos.
+ */
+#include "lx_emul.h"
+#include "iwl_ax211.h"
+#include "iwl_internal.h"
+
+extern void *memcpy(void *dst, const void *src, unsigned long n);
+extern void *memset(void *dst, int c, unsigned long n);
+extern char *strncpy(char *dst, const char *src, unsigned long n);
+extern int strncmp(const char *a, const char *b, unsigned long n);
+
+struct iwl_ax211_priv g_iwl;
+
+static void iwl_set_phase(struct iwl_ax211_priv *iwl, const char *p)
+{
+    strncpy(iwl->phase, p, sizeof(iwl->phase) - 1);
+    iwl->phase[sizeof(iwl->phase) - 1] = '\0';
+    lx_iwlwifi_set_phase(p);
+}
+
+static uint32_t iwl_read32(struct iwl_ax211_priv *iwl, uint32_t off)
+{
+    return iwl->mmio[off / 4];
+}
+
+static void mac_from_bdf(struct iwl_ax211_priv *iwl)
+{
+    if (!iwl->pdev)
+        return;
+    uint32_t bdf = lx_pci_bdf(iwl->pdev);
+    iwl->mac[0] = 0x02;
+    iwl->mac[1] = 0x00;
+    iwl->mac[2] = 0x00;
+    iwl->mac[3] = (uint8_t)(bdf >> 8);
+    iwl->mac[4] = (uint8_t)(bdf & 0xff);
+    iwl->mac[5] = 0;
+}
+
+static int iwl_try_ucode(struct iwl_ax211_priv *iwl, const char *name)
+{
+    const unsigned char *data = 0;
+    unsigned long len = 0;
+    if (lx_request_firmware(name, &data, &len) != 0)
+        return -1;
+    return iwl_fw_parse_tlv(iwl, data, len);
+}
+
+static int iwl_load_firmware_files(struct iwl_ax211_priv *iwl)
+{
+    const unsigned char *pnvm = 0;
+    unsigned long pnvm_len = 0;
+
+    if (iwl->family == IWL_DEVICE_FAMILY_8000) {
+        static const char *const iwl8265[] = {
+            "iwlwifi-8265-36.ucode",
+            "iwlwifi-8265-34.ucode",
+            0
+        };
+        for (int i = 0; iwl8265[i]; i++) {
+            if (iwl_try_ucode(iwl, iwl8265[i]) == 0)
+                return 0;
+        }
+        return -1;
+    }
+
+    if (iwl->family == IWL_DEVICE_FAMILY_22000) {
+        static const char *const ax200[] = {
+            "iwlwifi-cc-a0-77.ucode",
+            "iwlwifi-cc-a0-74.ucode",
+            "iwlwifi-cc-a0-73.ucode",
+            "iwlwifi-cc-a0-72.ucode",
+            "iwlwifi-cc-a0-66.ucode",
+            0
+        };
+        for (int i = 0; ax200[i]; i++) {
+            if (iwl_try_ucode(iwl, ax200[i]) == 0)
+                return 0;
+        }
+        return -1;
+    }
+
+    if (iwl_try_ucode(iwl, "iwlwifi-so-a0-gf-a0-89.ucode") != 0 &&
+        iwl_try_ucode(iwl, "iwlwifi-so-a0-gf-a0-77.ucode") != 0)
+        return -1;
+
+    if (lx_request_firmware("iwlwifi-so-a0-gf-a0.pnvm", &pnvm, &pnvm_len) == 0)
+        iwl_fw_parse_pnvm(iwl, pnvm, pnvm_len);
+    return 0;
+}
+
+static int iwl_ax211_probe(struct lx_pci_dev *pdev, const struct lx_pci_device_id *id)
+{
+    struct iwl_ax211_priv *iwl = &g_iwl;
+    (void)id;
+    memset(iwl, 0, sizeof(*iwl));
+    iwl->pdev = pdev;
+    iwl->device_id = lx_pci_device_id(pdev);
+    iwl->family = iwl_ax211_family_from_id(iwl->device_id);
+    iwl->gen3 = iwl->family == IWL_DEVICE_FAMILY_AX210;
+    iwl->cmd_qid = IWL_MVM_DQA_CMD_QUEUE;
+
+    if (lx_pci_enable_device(pdev) != 0)
+        return -1;
+    lx_pci_set_master(pdev);
+
+    void *mmio = lx_pci_iomap(pdev, 0, 0x10000);
+    if (!mmio)
+        return -1;
+    iwl->mmio = (volatile uint32_t *)mmio;
+    lx_pci_set_drvdata(pdev, iwl);
+
+    uint32_t rev = iwl_read32(iwl, CSR_HW_REV);
+
+    iwl->hw_rev = rev;
+    iwl->hw_rf_id = iwl_read32(iwl, CSR_HW_RF_ID);
+    lx_printk("iwlwifi: probe id=0x%x familia=%s gen%s rev=0x%x step=0x%x rf=0x%x bdf=0x%x\n",
+              iwl->device_id, iwl_ax211_family_name(iwl->family),
+              iwl->gen3 ? "3" : (iwl->family == IWL_DEVICE_FAMILY_22000 ? "2" : "0"),
+              rev,
+              iwl->family == IWL_DEVICE_FAMILY_8000 ? (rev & 0xfu) : ((rev >> 2) & 0x3u),
+              iwl->hw_rf_id, lx_pci_bdf(pdev));
+
+    mac_from_bdf(iwl);
+    iwl->probed = 1;
+    iwl_set_phase(iwl, "probe");
+    return 0;
+}
+
+static void iwl_ax211_remove(struct lx_pci_dev *pdev)
+{
+    (void)pdev;
+    g_iwl.alive = 0;
+    g_iwl.probed = 0;
+    g_iwl.associated = 0;
+    lx_iwlwifi_set_alive(0);
+    iwl_set_phase(&g_iwl, "removed");
+}
+
+static struct lx_pci_device_id iwl_ax211_ids[] = {
+    { 0x8086u, 0x7f70u, 0, 0, 0, 0, 0 },
+    { 0x8086u, 0x51f0u, 0, 0, 0, 0, 0 },
+    { 0x8086u, 0x54f0u, 0, 0, 0, 0, 0 },
+    { 0x8086u, IWL_PCI_AX200, 0, 0, 0, 0, 0 },
+    { 0x8086u, IWL_PCI_8265, 0, 0, 0, 0, 0 },
+    { 0, 0, 0, 0, 0, 0, 0 },
+};
+
+static int iwl_driver_registered;
+
+int iwl_ax211_register(void)
+{
+    if (iwl_driver_registered)
+        return 0;
+    int r = lx_pci_register_driver("iwlwifi", iwl_ax211_ids, iwl_ax211_probe, iwl_ax211_remove);
+    if (r == 0)
+        iwl_driver_registered = 1;
+    return r;
+}
+
+int iwl_ax211_probed(void)
+{
+    return g_iwl.probed;
+}
+
+int iwl_ax211_id_supported(uint16_t device_id)
+{
+    for (int i = 0; iwl_ax211_ids[i].vendor; i++) {
+        if ((uint16_t)iwl_ax211_ids[i].device == device_id)
+            return 1;
+    }
+    return 0;
+}
+
+int iwl_ax211_start_firmware(void)
+{
+    struct iwl_ax211_priv *iwl = &g_iwl;
+    if (!iwl->probed || !iwl->mmio)
+        return -1;
+    if (iwl->alive)
+        return 0;
+
+    iwl_set_phase(iwl, "fw_load");
+    if (iwl_load_firmware_files(iwl) != 0) {
+        lx_printk("iwlwifi: firmware no encontrado\n");
+        return -1;
+    }
+
+    iwl_set_phase(iwl, "fw_start");
+    if (iwl->family == IWL_DEVICE_FAMILY_8000) {
+        if (iwl_trans_8000_start(iwl) != 0) {
+            lx_printk("iwlwifi: arranque firmware 8000 falló\n");
+            return -1;
+        }
+        iwl_set_phase(iwl, "alive");
+        if (iwl_mvm_run_init(iwl) != 0) {
+            lx_printk("iwlwifi: init MVM incompleto\n");
+            return -1;
+        }
+        if (iwl_mvm_up_minimal(iwl) != 0) {
+            lx_printk("iwlwifi: up MVM incompleto\n");
+            return -1;
+        }
+        iwl_set_phase(iwl, "ready");
+        return 0;
+    }
+    if ((iwl->gen3 ? iwl_trans_gen3_start(iwl) : iwl_trans_gen2_start(iwl)) != 0) {
+        lx_printk("iwlwifi: arranque firmware falló\n");
+        return -1;
+    }
+    iwl_set_phase(iwl, "alive");
+    if (iwl_mvm_run_init(iwl) != 0) {
+        lx_printk("iwlwifi: init MVM incompleto\n");
+        return -1;
+    }
+    if (iwl_mvm_up_minimal(iwl) != 0) {
+        lx_printk("iwlwifi: up MVM incompleto\n");
+        return -1;
+    }
+    iwl_set_phase(iwl, "ready");
+    return 0;
+}
+
+int iwl_ax211_alive(void)
+{
+    return g_iwl.alive;
+}
+
+/* R4: un timeout deja la cola bloqueada a propósito. Antes de cualquier
+ * operación nueva se reinicia el transporte (que suelta el DMA envenenado) y
+ * se rehace la secuencia completa de carga: FW → init → up. */
+/* Tope de recuperaciones seguidas que fallan. Recargar el firmware cuesta
+ * segundos: sin tope, insistir con `wifi scan` sobre una tarjeta que no
+ * rearranca convierte cada intento en otra recarga. */
+#define IWL_RECOVER_MAX_FALLOS 3
+
+static int iwl_ax211_ensure_ready(struct iwl_ax211_priv *iwl)
+{
+    static int fallos;
+
+    if (!iwl_trans_needs_recover(iwl))
+        return 0;
+    if (fallos >= IWL_RECOVER_MAX_FALLOS) {
+        lx_printk("iwlwifi: %d recuperaciones seguidas fallidas; no se insiste "
+                  "(reinicia el equipo o recarga el módulo)\n", fallos);
+        return -1;
+    }
+    lx_printk("iwlwifi: cola bloqueada tras timeout; reiniciando transporte\n");
+    iwl_set_phase(iwl, "recover");
+    iwl_trans_recover(iwl);
+    if (iwl_ax211_start_firmware() != 0) {
+        fallos++;
+        lx_printk("iwlwifi: recuperación falló (firmware no rearrancó, %d de "
+                  "%d)\n", fallos, IWL_RECOVER_MAX_FALLOS);
+        iwl_set_phase(iwl, "recover_fail");
+        return -1;
+    }
+    fallos = 0;
+    lx_printk("iwlwifi: transporte recuperado (%u reinicios)\n",
+              (unsigned)iwl->cmd_recover);
+    return 0;
+}
+
+const char *iwl_ax211_phase(void)
+{
+    return g_iwl.phase;
+}
+
+void iwl_ax211_poll(void)
+{
+    iwl_trans_poll(&g_iwl);
+}
+
+static int iwl_ax211_copy_scan(struct iwl_ax211_bss *out, int max, int *count)
+{
+    struct iwl_ax211_priv *iwl = &g_iwl;
+    int n = iwl->scan_count;
+
+    if (n > max)
+        n = max;
+    if (out && n > 0)
+        memcpy(out, iwl->scan, (size_t)n * sizeof(struct iwl_ax211_bss));
+    if (count)
+        *count = n;
+    return 0;
+}
+
+int iwl_ax211_scan(struct iwl_ax211_bss *out, int max, int *count)
+{
+    struct iwl_ax211_priv *iwl = &g_iwl;
+    int rc;
+
+    if (iwl_ax211_ensure_ready(iwl) != 0)
+        return -1;
+    if (!iwl->alive)
+        return -1;
+
+    if (!out && !count) {
+        iwl_set_phase(iwl, "scan");
+        rc = iwl_mvm_scan(iwl);
+        iwl_set_phase(iwl, rc == 0 ? "scan_done" : "scan_fail");
+        return rc;
+    }
+
+    iwl_set_phase(iwl, "scan");
+    rc = iwl_mvm_scan(iwl);
+    iwl_set_phase(iwl, rc == 0 ? "scan_done" : "scan_fail");
+    /* R6: los BSS parciales se entregan, pero el resultado del scan se
+     * propaga tal cual. Antes devolvía 0 y un fallo parecía éxito. */
+    if (iwl_ax211_copy_scan(out, max, count) != 0)
+        return -1;
+    return rc;
+}
+
+int iwl_ax211_get_scan_results(struct iwl_ax211_bss *out, int max, int *count)
+{
+    if (!g_iwl.alive)
+        return -1;
+    return iwl_ax211_copy_scan(out, max, count);
+}
+
+int iwl_ax211_connect_open(const char *ssid)
+{
+    if (iwl_ax211_ensure_ready(&g_iwl) != 0)
+        return -1;
+    return iwl_mvm_connect_open(&g_iwl, ssid);
+}
+
+int iwl_ax211_connect_wpa2(const char *ssid, const uint8_t psk[32])
+{
+    if (iwl_ax211_ensure_ready(&g_iwl) != 0)
+        return -1;
+    return iwl_mvm_connect_wpa2(&g_iwl, ssid, psk);
+}
+
+int iwl_ax211_install_key(const uint8_t key[16], int key_idx)
+{
+    return iwl_mvm_install_key(&g_iwl, key, key_idx);
+}
+
+int iwl_ax211_install_gtk(const uint8_t key[16], int key_idx, const uint8_t rsc[8])
+{
+    return iwl_mvm_install_gtk(&g_iwl, key, key_idx, rsc);
+}
+
+int iwl_ax211_connected(void)
+{
+    return g_iwl.associated;
+}
+
+/* Enlace utilizable para IP: en red abierta basta la asociación, en WPA2 hace
+ * falta además el 4-way. Exponer `associated` como «conectada» arrancaba DHCP
+ * antes de tener claves, y el AP tiraba todo lo que saliera. */
+int iwl_ax211_authorized(void)
+{
+    return g_iwl.associated && g_iwl.authorized;
+}
+
+void iwl_ax211_set_authorized(int authorized)
+{
+    g_iwl.authorized = authorized ? 1u : 0u;
+}
+
+/* El mismo RSN IE que va en la Association Request; el supplicant tiene que
+ * repetirlo byte a byte en M2 o el AP aborta el handshake. */
+int iwl_ax211_rsn_ie(uint8_t *out, int max)
+{
+    return iwl_mvm_rsn_ie(&g_iwl, out, max);
+}
+
+int iwl_ax211_mac(uint8_t mac[6])
+{
+    if (!mac)
+        return -1;
+    memcpy(mac, g_iwl.mac, 6);
+    return 0;
+}
+
+int iwl_ax211_bssid(uint8_t bssid[6])
+{
+    if (!bssid || !g_iwl.associated)
+        return -1;
+    memcpy(bssid, g_iwl.bssid, 6);
+    return 0;
+}
+
+int iwl_ax211_rx(uint8_t *buf, int buflen)
+{
+    return iwl_mvm_rx_8023(&g_iwl, buf, buflen);
+}
+
+int iwl_ax211_rx_eapol(uint8_t *buf, int buflen)
+{
+    struct iwl_ax211_priv *iwl = &g_iwl;
+    int idx;
+    int len;
+
+    if (!buf || buflen <= 0 || iwl->eapolq_head == iwl->eapolq_tail)
+        return 0;
+    idx = iwl->eapolq_tail % 4;
+    len = (int)iwl->eapolq[idx][0] | ((int)iwl->eapolq[idx][1] << 8);
+    if (len <= 0 || len > (int)sizeof(iwl->eapolq[0]) - 2) {
+        iwl->eapolq_tail = (iwl->eapolq_tail + 1) % 4;
+        return 0;
+    }
+    if (len > buflen)
+        len = buflen;
+    memcpy(buf, &iwl->eapolq[idx][2], (size_t)len);
+    iwl->eapolq_tail = (iwl->eapolq_tail + 1) % 4;
+    return len;
+}
+
+int iwl_ax211_tx(const uint8_t *buf, int len)
+{
+    if (iwl_trans_needs_recover(&g_iwl))
+        return -1;
+    return iwl_mvm_tx_8023(&g_iwl, buf, len);
+}
+
+void iwl_ax211_deliver_rx(const uint8_t *data, int len)
+{
+    struct iwl_ax211_priv *iwl = &g_iwl;
+    if (!data || len <= 0 || len > 2040)
+        return;
+    int idx = iwl->rxq_head % 8;
+    iwl->rxq[idx][0] = (uint8_t)(len & 0xff);
+    iwl->rxq[idx][1] = (uint8_t)((len >> 8) & 0xff);
+    memcpy(&iwl->rxq[idx][2], data, (size_t)len);
+    iwl->rxq_head = (iwl->rxq_head + 1) % 8;
+}
+
+/* Cola aparte para EAPOL: smoltcp no debe llevarse M1/M3 mientras el 4-way
+ * está en curso, ni el supplicant quedarse con el tráfico IP. */
+void iwl_ax211_deliver_eapol(const uint8_t *data, int len)
+{
+    struct iwl_ax211_priv *iwl = &g_iwl;
+    int idx;
+
+    if (!data || len <= 0 || len > (int)sizeof(iwl->eapolq[0]) - 2)
+        return;
+    idx = iwl->eapolq_head % 4;
+    iwl->eapolq[idx][0] = (uint8_t)(len & 0xff);
+    iwl->eapolq[idx][1] = (uint8_t)((len >> 8) & 0xff);
+    memcpy(&iwl->eapolq[idx][2], data, (size_t)len);
+    iwl->eapolq_head = (iwl->eapolq_head + 1) % 4;
+}
+
+void iwl_ax211_add_bss(const struct iwl_ax211_bss *bss)
+{
+    struct iwl_ax211_priv *iwl = &g_iwl;
+    if (!bss || iwl->scan_count >= IWL_AX211_MAX_SCAN)
+        return;
+    iwl->scan[iwl->scan_count++] = *bss;
+}

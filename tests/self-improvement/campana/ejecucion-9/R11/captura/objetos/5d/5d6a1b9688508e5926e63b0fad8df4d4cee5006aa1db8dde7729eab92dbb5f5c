@@ -1,0 +1,13 @@
+[package]
+name = "soso-voz"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+
+[dependencies]
+libsoso = { workspace = true }
+soso-abi = { workspace = true }
+soso-gpu = { path = "../soso-gpu" }
+sosomodel = { path = "../../crates/sosomodel" }
+soso-llm-core = { path = "../../crates/soso-llm-core" }
+soso-audio = { path = "../../crates/soso-audio" }

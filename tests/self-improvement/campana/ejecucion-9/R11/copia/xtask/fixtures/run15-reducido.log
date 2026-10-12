@@ -1,0 +1,35 @@
+=== soso log flush #45 uptime=1071560ms bytes=48984 kbd sc=31 ultimo=0x1c enc=16 ent=16 ===
+soso 0.2.2 (276404696-dirty)
+mm: heap 512 MiB de 64910 MiB utilizables
+memoria: 64397 MiB libres tras el heap
+boot: memtest
+memtest: OK (4096 KiB)
+boot: acpi/smp
+pci: 10de:249c clase 0x030000
+pci: 8086:2723 clase 0x028000
+updslot: SOSOUPD.TXT LBA 131493
+updslot: SOSOKRN.BIN LBA 417 (64 MiB)
+updslot: SOSOKRN.MET LBA 131489
+lx: nouveau-lx: RPC fn=0x1001 (GSP_INIT_DONE) len=32 res=0x0
+lx: nouveau-lx: GSP_INIT_DONE recibido tras 6 mensaje(s)
+lx: nouveau-lx: GSP-RM listo (RPC en marcha)
+lx: nouveau-lx: COPY0 (9) SÍ está en la lista — es el engineType que pide el canal
+lx: nouveau-lx: CE readback verificado (G4e GO)
+=== soso log flush #46 uptime=1101560ms bytes=52100 ===
+lx: iwl_ax211: firmware ALIVE (UCODE_ALIVE_NTFY)
+lx: iwl_mvm: INIT_COMPLETE_NOTIF
+lx: iwl_mvm: MAC NVM 0x84:1b:77:e1:20:71
+lx: iwl_mvm: SHARED_MEM_CFG ok
+lx: iwl_trans: TX_ANT wide ver=0 len=12 (hdr 8 B + payload 4 B)
+lx: iwl_trans: timeout cmd grp=0 id=0x98 slot=3; MVM parado
+lx: iwl_mvm: TX_ANT_CONFIGURATION falló
+gpu: NVIDIA detectada (chipset Some(3074424993), GSP=booted, pool VRAM=no)
+net: dhcp… (mac f0:2f:74:4a:50:af)
+net: dhcp 192.168.1.44/24 gw 192.168.1.1 (eth0 e1000e)
+lx: iwl_mvm: SHARED_MEM_CFG falló
+lx: iwl_mvm: SHARED_MEM_CFG obligatorio — abort up
+hw-inv: no pude escribir /etc/soso-hw (Io)
+boot: task
+sosh — escribe 'help' para la ayuda
+$ init: sosh viva sin /tmp/sosh-ready; no confirmo OTA
+sosh: wifi scan: error de E/S

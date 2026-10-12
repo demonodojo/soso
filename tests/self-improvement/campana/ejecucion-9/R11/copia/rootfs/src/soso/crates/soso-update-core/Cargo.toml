@@ -1,0 +1,14 @@
+[package]
+name = "soso-update-core"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+
+[features]
+default = []
+std = ["sha2/std"]
+
+[dependencies]
+sha2 = { version = "0.10", default-features = false }
+
+[dev-dependencies]

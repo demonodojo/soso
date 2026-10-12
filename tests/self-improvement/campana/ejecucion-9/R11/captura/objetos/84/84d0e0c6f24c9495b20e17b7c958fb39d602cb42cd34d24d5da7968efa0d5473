@@ -1,0 +1,70 @@
+# Seguimiento T01 — Base reproducible
+
+## 2026-09-15 · intento 1
+
+**Base:** `9b281e1974dd52a5dae4fd63f5912eb45eb5966f` («minor advances»), HEAD
+desacoplado; diff sin indexar de 65 136 bytes al capturar.
+**Evidencia:** `target/self-improvement/tasks/T01/resultado.md` (logs completos
+en ese directorio; captura en `target/self-improvement/base/`).
+
+### Trabajo hecho
+
+- `scripts/self-improvement/baseline.py` (1080 líneas): subcomandos `capture`,
+  `reconstruct` y `suites`. Manifiesto `baseline.json` con `schema_version` 1,
+  diffs binarios de índice y árbol, contenido de los archivos nuevos
+  seleccionados, hash+motivo de los excluidos, herramientas con log y código de
+  salida, lista explícita de variables `SOSO_*` y sonda de estabilidad doble.
+- `tests/self-improvement/test_baseline.py` (504 líneas, 21 pruebas) con
+  repositorios git reales.
+- `.gitignore`: `__pycache__/`, que genera esta suite dentro del checkout.
+
+### Pruebas
+
+| Comando | Resultado |
+|---|---|
+| `python3 -m unittest discover -s tests/self-improvement -p test_baseline.py` | 21 OK, exit 0 |
+| `baseline.py --repo . --out target/self-improvement/base` | exit 0, sonda estable |
+| `baseline.py reconstruct --capture … --into … --with-excluded` | exit 0, verificación sin problemas |
+| comparación independiente original↔copia (939 archivos) | idénticos |
+| suites base de C6 sobre la copia | ver `resultado.md` |
+
+### Limitaciones
+
+- La captura declara la base; no guarda el contenido de blobs > 1 MiB ni de
+  `target/`, `models/`, `rootfs/lib/firmware/`, `lxdde/firmware/`. El firmware
+  de iwlwifi que exige `cargo xtask check` se recupera del origen con
+  `reconstruct --with-excluded`, verificando el hash del manifiesto.
+- `suites` escribe el log de cada suite al terminarla, no en streaming.
+- La reconstrucción necesita el repositorio de origen (clona de él); la captura
+  por sí sola no contiene los objetos de git.
+
+### Incidente (corregido)
+
+Una versión intermedia de `reconstruct` pasaba rutas relativas a `git clone`
+con otro cwd; el clone cayó en una ruta anidada y el `git checkout --detach`
+siguiente se ejecutó en un directorio vacío sin repositorio, de modo que git
+subió al checkout real y **desacopló su HEAD** (reflog 2026-09-15 23:01:20).
+Corregido con rutas absolutas, comprobación de que el clone dejó repositorio,
+`--git-dir/--work-tree` explícitos y `GIT_CEILING_DIRECTORIES` en todos los
+comandos; con prueba de regresión y verificación de que la prueba tiene dientes.
+
+### Siguiente paso
+
+T02 y T03 quedan habilitadas. Sin bloqueos.
+
+## 2026-09-15 · nota de cierre: ramas resueltas
+
+El HEAD desacoplado que dejó el incidente ya está arreglado (por el usuario, no
+por esta ficha). Estado comprobado:
+
+- `HEAD` vuelve a apuntar a `main`; `main` = `5a7be1388` («chages»), que
+  contiene `9b281e197`. Nada queda colgando del reflog.
+- `tmp-advances` apunta al mismo commit; `origin/main` sigue en `dfec53f84`, es
+  decir, ambos commits están sin publicar.
+- `5a7be1388` incluye un estado intermedio de los archivos de T01 y el
+  `.gitignore`. Las últimas correcciones (endurecer `parsear_name_status` y sus
+  tres pruebas de parseo) siguen **sin commitear** en el árbol de trabajo, que
+  es donde está la versión entregada: 21 pruebas en verde, exit 0.
+
+La evidencia de suites no cambia: se ejecutaron sobre una copia de `9b281e197`
+y son builds de soso, independientes de este script.

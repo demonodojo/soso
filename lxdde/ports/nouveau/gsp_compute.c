@@ -691,6 +691,13 @@ static unsigned char *cbank_prepare(struct gsp_compute *cp,
     *(uint32_t *)(cb + 0x0) = G4F_CTA_THREADS;
     *(uint32_t *)(cb + 0x4) = 1u;
     *(uint32_t *)(cb + 0x8) = 1u;
+    /* Base de la ventana de memoria compartida (64 bits en c[0x0][0x18]). Un
+     * puntero genérico que puede ser `xs` (matvec_q4k/q80: `xp = cols <= 4096 ?
+     * xs : x`) se convierte sumándole esto, y con 0 el LD.E iba a la VA ~0x10:
+     * falta de MMU en el primer lanzamiento (FIFO_ERROR_MMU_ERR_FLT, ROG,
+     * 2026-10-12). Es la misma que se programa con SET_SHADER_SHARED_MEMORY_WINDOW. */
+    *(uint32_t *)(cb + 0x18) = NVC7C0_SHADER_SHARED_WINDOW;
+    *(uint32_t *)(cb + 0x1c) = 0u;  /* mitad alta: el pushbuffer manda A=0 */
     return cb + k->param_base;
 }
 

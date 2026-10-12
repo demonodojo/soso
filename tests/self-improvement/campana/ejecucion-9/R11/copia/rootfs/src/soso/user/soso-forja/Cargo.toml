@@ -1,0 +1,15 @@
+# Cliente de forja remota: sincroniza /src/soso y pide build al host.
+
+[package]
+name = "soso-forja"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+
+[[bin]]
+name = "soso-forja"
+path = "src/main.rs"
+
+[dependencies]
+libsoso = { workspace = true }
+soso-update-core = { workspace = true }

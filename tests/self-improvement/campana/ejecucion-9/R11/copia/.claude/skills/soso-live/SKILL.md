@@ -1,0 +1,281 @@
+---
+name: soso-live
+description: >-
+  soso live USB, native install and OTA updates — GPT image, ESP 8.3 slots,
+  boot-shim, USB/xHCI mass storage, soso-install and soso-update. Use when
+  modifying package-usb-live, flash-usb-live, boot-shim, updslot, bootreq,
+  espfat, usb_storage, xhci-nostd, gptdisk, soso-update-core, or ESP files
+  SOSOLOG/SOSODRV/SOSOBOOT/SOSOUPD/SOSOKRN/SOSOKRN.MET/SOSOWIFI.
+---
+
+# soso — Live USB, instalación y actualizaciones
+
+## Plan aplicable y seguimiento
+
+Al avanzar un plan de instalación, OTA, recuperación o automejora, leer
+[Identificación y seguimiento de planes](../soso-architecture/references/planes.md).
+Conservar el ID de entrega del plan activo y registrar imagen/build, destino
+y alcance de la comprobación. Las fichas T31/T43 de automejora exigen evidencia
+de recuperación de kernel y rootfs: no cerrarlas solo con rollback del kernel.
+Mantener estado, artefactos y siguiente paso; un paquete preparado no acredita
+haberlo instalado ni arrancado en placa.
+
+El camino de placa: **un GPT** (`soso-live.img`), no tres imágenes sueltas.
+Docs de usuario: `MANUAL-USUARIO.md`. Bring-up on-box: `docs/L5c-on-box.md`.
+Guía operativa: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md).
+Estado/límites OTA: [`docs/ESTADO.md`](../../docs/ESTADO.md).
+
+## Particiones (orden real en el stick)
+
+| # | Nombre | Contenido |
+|---|--------|-----------|
+| 1 | ESP (FAT) | `BOOTX64.EFI` (shim) + `bootsoso.efi` + huecos 8.3 |
+| 2 | sosofs | rootfs |
+| 4 | `SOSOINSTALL` (FAT) | `install-soso.sh` para Linux; **tras el rootfs, no al final** |
+| 3 | sosomfs | modelos (se estira al flashear; grow del superbloque al montar) |
+
+Linux monta p4, no la ESP. El log **no** está en p4. El agente monta p1 con
+`udisksctl` (abajo); el usuario puede usar `cargo xtask sosolog`.
+
+Al final del pendrive Linux no montaba p4 (LBA que leía ceros). Por eso
+`SOSOINSTALL` va entre rootfs y modelos.
+
+## ESP en el host (agente: sin el usuario)
+
+Linux **no** monta sola la ESP (p1 EFI). El volumen que sí aparece es p4
+`SOSOINSTALL`; ahí no hay `SOSOLOG.TXT` ni `SOSOWIFI.TXT`.
+
+`cargo xtask sosolog` llama a `sudo mount`. En Cursor **no hay TTY** (`sudo: a
+terminal is required to read the password`): el agente **no** lo lanza, igual
+que `flash-usb-live`. El usuario sí puede.
+
+El agente monta p1 con **udisks** (polkit en extraíble: sin sudo ni
+contraseña). `--no-user-interaction` evita el diálogo polkit.
+
+> **Sandbox de Cursor sin D-Bus:** dentro del sandbox `udisksctl` falla con
+> `Error connecting to the udisks daemon` / `Failed to connect to bus` y
+> `/dev/sda1` ni siquiera aparece (`No such file or directory`). Este entorno
+> no arranca con systemd como PID 1, así que **no hay bus de sesión visible**.
+> `sudo mount` tampoco vale: pide contraseña y no hay TTY.
+> **Solución (lo que sí funciona):** ejecuta el comando **fuera del sandbox**
+> (`required_permissions: ["all"]`) y **exporta el bus de sesión** del usuario
+> antes de `udisksctl`:
+>
+> ```bash
+> export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/1000/bus"
+> udisksctl mount -b /dev/sda1 --no-user-interaction   # → /media/jmdiez/kernel
+> ```
+>
+> (uid 1000 = usuario de sesión; ajústalo si difiere). Con eso el agente monta,
+> copia y desmonta sin dejarle el comando al usuario. `sudo` sigue vetado.
+
+```bash
+lsblk -o NAME,SIZE,TYPE,FSTYPE,LABEL,PARTTYPENAME,RM
+# Candidato: RM=1, partición 1, vfat / EFI. Etiqueta típica `kernel`.
+# No uses p4 (`SOSOINSTALL`).
+
+# Fuera del sandbox (required_permissions ["all"]) + bus de sesión:
+export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/1000/bus"
+
+# ¿Ya montada? (p. ej. /media/<user>/kernel)
+findmnt -n -o TARGET /dev/sda1
+
+# Si no:
+udisksctl mount -b /dev/sda1 --no-user-interaction
+# → Mounted /dev/sda1 at /media/<user>/kernel
+
+ESP=$(findmnt -n -o TARGET /dev/sda1)
+cat "$ESP/SOSOLOG.TXT"
+cat "$ESP/SOSODRV.TXT"
+# Escritura (SOSOWIFI.TXT, …): el VFAT queda con uid del usuario de sesión.
+
+udisksctl unmount -b /dev/sda1 --no-user-interaction
+```
+
+Si aun con el bus exportado `udisksctl` falla (auth, no extraíble), deja el
+comando al usuario. **No** uses `sudo mount` ni `sudo cargo xtask sosolog`.
+
+Tras leer o editar, **desmonta**: un `dd` posterior necesita p1 libre.
+
+## Ficheros ESP (8.3, contiguos, pre-creados)
+
+El kernel **no crea** ficheros en FAT: `espfat::locate` busca entrada 8.3 con
+tamaño fijo y escribe sectores. Si falta el hueco, esa vía queda desactivada
+(hay que reflashear).
+
+| Fichero | Tamaño | Quién escribe | Para qué |
+|---------|--------|---------------|----------|
+| `BOOTMARK.TXT` | — | boot-shim | UEFI nos ejecutó; si sigue vacío, el firmware no arrancó el USB |
+| `SOSOLOG.TXT` | 256 KiB | kernel `fatlog` (~2 s) | log serie persistente |
+| `SOSODRV.TXT` | 16 KiB | `hwscan` / `drvlog` | informe PCI |
+| `SOSOBOOT.TXT` | 4 KiB | `soso-install` → shim | `INSTALL <guid-ESP>` → `Boot####` |
+| `SOSOWIFI.TXT` | 4 KiB | usuario en host | `ssid=` / `psk=` |
+| `SOSOUPD.TXT` | 4 KiB | `soso-update` / shim / init | buzón OTA kernel |
+| `SOSOKRN.BIN` | 64 MiB | `soso-update` / shim | hueco kernel (nuevo o backup) |
+| `SOSOKRN.MET` | 512 B | `soso-update` / shim | meta durable OTA (fases staged/backup/applying/probando) |
+| `SOSORES.TXT` | 4 KiB | kernel `fs-resize` | journal de redimensionado rootfs |
+| `kernel-x86_64` | **64 MiB** | `package-usb-live` (hueco) / `--only kernel` in situ | kernel UEFI activo; holgura para crecer sin flash completo |
+
+Pass 1 de `package-usb-live` reserva huecos; pass 2 **reutiliza** la misma
+entrada FAT (no duplicar `SOSOUPD`/`SOSOKRN`).
+
+## Boot-shim (`boot-shim/`)
+
+`BOOTX64.EFI` deja marca en `BOOTMARK.TXT`, atiende buzones y chainloadea
+`efi/boot/bootsoso.efi`.
+
+- **Install:** `bootentry.rs` lee `SOSOBOOT.TXT`, crea `Boot####` «soso».
+  El kernel no puede tocar NVRAM (`ExitBootServices`). Si falla, **no aborta**
+  el arranque. Deja `DONE Boot#### soso`.
+- **Update:** `actualiza.rs` lee `SOSOUPD.TXT` y `SOSOKRN.MET`:
+  - `KERNEL <tam> <sha256> <ver>` → verifica hueco, copia kernel viejo a
+    `SOSOKRN.BIN`, escribe el nuevo, deja `PROBANDO` (meta `applying`/`probando`).
+  - Corte en applying/backup → recuperación con backup verificado (tamaño/hash).
+  - `PROBANDO` en el *siguiente* arranque = el anterior falló → revertir.
+  - `OK` / `REVERTIR` / idle: ver `crates/soso-update-core/src/mailbox.rs`.
+- Init confirma el kernel nuevo (`OK`) solo tras rootfs accesible, `spawn` de
+  `/bin/sosh`, marca `/tmp/sosh-ready` con `pid=<pid>` de *esa* instancia
+  (sosh registra fallo de mkdir/write/close y tiempos de prefault) y
+  `kill(pid, 0)`. Si la marca tarda, init sigue sondeándola en el bucle de
+  PID 1; no confirma por banner ni por un timeout más largo. Una marca vieja
+  (`ok\n` u otro pid) no vale. Si sosh vive sin marca válida, no se confirma
+  OTA y la shell no se mata.
+  ELF perezoso: el PID de `spawn` no basta. Un page-fault de un binario
+  lanzado después de la marca (no de sosh) no revierte el buzón.
+
+Diagnóstico: `BOOTMARK` vacío → firmware; `BOOTMARK` escrito y `SOSOLOG`
+vacío → kernel (checkpoints `boot:` en pantalla).
+
+## Instalación nativa (`soso-install`)
+
+Userspace: `user/coreutils/src/bin/soso-install.rs`.
+
+1. `list` (o sin argumentos) — `SYS_DISK_LIST`; clasifica uso (live, soso,
+   Linux, Windows, vacío) y particiones. Sin destino, pide al usuario cuál.
+2. Destino **solo NVMe**, nunca el disco de arranque; `--force` si hay otro SO.
+3. Clona el live (prefijo usado hasta el fin de los modelos empaquetados;
+   omite cola vacía de p3); `gptdisk::relayout` (respaldo GPT al final, p3
+   estirada, **GUID nuevos** — si no, el firmware no distingue USB y destino).
+   Transferencias USB: READ(10) hasta 512 KiB con TRBs encadenados; progreso
+   MiB/s en consola.
+4. `SYS_BOOTREQ_WRITE` → `INSTALL <guid>` en `SOSOBOOT.TXT`.
+5. Reiniciar **con el USB**: el shim registra `Boot####`. Quitar USB.
+
+Tras el primer hwscan en live, el kernel escribe `/etc/soso-hw` (PCI+ncpu); el
+clon lo lleva al NVMe. Arranques nativos omiten hwscan/`SOSODRV` si coincide;
+`echo force > /etc/soso-hw` fuerza reescaneo.
+
+Syscalls: `disk_list=37`, `disk_read=38`, `disk_write=39` (512 B/LBA;
+`raw_disk` solo deja escribir NVMe y **nunca** el disco de arranque),
+`bootreq_write=41` / `bootreq_read=42` (solo el fichero pre-creado).
+
+Host alternativo: `cargo xtask install-disk /dev/nvmeXn1 --yes` (GRUB).
+
+E2E: `cargo xtask test-install` (3 arranques OVMF; NVMe falso con swap/ESP
+que el instalador debe rechazar). `SOSO_MODELS_SIZE=256M` para que sea rápido.
+
+## OTA (`soso-update`)
+
+Userspace + `crates/soso-update-core`. Release: `manifest.txt` + `rootfs.pack`
++ `kernel-x86_64` (`cargo xtask release [--publish]`).
+
+- Rootfs: pack concatenado; `PackWriter::should_pack` salta rutas en `PACK_SKIP`.
+  Sin rollback automático de binarios; progreso en `/etc/actualiza.estado`.
+- Kernel: `SYS_UPD_WRITE`/`READ` (68/69) sobre huecos ESP + `SOSOKRN.MET`.
+- Comandos: `estado` / `comprobar` / `aplicar` / `revertir`; `--local` apunta
+  a un directorio (p. ej. `/var/actualiza-prueba`).
+- Versión: `VERSION` → `/etc/soso-release` + banner kernel.
+
+E2E: `cargo xtask test-update` (apply, corte simulado + recovery, manifiesto inválido).
+Host: `cargo test -p soso-update-core --features std --tests`.
+
+## USB / xHCI (`crates/xhci-nostd` + `drivers/usb_storage.rs`)
+
+Live en placa: GPT por **USB BOT** (`live: GPT backend=Usb`) o NVMe.
+
+La geometría GPT (p2/p3) se cachea en RAM tras el primer parse. Las lecturas
+y escrituras de bloques **no** releen la tabla. Tras un resize/recovery que
+reescriba GPT, `live_disk::refresh_geometry()` actualiza la caché; hasta
+entonces los lectores siguen los límites anteriores (no una GPT a medias).
+
+- DMA del event ring en **uncacheable** (`dma::alloc_zeroed_uc`). Write-back
+  dejaba `EINT=1` y el software veía el anillo vacío (timeout + dump de puertos).
+- **Longitud de Normal TRB = 17 bits:** `0x20000` (128 KiB) se desborda a 0 →
+  Stall (`CSW inválido sig=0`). Tope `MAX_XFER = 64 KiB` en mass_storage.
+  `raw_disk` usa 128 KiB y **debe** trocear antes del TRB.
+- Bounce DMA **persistente** (`XhciController::bounce`): el asignador DMA del
+  kernel no libera; uno por comando tiraba tanta RAM como datos movidos.
+- **Babble en lecturas grandes de modelo (ABIERTO, placa ROG, qwen3.8-27b).**
+  Síntoma: `bulk slot=1 dci=3 len=13 … (Babble Detected)` — babea el **CSW de
+  13 B**, no la fase de datos — tras un READ(10) profundo en p3 (LBA válida, dentro
+  de capacidad). La lectura del shard falla → `mmap-fault: lectura FS falló` →
+  **page fault** de `/bin/soso-llm` (askd, pid 3) → y luego el flush del log a la
+  ESP del mismo USB expira a 5 s en bucle (`transfer event timeout … dci=2` /
+  `EP recovered`). **QEMU no lo reproduce** (nunca babea).
+  - `mass_storage::bot_reset` (USB MS Bulk-Only §5.3.4 / Linux `usb_stor_Bulk_reset`):
+    Bulk-Only Mass Storage Reset + `CLEAR_FEATURE(HALT)` en ambos endpoints bulk +
+    `reset_and_requeue_ep`, con **reintento acotado** en `Bot::Error` de
+    READ(10)/WRITE(10). Necesario (antes sólo EP0 se recuperaba) pero **NO
+    suficiente**: en placa el `BOT reset` sale `recuperado` (control OK) y la
+    **misma LBA vuelve a fallar**; a veces el propio EP0 (dci=1) expira, y
+    `USBSTS=0x18` trae el bit **PCD** (Port Change Detect) → el dispositivo se
+    atasca/cae por debajo del BOT (posible re-enum/brown-out en lecturas
+    sostenidas grandes).
+  - Diagnóstico añadido para el próximo arranque en placa: `residuo=` en el warn de
+    bulk, `fase de datos corta n/want` en `bot_in`, `count=` y `log_ports()`
+    (PORTSC/CCS/PLS) en el error de transporte. Decidirá: fase de datos corta →
+    bug de residuo; `CCS=0` → desconexión (necesita re-enumeración); `CCS=1`+PLS en
+    error → wedge de enlace. Hipótesis pendiente de datos: lecturas encadenadas
+    (>64 KiB, TD multi-TRB) o brown-out → probar `MAX_READ_XFER = MAX_XFER`.
+- `HOSTS` es `spin::Mutex` **no reentrante**. IRQ 1 / `poll_keyboard` no puede
+  `lock()` (teclado muerto en placa; QEMU SSH no lo ve). Ver architecture.
+- Se conservan todos los xHCI (un HCD por controlador, como Linux).
+
+Tests: `cargo xtask test-usb` (4 escenarios en paralelo).
+
+## Comandos host
+
+```bash
+cargo xtask package-usb-live              # qwen2.5-coder-3b Q4_K_M (sin medir stick)
+cargo xtask flash-usb-live /dev/sdX --yes # mide, elige GGUF, dd, estira p3
+SOSO_LIVE_OFFLINE=1 cargo xtask flash-usb-live /dev/sdX --yes
+# incremental (pendrive ya flasheado; no toca p3 modelos):
+cargo xtask flash-usb-live /dev/sdX --yes --skip-models
+cargo xtask flash-usb-live /dev/sdX --yes --only kernel
+SOSO_QEMU_LIVE=1 cargo xtask run
+cargo xtask sosolog [--drv] [/dev/sdX]    # usuario (sudo/TTY); agente: udisksctl, sección ESP
+cargo xtask test-install
+cargo xtask test-update
+cargo xtask test-usb
+cargo xtask check
+cargo xtask hw-matrix show
+```
+
+> **`--only kernel`:** actualiza `kernel-x86_64` (y `efi/boot/{bootsoso,bootx64}.efi`)
+> **in situ**. El empaquetado live deja p1 **192 MiB** y un hueco de kernel
+> **64 MiB** (como SOSOKRN). Si el hueco del stick es más pequeño, intenta
+> agrandarlo; si no hay clusters, el ELF tiene que caber o hace falta un
+> flash completo. No hace `dd` de `soso-uefi.img` p1 (~31 MiB) sobre la ESP
+> live (run17). Ver `docs/DIAGNOSTICO-ROG-2026-09-10.md` run17.
+
+No `sudo cargo`: root no tiene rustup. `cargo xtask flash-usb-live …` pide
+sudo solo para grabar el disco (HOME/PATH salen de `SUDO_UID` si ya eres root).
+
+**El agente no graba el USB.** El sudo del `dd` pide contraseña y en Cursor no
+hay TTY (`sudo: a terminal is required to read the password`). Compila el
+kernel, deja el comando exacto al usuario y no reintentes `sudo`.
+`lx-build` y el cargo del kernel/userspace bajo sudo escriben `target/` como
+el invocador (`SUDO_UID`), no como root. El `dd` al USB sigue siendo root.
+Leer/editar la ESP: sección **ESP en el host** (`udisksctl`, sin sudo).
+
+**Tras un arranque de placa**, con el pendrive de vuelta: actualizar la
+matriz A8 (`docs/hw-matrix.json`) con `parse-logs` — skill **soso-dev**.
+El agente puede editar ese JSON. No pongas etapas en `ok` sin evidencia
+en SOSOLOG (`UCODE_ALIVE_NTFY`, GSP RPC). Un arranque a sosh no es
+aceptación (hacen falta 3 seguidos + sesión).
+
+Notas de sesión VFIO/kdump archivadas: [`docs/historico/notas-placa.md`](../../docs/historico/notas-placa.md)
+(puntero desde [`board.txt`](../../board.txt)).
+
+Perfil default live: `live-usb` (virtio + e1000e + rtl8169 + nvme + usb +
+live-disk + nouveau + iwlwifi). Override: `SOSO_DRIVERS`.

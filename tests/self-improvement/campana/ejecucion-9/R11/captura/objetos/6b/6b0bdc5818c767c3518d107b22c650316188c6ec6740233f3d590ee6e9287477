@@ -1,0 +1,12 @@
+[package]
+name = "soso-rustc"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+
+[dependencies]
+libsoso = { workspace = true }
+
+[[bin]]
+name = "soso-rustc"
+path = "src/main.rs"

@@ -1,0 +1,13 @@
+[package]
+name = "convert-whisper"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+
+[[bin]]
+name = "convert-whisper"
+path = "src/main.rs"
+
+[dependencies]
+sosomodel = { path = "../../crates/sosomodel" }
+soso-llm-core = { path = "../../crates/soso-llm-core", features = ["std"] }

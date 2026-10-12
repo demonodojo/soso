@@ -1,0 +1,2 @@
+tarea: preparada r-R11 para R11
+  estado en /home/jmdiez/Trabajo/demonodojo/soso/tests/self-improvement/campana/ejecucion-9/R11/estado

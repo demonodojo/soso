@@ -1,0 +1,12 @@
+[package]
+name = "soso-hw"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+
+# Lógica pura de hardware extraída del kernel para poder probarla en host:
+# parseo de tablas ACPI (IVRS) y geometría de rotación del framebuffer.
+# Mismo patrón que `soso-resize-core`: el kernel hace el MMIO, aquí vive todo
+# lo que se puede comprobar sin silicio.
+
+[dependencies]

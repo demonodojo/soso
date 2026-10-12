@@ -1,0 +1,117 @@
+# nouveau/nvkm — bring-up GSP gb205 (G3)
+lxdde/ports/nouveau/gsp_dma.c
+lxdde/ports/nouveau/gsp_fw.c
+lxdde/ports/nouveau/gsp_rm.c
+lxdde/ports/nouveau/gsp_wpr.c
+lxdde/ports/nouveau/gsp_fwsec.c
+lxdde/ports/nouveau/gsp_libos.c
+lxdde/ports/nouveau/gsp_rpc.c
+lxdde/ports/nouveau/gsp_cpu_seq.c
+lxdde/ports/nouveau/gsp_cmdq.c
+lxdde/ports/nouveau/gsp_rm_obj.c
+lxdde/ports/nouveau/gsp_vram.c
+lxdde/ports/nouveau/gsp_vmm.c
+lxdde/ports/nouveau/gsp_chan.c
+lxdde/ports/nouveau/gsp_ce.c
+lxdde/ports/nouveau/gsp_grctx.c
+lxdde/ports/nouveau/gsp_buf.c
+lxdde/ports/nouveau/gsp_compute.c
+# Un juego de SASS por arquitectura (generados por l6-g4f-build-sass.sh).
+lxdde/ports/nouveau/sass_sm86.c
+lxdde/ports/nouveau/sass_sm120.c
+lxdde/ports/nouveau/gsp_fini.c
+lxdde/ports/nouveau/gsp_mmio.c
+lxdde/ports/nouveau/gsp_pramin.c
+lxdde/ports/nouveau/gsp_bar1.c
+lxdde/ports/nouveau/gsp_top.c
+lxdde/ports/nouveau/gsp_chip.c
+lxdde/ports/nouveau/gsp_bringup.c
+lxdde/ports/nouveau/acr_fw.c
+lxdde/ports/nouveau/falcon_lx.c
+lxdde/ports/nouveau/acr_lx.c
+lxdde/ports/nouveau/fmc_lx.c
+lxdde/ports/nouveau/fsp_lx.c
+lxdde/ports/nouveau/nouveau_stub.c
+lxdde/ports/nouveau/nvkm_device_lx.c
+lxdde/ports/nouveau/nvkm_bringup_lx.c
+
+# --- Ola 1: nvkm GSP subdev (Linux 6.6.32) ---
+# Compilan contra las cabeceras privadas de nouveau + shims lx_emul en
+# lxdde/shim/include (slab/pci/mutex/... mínimos que cortan la avalancha arch).
+# Los símbolos nvkm/kernel no resueltos se autogeneran como trace_and_stop.
+drivers/gpu/drm/nouveau/nvkm/subdev/gsp/base.c
+drivers/gpu/drm/nouveau/nvkm/subdev/gsp/ga102.c
+
+# --- Ola 1 fase 2: núcleo nvkm (ctors reales, sustituyen dummies) ---
+lib/rbtree.c
+drivers/gpu/drm/nouveau/nvkm/core/intr.c
+drivers/gpu/drm/nouveau/nvkm/core/object.c
+drivers/gpu/drm/nouveau/nvkm/core/oproxy.c
+drivers/gpu/drm/nouveau/nvkm/core/ramht.c
+drivers/gpu/drm/nouveau/nvkm/core/uevent.c
+drivers/gpu/drm/nouveau/nvkm/core/option.c
+drivers/gpu/drm/nouveau/nvkm/core/subdev.c
+drivers/gpu/drm/nouveau/nvkm/core/engine.c
+drivers/gpu/drm/nouveau/nvkm/core/memory.c
+drivers/gpu/drm/nouveau/nvkm/core/mm.c
+drivers/gpu/drm/nouveau/nvkm/core/gpuobj.c
+drivers/gpu/drm/nouveau/nvkm/core/firmware.c
+drivers/gpu/drm/nouveau/nvkm/falcon/base.c
+drivers/gpu/drm/nouveau/nvkm/falcon/fw.c
+
+# --- Ola 2: falcon por chip + nvfw parsers ---
+drivers/gpu/drm/nouveau/nvkm/falcon/ga102.c
+drivers/gpu/drm/nouveau/nvkm/falcon/gm200.c
+drivers/gpu/drm/nouveau/nvkm/falcon/gp102.c
+drivers/gpu/drm/nouveau/nvkm/falcon/ga100.c
+drivers/gpu/drm/nouveau/nvkm/nvfw/fw.c
+drivers/gpu/drm/nouveau/nvkm/nvfw/hs.c
+drivers/gpu/drm/nouveau/nvkm/nvfw/ls.c
+drivers/gpu/drm/nouveau/nvkm/nvfw/acr.c
+drivers/gpu/drm/nouveau/nvkm/nvfw/flcn.c
+
+# --- Ola 2: subdev ACR (secuencia AHESASC→ASB real, tu102_acr_init) ---
+drivers/gpu/drm/nouveau/nvkm/subdev/acr/base.c
+drivers/gpu/drm/nouveau/nvkm/subdev/acr/lsfw.c
+drivers/gpu/drm/nouveau/nvkm/subdev/acr/tu102.c
+drivers/gpu/drm/nouveau/nvkm/subdev/acr/ga102.c
+drivers/gpu/drm/nouveau/nvkm/subdev/acr/ga100.c
+drivers/gpu/drm/nouveau/nvkm/subdev/acr/gp102.c
+drivers/gpu/drm/nouveau/nvkm/subdev/acr/gp108.c
+drivers/gpu/drm/nouveau/nvkm/subdev/acr/gm200.c
+
+# --- Ola 1 fase 2: subdev base (timer/mc/top/bar/instmem/fb/mmu) ---
+drivers/gpu/drm/nouveau/nvkm/subdev/timer/base.c
+drivers/gpu/drm/nouveau/nvkm/subdev/mc/base.c
+drivers/gpu/drm/nouveau/nvkm/subdev/top/base.c
+drivers/gpu/drm/nouveau/nvkm/subdev/bar/base.c
+drivers/gpu/drm/nouveau/nvkm/subdev/instmem/base.c
+drivers/gpu/drm/nouveau/nvkm/subdev/fb/base.c
+drivers/gpu/drm/nouveau/nvkm/subdev/mmu/base.c
+drivers/gpu/drm/nouveau/nvkm/subdev/mmu/vmm.c
+drivers/gpu/drm/nouveau/nvkm/subdev/mmu/ummu.c
+drivers/gpu/drm/nouveau/nvkm/subdev/mmu/umem.c
+drivers/gpu/drm/nouveau/nvkm/subdev/mmu/uvmm.c
+drivers/gpu/drm/nouveau/nvkm/subdev/mmu/mem.c
+drivers/gpu/drm/nouveau/nvkm/subdev/fb/ram.c
+drivers/gpu/drm/nouveau/nvkm/subdev/bios/base.c
+drivers/gpu/drm/nouveau/nvkm/subdev/bios/M0203.c
+
+# --- Ola 4 (G4): infraestructura base del motor de cómputo + fifo/canales ---
+drivers/gpu/drm/nouveau/nvkm/core/event.c
+drivers/gpu/drm/nouveau/nvkm/engine/falcon.c
+drivers/gpu/drm/nouveau/nvkm/engine/dma/base.c
+drivers/gpu/drm/nouveau/nvkm/engine/dma/user.c
+drivers/gpu/drm/nouveau/nvkm/engine/fifo/base.c
+drivers/gpu/drm/nouveau/nvkm/engine/fifo/chid.c
+drivers/gpu/drm/nouveau/nvkm/engine/fifo/runl.c
+drivers/gpu/drm/nouveau/nvkm/engine/fifo/runq.c
+drivers/gpu/drm/nouveau/nvkm/engine/fifo/cgrp.c
+drivers/gpu/drm/nouveau/nvkm/engine/fifo/chan.c
+drivers/gpu/drm/nouveau/nvkm/engine/fifo/ucgrp.c
+drivers/gpu/drm/nouveau/nvkm/engine/fifo/uchan.c
+drivers/gpu/drm/nouveau/nvkm/engine/gr/base.c
+
+# Ola 2/3 nvkm (descomentar incrementalmente; ver nvkm_ola2.list + l6-g3-nvkm-inventory.sh):
+# subdev/pci/base.c requiere struct pci_dev real (usa lx_pci_* de momento)
+# drivers/gpu/drm/nouveau/nvkm/subdev/acr/base.c

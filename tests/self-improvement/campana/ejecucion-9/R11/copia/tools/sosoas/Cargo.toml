@@ -1,0 +1,11 @@
+# Ensamblador GAS x86_64 mínimo para cg_clif (Hito 3c).
+
+[package]
+name = "sosoas"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "sosoas"
+path = "src/main.rs"

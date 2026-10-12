@@ -1,0 +1,20 @@
+[package]
+name = "soso-http"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+build = "build.rs"
+
+[features]
+default = []
+std = []
+
+[build-dependencies]
+cc = "1"
+
+[dependencies]
+soso-abi = { path = "../soso-abi" }
+getrandom = { version = "0.2", features = ["rdrand"] }
+ring = { version = "0.17", features = ["less-safe-getrandom-custom-or-rdrand"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "0.26"

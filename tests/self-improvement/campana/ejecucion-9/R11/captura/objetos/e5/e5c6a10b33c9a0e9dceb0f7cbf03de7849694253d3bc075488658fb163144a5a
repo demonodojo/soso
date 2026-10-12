@@ -1,0 +1,11 @@
+[package]
+name = "soso-gpu"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+
+[dependencies]
+libsoso = { workspace = true }
+soso-abi = { workspace = true }
+soso-llm-core = { path = "../../crates/soso-llm-core" }
+sosomodel = { path = "../../crates/sosomodel" }

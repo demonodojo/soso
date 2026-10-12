@@ -1,0 +1,14 @@
+[package]
+name = "xhci-nostd"
+version = "0.1.0"
+edition = "2021"
+authors = ["Matt Gates <suhteevah@gmail.com>"]
+license = "MIT OR Apache-2.0"
+description = "no_std xHCI (USB 3.0) host controller driver with HID keyboard support"
+repository = "https://github.com/suhteevah/xhci-nostd"
+keywords = ["xhci", "usb", "keyboard", "no_std", "bare-metal"]
+categories = ["no-std", "hardware-support"]
+readme = "README.md"
+
+[dependencies]
+log = { version = "0.4", default-features = false }

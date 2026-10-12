@@ -1,0 +1,67 @@
+/* Config mínima equivalente a .config de Linux para ports lxdde. */
+#ifndef AUTOCONF_H
+#define AUTOCONF_H
+
+#define CONFIG_PCI 1
+#define CONFIG_NET 1
+#define CONFIG_ETHERNET 1
+#define CONFIG_E1000E 1
+#define CONFIG_SMP 0
+#define CONFIG_PREEMPT_NONE 1
+#define CONFIG_64BIT 1
+#define CONFIG_X86_64 1
+#define CONFIG_PHYS_ADDR_T_64BIT 1
+#define CONFIG_DMA_DIRECT_REMAP 1
+#define CONFIG_NETDEVICES 1
+#define CONFIG_INET 1
+#define CONFIG_DEBUG_KERNEL 1
+#define CONFIG_DRM 1
+#define CONFIG_DRM_NOUVEAU 1
+
+/* nvkm (nouveau) arrastra la cadena real de cabeceras del kernel: define las
+ * macros de .config que esas cabeceras esperan. Valores x86_64 estándar. */
+#define CONFIG_X86_L1_CACHE_SHIFT 6
+#define CONFIG_X86_INTERNODE_CACHE_SHIFT 6
+#define CONFIG_NR_CPUS 1
+#define CONFIG_BASE_SMALL 0
+/* Paginación x86_64 de 4 niveles (evita el fallback pgtable-nopmd que choca). */
+#define CONFIG_PGTABLE_LEVELS 4
+#define CONFIG_NOUVEAU_DEBUG 5
+#define CONFIG_NOUVEAU_DEBUG_DEFAULT 3
+
+/* iwlwifi + mac80211 (Intel AX211/AX200) */
+#define CONFIG_WIRELESS 1
+#define CONFIG_WIRELESS_EXT 1
+#define CONFIG_CFG80211 1
+#define CONFIG_CFG80211_WEXT 1
+#define CONFIG_MAC80211 1
+#define CONFIG_IWLWIFI 1
+#define CONFIG_IWLMVM 1
+#define CONFIG_IWLWIFI_DEBUG 1
+#define CONFIG_IWLWIFI_DEVICE_TRACING 0
+#define CONFIG_IWLWIFI_DEBUGFS 0
+#define CONFIG_IWLWIFI_DEVICE_TRACING 0
+#define CONFIG_PM 1
+#define CONFIG_PM_SLEEP 0
+#define CONFIG_ACPI 0
+#define CONFIG_RFS_ACCEL 0
+#define CONFIG_NET_SCHED 0
+#define CONFIG_NETFILTER 0
+#define CONFIG_IPV6 0
+#define CONFIG_NL80211_TESTMODE 0
+#define CONFIG_CFG80211_CERTIFICATION_ONUS 0
+#define CONFIG_MAC80211_MESH 0
+#define CONFIG_MAC80211_LEDS 0
+#define CONFIG_MAC80211_DEBUGFS 0
+#define CONFIG_MAC80211_MESSAGE_TRACING 0
+#define CONFIG_IWLWIFI_OPMODE_MODULAR 0
+#define CONFIG_IWLDVM 0
+#define CONFIG_IWLMLD 0
+#define CONFIG_IWLWIFI_LEDS 0
+#define CONFIG_IWLWIFI_DEBUGFS 0
+#define CONFIG_IWLWIFI_DEVICE_TRACING 0
+#define CONFIG_IWLWIFI_ATLANTIC 0
+#define CONFIG_CRC32 1
+#define CONFIG_RHASHTABLE 1
+
+#endif /* AUTOCONF_H */
