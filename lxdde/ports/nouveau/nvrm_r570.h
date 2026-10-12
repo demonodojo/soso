@@ -753,11 +753,13 @@ typedef struct NVC0B5_ALLOCATION_PARAMETERS {
 #define NVC7C0_SET_OBJECT                    0x00000000u
 #define NVC7C0_SET_QMD_VERSION               0x00000288u
 #define NVC7C0_CHECK_QMD_VERSION             0x00000290u
-/* Mesa invalida la caché del SKED antes del primer PCAS. Sin eso, una
- * entrada vieja (o la de reset) se traduce y el PBDMA se queda en
- * PBDMA_HANG_DURING_HTE. El bit 0 es el que invalida. */
+/* Mesa invalida la caché del SKED antes del primer PCAS, siempre con dato 0
+ * (`P_IMMD(p, NVB1C0, INVALIDATE_SKED_CACHES, 0)`). clc7c0.h no da nombre a
+ * ningún valor del campo V. Con dato 1 la GA104 lo atrapa como GR_CLASS_ERROR:
+ * 0x400100=0x00100000, 0x400704=0x00010298 (subcanal 1, método 0x298) y
+ * 0x400708=1 (ROG, 2026-10-12). */
 #define NVC7C0_INVALIDATE_SKED_CACHES        0x00000298u
-#define NVC7C0_INVALIDATE_SKED_CACHES_V_TRUE 0x1u
+#define NVC7C0_INVALIDATE_SKED_CACHES_V_MESA 0x0u
 /* Huecos de Mesa (nvk_push_dispatch_state_init) para que un acceso local o
  * compartido no caiga en la VA 0. Van por debajo de 4 GiB; nuestras VAs
  * empiezan en GSP_VA_BASE (512 GiB). */

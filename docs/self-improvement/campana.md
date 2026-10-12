@@ -156,7 +156,7 @@ Evidencia: `tests/self-improvement/campana/ejecucion-4/` (misma organización qu
 
 # Campaña 4 (`campana-si4-4`): banco nuevo, agente congelado
 
-**Estado:** en ejecución (lanzada el 2026-10-12 09:02). `campaign-4.json` sha256 `6178f9e56f244b9a276b421cc71b05afeaf74ecfb090c00c08ef480d498aff12`.
+**Estado:** en ejecución (lanzada el 2026-10-12 09:38; el primer intento de las 09:02 no arrancó por un defecto del arnés —lista de tareas por defecto— y no cuenta). `campaign-4.json` sha256 `6178f9e56f244b9a276b421cc71b05afeaf74ecfb090c00c08ef480d498aff12`.
 
 Es la medida que sí vale: diez tareas **nuevas** (R11–R20, `tests/self-improvement/campana2/`) escritas y fijadas antes de ejecutar nada, que el agente **nunca ha visto**, con el agente **congelado** tal como acabó la campaña 3 (`herramientas.rs` `b4ea58ae…`, `mod.rs` `986a8692…`; ningún cambio durante ni después). Para cada tarea se comprobó que la base falla (`verificar repo`, exit 2) y que la solución de referencia pasa (exit 0). Mismas reglas que las anteriores: base `git archive 6f558f072`, secuencial desde la base aceptada, 1 intento (2 en las inyecciones: R12 a los 75 s y R17 a los 45 s), 14B a T=0, criterio SI-4 (≥ 5 de 10, recuperación acreditada, base final en verde). `campaign-4.json` sha256 en el registro de lanzamiento.
 

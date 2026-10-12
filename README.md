@@ -151,7 +151,7 @@ e1000e under QEMU slirp — not for WiFi and not for rtl8169. Port forwards:
 
 - [x] **sosh** — pipes `|`, redirections including `N>&M`, lists with `;` / `&&` / `||`, builtins `cd` / `pwd` / `help` / `exit` / `wifi` / `ask` / `voz`
 - [x] **Per-process cwd** — relative paths resolve against the process working directory
-- [x] **Coreutils** — `ls`, `cat`, `echo`, `mkdir`, `rm`, `cp`, `mv`, `hexdump`, `grep`, `diff`, `find`, `wc`, `head`, `tail`, `stat`, `ip`, `ping`, `dns`, `ps`, `log`, `halt`, `reboot`
+- [x] **Coreutils** — `ls`, `cat`, `echo`, `mkdir`, `rm`, `cp`, `mv`, `hexdump`, `grep`, `diff`, `find`, `wc`, `head`, `tail`, `stat`, `uname`, `ip`, `ping`, `dns`, `ps`, `log`, `halt`, `reboot`
 - [x] **init** — PID 1, relaunches sosh, confirms a kernel update only after rootfs and `/tmp/sosh-ready`; `init test` is the syscall regression suite
 - [x] **soso-voz** — Whisper ASR daemon (`vozd` on `127.0.0.1:7421`); transcription is inserted into the line and never run by itself
 - [x] **soso-web** — HTTPS client, HTML reflow or framebuffer GUI (fontdue + DejaVu)

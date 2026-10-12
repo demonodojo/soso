@@ -31,12 +31,13 @@ el [`README.md`](README.md) (en inglés). Guía operativa de desarrollo:
 | Desarrollo | **soso-ed**, **soso-forja** | Editar fuentes en `/src/soso`; bucle remoto o plan local (`docs/SELF-HOSTING.md`) |
 | Utilidades | **cp**, **mv**, **grep**, **diff**, **find**, **wc**, **head**, **tail**, **stat** | Coreutils mínimas para editar y depurar en el guest |
 | Red | **ip**, **ping**, **dns**, **wifi** (builtin) | Ver la IPv4; comprobar alcance ICMP; resolver un nombre; escanear y conectar redes WiFi Intel en placa real |
-| Sistema | **ps**, **halt**, **reboot**, **exit** | Ver procesos; apagar, reiniciar o salir de la shell |
+| Sistema | **uname**, **ps**, **halt**, **reboot**, **exit** | Versión y estado del equipo; ver procesos; apagar, reiniciar o salir de la shell |
 | Diagnóstico | **notifybug**, **sosolog** (builtin) | En instalación: abrir una issue en GitHub con `/var/log`; en live: volcar log a `SOSOLOG.TXT` |
 
 Al arrancar verás una línea como `soso 0.2.2 (6641119fd)` — versión del kernel
-y build. La versión del disco está en `/etc/soso-release` (`soso-update estado`
-la muestra junto al estado del buzón de actualización).
+y build. `uname` muestra la versión del disco, el kernel en marcha y un
+resumen del equipo. La versión también está en `/etc/soso-release`
+(`soso-update estado` la muestra junto al estado del buzón de actualización).
 
 ---
 
@@ -598,6 +599,35 @@ Muestra los procesos del sistema: PID, proceso padre, estado y comando (ruta del
 ```
 
 Los hilos de usuario aparecen con `(hilo)` al final. En la kernel-shell de emergencia (`soso>`) el comando es el mismo.
+
+### uname — versión y estado del equipo
+
+```sh
+uname
+```
+
+`uname -a` muestra lo mismo. La primera línea es la versión del disco
+(`/etc/soso-release`). El resto es el kernel que está corriendo, la
+arquitectura, los procesadores, el tiempo encendido, la memoria, el espacio
+libre del disco, de qué medio arrancó y la red:
+
+```text
+soso 0.3.16
+build: 6641119fd
+fecha: 2026-10-12
+kernel: 0.3.16 6641119fd
+arquitectura: x86_64
+procesadores: 4
+encendido: 3 min 12 s
+memoria: 1800 MiB libres de 2048 MiB
+disco: 900 MiB libres de 4096 MiB
+arranque: virtio (prueba QEMU)
+red: 10.0.2.15/24 ethernet
+```
+
+Si hay páginas de fichero que el kernel puede soltar, la línea de memoria
+añade `(N MiB recuperables)`. Sin dirección todavía: `red: sin dirección
+(ethernet)`. Sin adaptador: `red: sin adaptador`.
 
 ### ping — comprobar que una máquina responde
 
@@ -2118,6 +2148,7 @@ cargo xtask run
 ssh -tt -i target/soso_test_key -p 2222 soso@localhost
 
 # --- Dentro de sosh ---
+uname                        # versión, memoria, disco, red
 soso-update estado          # medio de arranque, versión rootfs, kernel, buzón
 pwd
 cd /tmp

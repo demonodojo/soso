@@ -810,6 +810,11 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 ssh_ps(key, port)
             });
         });
+        filter.if_step(sid, "uname muestra el sistema", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "uname muestra el sistema", || {
+                ssh_uname(key, port)
+            });
+        });
         filter.if_step(sid, "soso-improve: runner de pruebas en soso", || {
             report.paso_ssh_sys(
                 &mut qemu,
@@ -1938,6 +1943,31 @@ fn ssh_improve_cli(key: &Path, ssh_port: u16) -> Result<(), String> {
     }
     if !salida.contains("orden desconocida") {
         return Err(format!("una orden inventada no se rechazó: {salida:?}"));
+    }
+    Ok(())
+}
+
+fn ssh_uname(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let salida = ssh_guion(key, ssh_port, "uname\nexit\n", Duration::from_secs(30))?;
+    let version = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../VERSION"))
+        .map_err(|e| format!("no se pudo leer VERSION: {e}"))?;
+    let version = version.trim();
+    if !salida.contains(&format!("soso {version}")) {
+        return Err(format!("uname no anunció soso {version}; stdout: {salida:?}"));
+    }
+    for marca in [
+        "arquitectura: x86_64",
+        "kernel:",
+        "procesadores:",
+        "encendido:",
+        "memoria:",
+        "disco:",
+        "arranque:",
+        "red:",
+    ] {
+        if !salida.contains(marca) {
+            return Err(format!("uname sin «{marca}»; stdout: {salida:?}"));
+        }
     }
     Ok(())
 }

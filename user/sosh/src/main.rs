@@ -1252,7 +1252,7 @@ fn ayuda() {
     println!("voz:      voz             — dictar; Enter confirma la línea");
     println!("          voz ask         — prefija «ask » al dictado");
     println!("          F4              — push-to-talk en la línea");
-    println!("comandos: ELF de /bin o ruta absoluta (ip, ls, cat, …)");
+    println!("comandos: ELF de /bin o ruta absoluta (uname, ip, ls, cat, …)");
     println!("install:  soso-install  — clonar live a un NVMe (elige disco)");
     println!("          soso-install list | nvme1 --yes | status");
     println!("guion:    sosh /ruta  — una orden por línea; # comentario al inicio");

@@ -962,11 +962,10 @@ int gsp_compute_encode_qmd(struct gsp_compute *cp, const GspQmdV05 *qmd,
     cp_pb_immd(c, &pos, 0u, NVC86F_WFI, 0u);
     if (cp->caps && cp->caps->qmd_version == GSP_QMD_VERSION_AMPERE) {
         /* Igual que nvk_cmd_buffer_begin_compute / nvk_push_dispatch_state_init:
-         * invalidar el SKED y apartar las ventanas local y compartida de la
-         * VA 0 antes del PCAS. En la GA104 no quitaron el cuelgue; se quedan
-         * porque Mesa las manda y no provocan GR_CLASS_ERROR. */
+         * invalidar el SKED (dato 0, ver nvrm_r570.h) y apartar las ventanas
+         * local y compartida de la VA 0 antes del PCAS. */
         cp_pb_immd(c, &pos, GSP_COMPUTE_SUBCHANNEL, NVC7C0_INVALIDATE_SKED_CACHES,
-                   NVC7C0_INVALIDATE_SKED_CACHES_V_TRUE);
+                   NVC7C0_INVALIDATE_SKED_CACHES_V_MESA);
         cp_pb_method(c, &pos, GSP_COMPUTE_SUBCHANNEL,
                      NVC7C0_SET_SHADER_SHARED_MEMORY_WINDOW_A, 2);
         cp_pb_write(c, &pos, 0u);

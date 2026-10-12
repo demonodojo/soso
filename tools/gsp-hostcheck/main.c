@@ -783,7 +783,7 @@ static int check_family_caps(void)
                     const uint32_t *w = (const uint32_t *)(pb + off);
                     uint32_t sked =
                         (NVC56F_DMA_SEC_OP_IMMD_DATA_METHOD << 29) |
-                        (NVC7C0_INVALIDATE_SKED_CACHES_V_TRUE << 16) |
+                        (NVC7C0_INVALIDATE_SKED_CACHES_V_MESA << 16) |
                         (1u << 13) |
                         ((NVC7C0_INVALIDATE_SKED_CACHES >> 2) & 0xfffu);
                     uint32_t win_shared =
