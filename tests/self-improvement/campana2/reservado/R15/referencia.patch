@@ -1,0 +1,16 @@
+diff --git a/crates/soso-update-core/src/pack.rs b/crates/soso-update-core/src/pack.rs
+index 441274e..27221e2 100644
+--- a/crates/soso-update-core/src/pack.rs
++++ b/crates/soso-update-core/src/pack.rs
+@@ -33,6 +33,11 @@ impl<'a> PackReader<'a> {
+             .map(|d| hex_sha256(d) == entry.hash_hex)
+             .unwrap_or(false)
+     }
++
++    /// Todas las entradas que **no** verifican (hash distinto o fuera del pack), en el orden de `files`.
++    pub fn verify_all<'e>(&self, files: &'e [FileEntry]) -> Vec<&'e FileEntry> {
++        files.iter().filter(|f| !self.verify_entry(f)).collect()
++    }
+ }
+ 
+ /// Construye un pack (sólo en host con std).

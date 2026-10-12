@@ -1,0 +1,27 @@
+diff --git a/crates/soso-wpa2/src/kde.rs b/crates/soso-wpa2/src/kde.rs
+index 6ef4820..471685b 100644
+--- a/crates/soso-wpa2/src/kde.rs
++++ b/crates/soso-wpa2/src/kde.rs
+@@ -47,6 +47,22 @@ pub fn for_each_rsn_kde<F: FnMut(u8, &[u8])>(key_data: &[u8], mut f: F) {
+     }
+ }
+ 
++pub const KDE_DATA_TYPE_PMKID: u8 = 4;
++
++/// Busca el KDE del PMKID (16 bytes). Un payload más corto se ignora; uno más largo se corta a 16.
++pub fn find_pmkid(key_data: &[u8]) -> Option<[u8; 16]> {
++    let mut found = None;
++    for_each_rsn_kde(key_data, |data_type, payload| {
++        if data_type != KDE_DATA_TYPE_PMKID || found.is_some() || payload.len() < 16 {
++            return;
++        }
++        let mut k = [0u8; 16];
++        k.copy_from_slice(&payload[..16]);
++        found = Some(k);
++    });
++    found
++}
++
+ /// Busca el KDE de la GTK. `None` si no está o si la clave no mide 16 bytes.
+ pub fn find_gtk(key_data: &[u8]) -> Option<Gtk> {
+     let mut found = None;

@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "R18",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "kde::find_pmkid extrae el PMKID del Key Data",
+  "etiqueta": "kde-pmkid",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R18/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R18",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R18/aceptacion.rs",
+    "reservado/R18/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R18/enunciado.md": "632c43d103134104df664eb22e474e118d660bcab4eeb467104d042d678cc768"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/soso-wpa2/src/kde.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "kde::find_pmkid extrae el PMKID del Key Data",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "soso-wpa2"
+    ],
+    "prueba_reservada": "reservado/R18/aceptacion.rs",
+    "destino_prueba": "crates/soso-wpa2/tests/aceptacion_R18.rs",
+    "referencia": "reservado/R18/referencia.patch"
+  }
+}

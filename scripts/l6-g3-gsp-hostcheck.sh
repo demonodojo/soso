@@ -162,8 +162,8 @@ if ! grep -q 'NVC7C0_INVALIDATE_SKED_CACHES' "$compute" ||
     echo "FALLO: Ampere tiene que invalidar el SKED y rellenar PROGRAM_PREFETCH" >&2
     exit 1
 fi
-if ! grep -q 'G4F_QMD_VRAM_VA' "$compute"; then
-    echo "FALLO: el PCAS Ampere tiene que apuntar al QMD en VRAM (G4F_QMD_VRAM_VA)" >&2
+if ! grep -q 'gv100_vmm_join' "$src/gsp_chan.c"; then
+    echo "FALLO: el canal GR de Ampere tiene que replicar el PDB a inst+0x2a0 (gv100_vmm_join)" >&2
     exit 1
 fi
 if [[ -d "$root/lxdde/reference" ]]; then

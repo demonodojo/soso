@@ -1,0 +1,19 @@
+diff --git a/crates/soso-update-core/src/semver.rs b/crates/soso-update-core/src/semver.rs
+index 871a776..42149a2 100644
+--- a/crates/soso-update-core/src/semver.rs
++++ b/crates/soso-update-core/src/semver.rs
+@@ -12,10 +12,14 @@ pub struct SemVer {
+ /// Parsea `major.minor.patch` (ignora sufijos tras `-` o `+`).
+ pub fn parse(s: &str) -> Option<SemVer> {
+     let base = s.split(['-', '+']).next()?.trim();
++    let base = base.strip_prefix(['v', 'V']).unwrap_or(base);
+     let mut it = base.split('.');
+     let major = it.next()?.parse().ok()?;
+     let minor = it.next()?.parse().ok()?;
+     let patch = it.next()?.parse().ok()?;
++    if it.next().is_some() {
++        return None;
++    }
+     Some(SemVer {
+         major,
+         minor,

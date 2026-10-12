@@ -1,0 +1,21 @@
+diff --git a/crates/soso-web-core/src/html.rs b/crates/soso-web-core/src/html.rs
+index 0179480..705da47 100644
+--- a/crates/soso-web-core/src/html.rs
++++ b/crates/soso-web-core/src/html.rs
+@@ -222,9 +222,14 @@ pub fn resolve_url(base: &str, href: &str) -> String {
+     if href.starts_with('#') || href.is_empty() {
+         return base.to_string();
+     }
++    let esquema = if base.starts_with("http://") { "http" } else { "https" };
++    if let Some(resto) = href.strip_prefix("//") {
++        return format!("{esquema}://{resto}");
++    }
+     if href.starts_with('/') {
+-        if let Some(host) = base.strip_prefix("https://").and_then(|r| r.split('/').next()) {
+-            return format!("https://{host}{href}");
++        let sin_esquema = base.strip_prefix("https://").or_else(|| base.strip_prefix("http://"));
++        if let Some(host) = sin_esquema.and_then(|r| r.split('/').next()) {
++            return format!("{esquema}://{host}{href}");
+         }
+         return href.to_string();
+     }

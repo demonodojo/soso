@@ -1,0 +1,18 @@
+diff --git a/crates/soso-web-core/src/decode.rs b/crates/soso-web-core/src/decode.rs
+index 5e8998b..a43cd15 100644
+--- a/crates/soso-web-core/src/decode.rs
++++ b/crates/soso-web-core/src/decode.rs
+@@ -62,11 +62,11 @@ fn parse_entity_char(rest: &[u8]) -> Option<(Option<char>, usize)> {
+         "nbsp" => Some((Some('\u{00a0}'), total)),
+         _ if raw.starts_with("#x") || raw.starts_with("#X") => {
+             let n = u32::from_str_radix(&raw[2..], 16).ok()?;
+-            Some((char::from_u32(n), total))
++            Some((Some(char::from_u32(n).filter(|c| *c != '\0').unwrap_or('\u{FFFD}')), total))
+         }
+         _ if raw.starts_with('#') => {
+             let n = raw[1..].parse::<u32>().ok()?;
+-            Some((char::from_u32(n), total))
++            Some((Some(char::from_u32(n).filter(|c| *c != '\0').unwrap_or('\u{FFFD}')), total))
+         }
+         _ => None,
+     }

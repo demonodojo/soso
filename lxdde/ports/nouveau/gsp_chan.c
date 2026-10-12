@@ -321,12 +321,60 @@ static void chan_probe_usermode(void)
               "doorbell 0x%06x es una dirección real\n", NV_VFN_DOORBELL);
 }
 
+/* `gv100_vmm_join` (lo usa `tu102_vmm`, que es la MMU de Ampere en Linux):
+ * el directorio queda en el bloque de instancia en +0x200, y Volta+ lo lee
+ * en la ranura 0 de +0x2a0. RM escribe +0x200 al crear el canal —el CE
+ * traduce con eso—. Si la ranura sigue a 0 o a 1, el GR no tiene directorio,
+ * la falta de MMU retiene el mutex y el PBDMA acaba en HANG_DURING_HTE.
+ * Solo el canal de GR en Ampere: Blackwell ya lanza con lo que dejó RM. */
+static void chan_join_gr_pdb(struct gsp_chan *c)
+{
+    uint64_t pdb, slot;
+    uint32_t mask_lo;
+
+    if (!c || c->engine != NV2080_ENGINE_TYPE_GR0 || !c->inst_addr) {
+        return;
+    }
+    if (gsp_nv_family_current() != NV_FAM_AMPERE || !gsp_pramin_alive()) {
+        return;
+    }
+    pdb = (uint64_t)gsp_pramin_rd32(c->inst_addr + 0x200u);
+    pdb |= (uint64_t)gsp_pramin_rd32(c->inst_addr + 0x204u) << 32;
+    slot = (uint64_t)gsp_pramin_rd32(c->inst_addr + 0x2a0u);
+    slot |= (uint64_t)gsp_pramin_rd32(c->inst_addr + 0x2a4u) << 32;
+    if (gsp_mmio_pri_error((uint32_t)pdb) || gsp_mmio_pri_error((uint32_t)slot)) {
+        lx_printk("nouveau-lx: canal GR — PDB del inst block ilegible\n");
+        return;
+    }
+    if ((pdb & ~0xfffull) == 0) {
+        lx_printk("nouveau-lx: canal GR — inst+0x200 sin directorio (0x%llx)\n",
+                  (unsigned long long)pdb);
+        return;
+    }
+    if (slot == pdb) {
+        lx_printk("nouveau-lx: canal GR — PDB ya en inst+0x200 y +0x2a0 "
+                  "(0x%llx)\n", (unsigned long long)pdb);
+        return;
+    }
+    gsp_pramin_wr32(c->inst_addr + 0x21cu, 0);
+    gsp_pramin_wr32(c->inst_addr + 0x2a0u, (uint32_t)pdb);
+    gsp_pramin_wr32(c->inst_addr + 0x2a4u, (uint32_t)(pdb >> 32));
+    mask_lo = gsp_pramin_rd32(c->inst_addr + 0x298u);
+    if (!gsp_mmio_pri_error(mask_lo) && (mask_lo & 1u) == 0u) {
+        gsp_pramin_wr32(c->inst_addr + 0x298u, mask_lo | 1u);
+    }
+    lx_printk("nouveau-lx: canal GR — PDB 0x%llx replicado a inst+0x2a0 "
+              "(gv100_vmm_join, antes 0x%llx)\n",
+              (unsigned long long)pdb, (unsigned long long)slot);
+}
+
 static int chan_start(struct gsp_chan *c)
 {
     if (chan_bind_engine(c) != 0 || chan_schedule(c) != 0 ||
         chan_get_doorbell_token(c) != 0) {
         return -1;
     }
+    chan_join_gr_pdb(c);
     /* Con el token en la mano y antes del primer submit: así el log dice si el
      * timbre existe **antes** de que el semáforo se coma dos segundos. */
     chan_probe_usermode();

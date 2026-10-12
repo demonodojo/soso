@@ -1,0 +1,28 @@
+diff --git a/crates/soso-update-core/src/semver.rs b/crates/soso-update-core/src/semver.rs
+index 871a776..787d607 100644
+--- a/crates/soso-update-core/src/semver.rs
++++ b/crates/soso-update-core/src/semver.rs
+@@ -23,6 +23,23 @@ pub fn parse(s: &str) -> Option<SemVer> {
+     })
+ }
+ 
++impl core::fmt::Display for SemVer {
++    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
++        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
++    }
++}
++
++/// La mayor de una lista según [`cmp`]; en un empate, la primera.
++pub fn max(versions: &[SemVer]) -> Option<&SemVer> {
++    let mut mejor: Option<&SemVer> = None;
++    for v in versions {
++        if mejor.map_or(true, |m| cmp(v, m) == Ordering::Greater) {
++            mejor = Some(v);
++        }
++    }
++    mejor
++}
++
+ pub fn cmp(a: &SemVer, b: &SemVer) -> Ordering {
+     a.major
+         .cmp(&b.major)

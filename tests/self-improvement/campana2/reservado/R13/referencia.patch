@@ -1,0 +1,26 @@
+diff --git a/crates/soso-resize-core/src/lib.rs b/crates/soso-resize-core/src/lib.rs
+index 36e5809..32e2edd 100644
+--- a/crates/soso-resize-core/src/lib.rs
++++ b/crates/soso-resize-core/src/lib.rs
+@@ -141,10 +141,20 @@ impl PartGeom {
+     pub fn from_lba(first: u64, last: u64) -> Self {
+         Self {
+             first,
+-            sectors: last.saturating_sub(first) + 1,
++            sectors: if last >= first { last - first + 1 } else { 0 },
+             last,
+         }
+     }
++
++    /// ¿Cae `lba` dentro? Ambos extremos cuentan; una geometría vacía no contiene nada.
++    pub fn contains(&self, lba: u64) -> bool {
++        self.sectors > 0 && lba >= self.first && lba <= self.last
++    }
++
++    /// ¿Comparten algún sector? Rangos cerrados; lo vacío no se solapa con nada.
++    pub fn overlaps(&self, other: &PartGeom) -> bool {
++        self.sectors > 0 && other.sectors > 0 && self.first <= other.last && other.first <= self.last
++    }
+ }
+ 
+ /// E/S de sectores 512 B (GPT y slide).

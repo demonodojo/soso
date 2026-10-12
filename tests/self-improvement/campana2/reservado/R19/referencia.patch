@@ -1,0 +1,14 @@
+diff --git a/crates/gptdisk/src/lib.rs b/crates/gptdisk/src/lib.rs
+index 3837218..84456e1 100644
+--- a/crates/gptdisk/src/lib.rs
++++ b/crates/gptdisk/src/lib.rs
+@@ -292,7 +292,8 @@ pub fn last_used(entries: &[u8], hdr: &Header) -> Option<usize> {
+             continue;
+         }
+         let last = entry_last_lba(e);
+-        if best.is_none_or(|(lba, _)| last >= lba) {
++        // Un empate lo gana la entrada de menor índice (la que se vio primero).
++        if best.is_none_or(|(lba, _)| last > lba) {
+             best = Some((last, i));
+         }
+     }

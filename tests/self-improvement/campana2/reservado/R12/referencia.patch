@@ -1,0 +1,24 @@
+diff --git a/crates/soso-update-core/src/mailbox.rs b/crates/soso-update-core/src/mailbox.rs
+index fe7d994..636c048 100644
+--- a/crates/soso-update-core/src/mailbox.rs
++++ b/crates/soso-update-core/src/mailbox.rs
+@@ -43,11 +43,14 @@ impl Mailbox {
+             if let Some(rest) = line.strip_prefix("KERNEL ") {
+                 if let Some((size, rest)) = rest.split_once(' ') {
+                     if let Some((hash, ver)) = rest.split_once(' ') {
+-                        cmd = MailboxCmd::Kernel {
+-                            size: size.parse().unwrap_or(0),
+-                            hash: hash.into(),
+-                            version: ver.into(),
+-                        };
++                        let hash_ok = hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit());
++                        if let (Ok(size), true) = (size.parse::<u64>(), hash_ok) {
++                            cmd = MailboxCmd::Kernel {
++                                size,
++                                hash: hash.into(),
++                                version: ver.into(),
++                            };
++                        }
+                     }
+                 }
+             } else if let Some(ver) = line.strip_prefix("PROBANDO ") {

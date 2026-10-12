@@ -1,0 +1,24 @@
+diff --git a/crates/soso-update-core/src/manifest.rs b/crates/soso-update-core/src/manifest.rs
+index 39754f3..a9b3fbe 100644
+--- a/crates/soso-update-core/src/manifest.rs
++++ b/crates/soso-update-core/src/manifest.rs
+@@ -150,7 +150,18 @@ impl Manifest {
+     }
+ 
+     pub fn find_file(&self, path: &str) -> Option<&FileEntry> {
+-        self.files.iter().find(|f| f.path == path)
++        // La consulta puede venir con `./` o `/` delante (de un `ls` o de una ruta absoluta): se quitan.
++        let mut p = path;
++        loop {
++            if let Some(r) = p.strip_prefix("./") {
++                p = r;
++            } else if let Some(r) = p.strip_prefix('/') {
++                p = r;
++            } else {
++                break;
++            }
++        }
++        self.files.iter().find(|f| f.path == p)
+     }
+ 
+     /// Comprobaciones globales antes de mutar el sistema.

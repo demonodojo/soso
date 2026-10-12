@@ -600,9 +600,6 @@ int gsp_compute_stage_sass(struct gsp_compute *cp, struct gsp_ce *ce,
     if (!cp || !cp->ready) {
         return -1;
     }
-    /* Aunque el blob ya esté en VRAM: el lanzamiento Ampere necesita este CE
-     * para copiar el QMD, y stage_sass_kernel vuelve enseguida si staged. */
-    cp->ce = ce;
     return stage_sass_kernel(ce, k, scratch_va, scratch_cpu, scratch_bytes);
 }
 
@@ -936,9 +933,6 @@ int gsp_compute_encode_qmd(struct gsp_compute *cp, const GspQmdV05 *qmd,
     if (cp->caps && cp->caps->qmd_version == GSP_QMD_VERSION_AMPERE) {
         qmd_bytes = (unsigned)sizeof(GspQmdV02);
         memcpy(cp_data(cp, G4F_QMD_OFF), qmd->words, qmd_bytes);
-        /* El PCAS no usa la copia de sysmem: launch_* la sube a VRAM con el
-         * CE antes del submit. El CE de esta GA104 ya traduce esa ventana. */
-        qmd_va = G4F_QMD_VRAM_VA;
         set_object = NVC7C0_SET_OBJECT;
         send_pcas = NVC7C0_SEND_PCAS_A;
     } else {
@@ -952,9 +946,9 @@ int gsp_compute_encode_qmd(struct gsp_compute *cp, const GspQmdV05 *qmd,
      * QMD desde esa VA al SKED; no es una dependencia de otro QMD. Mesa
      * (nvk_CmdDispatchBase) usa PCAS_B solo hasta Turing y PCAS2 desde
      * Ampere. PCAS_B en la GA104 deja el SKED sin QMD y el PBDMA se queda
-     * en PBDMA_HANG_DURING_HTE. Ampere invalida el SKED, programa las ventanas
-     * local/compartida y apunta el PCAS a la copia del QMD en VRAM: el mismo
-     * cuelgue seguía con el QMD en sysmem (ROG, 2026-10-11, tercer arranque).
+     * en PBDMA_HANG_DURING_HTE. Ampere invalida el SKED y programa las ventanas
+     * local/compartida antes del PCAS. El QMD se queda en sysmem, como el
+     * búfer de subida de Mesa.
      *
      * No se manda SET_QMD_VERSION. La versión va en el blob (major 3, minor
      * 0). El método, con 0x03000300 y con 0x00030003, lo contestó la GA104
@@ -995,36 +989,6 @@ int gsp_compute_encode_qmd(struct gsp_compute *cp, const GspQmdV05 *qmd,
     return 0;
 }
 
-/* Ampere: el SKED cuelga el PBDMA al traducir el QMD en sysmem. El CE, que en
- * esta GA104 ya copia SASS a la misma ventana de VRAM, sube la página del QMD
- * antes del submit. El semáforo no se mueve: la CPU lo sondea en sysmem. */
-static int ampere_place_qmd(struct gsp_compute *cp, const char *what)
-{
-    static int anunciado;
-
-    if (!cp->caps || cp->caps->qmd_version != GSP_QMD_VERSION_AMPERE) {
-        return 0;
-    }
-    if (!cp->ce) {
-        lx_printk("nouveau-lx: %s — Ampere sin CE para copiar el QMD a VRAM\n",
-                  what);
-        return -1;
-    }
-    if (gsp_ce_copy_sync(cp->ce, G4F_QMD_VRAM_VA,
-                         cp->data_va + G4F_QMD_OFF,
-                         GSP_CE_LINE_BYTES, GSP_CE_WAIT_MS) != 0) {
-        lx_printk("nouveau-lx: %s — CE no copió el QMD a VRAM 0x%llx\n",
-                  what, (unsigned long long)G4F_QMD_VRAM_VA);
-        return -1;
-    }
-    if (!anunciado) {
-        anunciado = 1;
-        lx_printk("nouveau-lx: QMD Ampere en VRAM 0x%llx (copia CE, %u B)\n",
-                  (unsigned long long)G4F_QMD_VRAM_VA, GSP_CE_LINE_BYTES);
-    }
-    return 0;
-}
-
 /* Encola el QMD de `k` y espera su semáforo. El semáforo tiene que estar a cero
  * ANTES de llamar aquí: quien stagea los datos es quien lo pone, porque es la
  * misma escritura que publica lo que el kernel va a leer.
@@ -1056,9 +1020,6 @@ static int launch_wait_sem(struct gsp_compute *cp, const struct gsp_kernel *k,
             lx_printk("nouveau-lx: %s — pushbuffer lleno y sin rebobinar\n", what);
             return -1;
         }
-    }
-    if (ampere_place_qmd(cp, what) != 0) {
-        return -1;
     }
     if (gsp_chan_submit(cp->chan, pb_off, pb_len) != 0) {
         lx_printk("nouveau-lx: %s — fallo al encolar QMD\n", what);
@@ -1713,9 +1674,6 @@ int gsp_compute_launch_enqueue(struct gsp_compute *cp, const struct gsp_kernel *
             lx_printk("nouveau-lx: %s — pushbuffer lleno\n", what);
             return -1;
         }
-    }
-    if (ampere_place_qmd(cp, what) != 0) {
-        return -1;
     }
     if (gsp_chan_submit(cp->chan, pb_off, pb_len) != 0) {
         return -1;

@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "id": "R15",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "PackReader::verify_all devuelve las entradas que no cuadran",
+  "etiqueta": "pack-verificar-todo",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R15/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R15",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R15/aceptacion.rs",
+    "reservado/R15/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R15/enunciado.md": "bf18ed5781575db47e3ed5a91328ef5623ff1e1850d750d871ff40432121f9a7"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/soso-update-core/src/pack.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "PackReader::verify_all devuelve las entradas que no cuadran",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "soso-update-core",
+      "--features",
+      "std"
+    ],
+    "prueba_reservada": "reservado/R15/aceptacion.rs",
+    "destino_prueba": "crates/soso-update-core/tests/aceptacion_R15.rs",
+    "referencia": "reservado/R15/referencia.patch"
+  }
+}
