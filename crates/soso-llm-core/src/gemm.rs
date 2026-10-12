@@ -551,6 +551,96 @@ pub fn matvec_q8_0_batch_strided(
     Ok(())
 }
 
+/// matvec fusionado sobre pesos Q4_0 (layout GGML: d f16 + 16 B de nibbles por bloque de 32).
+/// Descuantiza en registros dentro del bucle. `cols` debe ser múltiplo de 32.
+pub fn matvec_q4_0(bytes: &[u8], rows: usize, cols: usize, x: &[f32], out: &mut [f32]) -> Result<(), ()> {
+    use sosomodel::layout::{Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMS};
+    if cols % Q4_0_BLOCK_ELEMS != 0 || x.len() != cols || out.len() != rows {
+        return Err(());
+    }
+    let row_bytes = (cols / Q4_0_BLOCK_ELEMS) * Q4_0_BLOCK_BYTES;
+    if bytes.len() != rows * row_bytes {
+        return Err(());
+    }
+    if AVX2 {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            avx2::matvec_q4_0(bytes, rows, cols, x, out);
+            return Ok(());
+        }
+    }
+    matvec_q4_0_scalar(bytes, rows, cols, x, out);
+    Ok(())
+}
+
+pub fn matvec_q4_0_scalar(bytes: &[u8], _rows: usize, cols: usize, x: &[f32], out: &mut [f32]) {
+    use sosomodel::layout::{Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMS};
+    let row_bytes = (cols / Q4_0_BLOCK_ELEMS) * Q4_0_BLOCK_BYTES;
+    for (r, o) in out.iter_mut().enumerate() {
+        let row = &bytes[r * row_bytes..(r + 1) * row_bytes];
+        let mut acc = 0.0f32;
+        for (b, blk) in row.chunks_exact(Q4_0_BLOCK_BYTES).enumerate() {
+            let d = crate::f16::f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+            let xb = &x[b * Q4_0_BLOCK_ELEMS..(b + 1) * Q4_0_BLOCK_ELEMS];
+            let mut s = 0.0f32;
+            for j in 0..16 {
+                let q = blk[2 + j];
+                s += ((q & 0x0F) as i32 - 8) as f32 * xb[j];
+                s += ((q >> 4) as i32 - 8) as f32 * xb[j + 16];
+            }
+            acc += d * s;
+        }
+        *o = acc;
+    }
+}
+
+/// Como [`matvec_q8_0_batch`] con pesos Q4_0.
+pub fn matvec_q4_0_batch(
+    bytes: &[u8],
+    rows: usize,
+    cols: usize,
+    xs: &[f32],
+    n: usize,
+    outs: &mut [f32],
+) -> Result<(), ()> {
+    matvec_q4_0_batch_strided(bytes, rows, cols, xs, n, outs, rows)
+}
+
+/// Como [`matvec_q8_0_batch_strided`] con pesos Q4_0.
+pub fn matvec_q4_0_batch_strided(
+    bytes: &[u8],
+    rows: usize,
+    cols: usize,
+    xs: &[f32],
+    n: usize,
+    outs: &mut [f32],
+    stride: usize,
+) -> Result<(), ()> {
+    use sosomodel::layout::{Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMS};
+    if cols % Q4_0_BLOCK_ELEMS != 0 {
+        return Err(());
+    }
+    let row_bytes = (cols / Q4_0_BLOCK_ELEMS) * Q4_0_BLOCK_BYTES;
+    comprobar_lote(bytes.len(), row_bytes, rows, cols, xs, n, outs.len(), stride)?;
+    if AVX2 {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            avx2::matvec_q4_0_batch(bytes, rows, cols, xs, n, outs, stride);
+            return Ok(());
+        }
+    }
+    for j in 0..n {
+        matvec_q4_0(
+            bytes,
+            rows,
+            cols,
+            &xs[j * cols..(j + 1) * cols],
+            &mut outs[j * stride..j * stride + rows],
+        )?;
+    }
+    Ok(())
+}
+
 
 /// Kernels AVX2+FMA. `# Safety`: requieren CPU con AVX2/FMA y longitudes ya
 /// validadas por los wrappers públicos.
@@ -935,6 +1025,124 @@ pub mod avx2 {
                     }
                     for k in 0..NB {
                         acc[k] = _mm256_fmadd_ps(scale, blk[k], acc[k]);
+                    }
+                }
+                for k in 0..NB {
+                    outs[(j0 + k) * stride + r] = hsum(acc[k]);
+                }
+            }
+        }
+    }
+
+    /// Descomprime un bloque Q4_0 en 4 vectores de 8 f32 con el `−8` ya aplicado, en el orden de los
+    /// elementos: `[0..8)`, `[8..16)` (nibbles bajos) y `[16..24)`, `[24..32)` (nibbles altos).
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn q4_0_cuatro(qs: *const u8) -> [__m256; 4] {
+        unsafe {
+            let v = _mm_loadu_si128(qs as *const __m128i);
+            let mask = _mm_set1_epi8(0x0F);
+            let ocho = _mm_set1_epi8(8);
+            let lo = _mm_sub_epi8(_mm_and_si128(v, mask), ocho);
+            let hi = _mm_sub_epi8(_mm_and_si128(_mm_srli_epi16(v, 4), mask), ocho);
+            [
+                _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(lo)),
+                _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(lo, 8))),
+                _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(hi)),
+                _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(hi, 8))),
+            ]
+        }
+    }
+
+    /// # Safety
+    /// Como `matvec_f32`; `cols % 32 == 0`, `bytes.len() == rows*cols/32*18`.
+    #[target_feature(enable = "avx2,fma")]
+    pub unsafe fn matvec_q4_0(bytes: &[u8], rows: usize, cols: usize, x: &[f32], out: &mut [f32]) {
+        use crate::f16::f16_to_f32;
+        use sosomodel::layout::{Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMS};
+        unsafe {
+            let blocks = cols / Q4_0_BLOCK_ELEMS;
+            let row_bytes = blocks * Q4_0_BLOCK_BYTES;
+            for r in 0..rows {
+                let row = bytes.as_ptr().add(r * row_bytes);
+                let mut acc = _mm256_setzero_ps();
+                for b in 0..blocks {
+                    let blk = row.add(b * Q4_0_BLOCK_BYTES);
+                    let d = _mm256_set1_ps(f16_to_f32(u16::from_le_bytes([*blk, *blk.add(1)])));
+                    let q = q4_0_cuatro(blk.add(2));
+                    let xb = x.as_ptr().add(b * Q4_0_BLOCK_ELEMS);
+                    let mut s = _mm256_mul_ps(q[0], _mm256_loadu_ps(xb));
+                    s = _mm256_fmadd_ps(q[1], _mm256_loadu_ps(xb.add(8)), s);
+                    s = _mm256_fmadd_ps(q[2], _mm256_loadu_ps(xb.add(16)), s);
+                    s = _mm256_fmadd_ps(q[3], _mm256_loadu_ps(xb.add(24)), s);
+                    acc = _mm256_fmadd_ps(d, s, acc);
+                }
+                out[r] = hsum(acc);
+            }
+        }
+    }
+
+    /// # Safety
+    /// Como `matvec_q8_0_batch`.
+    #[target_feature(enable = "avx2,fma")]
+    pub unsafe fn matvec_q4_0_batch(
+        bytes: &[u8],
+        rows: usize,
+        cols: usize,
+        xs: &[f32],
+        n: usize,
+        outs: &mut [f32],
+        stride: usize,
+    ) {
+        unsafe {
+            let mut j0 = 0usize;
+            while j0 < n {
+                let nb = (n - j0).min(NB_MAX);
+                match nb {
+                    8 => q4_0_nb::<8>(bytes, rows, cols, xs, j0, outs, stride),
+                    7 => q4_0_nb::<7>(bytes, rows, cols, xs, j0, outs, stride),
+                    6 => q4_0_nb::<6>(bytes, rows, cols, xs, j0, outs, stride),
+                    5 => q4_0_nb::<5>(bytes, rows, cols, xs, j0, outs, stride),
+                    4 => q4_0_nb::<4>(bytes, rows, cols, xs, j0, outs, stride),
+                    3 => q4_0_nb::<3>(bytes, rows, cols, xs, j0, outs, stride),
+                    2 => q4_0_nb::<2>(bytes, rows, cols, xs, j0, outs, stride),
+                    _ => q4_0_nb::<1>(bytes, rows, cols, xs, j0, outs, stride),
+                }
+                j0 += nb;
+            }
+        }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn q4_0_nb<const NB: usize>(
+        bytes: &[u8],
+        rows: usize,
+        cols: usize,
+        xs: &[f32],
+        j0: usize,
+        outs: &mut [f32],
+        stride: usize,
+    ) {
+        use crate::f16::f16_to_f32;
+        use sosomodel::layout::{Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMS};
+        unsafe {
+            let blocks = cols / Q4_0_BLOCK_ELEMS;
+            let row_bytes = blocks * Q4_0_BLOCK_BYTES;
+            for r in 0..rows {
+                let row = bytes.as_ptr().add(r * row_bytes);
+                let mut acc = [_mm256_setzero_ps(); NB];
+                for b in 0..blocks {
+                    let blk = row.add(b * Q4_0_BLOCK_BYTES);
+                    let d = _mm256_set1_ps(f16_to_f32(u16::from_le_bytes([*blk, *blk.add(1)])));
+                    let q = q4_0_cuatro(blk.add(2));
+                    for k in 0..NB {
+                        let xb = xs.as_ptr().add((j0 + k) * cols + b * Q4_0_BLOCK_ELEMS);
+                        let mut s = _mm256_mul_ps(q[0], _mm256_loadu_ps(xb));
+                        s = _mm256_fmadd_ps(q[1], _mm256_loadu_ps(xb.add(8)), s);
+                        s = _mm256_fmadd_ps(q[2], _mm256_loadu_ps(xb.add(16)), s);
+                        s = _mm256_fmadd_ps(q[3], _mm256_loadu_ps(xb.add(24)), s);
+                        acc[k] = _mm256_fmadd_ps(d, s, acc[k]);
                     }
                 }
                 for k in 0..NB {

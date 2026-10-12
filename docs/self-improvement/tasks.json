@@ -1132,8 +1132,8 @@
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
       },
       "tracking": {
-        "updated_at": "2026-10-12T12:45:00+02:00",
-        "summary": "Cuatro campañas de diez tareas, todas NO-GO: 1→2→3 aceptadas con el agente ajustado sobre el mismo banco (R01–R10) y 2/10 con un BANCO NUEVO (R11–R20) y el agente congelado: esa es la medida honesta de generalización. Recuperación T27 acreditada con kill -9 real en cada campaña. SI-4 NO se cierra.",
+        "updated_at": "2026-10-12T19:30:00+02:00",
+        "summary": "Cinco campañas. Con Qwen2.5-Coder-14B (runtime de soso): 1→2→3 de 10 (banco ajustado) y 2 de 10 (banco nuevo R11–R20). Con Gemma 4 12B QAT Q4_0 servido por llama.cpp en GPU, mismo banco y mismo agente congelado: 6 de 10 (GO en el criterio, recuperación kill -9 real, base final verde). SI-4 NO se cierra hasta repetirlo con Gemma servido por soso (port en docs/PLAN-GEMMA4.md).",
         "evidence": [
           "docs/self-improvement/campana.md",
           "docs/self-improvement/seguimiento/T29.md",
@@ -1144,10 +1144,13 @@
           "tests/self-improvement/campaign-2.json",
           "tests/self-improvement/campaign-3.json",
           "tests/self-improvement/campaign-4.json",
-          "tests/self-improvement/campana2"
+          "tests/self-improvement/campana2",
+          "tests/self-improvement/campaign-5.json",
+          "tests/self-improvement/campana/ejecucion-8",
+          "docs/PLAN-GEMMA4.md"
         ],
-        "blocker": "SI-4 no alcanza el umbral (2 de 10 sobre tareas no vistas; mínimo 5). T30 no se habilita.",
-        "next_step": "Decisión de plan: campaña nueva con banco nuevo tras tres mejoras del agente (tabla puntos-del-enunciado→prueba propia, cargo check tras cada edición devuelto al modelo, edición por línea de read). No seguir sobre R01–R20."
+        "blocker": "SI-4 exige el modelo servido por soso: Gemma 4 va en llama.cpp. Falta el port (G3–G8 de PLAN-GEMMA4).",
+        "next_step": "Terminar el port de Gemma 4 a soso (G3 forward, G4 KV, G5 tokenizer, G6 plantilla, G7 paridad, G8 modelo por defecto) y repetir la campaña 5 sobre soso."
       }
     },
     {

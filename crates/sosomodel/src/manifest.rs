@@ -92,6 +92,30 @@ impl ModelKind {
     }
 }
 
+/// Extensiones del manifest v7 (Gemma 4). Todo a «sin efecto» por defecto: un modelo que no las usa se
+/// serializa **exactamente** como antes (v5/v6), así que ningún modelo existente cambia de bytes.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct ManifestExt {
+    /// Los embeddings se multiplican por este factor al entrar (Gemma: `sqrt(hidden)`); 0 = sin escala.
+    pub embed_scale: f32,
+    /// Límite blando de los logits (`cap·tanh(x/cap)`); 0 = sin límite.
+    pub logit_softcap: f32,
+    /// Escala de la atención; 0 = `1/sqrt(head_dim)`. Gemma 4 usa 1.0.
+    pub attn_scale: f32,
+    /// No hay `lm_head`: se reutiliza `embed`.
+    pub tied_lm_head: bool,
+    /// Ventana de atención por capa (0 = completa); vacío = todas completas.
+    pub window: Vec<u32>,
+    /// Base RoPE por capa (0 = la global); vacío = todas la global.
+    pub rope_theta: Vec<f32>,
+}
+
+impl ManifestExt {
+    pub fn es_vacia(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// Parámetros de audio/texto para modelos ASR (manifest v6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AudioSpec {
@@ -151,8 +175,28 @@ pub struct LayerSpec {
 pub const FLAG_ROPE_NEOX: u32 = 1 << 3;
 /// RMSNorm de Q y K por cabeza, antes del RoPE (Qwen3 denso).
 pub const FLAG_QK_NORM: u32 = 1 << 4;
+/// Normas «en sándwich» (Gemma): `post_attention_norm` tras la atención y `post_ffw_norm` tras el MLP,
+/// cada una antes de sumar al residual.
+pub const FLAG_SANDWICH_NORM: u32 = 1 << 5;
+/// La capa no tiene `attn_v`: el valor es la proyección K **antes** de su norma (Gemma, capas globales).
+pub const FLAG_V_FROM_K: u32 = 1 << 6;
+/// RMSNorm **sin pesos** sobre V, por cabeza (Gemma).
+pub const FLAG_V_NORM: u32 = 1 << 7;
+/// Activación GELU (aproximación tanh) en la puerta del MLP, en vez de SiLU.
+pub const FLAG_GEGLU: u32 = 1 << 8;
+/// Escala escalar de salida de la capa (`layer_output_scale`).
+pub const FLAG_LAYER_SCALE: u32 = 1 << 9;
+/// RoPE con factores por frecuencia (`L{i}.rope_freqs`, Gemma global): `theta_i / factor_i`.
+pub const FLAG_ROPE_FACTORS: u32 = 1 << 10;
 /// Flags de capa que el runtime entiende.
-pub const FLAGS_SOPORTADOS: u32 = FLAG_ROPE_NEOX | FLAG_QK_NORM;
+pub const FLAGS_SOPORTADOS: u32 = FLAG_ROPE_NEOX
+    | FLAG_QK_NORM
+    | FLAG_SANDWICH_NORM
+    | FLAG_V_FROM_K
+    | FLAG_V_NORM
+    | FLAG_GEGLU
+    | FLAG_LAYER_SCALE
+    | FLAG_ROPE_FACTORS;
 
 impl Default for LayerSpec {
     fn default() -> Self {
@@ -226,6 +270,8 @@ pub struct Manifest {
     pub audio: AudioSpec,
     /// Norma por capa (v6); RMS para decoders clásicos.
     pub norm_kind: NormKind,
+    /// Extensiones v7 (Gemma 4).
+    pub ext: ManifestExt,
 }
 
 const LAYER_SPEC_BYTES: usize = 60;
@@ -290,6 +336,24 @@ impl Manifest {
         } else {
             self.ffn_dim
         }
+    }
+
+    /// Ventana de atención de la capa (0 = completa).
+    pub fn layer_window(&self, layer: u32) -> u32 {
+        self.ext.window.get(layer as usize).copied().unwrap_or(0)
+    }
+
+    /// Base RoPE de la capa (la global si no tiene una propia).
+    pub fn layer_rope_theta(&self, layer: u32) -> f32 {
+        match self.ext.rope_theta.get(layer as usize).copied() {
+            Some(t) if t > 0.0 => t,
+            _ => self.rope_theta,
+        }
+    }
+
+    /// Factor de escala de los embeddings de entrada (1.0 si no hay).
+    pub fn embed_scale(&self) -> f32 {
+        if self.ext.embed_scale > 0.0 { self.ext.embed_scale } else { 1.0 }
     }
 
     pub fn layer(&self, i: u32) -> Option<&LayerSpec> {
@@ -579,6 +643,7 @@ impl Manifest {
             model_kind: ModelKind::Decoder,
             audio: AudioSpec::default(),
             norm_kind: NormKind::Rms,
+            ext: ManifestExt::default(),
         };
         m.fill_layers_from_globals();
         m
@@ -625,6 +690,7 @@ impl Manifest {
             model_kind: ModelKind::Decoder,
             audio: AudioSpec::default(),
             norm_kind: NormKind::Rms,
+            ext: ManifestExt::default(),
         };
         m.fill_layers_from_globals();
         m
@@ -731,6 +797,7 @@ impl Manifest {
             model_kind: ModelKind::AsrEncoderDecoder,
             audio,
             norm_kind: NormKind::Layer,
+            ext: ManifestExt::default(),
         }
     }
 
@@ -791,6 +858,7 @@ impl Manifest {
             model_kind: ModelKind::AsrEncoderDecoder,
             audio,
             norm_kind: NormKind::Layer,
+            ext: ManifestExt::default(),
         }
     }
 
@@ -842,7 +910,22 @@ impl Manifest {
         body.extend_from_slice(&self.audio.n_text_layer.to_le_bytes());
         body.extend_from_slice(&self.audio.n_text_head.to_le_bytes());
         debug_assert_eq!(LAYER_SPEC_BYTES, 60);
-        let version = if self.model_kind == ModelKind::AsrEncoderDecoder {
+        let version = if !self.ext.es_vacia() {
+            // v7: trailer tras el AudioSpec. Un lector antiguo no lo ve (llega a su fin natural).
+            body.extend_from_slice(&self.ext.embed_scale.to_le_bytes());
+            body.extend_from_slice(&self.ext.logit_softcap.to_le_bytes());
+            body.extend_from_slice(&self.ext.attn_scale.to_le_bytes());
+            body.extend_from_slice(&u32::from(self.ext.tied_lm_head).to_le_bytes());
+            body.extend_from_slice(&(self.ext.window.len() as u32).to_le_bytes());
+            for w in &self.ext.window {
+                body.extend_from_slice(&w.to_le_bytes());
+            }
+            body.extend_from_slice(&(self.ext.rope_theta.len() as u32).to_le_bytes());
+            for t in &self.ext.rope_theta {
+                body.extend_from_slice(&t.to_le_bytes());
+            }
+            7
+        } else if self.model_kind == ModelKind::AsrEncoderDecoder {
             6
         } else {
             5
@@ -930,6 +1013,31 @@ impl Manifest {
         } else {
             (ModelKind::Decoder, NormKind::Rms, AudioSpec::default())
         };
+        let ext = if version >= 7 {
+            let embed_scale = r.f32()?;
+            let logit_softcap = r.f32()?;
+            let attn_scale = r.f32()?;
+            let tied_lm_head = r.u32()? != 0;
+            let n_w = r.u32()? as usize;
+            if n_w > num_layers as usize {
+                return Err(());
+            }
+            let mut window = Vec::with_capacity(n_w);
+            for _ in 0..n_w {
+                window.push(r.u32()?);
+            }
+            let n_t = r.u32()? as usize;
+            if n_t > num_layers as usize {
+                return Err(());
+            }
+            let mut rope_theta = Vec::with_capacity(n_t);
+            for _ in 0..n_t {
+                rope_theta.push(r.f32()?);
+            }
+            ManifestExt { embed_scale, logit_softcap, attn_scale, tied_lm_head, window, rope_theta }
+        } else {
+            ManifestExt::default()
+        };
         let manifest = Self {
             name,
             vocab_size,
@@ -950,6 +1058,7 @@ impl Manifest {
             model_kind,
             audio,
             norm_kind,
+            ext,
         };
         manifest.validate_layer_divisibility()?;
         Ok(manifest)

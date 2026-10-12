@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use sosomodel::index::TensorIndex;
-use sosomodel::layout::{DTYPE_F32, DTYPE_MXFP4, DTYPE_Q4_K, DTYPE_Q8_0};
+use sosomodel::layout::{DTYPE_F32, DTYPE_MXFP4, DTYPE_Q4_0, DTYPE_Q4_K, DTYPE_Q8_0};
 use sosomodel::manifest::{AttnKind, FfnKind, Manifest, FLAG_QK_NORM, FLAG_ROPE_NEOX};
 
 /// Vista zero-copy del payload de un tensor (bytes crudos del shard mapeado,
@@ -175,6 +175,18 @@ pub fn matvec_view_par(
                 )
                 .is_ok()
             }
+            DTYPE_Q4_0 => {
+                use sosomodel::layout::{Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMS};
+                let row_bytes = (cols / Q4_0_BLOCK_ELEMS) * Q4_0_BLOCK_BYTES;
+                crate::gemm::matvec_q4_0(
+                    &bytes[r0 * row_bytes..r1 * row_bytes],
+                    r1 - r0,
+                    cols,
+                    x,
+                    &mut out[r0..r1],
+                )
+                .is_ok()
+            }
             DTYPE_Q4_K => {
                 use sosomodel::layout::{Q4_K_BLOCK_BYTES, Q4_K_BLOCK_ELEMS};
                 let row_bytes = (cols / Q4_K_BLOCK_ELEMS) * Q4_K_BLOCK_BYTES;
@@ -287,6 +299,20 @@ pub fn matvec_view_batch_par(
                 use sosomodel::layout::{Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMS};
                 let row_bytes = (cols / Q8_0_BLOCK_ELEMS) * Q8_0_BLOCK_BYTES;
                 matvec_q8_0_batch_strided(
+                    &bytes[r0 * row_bytes..r1 * row_bytes],
+                    sub,
+                    cols,
+                    xs,
+                    n,
+                    &mut outs[r0..],
+                    rows,
+                )
+                .is_ok()
+            }
+            DTYPE_Q4_0 => {
+                use sosomodel::layout::{Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMS};
+                let row_bytes = (cols / Q4_0_BLOCK_ELEMS) * Q4_0_BLOCK_BYTES;
+                crate::gemm::matvec_q4_0_batch_strided(
                     &bytes[r0 * row_bytes..r1 * row_bytes],
                     sub,
                     cols,
@@ -760,6 +786,12 @@ impl<'a> LayerExecutor<'a> {
             .layer(layer)
             .cloned()
             .unwrap_or_default();
+        // Gemma 4: normas en sándwich, V = K en las globales, ventana, escala 1.0… capa propia.
+        if crate::gemma::es_capa_gemma(spec.flags) {
+            return crate::gemma::forward_layer_gemma(
+                self, layer, pos, hidden, s, kv, source, gpu, use_gpu, planner_ro,
+            );
+        }
         let mut timing = LayerTiming::default();
 
         // --- atención ---
@@ -1124,6 +1156,7 @@ impl<'a> LayerExecutor<'a> {
             AttnKind::Mla | AttnKind::Kda | AttnKind::Gated | AttnKind::Gdn
         );
         atencion_clasica
+            && !crate::gemma::es_capa_gemma(spec.flags)
             && spec.ffn_kind != FfnKind::LatentMoe
             && !self.manifest.layer_is_moe(layer)
     }

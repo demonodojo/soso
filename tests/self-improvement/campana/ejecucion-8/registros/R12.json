@@ -1,0 +1,11 @@
+{
+ "id": "R12",
+ "resultado": "aceptada",
+ "intentos": 2,
+ "segundos": 234,
+ "nota": " | Corregido tras la ejecuci\u00f3n: intentos recontados desde informe.txt; herramientas/tokens sin medir (intento matado).",
+ "inyeccion": {
+  "que": "agente matado (kill -9) y coordinador reiniciado",
+  "recuperada": true
+ }
+}

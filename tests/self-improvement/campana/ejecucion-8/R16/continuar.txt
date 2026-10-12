@@ -1,0 +1,5 @@
+  base de «campana-R16» publicada (generación 0)
+  ejecutado: r-R16/lanzar/0
+  ejecutado: r-R16/exportar/0
+  ejecutado: r-R16/validar/0
+tarea: Rechazado

@@ -16,13 +16,15 @@ pub use io::{Read, ReadSeek, Seek};
 
 use soso_llm_core::quant::quantize_q8_0;
 use soso_llm_core::tokenizer::{VocabTokenizer, NO_TOKEN};
-use sosomodel::index::{make_f32_entry, make_mxfp4_entry, make_q4_k_entry, make_q8_0_entry, pack_shard, TensorIndex};
+use sosomodel::index::{make_f32_entry, make_mxfp4_entry, make_q4_0_entry, make_q4_k_entry, make_q8_0_entry, pack_shard, TensorIndex};
 use sosomodel::layout::{
-    DTYPE_F32, DTYPE_MXFP4, DTYPE_Q4_K, DTYPE_Q8_0, INDEX_FILE, MANIFEST_FILE, Q4_K_BLOCK_BYTES,
+    DTYPE_F32, DTYPE_MXFP4, DTYPE_Q4_0, DTYPE_Q4_K, DTYPE_Q8_0, INDEX_FILE, MANIFEST_FILE, Q4_K_BLOCK_BYTES,
     SHARDS_DIR, TOKENIZER_FILE,
 };
 use sosomodel::manifest::{
-    AttnKind, AudioSpec, LayerPrefetch, Manifest, ModelKind, NormKind, FLAG_QK_NORM, FLAG_ROPE_NEOX,
+    AttnKind, AudioSpec, LayerPrefetch, Manifest, ManifestExt, ModelKind, NormKind, FLAG_GEGLU,
+    FLAG_LAYER_SCALE, FLAG_QK_NORM, FLAG_ROPE_FACTORS, FLAG_ROPE_NEOX, FLAG_SANDWICH_NORM,
+    FLAG_V_FROM_K, FLAG_V_NORM,
 };
 
 pub trait SomOut {
@@ -110,6 +112,7 @@ pub fn convert_path_with_options(
 }
 
 const GGML_F32: u32 = 0;
+const GGML_Q4_0: u32 = 2;
 const GGML_F16: u32 = 1;
 const GGML_Q8_0: u32 = 8;
 const GGML_Q4_K: u32 = 12;
@@ -149,14 +152,16 @@ pub fn convert_with_options<R: Read + Seek>(
     // y la FFN es MoE con la dimensión de experto propia (`expert_feed_forward_length`).
     let is_qwen3 = arch_name == "qwen3" || arch_name == "qwen3moe";
     let is_qwen35 = arch_name == "qwen35" || arch_name == "qwen38";
-    if arch_name != "llama" && !is_mla && !is_qwen2 && !is_qwen3 && !is_qwen35 {
+    // Gemma 4 (denso): atención mixta local/global, normas en sándwich, QK-norm, GeGLU.
+    let is_gemma4 = arch_name == "gemma4";
+    if arch_name != "llama" && !is_mla && !is_qwen2 && !is_qwen3 && !is_qwen35 && !is_gemma4 {
         return Err(format!(
-            "arquitectura {arch_name} no soportada (llama | deepseek2 | qwen2 | qwen3 | qwen3moe | qwen35 | qwen38)"
+            "arquitectura {arch_name} no soportada (llama | deepseek2 | qwen2 | qwen3 | qwen3moe | qwen35 | qwen38 | gemma4)"
         ));
     }
     let meta_prefix = if is_mla {
         "deepseek2"
-    } else if is_qwen2 || is_qwen3 || is_qwen35 {
+    } else if is_qwen2 || is_qwen3 || is_qwen35 || is_gemma4 {
         arch_name
     } else {
         "llama"
@@ -168,9 +173,18 @@ pub fn convert_with_options<R: Read + Seek>(
         .meta_u32(&format!("{meta_prefix}.feed_forward_length"))
         .or_else(|_| gguf.meta_u32(&format!("{meta_prefix}.expert_feed_forward_length")))?;
     let num_heads = gguf.meta_u32(&format!("{meta_prefix}.attention.head_count"))?;
-    let num_kv_heads = gguf
-        .meta_u32(&format!("{meta_prefix}.attention.head_count_kv"))
-        .unwrap_or(num_heads);
+    // En Gemma 4 `head_count_kv` es un array (una cifra por capa); la global del manifest es la de las
+    // capas locales y las demás se fijan por capa más abajo.
+    let kv_heads_por_capa: Vec<u32> = match gguf.meta.get(&format!("{meta_prefix}.attention.head_count_kv")) {
+        Some(MetaValue::IntArray(v)) => v.iter().map(|&x| x as u32).collect(),
+        _ => Vec::new(),
+    };
+    let num_kv_heads = match kv_heads_por_capa.iter().max() {
+        Some(&m) => m,
+        None => gguf
+            .meta_u32(&format!("{meta_prefix}.attention.head_count_kv"))
+            .unwrap_or(num_heads),
+    };
     let rope_theta = gguf
         .meta_f32(&format!("{meta_prefix}.rope.freq_base"))
         .unwrap_or(10000.0);
@@ -292,7 +306,26 @@ pub fn convert_with_options<R: Read + Seek>(
         ("ffn_gate", "ffn_gate"),
         ("ffn_down", "ffn_down"),
     ];
-    let layer_parts = if is_mla {
+    // Gemma 4 denso: sándwich de normas, QK-norm, escala de salida por capa; `attn_v` falta en las globales.
+    const GEMMA4_LAYER_PARTS: &[(&str, &str)] = &[
+        ("attn_norm", "attn_norm"),
+        ("attn_q", "attn_q"),
+        ("attn_k", "attn_k"),
+        ("attn_v", "attn_v"),
+        ("attn_output", "attn_output"),
+        ("attn_q_norm", "attn_q_norm"),
+        ("attn_k_norm", "attn_k_norm"),
+        ("post_attention_norm", "post_attn_norm"),
+        ("ffn_norm", "ffn_norm"),
+        ("ffn_up", "ffn_up"),
+        ("ffn_gate", "ffn_gate"),
+        ("ffn_down", "ffn_down"),
+        ("post_ffw_norm", "post_ffn_norm"),
+        ("layer_output_scale", "layer_scale"),
+    ];
+    let layer_parts = if is_gemma4 {
+        GEMMA4_LAYER_PARTS
+    } else if is_mla {
         MLA_LAYER_PARTS
     } else if is_qwen3 {
         QWEN3_LAYER_PARTS
@@ -345,6 +378,13 @@ pub fn convert_with_options<R: Read + Seek>(
                     offset,
                     &piece.shape,
                 ),
+                DTYPE_Q4_0 => make_q4_0_entry(
+                    *id,
+                    &piece.som_name,
+                    &shard_name,
+                    offset,
+                    &piece.shape,
+                ),
                 _ => make_f32_entry(*id, &piece.som_name, &shard_name, offset, &piece.shape),
             });
             *id += 1;
@@ -377,6 +417,7 @@ pub fn convert_with_options<R: Read + Seek>(
         index.entries.push(match dtype {
             DTYPE_Q8_0 => make_q8_0_entry(*id, som_name, &shard_name, 0, &shape),
             DTYPE_Q4_K => make_q4_k_entry(*id, som_name, &shard_name, 0, &shape),
+            DTYPE_Q4_0 => make_q4_0_entry(*id, som_name, &shard_name, 0, &shape),
             DTYPE_MXFP4 => make_mxfp4_entry(*id, som_name, &shard_name, 0, &shape),
             _ => make_f32_entry(*id, som_name, &shard_name, 0, &shape),
         });
@@ -572,12 +613,18 @@ pub fn convert_with_options<R: Read + Seek>(
     for (gguf_name, som_name) in globals {
         emit(file, &mut index, &mut id, gguf_name, som_name, out)?;
     }
+    if is_gemma4 {
+        // Factores por frecuencia del RoPE de las capas globales (un solo tensor compartido).
+        emit(file, &mut index, &mut id, "rope_freqs.weight", "rope_freqs", out)?;
+    }
 
     if index.find("embed").is_none() {
         return Err("el GGUF no contiene token_embd.weight".into());
     }
 
-    let chat_template = plantilla_de_chat(&gguf);
+    // La plantilla de Gemma 4 es un Jinja con su propio DSL de herramientas: no se traduce a los marcadores de
+    // `chat.rs` (lo hace el renderizador propio del runtime, ficha G6).
+    let chat_template = if is_gemma4 { String::new() } else { plantilla_de_chat(&gguf) };
     let mut manifest = Manifest {
         name: model_name,
         vocab_size: vocab,
@@ -598,6 +645,7 @@ pub fn convert_with_options<R: Read + Seek>(
         model_kind: ModelKind::Decoder,
         audio: AudioSpec::default(),
         norm_kind: NormKind::Rms,
+        ext: ManifestExt::default(),
     };
     manifest.fill_layers_from_globals();
     if is_qwen2 {
@@ -623,6 +671,9 @@ pub fn convert_with_options<R: Read + Seek>(
                 spec.v_head_dim = hd;
             }
         }
+    }
+    if is_gemma4 {
+        aplicar_gemma4(&mut manifest, &index, &gguf, hidden, &kv_heads_por_capa)?;
     }
     if is_mla {
         for spec in manifest.layers.iter_mut() {
@@ -740,6 +791,79 @@ fn index_rows(index: &TensorIndex, name: &str) -> u32 {
 
 fn index_cols(index: &TensorIndex, name: &str) -> u32 {
     index.find(name).and_then(|e| e.shape.get(1).copied()).unwrap_or(0)
+}
+
+/// Especificaciones de capa y extensiones del manifest v7 para Gemma 4. Todo sale del GGUF; lo que el GGUF
+/// no dice y el modelo necesita (escala de embeddings `sqrt(hidden)`, atención sin escalar) es contrato de
+/// la arquitectura y está fijado contra la implementación de referencia (llama.cpp, `gemma4.cpp`).
+fn aplicar_gemma4(
+    manifest: &mut Manifest,
+    index: &TensorIndex,
+    gguf: &GgufFile,
+    hidden: u32,
+    kv_heads_por_capa: &[u32],
+) -> Result<(), String> {
+    let patron: Vec<u64> = match gguf.meta.get("gemma4.attention.sliding_window_pattern") {
+        Some(MetaValue::IntArray(v)) => v.clone(),
+        _ => return Err("gemma4: falta attention.sliding_window_pattern".into()),
+    };
+    let n = manifest.layers.len();
+    if patron.len() != n {
+        return Err(format!("gemma4: el patrón de ventana tiene {} entradas y el modelo {n} capas", patron.len()));
+    }
+    let hd_global = gguf.meta_u32("gemma4.attention.key_length")?;
+    let hd_local = gguf.meta_u32("gemma4.attention.key_length_swa")?;
+    let ventana = gguf.meta_u32("gemma4.attention.sliding_window")?;
+    let theta_global = manifest.rope_theta;
+    let theta_local = gguf.meta_f32("gemma4.rope.freq_base_swa").unwrap_or(10_000.0);
+    let mut window = Vec::with_capacity(n);
+    let mut rope = Vec::with_capacity(n);
+    for (i, spec) in manifest.layers.iter_mut().enumerate() {
+        let local = patron[i] != 0;
+        spec.flags |= FLAG_ROPE_NEOX | FLAG_QK_NORM | FLAG_SANDWICH_NORM | FLAG_V_NORM | FLAG_GEGLU | FLAG_LAYER_SCALE;
+        spec.v_head_dim = if local { hd_local } else { hd_global };
+        if let Some(&k) = kv_heads_por_capa.get(i) {
+            spec.num_kv_heads = k;
+        }
+        window.push(if local { ventana } else { 0 });
+        rope.push(if local { theta_local } else { theta_global });
+        if !local {
+            spec.flags |= FLAG_ROPE_FACTORS;
+        }
+        if index.find(&format!("L{i:02}.attn_v")).is_none() {
+            spec.flags |= FLAG_V_FROM_K;
+        }
+        for t in ["attn_q_norm", "attn_k_norm", "post_attn_norm", "post_ffn_norm", "layer_scale"] {
+            if index.find(&format!("L{i:02}.{t}")).is_none() {
+                return Err(format!("gemma4: capa {i}: falta {t}"));
+            }
+        }
+    }
+    if !patron.iter().all(|&p| p != 0) && index.find("rope_freqs").is_none() {
+        return Err("gemma4: hay capas globales y falta rope_freqs.weight".into());
+    }
+    manifest.ext = ManifestExt {
+        embed_scale: raiz_cuadrada(hidden as f32),
+        logit_softcap: gguf.meta_f32("gemma4.final_logit_softcapping").unwrap_or(0.0),
+        attn_scale: 1.0,
+        tied_lm_head: index.find("lm_head").is_none(),
+        window,
+        rope_theta: rope,
+    };
+    Ok(())
+}
+
+/// Raíz cuadrada sin `libm` ni `std` (el crate también se compila `no_std`): Newton con el último
+/// paso corregido; suficiente para `sqrt(hidden)` (el factor de escala de los embeddings de Gemma).
+fn raiz_cuadrada(x: f32) -> f32 {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let mut g = if x > 1.0 { x / 2.0 } else { 1.0 };
+    for _ in 0..40 {
+        g = 0.5 * (g + x / g);
+    }
+    g
 }
 
 fn apply_qwen35_layer_specs(
@@ -1025,6 +1149,8 @@ enum MetaValue {
     F32(f32),
     Str(String),
     StrArray(Vec<String>),
+    /// Array de enteros/booleanos (p. ej. `head_count_kv` por capa o el patrón de ventana).
+    IntArray(Vec<u64>),
     Other,
 }
 
@@ -1208,6 +1334,16 @@ fn read_tensor<R: Read + Seek>(
             }
             Ok((out, DTYPE_Q8_0))
         }
+        GGML_Q4_0 => {
+            // el layout .som de Q4_0 es el de GGML tal cual: passthrough
+            use sosomodel::layout::{Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMS};
+            if elems % Q4_0_BLOCK_ELEMS != 0 {
+                return Err(format!("tensor Q4_0 con {elems} elems (no múltiplo de {Q4_0_BLOCK_ELEMS})"));
+            }
+            let mut out = vec![0u8; (elems / Q4_0_BLOCK_ELEMS) * Q4_0_BLOCK_BYTES];
+            file.read_exact(&mut out)?;
+            Ok((out, DTYPE_Q4_0))
+        }
         GGML_Q4_K => {
             // el layout .som de Q4_K es el de GGML tal cual: passthrough
             if elems % 256 != 0 {
@@ -1303,6 +1439,15 @@ fn read_meta_value<R: Read + Seek>(file: &mut R, vtype: u32) -> Result<MetaValue
                     v.push(read_string(file)?);
                 }
                 MetaValue::StrArray(v)
+            } else if matches!(elem_type, 0..=5 | 7 | 10 | 11) && count <= 1 << 20 {
+                let mut v = Vec::with_capacity(count as usize);
+                for _ in 0..count {
+                    match read_meta_value(file, elem_type)? {
+                        MetaValue::Int(x) => v.push(x),
+                        _ => return Err("elemento de array no entero".into()),
+                    }
+                }
+                MetaValue::IntArray(v)
             } else {
                 for _ in 0..count {
                     skip_meta_value(file, elem_type)?;
@@ -1493,6 +1638,158 @@ mod tests {
         for v in &vals {
             assert!((v + 1.0).abs() < 0.02, "esperaba -1.0, got {v}");
         }
+    }
+
+    fn gguf_kv_int_array(out: &mut Vec<u8>, key: &str, tipo: u32, vals: &[u64]) {
+        gguf_string(out, key);
+        out.extend_from_slice(&9u32.to_le_bytes());
+        out.extend_from_slice(&tipo.to_le_bytes());
+        out.extend_from_slice(&(vals.len() as u64).to_le_bytes());
+        for v in vals {
+            match tipo {
+                7 => out.push(*v as u8),
+                _ => out.extend_from_slice(&(*v as u32).to_le_bytes()),
+            }
+        }
+    }
+
+    #[test]
+    fn q4_0_pasa_tal_cual() {
+        use sosomodel::layout::{Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMS};
+        let dir = std::env::temp_dir().join("convert-gguf-q4_0-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let bytes: Vec<u8> = (0..3 * Q4_0_BLOCK_BYTES).map(|i| (i * 29 % 253) as u8).collect();
+        let p = dir.join("q40.bin");
+        fs::File::create(&p).unwrap().write_all(&bytes).unwrap();
+        let gguf = GgufFile { meta: BTreeMap::new(), tensors: BTreeMap::new(), data_offset: 0 };
+        let t = TensorInfo { shape: vec![(3 * Q4_0_BLOCK_ELEMS) as u64], ggml_type: GGML_Q4_0, offset: 0 };
+        let mut f = IoFile(fs::File::open(&p).unwrap());
+        let (out, dtype) = read_tensor(&mut f, &gguf, &t).unwrap();
+        assert_eq!((dtype, out), (DTYPE_Q4_0, bytes));
+        let malo = TensorInfo { shape: vec![33], ggml_type: GGML_Q4_0, offset: 0 };
+        assert!(read_tensor(&mut f, &gguf, &malo).is_err(), "no múltiplo de 32");
+    }
+
+    /// Gemma 4 en pequeño: 3 capas (local, local, global), `head_count_kv` por capa, sin `attn_v` ni
+    /// `output.weight`. Lo que se comprueba es lo que el runtime necesitará: especificaciones por capa
+    /// (dimensión de cabeza, KV, ventana, base RoPE, flags) y las extensiones del manifest.
+    #[test]
+    fn convierte_gemma4_sintetico() {
+        use sosomodel::manifest::{FLAG_GEGLU, FLAG_ROPE_FACTORS, FLAG_ROPE_NEOX, FLAG_V_FROM_K};
+        const H: u64 = 16;
+        const FFN: u64 = 32;
+        const VOCAB: u64 = 6;
+        // local: 2 cabezas Q de 8, 2 KV de 8; global: 2 cabezas Q de 16, 1 KV de 16.
+        let mut tensors: Vec<(String, Vec<u64>)> = vec![
+            ("token_embd.weight".into(), vec![H, VOCAB]),
+            ("output_norm.weight".into(), vec![H]),
+            ("rope_freqs.weight".into(), vec![8]),
+        ];
+        for i in 0..3u32 {
+            let global = i == 2;
+            let (hd, nkv) = if global { (16u64, 1u64) } else { (8, 2) };
+            let b = |n: &str| format!("blk.{i}.{n}.weight");
+            tensors.push((b("attn_norm"), vec![H]));
+            tensors.push((b("attn_q"), vec![H, 2 * hd]));
+            tensors.push((b("attn_k"), vec![H, nkv * hd]));
+            if !global {
+                tensors.push((b("attn_v"), vec![H, nkv * hd]));
+            }
+            tensors.push((b("attn_output"), vec![2 * hd, H]));
+            tensors.push((b("attn_q_norm"), vec![hd]));
+            tensors.push((b("attn_k_norm"), vec![hd]));
+            tensors.push((b("post_attention_norm"), vec![H]));
+            tensors.push((b("ffn_norm"), vec![H]));
+            tensors.push((b("ffn_up"), vec![H, FFN]));
+            tensors.push((b("ffn_gate"), vec![H, FFN]));
+            tensors.push((b("ffn_down"), vec![FFN, H]));
+            tensors.push((b("post_ffw_norm"), vec![H]));
+            tensors.push((b("layer_output_scale"), vec![1]));
+        }
+        let mut g: Vec<u8> = Vec::new();
+        g.extend_from_slice(b"GGUF");
+        g.extend_from_slice(&3u32.to_le_bytes());
+        g.extend_from_slice(&(tensors.len() as u64).to_le_bytes());
+        g.extend_from_slice(&19u64.to_le_bytes());
+        gguf_kv_str(&mut g, "general.architecture", "gemma4");
+        gguf_kv_u32(&mut g, "gemma4.embedding_length", H as u32);
+        gguf_kv_u32(&mut g, "gemma4.block_count", 3);
+        gguf_kv_u32(&mut g, "gemma4.feed_forward_length", FFN as u32);
+        gguf_kv_u32(&mut g, "gemma4.attention.head_count", 2);
+        gguf_kv_int_array(&mut g, "gemma4.attention.head_count_kv", 4, &[2, 2, 1]);
+        gguf_kv_f32(&mut g, "gemma4.rope.freq_base", 1_000_000.0);
+        gguf_kv_f32(&mut g, "gemma4.rope.freq_base_swa", 10_000.0);
+        gguf_kv_f32(&mut g, "gemma4.attention.layer_norm_rms_epsilon", 1e-6);
+        gguf_kv_u32(&mut g, "gemma4.attention.key_length", 16);
+        gguf_kv_u32(&mut g, "gemma4.attention.key_length_swa", 8);
+        gguf_kv_u32(&mut g, "gemma4.attention.sliding_window", 4);
+        gguf_kv_int_array(&mut g, "gemma4.attention.sliding_window_pattern", 7, &[1, 1, 0]);
+        gguf_kv_f32(&mut g, "gemma4.final_logit_softcapping", 30.0);
+        gguf_kv_u32(&mut g, "gemma4.context_length", 128);
+        gguf_kv_bool(&mut g, "tokenizer.ggml.add_bos_token", true);
+        gguf_kv_str_array(&mut g, "tokenizer.ggml.tokens", &["<pad>", "<eos>", "<bos>", "a", "b", "c"]);
+        gguf_kv_u32(&mut g, "tokenizer.ggml.eos_token_id", 1);
+        gguf_kv_u32(&mut g, "tokenizer.ggml.bos_token_id", 2);
+        let mut offset = 0u64;
+        for (name, shape) in &tensors {
+            gguf_string(&mut g, name);
+            g.extend_from_slice(&(shape.len() as u32).to_le_bytes());
+            for d in shape {
+                g.extend_from_slice(&d.to_le_bytes());
+            }
+            g.extend_from_slice(&GGML_F32.to_le_bytes());
+            g.extend_from_slice(&offset.to_le_bytes());
+            offset = (offset + shape.iter().product::<u64>() * 4).next_multiple_of(32);
+        }
+        while g.len() % 32 != 0 {
+            g.push(0);
+        }
+        for (i, (_, shape)) in tensors.iter().enumerate() {
+            for e in 0..shape.iter().product::<u64>() {
+                g.extend_from_slice(&((i as f32) * 0.01 + (e as f32) * 1e-3).to_le_bytes());
+            }
+            while g.len() % 32 != 0 {
+                g.push(0);
+            }
+        }
+        let dir = std::env::temp_dir().join("convert-gemma4-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let gguf_path = dir.join("mini.gguf");
+        fs::File::create(&gguf_path).unwrap().write_all(&g).unwrap();
+        let out = dir.join("out");
+        convert_path(gguf_path.to_str().unwrap(), &out, Some("g4")).unwrap();
+
+        let manifest = Manifest::parse(&fs::read(out.join(MANIFEST_FILE)).unwrap()).unwrap();
+        // Globales: las cifras de las capas locales; el resto, por capa.
+        assert_eq!((manifest.hidden_dim, manifest.num_layers, manifest.num_heads, manifest.num_kv_heads), (16, 3, 2, 2));
+        assert!((manifest.rope_theta - 1_000_000.0).abs() < 1.0);
+        let local = manifest.layer(0).unwrap();
+        let global = manifest.layer(2).unwrap();
+        assert_eq!((local.v_head_dim, local.num_kv_heads), (8, 2));
+        assert_eq!((global.v_head_dim, global.num_kv_heads), (16, 1));
+        assert!(local.flags & FLAG_ROPE_NEOX != 0 && local.flags & FLAG_GEGLU != 0);
+        assert!(local.flags & FLAG_ROPE_FACTORS == 0 && local.flags & FLAG_V_FROM_K == 0);
+        assert!(global.flags & FLAG_ROPE_FACTORS != 0 && global.flags & FLAG_V_FROM_K != 0, "la global lleva factores y V = K");
+        assert_eq!((manifest.layer_window(0), manifest.layer_window(1), manifest.layer_window(2)), (4, 4, 0));
+        assert_eq!(manifest.layer_rope_theta(0), 10_000.0);
+        assert_eq!(manifest.layer_rope_theta(2), 1_000_000.0);
+        assert!((manifest.ext.embed_scale - 4.0).abs() < 1e-5, "sqrt(16)");
+        assert_eq!((manifest.ext.logit_softcap, manifest.ext.attn_scale, manifest.ext.tied_lm_head), (30.0, 1.0, true));
+        assert_eq!(manifest.chat_template, "", "la plantilla de Gemma la renderiza el runtime");
+
+        let index = TensorIndex::parse(&fs::read(out.join(INDEX_FILE)).unwrap()).unwrap();
+        assert!(index.find("lm_head").is_none() && index.find("L02.attn_v").is_none());
+        assert_eq!(index.find("L02.attn_q").unwrap().shape, vec![32, 16]);
+        assert_eq!(index.find("L02.attn_k").unwrap().shape, vec![16, 16]);
+        assert_eq!(index.find("rope_freqs").unwrap().shape, vec![8]);
+        assert_eq!(index.find("L00.layer_scale").unwrap().shape, vec![1]);
+        // El runtime acepta las formas heterogéneas.
+        let rt = soso_llm_core::runtime::Runtime::new(manifest.clone(), index, 0, 0);
+        rt.validate_shapes().expect("formas coherentes");
+        // Y un manifest v7 sobrevive al viaje de ida y vuelta, sin tocar los que no usan la extensión.
+        assert_eq!(Manifest::parse(&manifest.serialize()).unwrap().ext, manifest.ext);
     }
 
     #[test]

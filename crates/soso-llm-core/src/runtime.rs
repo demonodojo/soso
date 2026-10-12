@@ -227,7 +227,11 @@ impl Runtime {
         let needs_embed = matches!(role, PipelineRole::Head | PipelineRole::Full);
         let needs_logits = matches!(role, PipelineRole::Tail | PipelineRole::Full);
         check("embed", &[vocab, h], needs_embed)?;
+        // Con `tied_lm_head` no hay `lm_head`: los logits salen de `embed`.
         check("lm_head", &[vocab, h], false)?;
+        if self.manifest.ext.tied_lm_head && self.index.find("lm_head").is_some() {
+            return Err(String::from("lm_head: sobra (el manifest declara embeddings atados)"));
+        }
         check("output_norm", &[h], needs_logits && self.has_output_norm)?;
         for layer in layer_start..layer_end {
             let p = alloc::format!("L{layer:02}");
@@ -292,11 +296,26 @@ impl Runtime {
                 let q_dim = layer_heads * head_dim;
                 check(&alloc::format!("{p}.attn_q"), &[q_dim, h], true)?;
                 check(&alloc::format!("{p}.attn_k"), &[kv_dim, h], true)?;
-                check(&alloc::format!("{p}.attn_v"), &[kv_dim, h], true)?;
+                // Gemma, capas globales: sin `attn_v` (el valor sale de la proyección K).
+                let v_de_k = spec.flags & sosomodel::FLAG_V_FROM_K != 0;
+                check(&alloc::format!("{p}.attn_v"), &[kv_dim, h], !v_de_k)?;
+                if v_de_k && self.index.find(&alloc::format!("{p}.attn_v")).is_some() {
+                    return Err(alloc::format!("{p}.attn_v: sobra (la capa declara V = K)"));
+                }
                 check(&alloc::format!("{p}.attn_output"), &[h, q_dim], true)?;
                 if spec.flags & sosomodel::FLAG_QK_NORM != 0 {
                     check(&alloc::format!("{p}.attn_q_norm"), &[head_dim], true)?;
                     check(&alloc::format!("{p}.attn_k_norm"), &[head_dim], true)?;
+                }
+                if spec.flags & sosomodel::FLAG_SANDWICH_NORM != 0 {
+                    check(&alloc::format!("{p}.post_attn_norm"), &[h], true)?;
+                    check(&alloc::format!("{p}.post_ffn_norm"), &[h], true)?;
+                }
+                if spec.flags & sosomodel::FLAG_LAYER_SCALE != 0 {
+                    check(&alloc::format!("{p}.layer_scale"), &[1], true)?;
+                }
+                if spec.flags & sosomodel::FLAG_ROPE_FACTORS != 0 {
+                    check("rope_freqs", &[head_dim / 2], true)?;
                 }
             }
             check(&alloc::format!("{p}.ffn_norm"), &[h], true)?;
@@ -439,7 +458,25 @@ impl Runtime {
             return Err(());
         }
         note_infer_op(None, "embed");
-        source.load_f32_range("embed", token as usize * h, &mut self.hidden)
+        source.load_f32_range("embed", token as usize * h, &mut self.hidden)?;
+        // Gemma multiplica los embeddings de entrada por sqrt(hidden).
+        let k = self.manifest.embed_scale();
+        if k != 1.0 {
+            for v in self.hidden.iter_mut() {
+                *v *= k;
+            }
+        }
+        Ok(())
+    }
+
+    /// Límite blando de los logits (`cap·tanh(x/cap)`), si el modelo lo declara.
+    fn softcap_logits(&mut self) {
+        let cap = self.manifest.ext.logit_softcap;
+        if cap > 0.0 {
+            for v in self.logits_buf.iter_mut() {
+                *v = cap * libm::tanhf(*v / cap);
+            }
+        }
     }
 
     /// Prefetch de la fila de embed (solapa I/O con el forward del token actual).
@@ -1016,6 +1053,7 @@ impl Runtime {
             &mut self.logits_buf,
             &Sequential,
         )?;
+        self.softcap_logits();
         Ok(&self.logits_buf)
     }
 
@@ -1044,6 +1082,7 @@ impl Runtime {
             &mut self.logits_buf,
             par,
         )?;
+        self.softcap_logits();
         Ok(&self.logits_buf)
     }
 

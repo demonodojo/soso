@@ -1,0 +1,3 @@
+ejecución r-R20 · tarea R20 · estado rechazada
+  intento 0 verificando  herramientas 8 tokens 32708 artefactos 1
+  intentos restantes: 0

@@ -1,0 +1,5 @@
+  base de «campana-R14» publicada (generación 0)
+  ejecutado: r-R14/lanzar/0
+  ejecutado: r-R14/exportar/0
+  ejecutado: r-R14/validar/0
+tarea: aceptada

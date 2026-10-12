@@ -16,8 +16,8 @@
 //! `soso-llm-core::quant`: usan `libm::roundf` y `sosomodel` no depende de `libm`.
 
 use crate::layout::{
-    MXFP4_BLOCK_BYTES, MXFP4_BLOCK_ELEMS, Q4_K_BLOCK_BYTES, Q4_K_BLOCK_ELEMS, Q8_0_BLOCK_BYTES,
-    Q8_0_BLOCK_ELEMS,
+    MXFP4_BLOCK_BYTES, MXFP4_BLOCK_ELEMS, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMS, Q4_K_BLOCK_BYTES,
+    Q4_K_BLOCK_ELEMS, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMS,
 };
 
 const POW2_NEG14: f32 = 6.103_515_6e-5; // 2^-14
@@ -53,6 +53,7 @@ pub fn f16_to_f32(bits: u16) -> f32 {
 pub fn row_bytes(dtype: u8, cols: usize) -> Option<usize> {
     let (elems, bytes) = match dtype {
         crate::layout::DTYPE_Q8_0 => (Q8_0_BLOCK_ELEMS, Q8_0_BLOCK_BYTES),
+        crate::layout::DTYPE_Q4_0 => (Q4_0_BLOCK_ELEMS, Q4_0_BLOCK_BYTES),
         crate::layout::DTYPE_Q4_K => (Q4_K_BLOCK_ELEMS, Q4_K_BLOCK_BYTES),
         crate::layout::DTYPE_MXFP4 => (MXFP4_BLOCK_ELEMS, MXFP4_BLOCK_BYTES),
         _ => return None,
@@ -95,6 +96,44 @@ pub fn dequant_q8_0_range(bytes: &[u8], elem_off: usize, out: &mut [f32]) -> Res
 /// Descuantiza el tensor completo.
 pub fn dequant_q8_0(bytes: &[u8], out: &mut [f32]) -> Result<(), ()> {
     dequant_q8_0_range(bytes, 0, out)
+}
+
+// ---- Q4_0 (layout GGML) ----
+//
+// Bloque de 32 elementos = 18 bytes: d f16 | qs[16]. El nibble bajo de qs[j] es el
+// elemento j y el alto el j+16 (no están intercalados). valor = d·(q − 8).
+
+/// Descuantiza `out.len()` elementos a partir del elemento `elem_off`.
+pub fn dequant_q4_0_range(bytes: &[u8], elem_off: usize, out: &mut [f32]) -> Result<(), ()> {
+    if bytes.len() % Q4_0_BLOCK_BYTES != 0 || out.is_empty() {
+        return Err(());
+    }
+    let total = (bytes.len() / Q4_0_BLOCK_BYTES) * Q4_0_BLOCK_ELEMS;
+    let end = elem_off.checked_add(out.len()).ok_or(())?;
+    if end > total {
+        return Err(());
+    }
+    let first = elem_off / Q4_0_BLOCK_ELEMS;
+    let last = (end - 1) / Q4_0_BLOCK_ELEMS;
+    for b in first..=last {
+        let blk = &bytes[b * Q4_0_BLOCK_BYTES..(b + 1) * Q4_0_BLOCK_BYTES];
+        let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+        let base = b * Q4_0_BLOCK_ELEMS;
+        for j in 0..16 {
+            let q = blk[2 + j];
+            for (e, v) in [(base + j, (q & 0x0F) as i32 - 8), (base + j + 16, (q >> 4) as i32 - 8)] {
+                if e >= elem_off && e < end {
+                    out[e - elem_off] = v as f32 * d;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Descuantiza el tensor completo.
+pub fn dequant_q4_0(bytes: &[u8], out: &mut [f32]) -> Result<(), ()> {
+    dequant_q4_0_range(bytes, 0, out)
 }
 
 // ---- Q4_K (layout GGML) ----
@@ -259,6 +298,7 @@ pub fn matvec_row(
     }
     let deq = match dtype {
         crate::layout::DTYPE_Q8_0 => dequant_q8_0(fila, &mut scratch[..cols]),
+        crate::layout::DTYPE_Q4_0 => dequant_q4_0(fila, &mut scratch[..cols]),
         crate::layout::DTYPE_Q4_K => dequant_q4_k(fila, &mut scratch[..cols]),
         crate::layout::DTYPE_MXFP4 => dequant_mxfp4(fila, &mut scratch[..cols]),
         _ => return None,

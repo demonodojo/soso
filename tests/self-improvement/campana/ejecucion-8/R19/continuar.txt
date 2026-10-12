@@ -1,0 +1,5 @@
+  base de «campana-R19» publicada (generación 0)
+  ejecutado: r-R19/lanzar/0
+  ejecutado: r-R19/exportar/0
+  ejecutado: r-R19/validar/0
+tarea: aceptada

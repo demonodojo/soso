@@ -216,7 +216,7 @@ Esas tres mejoras son una **campaña nueva con banco nuevo** (el R11–R20 ya es
 
 # Campaña 5 (`campana-si4-5-gemma`): el mismo banco con otro modelo
 
-**Estado:** en ejecución (lanzada el 2026-10-12 ~18:00 en CPU; **reiniciada a las ~18:25 en GPU** al ver que la GPU sí estaba disponible: ver abajo).
+**Estado:** terminada: **GO 6/10** (lanzada el 2026-10-12 ~18:00 en CPU; **reiniciada a las ~18:25 en GPU** al ver que la GPU sí estaba disponible: ver abajo).
 
 **Idea (del usuario):** probar `google/gemma-4-12B-it-qat-q4_0-gguf`. **Lo que se hizo y por qué así:** soso **no puede ejecutar ese modelo hoy** (su convertidor y su runtime sólo conocen las arquitecturas llama/qwen y no la cuantización Q4_0; Gemma pide además su plantilla de chat y su formato de llamadas a herramientas). Antes de plantear un port se comprueba lo barato: **¿es mejor el modelo?** Se sirve con **llama.cpp** (compilado en CPU en el host, `llama-server --jinja`, `-c 24576`, T=0; 6 975 879 296 bytes) y se le pasa **el mismo banco R11–R20 con el mismo agente congelado** (mismas huellas que en la campaña 4). Sólo cambian el modelo y el runtime (y `max_tokens` 4096 en vez de 2048 porque Gemma «piensa» antes de contestar).
 - `campaign-5.json` sha256 `4254b4581b19893dac284aa3554389355eddc00b011f353bf43940e69663156f` (la anterior, `9858780d…`, decía «CPU»); agente: `mod.rs` `986a8692…`, `herramientas.rs` `b4ea58ae…` (sin cambios). El arnés sólo gana `MODELO`, `PUERTO` y `MAX_TOKENS` por entorno.
@@ -224,4 +224,25 @@ Esas tres mejoras son una **campaña nueva con banco nuevo** (el R11–R20 ya es
 - **CPU → GPU.** Se montó primero en CPU porque era lo más rápido de poner en marcha (sin `nvcc` y con Docker sin runtime de NVIDIA); pero la GPU del host (RTX 5070 Ti, driver 595) funciona y había una imagen `llama.cpp:server-cuda` en local: pasándole los dispositivos `/dev/nvidia*` y las dos librerías del driver a mano, el mismo modelo va a **30,6 tok/s generando y 496 tok/s de prefill** (CPU: 7,4 y 61) con 8 GB de VRAM. La campaña se reinició en GPU; lo de CPU (primera tarea, sin terminar) se descartó.
 
 ## Resultados
-(pendiente)
+Evidencia: `tests/self-improvement/campana/ejecucion-8/` (misma organización; mismas dos correcciones anotadas en R12 y R17). Se ejecutó en **GPU** (R11 en 27 s; las diez en ~35 min).
+
+| tarea | Qwen2.5-Coder-14B (campaña 4) | **Gemma 4 12B** (campaña 5) |
+|---|---|---|
+| R11 | rechazada | rechazada |
+| R12 (inyección) | rechazada | **aceptada** (recuperada tras `kill -9`) |
+| R13 | rechazada | **aceptada** |
+| R14 | bloqueada (no editó) | **aceptada** |
+| R15 | **aceptada** | **aceptada** |
+| R16 | bloqueada (no editó) | rechazada |
+| R17 (inyección) | bloqueada | rechazada (recuperada tras `kill -9`) |
+| R18 | rechazada | **aceptada** |
+| R19 | **aceptada** | **aceptada** |
+| R20 | rechazada | rechazada |
+| **aceptadas** | **2 de 10** | **6 de 10** |
+
+**Resultado: 6 de 10 → GO en el criterio de SI-4** (≥ 5, recuperación acreditada con `kill -9` real, base final R12+R13+R14+R15+R18+R19 con `cargo test` en verde en los cinco crates tocados). Fallos: 4, todos de programación (editó y la prueba reservada no pasa); **cero** de protocolo y de infraestructura: Gemma usa las herramientas como se espera y no se rinde sin editar, que era el fallo dominante del Qwen.
+
+**Cómo leerlo, sin pasarse:**
+- Misma vara que la campaña 4: mismo banco, mismo agente congelado (huellas idénticas), mismos límites e inyecciones. Cambian el **modelo** y el **runtime** (llama.cpp en GPU; Gemma recibe las llamadas a herramientas en su formato nativo por `--jinja`; Qwen las recibía por el parser de soso).
+- El banco R11–R20 ya lo había visto el agente en la campaña 4, pero **no se tocó nada del agente después**, y Gemma no participó en ningún ajuste: la ventaja es del modelo, no de un ajuste a estas tareas. Sigue siendo una sola tanda de diez; un 6/10 tiene un margen de error amplio.
+- **El criterio SI-4 pide el modelo servido por soso**, y aquí se sirvió con llama.cpp. Por eso SI-4 **no se cierra aún**: se cerrará cuando esta misma campaña se repita con Gemma 4 **sobre soso** (etapa G8 de `docs/PLAN-GEMMA4.md`). Lo que queda acreditado es la **capacidad del modelo** y la decisión de portarlo.

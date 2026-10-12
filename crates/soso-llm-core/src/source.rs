@@ -8,7 +8,7 @@ use alloc::format;
 use alloc::string::String;
 use core::sync::atomic::{AtomicU32, Ordering};
 use sosomodel::index::{verify_shard, TensorEntry, TensorIndex};
-use sosomodel::layout::{DTYPE_F32, DTYPE_MXFP4, DTYPE_Q4_K, DTYPE_Q8_0};
+use sosomodel::layout::{DTYPE_F32, DTYPE_MXFP4, DTYPE_Q4_0, DTYPE_Q4_K, DTYPE_Q8_0};
 
 /// Región de fichero mapeada en memoria.
 #[derive(Clone, Debug)]
@@ -270,6 +270,10 @@ impl<M: FileMapper> TensorSource for MmapTensorSource<M> {
                 let bytes = self.tensor_bytes(&entry, 0, entry.byte_len as usize)?;
                 dequant_q8_0(bytes, out)
             }
+            DTYPE_Q4_0 => {
+                let bytes = self.tensor_bytes(&entry, 0, entry.byte_len as usize)?;
+                sosomodel::dequant::dequant_q4_0(bytes, out)
+            }
             DTYPE_Q4_K => {
                 let bytes = self.tensor_bytes(&entry, 0, entry.byte_len as usize)?;
                 dequant_q4_k(bytes, out)
@@ -296,6 +300,10 @@ impl<M: FileMapper> TensorSource for MmapTensorSource<M> {
             DTYPE_Q8_0 => {
                 let bytes = self.tensor_bytes(&entry, 0, entry.byte_len as usize)?;
                 dequant_q8_0_range(bytes, elem_off, out)
+            }
+            DTYPE_Q4_0 => {
+                let bytes = self.tensor_bytes(&entry, 0, entry.byte_len as usize)?;
+                sosomodel::dequant::dequant_q4_0_range(bytes, elem_off, out)
             }
             DTYPE_Q4_K => {
                 let bytes = self.tensor_bytes(&entry, 0, entry.byte_len as usize)?;
