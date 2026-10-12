@@ -8,7 +8,9 @@ BIN=$R0/target/debug/soso-improve
 CAMP=${CAMPANA_JSON:-$R0/tests/self-improvement/campaign.json}
 # Las tareas son las que fija el JSON de la campaña (o las que se pasen como argumentos).
 TAREAS=${@:-$(python3 -I -c "import json,sys;print(' '.join(t['id'] for t in json.load(open(sys.argv[1]))['tareas']))" $CAMP)}
-PORT=7441
+PORT=${PUERTO:-7441}
+MODELO=${MODELO:-qwen2.5-coder-14b}
+MAXTOK=${MAX_TOKENS:-2048}
 mkdir -p $OUT/registros
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-/tmp/campana-target}
 export SOSO_LLM_API_KEY=clave-host
@@ -45,7 +47,7 @@ P
   RUN=r-$T
   $BIN tarea preparar --estado $W/estado --spec $W/spec.json --run $RUN > $W/preparar.txt 2>&1
   $BIN tarea copiar --estado $W/estado --run $RUN --captura $W/captura --destino $W/copia > $W/copiar.txt 2>&1
-  ARGS="--estado $W/estado --run $RUN --captura $W/captura --copia $W/copia --exigencias $W/exigencias.json --trabajo $W/validador --referencias $OUT/refs --campana campana-$T --publicar-base --modelo qwen2.5-coder-14b --puerto $PORT --max-turnos 30 --cargo-home $HOME/.cargo"
+  ARGS="--estado $W/estado --run $RUN --captura $W/captura --copia $W/copia --exigencias $W/exigencias.json --trabajo $W/validador --referencias $OUT/refs --campana campana-$T --publicar-base --modelo $MODELO --puerto $PORT --max-tokens $MAXTOK --max-turnos 30 --cargo-home $HOME/.cargo"
   INYECTADA=0
   if [ "$INJ_S" != "0" ]; then
     $BIN tarea reanudar --continuar $ARGS > $W/continuar-1.txt 2>&1 &

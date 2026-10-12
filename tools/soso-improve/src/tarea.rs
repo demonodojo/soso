@@ -250,7 +250,10 @@ fn continuar(op: &Opciones) -> Result<i32, Error> {
     let arbol = format!("{trabajo}/arbol");
     std::fs::create_dir_all(&trabajo).map_err(|e| Error::entorno(format!("no pude crear {trabajo}: {e}")))?;
     let puerto: u16 = op.uno("puerto").and_then(|p| p.parse().ok()).unwrap_or(17299);
-    let cfg = Config::nueva(op.uno("modelo").filter(|s| !s.is_empty()).unwrap_or("soso-coder"), SISTEMA);
+    let mut cfg = Config::nueva(op.uno("modelo").filter(|s| !s.is_empty()).unwrap_or("soso-coder"), SISTEMA);
+    if let Some(n) = op.uno("max-tokens").and_then(|v| v.parse().ok()) {
+        cfg.max_tokens = n;
+    }
     let mut pol = PolAgente::nueva(&copia);
     if let Some(h) = op.uno("cargo-home").filter(|s| !s.is_empty()) {
         pol.entorno.push(("CARGO_HOME".into(), h.to_string()));

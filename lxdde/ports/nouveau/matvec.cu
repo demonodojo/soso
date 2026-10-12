@@ -32,13 +32,19 @@ extern "C" __global__ void matvec_f32(const float *w, const float *x, float *y,
     float sum = 0.0f;
     int c;
 
-    for (c = lane; c + 3 < cols; c += 32) {
-        float4 w4 = *(const float4 *)(row + c);
-        float4 x4 = *(const float4 *)(x + c);
-        sum += w4.x * x4.x + w4.y * x4.y + w4.z * x4.z + w4.w * x4.w;
-    }
-    for (; c < cols; c += 32) {
-        sum += row[c] * x[c];
+    /* Un float4 es un LDG.E.128 y exige 16 B. Con `c = lane` el hilo 1 leía en
+     * row+4 B: la GA104 lo paró con GR_EXCEPTION en una VA acabada en 0x…d04
+     * (ROG, 2026-10-12), y además cada columna se sumaba hasta cuatro veces. */
+    if ((cols & 3) == 0) {
+        for (c = lane * 4; c < cols; c += 128) {
+            float4 w4 = *(const float4 *)(row + c);
+            float4 x4 = *(const float4 *)(x + c);
+            sum += w4.x * x4.x + w4.y * x4.y + w4.z * x4.z + w4.w * x4.w;
+        }
+    } else {
+        for (c = lane; c < cols; c += 32) {
+            sum += row[c] * x[c];
+        }
     }
 
     sum = warp_reduce_sum(sum);

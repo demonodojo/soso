@@ -30,13 +30,18 @@ extern "C" __global__ void matmul_xwt_f32(const float *w, const float *x, float 
     float sum = 0.0f;
     int c;
 
-    for (c = lane; c + 3 < cols; c += 32) {
-        float4 w4 = *(const float4 *)(row_w + c);
-        float4 x4 = *(const float4 *)(row_x + c);
-        sum += w4.x * x4.x + w4.y * x4.y + w4.z * x4.z + w4.w * x4.w;
-    }
-    for (; c < cols; c += 32) {
-        sum += row_w[c] * row_x[c];
+    /* Mismo bucle que matvec.cu: float4 sólo con bloques de 4 columnas
+     * alineados (lane*4), o el LDG.E.128 cae desalineado. */
+    if ((cols & 3) == 0) {
+        for (c = lane * 4; c < cols; c += 128) {
+            float4 w4 = *(const float4 *)(row_w + c);
+            float4 x4 = *(const float4 *)(row_x + c);
+            sum += w4.x * x4.x + w4.y * x4.y + w4.z * x4.z + w4.w * x4.w;
+        }
+    } else {
+        for (c = lane; c < cols; c += 32) {
+            sum += row_w[c] * row_x[c];
+        }
     }
 
     sum = warp_reduce_sum(sum);
