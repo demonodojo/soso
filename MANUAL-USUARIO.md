@@ -1108,11 +1108,12 @@ y el máximo admitido. Conserva esas líneas junto con el origen y la versión
 instalada para diagnosticarlo. Con `--local` se lee el manifiesto completo,
 también cuando supera los 256 KiB.
 
-Tras `aplicar`, **reinicia** para que el shim UEFI aplique el kernel nuevo.
-Si el arranque falla, el shim revierte al kernel anterior en el siguiente
-reinicio (backup en `SOSOKRN.BIN`, estado durable en `SOSOKRN.MET` en la ESP).
-Las imágenes live **anteriores** a tener esos huecos solo pueden actualizar
-rootfs hasta reflashear/reinstalar el live una vez.
+Tras `aplicar`, **reinicia** para que el cargador aplique el kernel nuevo.
+Si el arranque falla, el siguiente reinicio restaura el kernel anterior: la
+copia queda en `SOSOKRN.BIN` y el estado en `SOSOKRN.MET`, en la partición de
+arranque. `SOSOKRN.BIN` tiene que seguir midiendo 64 MiB. El cargador ya no lo
+recorta, y si una versión anterior lo dejó corto el kernel lo repone al
+arrancar. No hace falta el USB live.
 
 **Rootfs:** la actualización es por fichero (solo baja lo que cambia). Si
 `aplicar` se interrumpe, el progreso queda en `/etc/actualiza.estado` para
@@ -2004,10 +2005,9 @@ por Linux en ningún momento**.
 | Disco destino | NVMe entero, vacío o con soso. **Nunca el disco de Linux** |
 | Origen | Pendrive live generado con `cargo xtask package-usb-live` |
 
-**Actualizaciones de kernel:** las instalaciones hechas con un live **anterior** a
-0.2.0 pueden no tener los huecos `SOSOKRN.BIN` / `SOSOKRN.MET` en la ESP;
-reflashea o reinstala una vez para poder usar `soso-update aplicar` con kernel
-y recuperación verificable.
+**Actualizaciones de kernel:** `SOSOKRN.BIN`, en la partición de arranque, es
+el hueco de 64 MiB donde se deja el kernel nuevo y la copia del anterior. Si
+falta o no mide eso, el kernel lo repone al arrancar. No hace falta el USB live.
 
 soso solo sabe escribir en discos NVMe (`raw_disk::writable`) y el kernel
 rechaza cualquier escritura sobre el disco desde el que arrancó. El disco de

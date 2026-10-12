@@ -14,47 +14,63 @@ pub fn init() {
     if !crate::drivers::live_disk::esp_available() {
         return;
     }
-    match espfat::locate(b"SOSOUPD ", b"TXT", abi::UPD_MAILBOX_SIZE) {
-        Some(slot) => {
-            MAILBOX.call_once(|| Some(slot));
-            crate::println!("updslot: SOSOUPD.TXT LBA {}", slot.data_lba);
-            crate::otalog!("hueco SOSOUPD.TXT disponible LBA {}", slot.data_lba);
-        }
-        None => {
-            crate::println!(
-                "updslot: SOSOUPD.TXT no encontrado; actualizaciones de kernel desactivadas"
-            );
-            crate::otalog!("hueco SOSOUPD.TXT ausente: OTA de kernel desactivada");
-        }
+    // Los huecos imprescindibles se reponen aquí, en la máquina instalada.
+    // Una actualización de kernel recortaba `SOSOKRN.BIN` al tamaño del ELF y
+    // la siguiente ya no lo reconocía; reponerlo no puede depender del live.
+    if let Some(slot) = hueco(b"SOSOUPD ", b"TXT", abi::UPD_MAILBOX_SIZE, "SOSOUPD.TXT") {
+        MAILBOX.call_once(|| Some(slot));
+        crate::println!("updslot: SOSOUPD.TXT LBA {}", slot.data_lba);
+        crate::otalog!("hueco SOSOUPD.TXT disponible LBA {}", slot.data_lba);
+    } else {
+        crate::println!("updslot: SOSOUPD.TXT no se pudo reponer; actualizaciones de kernel desactivadas");
+        crate::otalog!("hueco SOSOUPD.TXT ausente: OTA de kernel desactivada");
     }
     let ksize = abi::UPD_KERNEL_SLOT_SIZE as usize;
-    match espfat::locate(b"SOSOKRN ", b"BIN", ksize) {
-        Some(slot) => {
-            KERNEL.call_once(|| Some(slot));
-            crate::println!("updslot: SOSOKRN.BIN LBA {} ({} MiB)", slot.data_lba, ksize / (1024 * 1024));
-        }
-        None => crate::println!(
-            "updslot: SOSOKRN.BIN no encontrado; reflashea el live para habilitar actualizaciones de kernel"
-        ),
+    if let Some(slot) = hueco(b"SOSOKRN ", b"BIN", ksize, "SOSOKRN.BIN") {
+        KERNEL.call_once(|| Some(slot));
+        crate::println!(
+            "updslot: SOSOKRN.BIN LBA {} ({} MiB)",
+            slot.data_lba,
+            ksize / (1024 * 1024)
+        );
+    } else {
+        crate::println!("updslot: SOSOKRN.BIN no se pudo reponer; sin actualización de kernel");
     }
     // Huecos de la transacción (U5a) y de la identidad (U2). Que falten no es
     // fatal: sólo desactiva esa vía, como el resto.
-    if let Some(slot) = espfat::locate(b"SOSOTXN ", b"BIN", soso_update_core::UPD_BOOTREC_SIZE) {
+    if let Some(slot) = hueco(b"SOSOTXN ", b"BIN", soso_update_core::UPD_BOOTREC_SIZE, "SOSOTXN.BIN") {
         TXN.call_once(|| Some(slot));
     } else {
-        crate::println!("updslot: SOSOTXN.BIN no encontrado; sin registro de transacción");
+        crate::println!("updslot: SOSOTXN.BIN no se pudo reponer; sin registro de transacción");
     }
+    // `SOSOMODE.TXT` vacío se lee como «sin registro» y la máquina se cree un
+    // live. Si falta, no se inventa: sólo se usa el que ya está bien.
     if let Some(slot) = espfat::locate(b"SOSOMODE", b"TXT", soso_update_core::UPD_MODE_SIZE) {
         MODE.call_once(|| Some(slot));
     }
-    match espfat::locate(b"SOSOKRN ", b"MET", abi::UPD_KERNEL_META_SIZE) {
-        Some(slot) => {
-            META.call_once(|| Some(slot));
-            crate::println!("updslot: SOSOKRN.MET LBA {}", slot.data_lba);
+    if let Some(slot) = hueco(b"SOSOKRN ", b"MET", abi::UPD_KERNEL_META_SIZE, "SOSOKRN.MET") {
+        META.call_once(|| Some(slot));
+        crate::println!("updslot: SOSOKRN.MET LBA {}", slot.data_lba);
+    } else {
+        crate::println!("updslot: SOSOKRN.MET no se pudo reponer; recuperación OTA limitada");
+    }
+}
+
+/// Localiza el hueco y, si no mide lo justo o no es contiguo, lo repone.
+fn hueco(name: &[u8; 8], ext: &[u8; 3], size: usize, etiqueta: &str) -> Option<Slot> {
+    if let Some(slot) = espfat::locate(name, ext, size) {
+        return Some(slot);
+    }
+    crate::println!("updslot: {etiqueta} no está usable; lo repongo");
+    match espfat::asegurar(name, ext, size) {
+        Ok(slot) => {
+            crate::println!("updslot: {etiqueta} repuesto, LBA {}", slot.data_lba);
+            Some(slot)
         }
-        None => crate::println!(
-            "updslot: SOSOKRN.MET no encontrado; recuperación OTA limitada hasta reflashear"
-        ),
+        Err(e) => {
+            crate::println!("updslot: no pude reponer {etiqueta} ({e:?})");
+            None
+        }
     }
 }
 

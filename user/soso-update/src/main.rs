@@ -182,7 +182,7 @@ fn cmd_estado() -> u8 {
         let mb = Mailbox::parse(core::str::from_utf8(&mbuf[..mn as usize]).unwrap_or(""));
         println!("buzón: {:?}", mb.cmd);
     } else if mn == -libsoso::abi::ENOTSUP {
-        println!("buzón: no disponible (reflashea/reinstala para actualizar kernel)");
+        println!("buzón: no disponible (reinicia: el kernel repone el hueco al arrancar)");
     }
     if file_exists("/etc/actualiza.estado") {
         if let Some(s) = read_file("/etc/actualiza.estado", 256) {
@@ -357,7 +357,7 @@ fn cmd_aplicar(args: &[String]) -> u8 {
             println!("  {}", f.descripcion());
         }
         println!("  no actualizo: prefiero no tocar nada a dejarte sin camino de regreso");
-        println!("  arréglalo desde un live actualizado («soso-update transicion» lo detalla)");
+        println!("  reinicia: al arrancar, el kernel repone los huecos que no midan lo justo");
         libsoso::logln!("actualiza: instalación sin huecos de transición; no aplico");
         return 1;
     }
@@ -912,15 +912,9 @@ fn apply_kernel(opts: &Opts, man: &Manifest) -> Result<(), &'static str> {
         let r = sys::upd_write(UPD_WHICH_KERNEL, off, &pad);
         if r < 0 {
             if r == -libsoso::abi::ENOTSUP {
-                return Err(match medio_arranque() {
-                    "USB live (pendrive)" => {
-                        "sin hueco de kernel en la ESP: reflashea este pendrive (cargo xtask flash-usb-live) con una imagen ≥0.2.0"
-                    }
-                    "disco instalado" => {
-                        "sin hueco de kernel en la ESP: arranca el live y ejecuta soso-install de nuevo para renovar la instalación"
-                    }
-                    _ => "reflashea/reinstala el live para habilitar actualización de kernel",
-                });
+                return Err(
+                    "el hueco del kernel en la partición de arranque no está usable; reinicia para reponerlo",
+                );
             }
             return Err("upd_write falló");
         }
@@ -1503,7 +1497,7 @@ fn cmd_transicion(args: &[String]) -> u8 {
         println!("puede actualizarse con vuelta atrás; lo marcado con «!!» sería lo que la impide");
     } else {
         println!("NO puede actualizarse con vuelta atrás todavía");
-        println!("  arréglalo desde un live actualizado; reinstalar no hace falta");
+        println!("  reinicia: el kernel repone al arrancar los huecos que no estén a su tamaño");
     }
     0
 }

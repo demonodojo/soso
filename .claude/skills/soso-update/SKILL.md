@@ -83,6 +83,12 @@ sustituye `bootx64.efi` releyéndolo para compararlo, y registra las dos entrada
 Orden correcto de la secuencia puente: **transición primero, OTA recuperable
 después**. Al revés, esa primera actualización iría sin vuelta atrás.
 
+En una máquina ya instalada el kernel repone al arrancar los huecos
+imprescindibles (`SOSOKRN.BIN` incluido) si faltan, no miden lo justo o están
+fragmentados. El shim no recorta `SOSOKRN.BIN` al guardar la copia del kernel
+anterior: lo deja en 64 MiB. No hace falta el live para la siguiente
+actualización. `SOSOMODE.TXT` no se crea vacío.
+
 ## Banco de pruebas
 
 `cargo xtask test-update [filtro]` — 12 fases; el filtro casa por nombre:

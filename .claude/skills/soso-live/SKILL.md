@@ -113,9 +113,11 @@ envía esas colas a una issue de GitHub; el live conserva `SOSOLOG.TXT` y
 
 ## Ficheros ESP (8.3, contiguos, pre-creados)
 
-El kernel **no crea** ficheros en FAT: `espfat::locate` busca entrada 8.3 con
-tamaño fijo y escribe sectores. Si falta el hueco, esa vía queda desactivada
-(hay que reflashear).
+El kernel escribe por LBA los huecos 8.3 que ya miden lo justo y son contiguos.
+Si `SOSOKRN.BIN`, `SOSOKRN.MET`, `SOSOTXN.BIN` o `SOSOUPD.TXT` falta, mide otra
+cosa o está fragmentado, al arrancar lo repone (conserva el prefijo y lo deja
+en su tamaño exacto). No hace falta el live. `SOSOMODE.TXT` no se crea vacío:
+un hueco en blanco se leería como live.
 
 | Fichero | Tamaño | Quién escribe | Para qué |
 |---------|--------|---------------|----------|
@@ -210,11 +212,13 @@ desde el live. Lo que toca a este medio:
   `SOSOTXN.BIN` 4 KiB, `SOSOKRN.BIN` 64 MiB, `SOSOKRN.MET` 512 B,
   `SOSOUPD.TXT` 4 KiB, `SOSOMODE.TXT` 4 KiB. El kernel los localiza por LBA
   exigiendo **tamaño exacto y clusters consecutivos**: uno «casi bien» no sirve.
+  Al arrancar, si no está usable, el kernel lo repone (`espfat::asegurar`).
 - **El flasheo incremental NO rehace la ESP.** `--skip-models` / `--only kernel`
   actualizan `kernel-x86_64` **in situ** y nada más: ni los huecos ni
   `bootx64.efi`. Un stick flasheado así conserva la ESP del último flasheo
   completo — y `soso-install` la clona tal cual al destino. Si a una instalación
-  le faltan huecos, el origen suele ser ese (2026-09-19, ROG).
+  le faltan huecos, el siguiente arranque del kernel nuevo los repone; ya no
+  hace falta el live para eso (2026-09-19 era el origen, 2026-10-12 el arreglo).
 - `cargo xtask test-install` comprueba ahora que **cada hueco sigue siendo
   utilizable** tras instalar, no sólo que el fichero esté.
 

@@ -5,9 +5,9 @@
 //! usa la misma lógica contra el disco **destino**, que es otro volumen y no
 //! está montado: por eso el parser está fuera y no duplicado.
 //!
-//! No sabe crear ficheros ni asignar clusters: encuentra dónde empiezan los
-//! datos de un fichero 8.3 de la raíz **que ya existe y es contiguo**, para
-//! sobrescribirlo in situ. `xtask package-usb-live` los deja preparados.
+//! Sobrescribe por LBA un fichero 8.3 de la raíz que ya es contiguo. Si un
+//! hueco de actualización falta, mide otra cosa o está fragmentado,
+//! `asegurar` lo repone al tamaño exacto conservando el prefijo.
 //!
 //! Lo usan `fatlog` (log de consola), `drvlog` (informe hwscan), `bootreq`
 //! (petición de entrada de arranque), `updslot` (huecos OTA) y `modo` (la
@@ -52,6 +52,15 @@ pub fn locate(name: &[u8; 8], ext: &[u8; 3], expect_size: usize) -> Option<Slot>
 /// ¿Existe el fichero, mida lo que mida?
 pub fn existe(name: &[u8; 8], ext: &[u8; 3]) -> bool {
     volumen().is_some_and(|mut v| v.existe(name, ext))
+}
+
+/// Deja el hueco a `size` bytes, contiguo, conservando el prefijo si ya había
+/// algo. Lo usa el arranque para que una instalación pueda volver a actualizar
+/// el kernel sin el live.
+pub fn asegurar(name: &[u8; 8], ext: &[u8; 3], size: usize) -> Result<Slot, FatError> {
+    let mut v = volumen().ok_or(FatError::Io)?;
+    let tam = u32::try_from(size).map_err(|_| FatError::NoSoportado)?;
+    v.asegurar_contiguo(name, ext, tam)
 }
 
 /// Borra un fichero de la raíz de la ESP. Lo usa la retirada del log FAT (U6)

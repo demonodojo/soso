@@ -124,7 +124,10 @@ fn aplicar_kernel(size: u64, hash_hex: &str, version: &str) -> Result<(), String
     // El hueco pasa de kernel nuevo a backup. No marcar Applying hasta que
     // la copia esté en disco: un corte a medias dejaría el slot ilegible y
     // `needs_recovery` intentaría restaurar basura.
-    escribir_fichero_exacto(SLOT, &viejo).map_err(|e| format!("copia backup en hueco: {e}"))?;
+    // El hueco tiene que seguir midiendo 64 MiB. Recortarlo al ELF hacía que
+    // el kernel dejara de verlo y la siguiente actualización pidiera el live.
+    escribir_en_hueco(SLOT, &viejo, UPD_KERNEL_SLOT_SIZE as u64)
+        .map_err(|e| format!("copia backup en hueco: {e}"))?;
 
     meta.phase = KernelPhase::BackupReady;
     escribir_kernel_meta(&meta).map_err(|e| format!("meta backup: {e}"))?;
@@ -226,6 +229,54 @@ fn leer_fichero_completo(path: &CStr16, max: usize) -> Option<Vec<u8>> {
 
 fn leer_fichero_bytes(path: &CStr16, max: usize) -> Option<Vec<u8>> {
     leer_fichero_completo(path, max)
+}
+
+/// Escribe `data` al principio del hueco y deja el fichero en `tamano` bytes.
+/// No lo encoge: el kernel lo localiza por ese tamaño exacto.
+fn escribir_en_hueco(path: &CStr16, data: &[u8], tamano: u64) -> Result<(), &'static str> {
+    if data.len() as u64 > tamano {
+        return Err("no cabe en el hueco");
+    }
+    let mut fs = boot::get_image_file_system(boot::image_handle()).map_err(|_| "sin filesystem")?;
+    let mut root = fs.open_volume().map_err(|_| "open_volume")?;
+    let handle = root
+        .open(path, FileMode::CreateReadWrite, FileAttribute::empty())
+        .map_err(|_| "open")?;
+    let mut f: RegularFile = handle.into_regular_file().ok_or("not regular")?;
+    let size = f.get_boxed_info::<FileInfo>().map_err(|_| "get_info")?.file_size();
+    if size < tamano {
+        fijar_tamano(&mut f, tamano)?;
+    }
+    let _ = f.set_position(0);
+    f.write(data).map_err(|_| "write")?;
+    let cero = alloc::vec![0u8; 64 * 1024];
+    let mut off = data.len() as u64;
+    while off < tamano {
+        let n = ((tamano - off) as usize).min(cero.len());
+        f.write(&cero[..n]).map_err(|_| "write")?;
+        off += n as u64;
+    }
+    f.flush().map_err(|_| "flush")
+}
+
+fn fijar_tamano(f: &mut RegularFile, size: u64) -> Result<(), &'static str> {
+    let info = f.get_boxed_info::<FileInfo>().map_err(|_| "get_info")?;
+    if info.file_size() >= size {
+        return Ok(());
+    }
+    let mut buf = alloc::vec![0u8; 512];
+    let new_info = FileInfo::new(
+        &mut buf,
+        size,
+        info.physical_size(),
+        *info.create_time(),
+        *info.last_access_time(),
+        *info.modification_time(),
+        info.attribute(),
+        info.file_name(),
+    )
+    .map_err(|_| "new_info")?;
+    f.set_info(new_info).map_err(|_| "set_info")
 }
 
 fn escribir_fichero_exacto(path: &CStr16, data: &[u8]) -> Result<(), &'static str> {

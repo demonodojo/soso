@@ -363,3 +363,67 @@ fn un_fallo_de_escritura_se_propaga() {
     let mut v = Volumen::abrir(&mut d).unwrap();
     assert_eq!(v.borrar(&n8("SOSOLOG"), &n3("TXT")), Err(FatError::Io));
 }
+
+// ── Reponer un hueco recortado ───────────────────────────────────────────
+
+#[test]
+fn crecer_conserva_el_prefijo_y_queda_contiguo() {
+    for f in [Formato::fat32(), Formato::fat16()] {
+        let mut corto = fichero("SOSOKRN", "BIN", 512);
+        corto.relleno = b'K';
+        let mut d = volumen(&f, &[corto]);
+        {
+            let mut v = Volumen::abrir(&mut d).unwrap();
+            v.asegurar_contiguo(&n8("SOSOKRN"), &n3("BIN"), 2048).unwrap();
+        }
+        let mut v = Volumen::abrir(&mut d).unwrap();
+        let slot = v.localizar(&n8("SOSOKRN"), &n3("BIN"), 2048).unwrap();
+        let primero = d.sector(slot.data_lba);
+        assert!(primero.iter().all(|&b| b == b'K'), "el prefijo se conserva");
+        let cola = d.sector(slot.data_lba + 1);
+        assert!(cola.iter().all(|&b| b == 0), "el tramo nuevo queda a ceros");
+    }
+}
+
+#[test]
+fn un_hueco_que_ya_mide_lo_justo_no_se_reescribe() {
+    let f = Formato::fat32();
+    let mut d = volumen(&f, &[fichero("SOSOKRN", "BIN", 1024)]);
+    let antes = d.datos.clone();
+    let mut v = Volumen::abrir(&mut d).unwrap();
+    v.asegurar_contiguo(&n8("SOSOKRN"), &n3("BIN"), 1024).unwrap();
+    assert_eq!(d.datos, antes);
+}
+
+#[test]
+fn crea_el_hueco_si_no_esta() {
+    for f in [Formato::fat32(), Formato::fat16()] {
+        let mut d = volumen(&f, &[fichero("SOSOLOG", "TXT", 512)]);
+        {
+            let mut v = Volumen::abrir(&mut d).unwrap();
+            v.asegurar_contiguo(&n8("SOSOKRN"), &n3("BIN"), 1024).unwrap();
+        }
+        let ceros = {
+            let mut v = Volumen::abrir(&mut d).unwrap();
+            let slot = v.localizar(&n8("SOSOKRN"), &n3("BIN"), 1024).unwrap();
+            d.sector(slot.data_lba).iter().all(|&b| b == 0)
+        };
+        let mut v = Volumen::abrir(&mut d).unwrap();
+        assert!(ceros);
+        assert!(v.existe(&n8("SOSOLOG"), &n3("TXT")));
+    }
+}
+
+#[test]
+fn sin_sitio_contiguo_no_toca_el_fichero() {
+    let f = Formato::fat32();
+    let mut d = volumen(&f, &[fichero("SOSOKRN", "BIN", 512)]);
+    let antes = d.datos.clone();
+    let mut v = Volumen::abrir(&mut d).unwrap();
+    // El volumen de prueba tiene 4096 sectores: no cabe un hueco de 2 MiB.
+    assert_eq!(
+        v.asegurar_contiguo(&n8("SOSOKRN"), &n3("BIN"), 2 * 1024 * 1024),
+        Err(FatError::SinEspacio)
+    );
+    assert_eq!(d.datos, antes);
+}
