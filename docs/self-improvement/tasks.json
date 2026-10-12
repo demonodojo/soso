@@ -1132,8 +1132,8 @@
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
       },
       "tracking": {
-        "updated_at": "2026-10-12T03:30:00+02:00",
-        "summary": "Tres campañas de diez tareas ejecutadas y publicadas, todas NO-GO: 1/10 (agente v1), 2/10 (+equilibrio de llaves, insertar, recordatorios), 3/10 (+400 de formato devuelto al modelo). Recuperación T27 acreditada con kill -9 real en R02 y R07 en cada una. Advertencia: el agente se ajustó mirando las mismas tareas; un GO futuro necesita tareas nuevas. SI-4 NO se cierra.",
+        "updated_at": "2026-10-12T12:45:00+02:00",
+        "summary": "Cuatro campañas de diez tareas, todas NO-GO: 1→2→3 aceptadas con el agente ajustado sobre el mismo banco (R01–R10) y 2/10 con un BANCO NUEVO (R11–R20) y el agente congelado: esa es la medida honesta de generalización. Recuperación T27 acreditada con kill -9 real en cada campaña. SI-4 NO se cierra.",
         "evidence": [
           "docs/self-improvement/campana.md",
           "docs/self-improvement/seguimiento/T29.md",
@@ -1142,10 +1142,12 @@
           "crates/soso-improve-core/tests/report.rs",
           "tests/self-improvement/campaign.json",
           "tests/self-improvement/campaign-2.json",
-          "tests/self-improvement/campaign-3.json"
+          "tests/self-improvement/campaign-3.json",
+          "tests/self-improvement/campaign-4.json",
+          "tests/self-improvement/campana2"
         ],
-        "blocker": "SI-4 no alcanza el umbral (mejor resultado 3 de 10; mínimo 5). T30 no se habilita.",
-        "next_step": "Decisión de plan (usuario): banco NUEVO de tareas fijado antes + mejoras de comprensión (pruebas propias por punto del enunciado, más intentos); no seguir ajustando sobre estas diez."
+        "blocker": "SI-4 no alcanza el umbral (2 de 10 sobre tareas no vistas; mínimo 5). T30 no se habilita.",
+        "next_step": "Decisión de plan: campaña nueva con banco nuevo tras tres mejoras del agente (tabla puntos-del-enunciado→prueba propia, cargo check tras cada edición devuelto al modelo, edición por línea de read). No seguir sobre R01–R20."
       }
     },
     {

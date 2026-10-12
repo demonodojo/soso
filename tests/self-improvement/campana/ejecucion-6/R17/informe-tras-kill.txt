@@ -1,0 +1,4 @@
+ejecución r-R17 · tarea R17 · estado editando
+  intento 0 editando     herramientas ? (el intento no ha terminado) tokens ? (el intento no ha terminado) artefactos 0
+  intento 0 quedó abierto: sus efectos ya existen (reanudar sin repetirlos es T27)
+  intentos restantes: 1

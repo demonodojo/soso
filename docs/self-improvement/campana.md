@@ -156,7 +156,7 @@ Evidencia: `tests/self-improvement/campana/ejecucion-4/` (misma organización qu
 
 # Campaña 4 (`campana-si4-4`): banco nuevo, agente congelado
 
-**Estado:** en ejecución (lanzada el 2026-10-12 09:38; el primer intento de las 09:02 no arrancó por un defecto del arnés —lista de tareas por defecto— y no cuenta). `campaign-4.json` sha256 `6178f9e56f244b9a276b421cc71b05afeaf74ecfb090c00c08ef480d498aff12`.
+**Estado:** terminada (2026-10-12 09:38–12:23): **NO-GO, 2 aceptadas de 10** (R15, R19) (lanzada 09:38; el primer intento de las 09:02 no arrancó por un defecto del arnés —lista de tareas por defecto— y no cuenta). `campaign-4.json` sha256 `6178f9e56f244b9a276b421cc71b05afeaf74ecfb090c00c08ef480d498aff12`.
 
 Es la medida que sí vale: diez tareas **nuevas** (R11–R20, `tests/self-improvement/campana2/`) escritas y fijadas antes de ejecutar nada, que el agente **nunca ha visto**, con el agente **congelado** tal como acabó la campaña 3 (`herramientas.rs` `b4ea58ae…`, `mod.rs` `986a8692…`; ningún cambio durante ni después). Para cada tarea se comprobó que la base falla (`verificar repo`, exit 2) y que la solución de referencia pasa (exit 0). Mismas reglas que las anteriores: base `git archive 6f558f072`, secuencial desde la base aceptada, 1 intento (2 en las inyecciones: R12 a los 75 s y R17 a los 45 s), 14B a T=0, criterio SI-4 (≥ 5 de 10, recuperación acreditada, base final en verde). `campaign-4.json` sha256 en el registro de lanzamiento.
 
@@ -174,4 +174,40 @@ Es la medida que sí vale: diez tareas **nuevas** (R11–R20, `tests/self-improv
 | R20 | `SemVer`: `Display` y `max` |
 
 ## Resultados
-(pendiente)
+Evidencia: `tests/self-improvement/campana/ejecucion-6/` (el número es el de la ejecución en `/tmp`; es la campaña 4). Mismas dos correcciones anotadas en los registros de R12 y R17 (intentos recontados desde `informe.txt`; herramientas y tokens sin medir por el intento matado). `registros-originales/` conserva lo que escribió el arnés.
+
+| tarea | resultado | de quién | intentos | seg | qué pasó |
+|---|---|---|---|---|---|
+| R11 | rechazada | programación | 1 | 1468 | 4 recordatorios y 8 llamadas: dejó el `parse` mal (la comprobación del cuarto componente quedó antes de leer `patch`) |
+| R12 | rechazada | programación | 2 | 899 | **inyección** recuperada; sus pruebas pasan, la reservada no (no validó el hash de 64 hex, o el tamaño no numérico) |
+| R13 | rechazada | programación | 1 | 1386 | `reemplazar_texto` falló cinco veces («no encuentro ese fragmento») y no llegó a terminar |
+| R14 | bloqueada | protocolo | 1 | 765 | editó, buscó con `grep` el texto de una firma (literal) y no volvió a editar |
+| **R15** | **aceptada** | – | 1 | 607 | método nuevo, local |
+| R16 | bloqueada | protocolo | 1 | 656 | leyó y reemplazó sin que el cambio quedara (el equilibrio de llaves lo rechazó) |
+| R17 | bloqueada | protocolo | 2 | 1637 | **inyección** recuperada; el segundo intento leyó, corrió las pruebas del crate en verde y terminó sin haber editado |
+| R18 | rechazada | programación | 1 | 753 | `insertar` dejó `pub const` pegado a una línea sin `;` (no compila) |
+| **R19** | **aceptada** | – | 1 | 1072 | un `>=` por un `>` |
+| R20 | rechazada | programación | 1 | 650 | compila y sus pruebas pasan, la reservada no (`max` o `Display`) |
+
+**Resultado: 2 de 10 → NO-GO.** Recuperación (T27) acreditada otra vez con procesos reales (R12, R17). Base final (R15+R19): `cargo test -p soso-update-core --features std -p gptdisk` sale 0. Fallos: 5 de programación, 3 de protocolo, 0 de infraestructura.
+
+---
+
+# Conclusión de T29
+
+| campaña | banco | agente | aceptadas |
+|---|---|---|---|
+| 1 (ej. 1) | R01–R10 | v1 | 0 (infraestructura) |
+| 1 (ej. 2) | R01–R10 | v1 | 1 |
+| 2 | R01–R10 | v2 | 2 |
+| 3 | R01–R10 | v3 | 3 |
+| **4** | **R11–R20 (nuevo)** | **v3 congelado** | **2** |
+
+**La medida honesta de este agente con este modelo, sobre tareas que no ha visto, es 2 de 10.** El 3 de 10 de la campaña 3 era sobre tareas ya vistas; la bajada a 2 es pequeña (el ajuste a las diez primeras fue casi todo de herramientas y formato, no de memorizar tareas), pero la cifra que cuenta es la de la 4. **SI-4 no se cierra** (mínimo 5) y T29 queda hecha con NO-GO publicado.
+
+**Dónde se pierden las ocho que no salen** (campañas 3 y 4, 14B a T=0):
+- **Comprensión incompleta (≈ 5 de 8):** el candidato compila y pasa sus propias pruebas pero no la reservada (R12, R20, y R09/R10 del banco viejo): cubre el caso del enunciado y no los límites que el enunciado también pide. Una tabla de «puntos del enunciado → prueba propia» antes de dar por terminado es la palanca más prometedora.
+- **No edita / edita sin dejar rastro (≈ 3):** R14, R16, R17: lee, busca, a veces intenta y el equilibrio de llaves o un `no encuentro` lo frena, y termina sin cambio. Más intentos con el diagnóstico a la vista y una vía de edición menos frágil (que `reemplazar_texto` acepte la línea completa con su número de `read`) lo atacan.
+- **Edición que no compila (R11, R13, R18):** aun con equilibrio de llaves, errores de sintaxis menores (`pub const` pegado a otra línea, un `}` en sitio equivocado): un `cargo check` automático tras cada edición, devuelto al modelo antes de seguir, los cogería.
+
+Esas tres mejoras son una **campaña nueva con banco nuevo** (el R11–R20 ya está visto ahora); no se hacen aquí.
