@@ -436,6 +436,8 @@ int gsp_compute_init(struct gsp_rm *rm, struct gsp_chan *chan,
             k->cbank_size = v->cbank_size;
             k->param_off = v->param_off;
             k->param_count = v->param_count;
+            k->shared_size = v->shared_size;
+            k->barrier_count = v->barrier_count;
             k->sass_va = tabla[i].va;
             if (kernel_check(k, tabla[i].params) != 0) {
                 return -1;
@@ -739,6 +741,26 @@ void gsp_compute_set_matmul_params(struct gsp_compute *cp, const struct gsp_kern
     __asm__ __volatile__("mfence" ::: "memory");
 }
 
+/* Mesa `gv100_pick_smem_size_kb` + `gv100_smem_size_to_hw`: la configuración
+ * más pequeña del SM que da `smem` bytes a `wg` CTAs a la vez. */
+static unsigned sm86_smem_config(unsigned smem, unsigned wg)
+{
+    static const unsigned kb[] = { 0u, 8u, 16u, 32u, 64u, 100u };
+    const unsigned n = (unsigned)(sizeof(kb) / sizeof(kb[0]));
+    unsigned cabe = (kb[n - 1u] * 1024u) / (smem ? smem : 1u);
+    unsigned i;
+
+    if (wg > cabe) {
+        wg = cabe;
+    }
+    for (i = 0; i < n; i++) {
+        if (kb[i] * 1024u >= smem * wg) {
+            return kb[i] / 4u + 1u;
+        }
+    }
+    return kb[n - 1u] / 4u + 1u;
+}
+
 static void gsp_compute_fill_qmd_v02_grid(struct gsp_compute *cp,
                                           const struct gsp_kernel *k,
                                           GspQmdV02 *qmd, unsigned grid_x,
@@ -802,15 +824,23 @@ static void gsp_compute_fill_qmd_v02_grid(struct gsp_compute *cp,
         qmd_set_bits(qmd->words, QMDV03_PROGRAM_PREFETCH_TYPE, 0u);
     }
 
-    qmd_set_bits(qmd->words, QMDV03_REGISTER_COUNT_V, k->regcount);
-    qmd_set_bits(qmd->words, QMDV03_BARRIER_COUNT, 0u);
-    qmd_set_bits(qmd->words, QMDV03_SHARED_MEMORY_SIZE, 0u);
-    qmd_set_bits(qmd->words, QMDV03_MIN_SM_CONFIG_SHARED_MEM_SIZE,
-                 QMDV03_SM_CONFIG_SMEM_NONE);
-    qmd_set_bits(qmd->words, QMDV03_TARGET_SM_CONFIG_SHARED_MEM_SIZE,
-                 QMDV03_SM_CONFIG_SMEM_NONE);
-    qmd_set_bits(qmd->words, QMDV03_MAX_SM_CONFIG_SHARED_MEM_SIZE,
-                 QMDV03_SM_CONFIG_SMEM_MAX_SM86);
+    /* Memoria compartida y barreras salen del cubin. Con 0 y 0, el
+     * `__syncthreads()` de matvec_q4k/q80 (16 KiB de `xs`) se quedaba en
+     * BAR.SYNC para siempre: semáforo a 0 y ni un RC (ROG, 2026-10-12). */
+    {
+        unsigned smem = (k->shared_size + 0xffu) & ~0xffu;
+        unsigned wg = QMDV03_SM86_MAX_WARPS_PER_SM / (G4F_CTA_THREADS / 32u);
+
+        qmd_set_bits(qmd->words, QMDV03_REGISTER_COUNT_V, k->regcount);
+        qmd_set_bits(qmd->words, QMDV03_BARRIER_COUNT, k->barrier_count);
+        qmd_set_bits(qmd->words, QMDV03_SHARED_MEMORY_SIZE, smem);
+        qmd_set_bits(qmd->words, QMDV03_MIN_SM_CONFIG_SHARED_MEM_SIZE,
+                     sm86_smem_config(smem, 1u));
+        qmd_set_bits(qmd->words, QMDV03_TARGET_SM_CONFIG_SHARED_MEM_SIZE,
+                     sm86_smem_config(smem, wg));
+        qmd_set_bits(qmd->words, QMDV03_MAX_SM_CONFIG_SHARED_MEM_SIZE,
+                     QMDV03_SM_CONFIG_SMEM_MAX_SM86);
+    }
 
     qmd_set_bits(qmd->words, QMDV03_CONSTANT_BUFFER_VALID0,
                  NVC6C0_QMDV03_00_CONSTANT_BUFFER_VALID_TRUE);

@@ -37,6 +37,19 @@ def secciones(data):
     return out
 
 
+def flags_seccion(data, seccion):
+    shoff, = struct.unpack_from("<Q", data, 0x28)
+    shentsize, shnum, shstrndx = struct.unpack_from("<HHH", data, 0x3A)
+    shstr, = struct.unpack_from("<Q", data, shoff + shstrndx * shentsize + 0x18)
+    for i in range(shnum):
+        o = shoff + i * shentsize
+        nameoff, = struct.unpack_from("<I", data, o)
+        name = data[shstr + nameoff:data.find(b"\0", shstr + nameoff)].decode()
+        if name == seccion:
+            return struct.unpack_from("<Q", data, o + 8)[0]
+    return 0
+
+
 def atributos(data, secs, seccion):
     off, size, _ = secs[seccion]
     b, i, out = data[off:off + size], 0, []
@@ -78,8 +91,11 @@ def lee_cubin(path):
     if data[:4] != b"\x7fELF":
         sys.exit(f"{path}: no es un cubin ELF")
     secs = secciones(data)
-    off, size, _sec = texto_kernel(data, secs)
+    off, size, sec = texto_kernel(data, secs)
     sass = data[off:off + size]
+    # Barreras con nombre que usa el kernel: sh_flags[26:20] del `.text`. Sin
+    # BARRIER_COUNT en el QMD, un `__syncthreads()` no vuelve.
+    barreras = (flags_seccion(data, sec) >> 20) & 0x7F
 
     info = next(n for n in secs if n.startswith(".nv.info."))
     kernel = info[len(".nv.info."):]
@@ -94,6 +110,7 @@ def lee_cubin(path):
         if a == EIATTR_PARAM_CBANK
     )
     cbank = secs[f".nv.constant0.{kernel}"][1]
+    shared = secs.get(f".nv.shared.{kernel}", (0, 0, 0))[1]
     params = sorted(
         (struct.unpack_from("<H", v, 4)[0], struct.unpack_from("<H", v, 6)[0])
         for a, v in atributos(data, secs, info)
@@ -109,6 +126,8 @@ def lee_cubin(path):
         "param_size": psize,
         "cbank_size": cbank,
         "param_off": [off for _, off in params],
+        "shared_size": shared,
+        "barrier_count": barreras,
     }
 
 
@@ -155,6 +174,8 @@ def main():
             f"        .cbank_size = {k['cbank_size']},\n"
             f"        .param_off = {prefijo}_param_off_{tag},\n"
             f"        .param_count = {len(k['param_off'])},\n"
+            f"        .shared_size = {k['shared_size']},\n"
+            f"        .barrier_count = {k['barrier_count']},\n"
             f"    }},\n"
         )
         manifiesto.append({
@@ -167,6 +188,8 @@ def main():
             "param_size": k["param_size"],
             "cbank_size": k["cbank_size"],
             "param_off": k["param_off"],
+            "shared_size": k["shared_size"],
+            "barrier_count": k["barrier_count"],
         })
 
     with open(salida, "w", encoding="utf-8") as f:

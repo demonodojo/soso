@@ -4075,6 +4075,8 @@ static const struct gsp_sass_variant vars_sm86[] = {
         .cbank_size = 380,
         .param_off = saxpy_param_off_sm86,
         .param_count = 4,
+        .shared_size = 0,
+        .barrier_count = 0,
     },
     {
         .name = "matvec",
@@ -4086,6 +4088,8 @@ static const struct gsp_sass_variant vars_sm86[] = {
         .cbank_size = 384,
         .param_off = matvec_param_off_sm86,
         .param_count = 5,
+        .shared_size = 0,
+        .barrier_count = 0,
     },
     {
         .name = "matvec_q4k",
@@ -4097,6 +4101,8 @@ static const struct gsp_sass_variant vars_sm86[] = {
         .cbank_size = 384,
         .param_off = matvec_q4k_param_off_sm86,
         .param_count = 5,
+        .shared_size = 16384,
+        .barrier_count = 1,
     },
     {
         .name = "matvec_q80",
@@ -4108,6 +4114,8 @@ static const struct gsp_sass_variant vars_sm86[] = {
         .cbank_size = 384,
         .param_off = matvec_q80_param_off_sm86,
         .param_count = 5,
+        .shared_size = 16384,
+        .barrier_count = 1,
     },
     {
         .name = "matmul",
@@ -4119,6 +4127,8 @@ static const struct gsp_sass_variant vars_sm86[] = {
         .cbank_size = 388,
         .param_off = matmul_param_off_sm86,
         .param_count = 6,
+        .shared_size = 0,
+        .barrier_count = 0,
     },
     {
         .name = "softmax_rows",
@@ -4130,6 +4140,8 @@ static const struct gsp_sass_variant vars_sm86[] = {
         .cbank_size = 368,
         .param_off = softmax_rows_param_off_sm86,
         .param_count = 3,
+        .shared_size = 0,
+        .barrier_count = 0,
     },
     {
         .name = "layernorm_rows",
@@ -4141,6 +4153,8 @@ static const struct gsp_sass_variant vars_sm86[] = {
         .cbank_size = 388,
         .param_off = layernorm_rows_param_off_sm86,
         .param_count = 6,
+        .shared_size = 0,
+        .barrier_count = 0,
     },
 };
 

@@ -30,6 +30,8 @@ struct gsp_sass_variant {
     unsigned cbank_size;    /* tamaño de .nv.constant0 */
     const unsigned *param_off;
     unsigned param_count;
+    unsigned shared_size;   /* tamaño de .nv.shared.<kernel> (0 si no hay) */
+    unsigned barrier_count; /* sh_flags[26:20] de .text.<kernel> */
 };
 
 /* Todos los kernels compilados para una misma arquitectura. */

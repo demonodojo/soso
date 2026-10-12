@@ -103,6 +103,8 @@ struct gsp_kernel {
     unsigned cbank_size;    /* tamaño de .nv.constant0 */
     const unsigned *param_off;
     unsigned param_count;
+    unsigned shared_size;   /* bytes de memoria compartida estática */
+    unsigned barrier_count;
     uint64_t sass_va;       /* dónde se stagea en VRAM */
     /* Ya está en VRAM: no volver a copiarlo.
      *

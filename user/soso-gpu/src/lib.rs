@@ -1132,7 +1132,10 @@ impl GpuDispatch for SysGpu {
         }
         let ns = libsoso::ciclos().wrapping_sub(t0) as u64 * 3 / 10;
         self.note_launch(ns, bytes + w_bytes, bytes, cols as u64);
-        Ok(self.on_gpu)
+        // COMPUTED = `x` ya está normalizado, por la GPU o por la CPU del kernel.
+        // Devolver `on_gpu` aquí hacía que quien llama normalizara otra vez un `x`
+        // ya normalizado: el peso de la norma aplicado dos veces por capa.
+        Ok(true)
     }
 }
 

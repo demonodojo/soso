@@ -17,7 +17,9 @@
         8,
         16,
         24
-      ]
+      ],
+      "shared_size": 0,
+      "barrier_count": 0
     },
     {
       "kernel": "matvec",
@@ -34,7 +36,9 @@
         16,
         24,
         28
-      ]
+      ],
+      "shared_size": 0,
+      "barrier_count": 0
     },
     {
       "kernel": "matvec_q4k",
@@ -51,7 +55,9 @@
         16,
         24,
         28
-      ]
+      ],
+      "shared_size": 16384,
+      "barrier_count": 1
     },
     {
       "kernel": "matvec_q80",
@@ -68,7 +74,9 @@
         16,
         24,
         28
-      ]
+      ],
+      "shared_size": 16384,
+      "barrier_count": 1
     },
     {
       "kernel": "matmul",
@@ -86,7 +94,9 @@
         24,
         28,
         32
-      ]
+      ],
+      "shared_size": 0,
+      "barrier_count": 0
     },
     {
       "kernel": "softmax_rows",
@@ -101,7 +111,9 @@
         0,
         8,
         12
-      ]
+      ],
+      "shared_size": 0,
+      "barrier_count": 0
     },
     {
       "kernel": "layernorm_rows",
@@ -119,7 +131,9 @@
         24,
         28,
         32
-      ]
+      ],
+      "shared_size": 0,
+      "barrier_count": 0
     }
   ]
 }

@@ -1314,6 +1314,9 @@ typedef char gsp_qmd_v05_size_check[sizeof(GspQmdV05) == GSP_QMD_INLINE_WORDS * 
  * SM de GA10x/AD10x (sm_86/sm_89: 100 kB → 26). */
 #define QMDV03_SM_CONFIG_SMEM_NONE                                1u
 #define QMDV03_SM_CONFIG_SMEM_MAX_SM86                            26u
+/* Warps residentes por SM en sm_86 (Mesa `max_warps_per_sm`): fija cuántos CTAs
+ * caben a la vez para elegir TARGET_SM_CONFIG_SHARED_MEM_SIZE. */
+#define QMDV03_SM86_MAX_WARPS_PER_SM                              48u
 
 typedef struct GspQmdV02 {
     NvU32 words[GSP_QMD_V02_WORDS];
