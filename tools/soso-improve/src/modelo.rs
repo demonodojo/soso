@@ -26,6 +26,7 @@ impl TokenizerSoso {
             Tokenizer::Vocab(v) => match v.segmentacion() {
                 Segmentacion::BpeByteLevel => "bpe-bytelevel",
                 Segmentacion::PiezaMasLarga => "pieza-mas-larga",
+                Segmentacion::BpeSpm => "bpe-spm",
             },
             Tokenizer::ByteLevel => "bytes",
         }

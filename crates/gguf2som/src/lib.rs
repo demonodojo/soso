@@ -622,9 +622,9 @@ pub fn convert_with_options<R: Read + Seek>(
         return Err("el GGUF no contiene token_embd.weight".into());
     }
 
-    // La plantilla de Gemma 4 es un Jinja con su propio DSL de herramientas: no se traduce a los marcadores de
-    // `chat.rs` (lo hace el renderizador propio del runtime, ficha G6).
-    let chat_template = if is_gemma4 { String::new() } else { plantilla_de_chat(&gguf) };
+    // Para `ask` (una pregunta) basta la forma de un solo turno de `chat.rs`; el chat con herramientas de Gemma 4
+    // lo hace el renderizador propio de `conversation::gemma4` (ficha G6).
+    let chat_template = plantilla_de_chat(&gguf);
     let mut manifest = Manifest {
         name: model_name,
         vocab_size: vocab,
@@ -726,10 +726,25 @@ pub fn convert_with_options<R: Read + Seek>(
         }
         #[cfg(not(feature = "std"))]
         let _ = sueltas;
-        out.write(
-            TOKENIZER_FILE,
-            &VocabTokenizer::serialize_con_merges(&pieces, bos, eos, &merges),
-        )?;
+        let spm = matches!(gguf.meta.get("tokenizer.ggml.model"), Some(MetaValue::Str(m)) if m == "gemma4");
+        if spm {
+            // Tipos del GGUF: 3 = control, 4 = definido por el usuario; sólo esos se reconocen en el texto.
+            let especiales: Vec<u32> = match gguf.meta.get("tokenizer.ggml.token_type") {
+                Some(MetaValue::IntArray(t)) => {
+                    t.iter().enumerate().filter(|(_, ty)| **ty == 3 || **ty == 4).map(|(i, _)| i as u32).collect()
+                }
+                _ => Vec::new(),
+            };
+            out.write(
+                TOKENIZER_FILE,
+                &VocabTokenizer::serialize_spm(&pieces, bos, eos, &merges, &especiales),
+            )?;
+        } else {
+            out.write(
+                TOKENIZER_FILE,
+                &VocabTokenizer::serialize_con_merges(&pieces, bos, eos, &merges),
+            )?;
+        }
     }
     Ok(())
 }
@@ -1200,6 +1215,10 @@ fn traducir_plantilla(jinja: &str) -> Option<&'static str> {
         // está en la lista de tokens del GGUF, así que el emparejado más largo
         // del tokenizador lo encuentra entero.
         return Some("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n");
+    }
+    if jinja.contains("<|turn>") && jinja.contains("<turn|>") {
+        // Gemma 4. Sin pensamiento: el prompt de generación abre un canal de razonamiento vacío.
+        return Some("<|turn>user\n{prompt}<turn|>\n<|turn>model\n<|channel>thought\n<channel|>");
     }
     if jinja.contains("<|user|>") && jinja.contains("<|assistant|>") {
         // Zephyr / TinyLlama-Chat. El fin de turno del usuario es el token EOS.
@@ -1943,6 +1962,10 @@ mod tests {
         );
         // Familia desconocida: vacía y a texto crudo, nunca una plantilla
         // inventada — meterle marcadores que el modelo no vio es peor que nada.
+        assert_eq!(
+            traducir_plantilla("{{ '<|turn>' + role + '\\n' }} ... <turn|>"),
+            Some("<|turn>user\n{prompt}<turn|>\n<|turn>model\n<|channel>thought\n<channel|>")
+        );
         assert_eq!(traducir_plantilla("{{ raro }}"), None);
     }
 

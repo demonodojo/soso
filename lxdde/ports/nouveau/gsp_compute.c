@@ -1370,6 +1370,52 @@ static struct gsp_kernel *q_kernel(struct gsp_compute *cp, unsigned dtype)
     }
 }
 
+/* Una vez por arranque, antes del primer matvec cuantizado: un CTA con los pesos a
+ * cero en el staging de sysmem y otro con las primeras filas del tensor en VRAM.
+ * En la ROG (2026-10-12) q4k/q80 no señalizaban, sin RC ni falta de MMU, y ahí se
+ * juntan dos cosas que la sonda de 64×64 no toca: el kernel con `xs` + barrera, y el
+ * SM leyendo VRAM por páginas de 2 MiB. Si cuelga el primero es el kernel o su QMD;
+ * si sólo cuelga el segundo, el mapeo. Un bloque a cero decodifica a 0 en los dos
+ * formatos, así que el primero no lee nada que no sea nuestro. */
+static int g_q_diag_hecho;
+
+static int q_diag(struct gsp_compute *cp, struct gsp_kernel *k, uint64_t w_va,
+                  unsigned dtype, unsigned cols, uint64_t x_va, uint64_t y_va)
+{
+    unsigned long rb = q_row_bytes(dtype, cols);
+    unsigned rows = G6_ROWS_PER_CTA;
+
+    if (!cp->mv_mapped || rb * rows > G5_MV_W_BYTES) {
+        lx_printk("nouveau-lx: diag %s — sin staging para %u columnas, no se mide\n",
+                  k->name, cols);
+        return 0;
+    }
+    memset(cp_mv(cp, G5_MV_W_OFF), 0, rb * rows);
+    memset(cp_res(cp, G6_RES_Y_OFF), 0, (unsigned long)rows * 4ul);
+    *(uint32_t *)cp_data(cp, G4F_SEM_OFF) = 0;
+    __asm__ __volatile__("mfence" ::: "memory");
+    gsp_compute_set_mv_params(cp, k, cp->mv_va + G5_MV_W_OFF, x_va, y_va, rows, cols);
+    if (launch_wait(cp, k, 1u, "diag-q pesos en sysmem") != 0) {
+        lx_printk("nouveau-lx: diag %s %ux%u — pesos en sysmem: CUELGA (kernel/QMD)\n",
+                  k->name, rows, cols);
+        return -1;
+    }
+    lx_printk("nouveau-lx: diag %s %ux%u — pesos en sysmem: OK\n", k->name, rows, cols);
+
+    memset(cp_res(cp, G6_RES_Y_OFF), 0, (unsigned long)rows * 4ul);
+    *(uint32_t *)cp_data(cp, G4F_SEM_OFF) = 0;
+    __asm__ __volatile__("mfence" ::: "memory");
+    gsp_compute_set_mv_params(cp, k, w_va, x_va, y_va, rows, cols);
+    if (launch_wait(cp, k, 1u, "diag-q pesos en VRAM") != 0) {
+        lx_printk("nouveau-lx: diag %s %ux%u — pesos en VRAM (VA 0x%llx): CUELGA "
+                  "(mapeo)\n", k->name, rows, cols, (unsigned long long)w_va);
+        return -1;
+    }
+    lx_printk("nouveau-lx: diag %s %ux%u — pesos en VRAM (VA 0x%llx): OK\n",
+              k->name, rows, cols, (unsigned long long)w_va);
+    return 0;
+}
+
 int gsp_compute_matvec_q_resident(struct gsp_compute *cp, struct gsp_ce *ce,
                                   uint64_t w_va, unsigned dtype, unsigned rows,
                                   unsigned cols, const float *x, float *y,
@@ -1413,12 +1459,20 @@ int gsp_compute_matvec_q_resident(struct gsp_compute *cp, struct gsp_ce *ce,
     gx = (float *)cp_res(cp, G6_RES_X_OFF);
     gy = (float *)cp_res(cp, G6_RES_Y_OFF);
     memcpy(gx, x, (unsigned long)cols * 4ul);
+    x_va = cp->res_va + G6_RES_X_OFF;
+    y_va = cp->res_va + G6_RES_Y_OFF;
+
+    if (!g_q_diag_hecho && rows >= G6_ROWS_PER_CTA) {
+        g_q_diag_hecho = 1;
+        if (q_diag(cp, k, w_va, dtype, cols, x_va, y_va) != 0) {
+            return -1;
+        }
+    }
+
     memset(gy, 0, (unsigned long)rows * 4ul);
     *(uint32_t *)cp_data(cp, G4F_SEM_OFF) = 0;
     __asm__ __volatile__("mfence" ::: "memory");
 
-    x_va = cp->res_va + G6_RES_X_OFF;
-    y_va = cp->res_va + G6_RES_Y_OFF;
     gsp_compute_set_mv_params(cp, k, w_va, x_va, y_va, rows, cols);
 
     grid = (rows + G6_ROWS_PER_CTA - 1u) / G6_ROWS_PER_CTA;

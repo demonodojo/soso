@@ -314,6 +314,9 @@ pub fn parse_assistant_output_pasante(
     generated: &str,
     id_next: u32,
 ) -> Result<AssistantTurn, ChatError> {
+    if super::gemma4::parece_gemma4(generated) {
+        return super::gemma4::interpretar(entrada, generated, id_next, true);
+    }
     let mut parser = ToolCallParser::new(id_next).pasante();
     parser.push(sin_marca_de_turno(generated))?;
     parser.finish(entrada)
@@ -325,6 +328,9 @@ pub fn parse_assistant_output(
     generated: &str,
     id_next: u32,
 ) -> Result<AssistantTurn, ChatError> {
+    if super::gemma4::parece_gemma4(generated) {
+        return super::gemma4::interpretar(entrada, generated, id_next, false);
+    }
     let mut parser = ToolCallParser::new(id_next);
     parser.push(sin_marca_de_turno(generated))?;
     parser.finish(entrada)
@@ -756,7 +762,7 @@ fn cierres_que_faltan(json: &str) -> Option<String> {
 /// El 7B escribe a veces `"true"` donde el esquema pide un booleano, o `"5"` donde pide un
 /// número. Se convierte al tipo del esquema **sólo** cuando la cadena es exactamente eso;
 /// cualquier otra discrepancia de tipo la sigue rechazando la validación.
-fn ajustar_tipos(entrada: &ChatInput, call: &mut ToolCall) {
+pub(super) fn ajustar_tipos(entrada: &ChatInput, call: &mut ToolCall) {
     let Some(def) = entrada.herramienta(&call.name) else {
         return;
     };

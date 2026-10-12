@@ -86,6 +86,15 @@ pub const CATALOG: &[LiveModelSpec] = &[
         tokenizer: TokenizerEsperado::Piezas,
     },
     LiveModelSpec {
+        name: "gemma-4-12b",
+        repo: "google/gemma-4-12B-it-qat-q4_0-gguf",
+        gguf_file: Some("gemma-4-12b-it-qat-q4_0.gguf"),
+        gguf_bytes_estimate: 6_976 * 1000 * 1000,
+        min_usb_bytes: 16 * 1024 * 1024 * 1024,
+        // El `.som` v3 trae la tabla de fusiones y los tokens especiales por tipo.
+        tokenizer: TokenizerEsperado::Fusiones,
+    },
+    LiveModelSpec {
         name: "mixtral",
         repo: "TheBloke/Mixtral-8x7B-Instruct-v0.1-GGUF",
         gguf_file: None,
@@ -540,10 +549,11 @@ mod tests {
     }
 
     #[test]
-    fn pick_12g_mistral() {
+    fn pick_16g_gemma() {
+        // Con 16 GB cabe Gemma 4 12B, mejor que Mistral 7B.
         let usb = 16 * 1024 * 1024 * 1024;
         let spec = pick_for_usb(usb, 64 * 1024 * 1024, 512 * 1024 * 1024, &root());
-        assert_eq!(spec.name, "mistral-7b");
+        assert_eq!(spec.name, "gemma-4-12b");
     }
 
     #[test]
@@ -711,7 +721,7 @@ mod tests {
         // Si mañana entra otro Qwen/GPT al catálogo y nadie declara su
         // tokenizer, esto lo dice antes de que se meta en un pendrive.
         for spec in CATALOG {
-            let bpe = spec.name.starts_with("qwen");
+            let bpe = spec.name.starts_with("qwen") || spec.name.starts_with("gemma");
             assert_eq!(
                 spec.tokenizer == TokenizerEsperado::Fusiones,
                 bpe,

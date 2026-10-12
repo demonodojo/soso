@@ -40,6 +40,8 @@ pub fn render_messages(
     let texto = match profile.family.as_str() {
         "qwen2" => render_qwen2(input, true)?,
         "qwen3coder" => render_qwen3coder(input, true)?,
+        // Sin pensamiento: el canal de razonamiento cuesta tokens y el agente no los usa.
+        "gemma4" => super::gemma4::render_gemma4(input, true, false)?,
         otro => {
             return Err(ChatError::FamiliaNoImplementada {
                 family: String::from(otro),

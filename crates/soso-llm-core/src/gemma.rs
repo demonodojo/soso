@@ -67,6 +67,24 @@ pub fn rope_neox_factores(x: &mut [f32], heads: usize, head_dim: usize, pos: usi
     }
 }
 
+/// Filas que una capa local guarda **de más** sobre su ventana antes de expulsar, y a cuántas se recorta.
+/// La holgura es lo que permite reutilizar el prefijo de una petición anterior cuando diverge poco antes
+/// del final (el patrón de un agente que reenvía su historial).
+pub const EXPULSION_DISPARO: usize = 2048;
+pub const EXPULSION_HOLGURA: usize = 1024;
+
+/// Ventana deslizante real de una capa local: antes de añadir filas nuevas, tira las más antiguas si hay
+/// demasiadas. Las capas globales (`ventana == 0`) conservan todo.
+fn expulsar_si_hace_falta(kv: &mut LayerKv, ventana: usize, kv_dim: usize) {
+    if ventana == 0 {
+        return;
+    }
+    let guardadas = kv.tokens(kv_dim);
+    if guardadas >= ventana + EXPULSION_DISPARO {
+        kv.expulsar_delante(guardadas - (ventana + EXPULSION_HOLGURA), kv_dim);
+    }
+}
+
 /// ¿Esta capa se ejecuta con el camino de Gemma?
 pub fn es_capa_gemma(flags: u32) -> bool {
     flags & sosomodel::manifest::FLAG_SANDWICH_NORM != 0
@@ -145,6 +163,7 @@ pub fn forward_layer_gemma<S: TensorSource>(
         rope_neox_factores(&mut s.q[..q_dim], heads, hd, pos, theta, None);
         rope_neox_factores(&mut s.k[..kv_dim], kv_heads, hd, pos, theta, None);
     }
+    expulsar_si_hace_falta(kv, ventana, kv_dim);
     kv.append_f16(&s.k[..kv_dim], &s.v[..kv_dim]);
     let total = kv.tokens(kv_dim);
     let t_ini = if ventana > 0 { total.saturating_sub(ventana) } else { 0 };
@@ -212,4 +231,172 @@ pub fn forward_layer_gemma<S: TensorSource>(
         }
     }
     Ok(LayerTiming::default())
+}
+
+/// Una capa de Gemma para `n` tokens consecutivos (`pos0..pos0+n`) a la vez: el prefill por bloques.
+///
+/// Proyecciones y MLP —casi todo el coste— leen cada matriz una sola vez para los `n` vectores; la
+/// atención sigue siendo por token (causal: el token `i` ve `seq_antes + i + 1` posiciones). El resultado
+/// es el de `forward_layer_gemma` repetido `n` veces, salvo el orden de las sumas dentro de los núcleos
+/// por lotes.
+#[allow(clippy::too_many_arguments)]
+pub fn forward_layer_gemma_block<S: TensorSource>(
+    exec: &LayerExecutor<'_>,
+    layer: u32,
+    pos0: usize,
+    n: usize,
+    hs: &mut [f32],
+    bs: &mut crate::layer::BlockScratch,
+    s: &mut LayerScratch,
+    kv: &mut LayerKv,
+    source: &mut S,
+) -> Result<(), ()> {
+    use crate::layer::matvec_view_batch_par;
+    if kv.dtype != KvDtype::F16 {
+        return Err(());
+    }
+    let m = exec.manifest;
+    let spec = m.layer(layer).cloned().unwrap_or_default();
+    let h = m.hidden_dim as usize;
+    let heads = m.effective_num_heads(layer) as usize;
+    let kv_heads = m.effective_num_kv_heads(layer) as usize;
+    let hd = m.effective_head_dim(layer) as usize;
+    let q_dim = heads * hd;
+    let kv_dim = kv_heads * hd;
+    let g = heads / kv_heads;
+    let ffn = m.effective_ffn_dim(layer) as usize;
+    let eps = m.rms_eps;
+    let theta = m.layer_rope_theta(layer);
+    let ventana = m.layer_window(layer) as usize;
+    let escala = if m.ext.attn_scale > 0.0 { m.ext.attn_scale } else { 1.0 / libm::sqrtf(hd as f32) };
+    let p = format!("L{layer:02}");
+    let seq = Sequential;
+    let par: &dyn RowParallel = exec.parallel.unwrap_or(&seq);
+    if hs.len() != n * h || n == 0 || n > bs.cap {
+        return Err(());
+    }
+    bs.ensure_q8k(n, h.max(q_dim).max(ffn));
+
+    // ---------------------------------------------------------------- atención
+    bs.residual[..n * h].copy_from_slice(hs);
+    source.load_f32(&format!("{p}.attn_norm"), &mut s.norm_w[..h])?;
+    for i in 0..n {
+        rmsnorm(&mut hs[i * h..(i + 1) * h], &s.norm_w[..h], eps);
+    }
+    let (nq, nk, nv, no) = (format!("{p}.attn_q"), format!("{p}.attn_k"), format!("{p}.attn_v"), format!("{p}.attn_output"));
+    matvec_view_batch_par(&source.tensor_view(&nq)?, q_dim, h, hs, n, &mut bs.q[..n * q_dim], par, Some(&mut bs.q8k_x))?;
+    matvec_view_batch_par(&source.tensor_view(&nk)?, kv_dim, h, hs, n, &mut bs.k[..n * kv_dim], par, Some(&mut bs.q8k_x))?;
+    if spec.flags & FLAG_V_FROM_K != 0 {
+        let (k, v) = (&bs.k[..n * kv_dim], &mut bs.v[..n * kv_dim]);
+        v.copy_from_slice(k);
+    } else {
+        matvec_view_batch_par(&source.tensor_view(&nv)?, kv_dim, h, hs, n, &mut bs.v[..n * kv_dim], par, Some(&mut bs.q8k_x))?;
+    }
+    if spec.flags & FLAG_QK_NORM != 0 {
+        source.load_f32(&format!("{p}.attn_q_norm"), &mut s.head_out[..hd])?;
+        for i in 0..n {
+            for c in 0..heads {
+                let o = i * q_dim + c * hd;
+                rmsnorm(&mut bs.q[o..o + hd], &s.head_out[..hd], eps);
+            }
+        }
+        source.load_f32(&format!("{p}.attn_k_norm"), &mut s.head_out[..hd])?;
+        for i in 0..n {
+            for c in 0..kv_heads {
+                let o = i * kv_dim + c * hd;
+                rmsnorm(&mut bs.k[o..o + hd], &s.head_out[..hd], eps);
+            }
+        }
+    }
+    if spec.flags & FLAG_V_NORM != 0 {
+        for i in 0..n {
+            for c in 0..kv_heads {
+                let o = i * kv_dim + c * hd;
+                rmsnorm_sin_pesos(&mut bs.v[o..o + hd], eps);
+            }
+        }
+    }
+    let factores = if spec.flags & FLAG_ROPE_FACTORS != 0 {
+        source.load_f32("rope_freqs", &mut s.head_out[..hd / 2])?;
+        Some(s.head_out[..hd / 2].to_vec())
+    } else {
+        None
+    };
+    expulsar_si_hace_falta(kv, ventana, kv_dim);
+    let seq_antes = kv.tokens(kv_dim);
+    for i in 0..n {
+        let pos = pos0 + i; // posición absoluta: RoPE no depende de las filas expulsadas
+        rope_neox_factores(&mut bs.q[i * q_dim..(i + 1) * q_dim], heads, hd, pos, theta, factores.as_deref());
+        rope_neox_factores(&mut bs.k[i * kv_dim..(i + 1) * kv_dim], kv_heads, hd, pos, theta, factores.as_deref());
+        kv.append_f16(&bs.k[i * kv_dim..(i + 1) * kv_dim], &bs.v[i * kv_dim..(i + 1) * kv_dim]);
+    }
+
+    // Tareas: (token, cabeza KV, trozo de cabezas Q). Cada token ve su propio prefijo.
+    let trozos = if g >= 8 { 4 } else { 1 };
+    let por_token = kv_heads * trozos;
+    let tareas = n * por_token;
+    let (k_f16, v_f16) = (kv.k_f16_slice(), kv.v_f16_slice());
+    let q_ptr = bs.q.as_ptr() as usize;
+    let o_ptr = bs.attn.as_mut_ptr() as usize;
+    let trabajo = move |t0: usize, t1: usize| {
+        for t in t0..t1 {
+            let (i, r) = (t / por_token, t % por_token);
+            let (kvh, c) = (r / trozos, r % trozos);
+            let (j0, j1) = (c * g / trozos, (c + 1) * g / trozos);
+            let ng = j1 - j0;
+            let base = i * q_dim + (kvh * g + j0) * hd;
+            let total = seq_antes + i + 1;
+            let t_ini = if ventana > 0 { total.saturating_sub(ventana) } else { 0 };
+            let (q, o) = unsafe {
+                (
+                    core::slice::from_raw_parts((q_ptr as *const f32).add(base), ng * hd),
+                    core::slice::from_raw_parts_mut((o_ptr as *mut f32).add(base), ng * hd),
+                )
+            };
+            attention_gqa_f16(q, ng, k_f16, v_f16, hd, kv_dim, kvh, t_ini, total, escala, o);
+        }
+    };
+    par.for_rows(tareas, &trabajo);
+
+    matvec_view_batch_par(&source.tensor_view(&no)?, h, q_dim, &bs.attn[..n * q_dim], n, &mut bs.o[..n * h], par, Some(&mut bs.q8k_x))?;
+    source.load_f32(&format!("{p}.post_attn_norm"), &mut s.norm_w[..h])?;
+    for i in 0..n {
+        rmsnorm(&mut bs.o[i * h..(i + 1) * h], &s.norm_w[..h], eps);
+        for j in 0..h {
+            hs[i * h + j] = bs.residual[i * h + j] + bs.o[i * h + j];
+        }
+    }
+
+    // ---------------------------------------------------------------- MLP (GeGLU)
+    bs.residual[..n * h].copy_from_slice(hs);
+    source.load_f32(&format!("{p}.ffn_norm"), &mut s.norm_w[..h])?;
+    for i in 0..n {
+        rmsnorm(&mut hs[i * h..(i + 1) * h], &s.norm_w[..h], eps);
+    }
+    let (nu, ng_, nd) = (format!("{p}.ffn_up"), format!("{p}.ffn_gate"), format!("{p}.ffn_down"));
+    matvec_view_batch_par(&source.tensor_view(&nu)?, ffn, h, hs, n, &mut bs.up[..n * ffn], par, Some(&mut bs.q8k_x))?;
+    matvec_view_batch_par(&source.tensor_view(&ng_)?, ffn, h, hs, n, &mut bs.gate[..n * ffn], par, Some(&mut bs.q8k_x))?;
+    if spec.flags & FLAG_GEGLU != 0 {
+        for i in 0..n * ffn {
+            bs.up[i] *= gelu(bs.gate[i]);
+        }
+    } else {
+        crate::gemm::swiglu_inplace(&mut bs.up[..n * ffn], &bs.gate[..n * ffn]);
+    }
+    matvec_view_batch_par(&source.tensor_view(&nd)?, h, ffn, &bs.up[..n * ffn], n, &mut bs.o[..n * h], par, Some(&mut bs.q8k_x))?;
+    source.load_f32(&format!("{p}.post_ffn_norm"), &mut s.norm_w[..h])?;
+    let escala_capa = if spec.flags & FLAG_LAYER_SCALE != 0 {
+        let mut e = [0.0f32; 1];
+        source.load_f32(&format!("{p}.layer_scale"), &mut e)?;
+        e[0]
+    } else {
+        1.0
+    };
+    for i in 0..n {
+        rmsnorm(&mut bs.o[i * h..(i + 1) * h], &s.norm_w[..h], eps);
+        for j in 0..h {
+            hs[i * h + j] = (bs.o[i * h + j] + bs.residual[i * h + j]) * escala_capa;
+        }
+    }
+    Ok(())
 }

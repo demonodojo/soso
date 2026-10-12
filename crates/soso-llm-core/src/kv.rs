@@ -34,6 +34,9 @@ pub struct LayerKv {
     pub gdn_s: Vec<f32>,
     /// Historial causal conv1d: `[(kernel-1) * conv_dim]`.
     pub gdn_conv: Vec<f32>,
+    /// Filas expulsadas por delante (ventana deslizante de las capas locales de Gemma). Las filas
+    /// guardadas son las posiciones absolutas `dropped..dropped + tokens(kv_dim)`.
+    pub dropped: usize,
 }
 
 impl LayerKv {
@@ -60,6 +63,7 @@ impl LayerKv {
                 mass: Vec::with_capacity(tokens),
                 gdn_s: Vec::new(),
                 gdn_conv: Vec::new(),
+                dropped: 0,
             },
             KvDtype::I8 => Self {
                 dtype,
@@ -73,6 +77,7 @@ impl LayerKv {
                 mass: Vec::with_capacity(tokens),
                 gdn_s: Vec::new(),
                 gdn_conv: Vec::new(),
+                dropped: 0,
             },
         }
     }
@@ -100,6 +105,27 @@ impl LayerKv {
         self.mass.clear();
         self.gdn_s.fill(0.0);
         self.gdn_conv.fill(0.0);
+        self.dropped = 0;
+    }
+
+    /// Posiciones absolutas cubiertas (expulsadas + guardadas).
+    pub fn posiciones(&self, kv_dim: usize) -> usize {
+        self.dropped + self.tokens(kv_dim)
+    }
+
+    /// Expulsa las `filas` más antiguas (sólo KV f16). Es la ventana deslizante **real** de una capa local:
+    /// RoPE ya se aplicó a K al guardarlo, así que las filas que quedan no cambian.
+    pub fn expulsar_delante(&mut self, filas: usize, kv_dim: usize) {
+        if filas == 0 || self.dtype != KvDtype::F16 {
+            return;
+        }
+        let n = (filas * kv_dim).min(self.k_f16.len());
+        self.k_f16.drain(..n);
+        self.v_f16.drain(..n);
+        let filas = n / kv_dim.max(1);
+        let m = filas.min(self.mass.len());
+        self.mass.drain(..m);
+        self.dropped += filas;
     }
 
     /// Reserva (y pone a cero) el estado GDN si el tamaño no coincide.
@@ -107,6 +133,8 @@ impl LayerKv {
     /// la petición anterior). `kv_dim` es el ancho de K/V por token; no vale
     /// para MLA ni GDN, cuyo estado no se puede recortar.
     pub fn truncate_tokens(&mut self, tokens: usize, kv_dim: usize) {
+        // `tokens` es una posición absoluta: con filas expulsadas se guardan `tokens - dropped`.
+        let tokens = tokens.saturating_sub(self.dropped);
         let n = tokens.saturating_mul(kv_dim);
         self.k_f16.truncate(n);
         self.v_f16.truncate(n);

@@ -1156,7 +1156,6 @@ impl<'a> LayerExecutor<'a> {
             AttnKind::Mla | AttnKind::Kda | AttnKind::Gated | AttnKind::Gdn
         );
         atencion_clasica
-            && !crate::gemma::es_capa_gemma(spec.flags)
             && spec.ffn_kind != FfnKind::LatentMoe
             && !self.manifest.layer_is_moe(layer)
     }
@@ -1180,6 +1179,9 @@ impl<'a> LayerExecutor<'a> {
         source: &mut S,
         planner: Option<&crate::plan::ResourcePlanner>,
     ) -> Result<(), ()> {
+        if crate::gemma::es_capa_gemma(self.manifest.layer(layer).map_or(0, |l| l.flags)) {
+            return crate::gemma::forward_layer_gemma_block(self, layer, pos0, n, hs, bs, s, kv, source);
+        }
         let h = self.manifest.hidden_dim as usize;
         let heads = self.manifest.effective_num_heads(layer) as usize;
         let kv_heads = self.manifest.effective_num_kv_heads(layer) as usize;

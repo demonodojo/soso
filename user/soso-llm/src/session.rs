@@ -538,6 +538,8 @@ pub fn perfil_api(sesion: &Sesion) -> ModelProfile {
     let base = model_base(&sesion.modelo);
     let family = if m.chat_template.contains("<|im_start|>") {
         String::from("qwen2")
+    } else if m.chat_template.contains("<|turn>") {
+        String::from("gemma4")
     } else {
         String::new()
     };
@@ -551,6 +553,18 @@ pub fn perfil_api(sesion: &Sesion) -> ModelProfile {
     // la salida de las herramientas (T22, 2026-10-10).
     if family == "qwen2" {
         for texto in ["<|im_end|>", "<|endoftext|>"] {
+            let ids = sesion.bundle.tokenizer.encode_trozo(texto, false, false);
+            if let [id] = ids[..]
+                && !stops.contains(&id)
+            {
+                stops.push(id);
+            }
+        }
+    }
+    // Gemma 4 cierra el turno con `<turn|>`, y `<|tool_response>` marca que el modelo espera el resultado
+    // de la herramienta que acaba de pedir: en los dos hay que dejar de generar.
+    if family == "gemma4" {
+        for texto in ["<turn|>", "<|tool_response>"] {
             let ids = sesion.bundle.tokenizer.encode_trozo(texto, false, false);
             if let [id] = ids[..]
                 && !stops.contains(&id)

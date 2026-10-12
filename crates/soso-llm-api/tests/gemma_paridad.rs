@@ -5,8 +5,9 @@
 //! con ruta clara, de ahí el `#[ignore]`:
 //!
 //! ```sh
-//! HILOS=12 cargo test --release -p soso-llm-api --features std --test gemma_paridad -- --ignored
+//! HILOS=12 cargo test --release -p soso-llm-api --features std --test gemma_paridad -- --ignored --test-threads=1
 //! ```
+//! (`--test-threads=1`: cada test carga el modelo y dos a la vez agotan la RAM.)
 //! Tolerancia: el mismo top-1 y el mismo top-2, y la probabilidad del top-1 a ±0,12 (llama.cpp
 //! referenció en GPU y soso requantiza token_embd a Q8_0 y guarda el KV en f16).
 
@@ -83,4 +84,30 @@ fn gemma4_coincide_con_llama_cpp() {
         assert_eq!(orden[1] as u32, c.top2, "{}: top-2", c.nombre);
         assert!((p1 - c.p1).abs() < 0.12, "{}: p(top-1) {p1:.4} vs referencia {:.4}", c.nombre, c.p1);
     }
+}
+
+/// El prefill por bloques (8 tokens a la vez) debe dar lo mismo que el camino de un token.
+#[test]
+#[ignore = "necesita target/gemma4-12b-model (7 GB)"]
+fn gemma4_bloque_y_token_a_token_coinciden() {
+    let dir = format!("{}/../../target/gemma4-12b-model", env!("CARGO_MANIFEST_DIR"));
+    let leer = |f: &str| std::fs::read(format!("{dir}/{f}")).unwrap_or_else(|e| panic!("falta {dir}/{f}: {e}"));
+    let manifest = Manifest::parse(&leer("manifest.som")).expect("manifest válido");
+    let index = TensorIndex::parse(&leer("index.som")).expect("index válido");
+    let mut source = MmapTensorSource::new(format!("{dir}/shards"), index.clone(), OwnedMapper::default());
+    let pool = std::env::var("HILOS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&n| n > 1).map(HostPool::new);
+    let par: Option<&dyn RowParallel> = pool.as_ref().map(|p| p as &dyn RowParallel);
+    let ids = CASOS[0].ids;
+    let mut logits = Vec::new();
+    for bloques in [true, false] {
+        let mut rt = Runtime::new(manifest.clone(), index.clone(), 0, 0);
+        rt.prefill_por_bloques = bloques;
+        rt.prefill_prompt(&mut source, ids, par, &mut None, None).expect("prefill");
+        if bloques {
+            assert!(rt.tokens_en_bloque > 0, "no se usó el camino por bloques: {}", rt.motivo_sin_bloque);
+        }
+        logits.push(rt.logits_par(&mut source, par).expect("logits").to_vec());
+    }
+    let max = logits[0].iter().zip(&logits[1]).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    assert!(max < 0.05, "bloque y token a token difieren en {max}");
 }

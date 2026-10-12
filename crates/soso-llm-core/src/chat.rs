@@ -106,6 +106,12 @@ pub fn anteponer_sistema(plantilla: &str, sistema: &str) -> String {
     {
         return String::from(plantilla);
     }
+    if plantilla.contains("<|turn>system") {
+        return String::from(plantilla);
+    }
+    if plantilla.contains("<|turn>user") {
+        return format!("<|turn>system\n{sistema}<turn|>\n{plantilla}");
+    }
     if plantilla.contains("<|im_start|>") {
         return format!("<|im_start|>system\n{sistema}<|im_end|>\n{plantilla}");
     }
@@ -252,6 +258,10 @@ mod tests {
         assert_eq!(
             anteponer_sistema("SYS {system}\n<|user|>\n{prompt}", "agente"),
             "SYS agente\n<|user|>\n{prompt}"
+        );
+        assert_eq!(
+            anteponer_sistema("<|turn>user\n{prompt}<turn|>\n<|turn>model\n", "agente"),
+            "<|turn>system\nagente<turn|>\n<|turn>user\n{prompt}<turn|>\n<|turn>model\n"
         );
         assert_eq!(
             anteponer_sistema("<|user|>\n{prompt}{eos}\n<|assistant|>\n", "agente"),

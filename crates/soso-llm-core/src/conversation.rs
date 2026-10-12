@@ -33,6 +33,8 @@ pub mod validate;
 pub mod render;
 /// Parse de `<tool_call>` en salida del modelo (T07).
 pub mod tools;
+/// Plantilla y llamadas a herramientas de Gemma 4 (G6).
+pub mod gemma4;
 
 pub use render::render_messages;
 pub use tools::{parse_assistant_output, parse_assistant_output_pasante, AssistantTurn, ToolCallParser};

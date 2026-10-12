@@ -37,6 +37,9 @@ pub enum Segmentacion {
     PiezaMasLarga,
     /// BPE byte-level: símbolos iniciales y fusiones en orden de rango.
     BpeByteLevel,
+    /// BPE al estilo SentencePiece (Gemma 4): UTF-8 crudo, `▁` por espacio, sin
+    /// pre-tokenizado salvo cortar por saltos de línea, y bytes `<0xXX>` de reserva.
+    BpeSpm,
 }
 
 pub struct VocabTokenizer {
@@ -303,6 +306,23 @@ impl VocabTokenizer {
         pack_som(&body, 2, CACHE_ALIGN)
     }
 
+    /// v3 — lo de v2 (con `n_merges`, aunque sea 0), y después: modo u32 (bit 0 = BPE tipo SentencePiece) |
+    /// n_especiales u32 | id u32*.
+    pub fn serialize_spm(pieces: &[String], bos: u32, eos: u32, merges: &[(u32, u32)], especiales: &[u32]) -> Vec<u8> {
+        let mut body = Self::cuerpo(pieces, bos, eos);
+        body.extend_from_slice(&(merges.len() as u32).to_le_bytes());
+        for (a, b) in merges {
+            body.extend_from_slice(&a.to_le_bytes());
+            body.extend_from_slice(&b.to_le_bytes());
+        }
+        body.extend_from_slice(&1u32.to_le_bytes());
+        body.extend_from_slice(&(especiales.len() as u32).to_le_bytes());
+        for id in especiales {
+            body.extend_from_slice(&id.to_le_bytes());
+        }
+        pack_som(&body, 3, CACHE_ALIGN)
+    }
+
     fn cuerpo(pieces: &[String], bos: u32, eos: u32) -> Vec<u8> {
         let mut body = Vec::new();
         body.extend_from_slice(&bos.to_le_bytes());
@@ -319,7 +339,7 @@ impl VocabTokenizer {
     /// igual que antes: sin fusiones, segmentación por pieza más larga.
     pub fn parse(data: &[u8]) -> Result<Self, ()> {
         let (version, body) = parse_som(data)?;
-        if version > 2 {
+        if version > 3 {
             return Err(());
         }
         let mut r = Reader::new(body);
@@ -349,7 +369,42 @@ impl VocabTokenizer {
                 merges.push((a, b));
             }
         }
+        if version >= 3 {
+            let modo = r.u32()?;
+            let n = r.u32()? as usize;
+            let mut especiales = Vec::with_capacity(n);
+            for _ in 0..n {
+                let id = r.u32()?;
+                if id as usize >= pieces.len() {
+                    return Err(());
+                }
+                especiales.push(id);
+            }
+            return Ok(Self::con_spm(pieces, bos, eos, merges, especiales, modo & 1 != 0));
+        }
         Ok(Self::con_merges(pieces, bos, eos, merges))
+    }
+
+    /// Vocabulario con tokens especiales **declarados** (por el tipo del GGUF) y, si `spm`, segmentación
+    /// BPE al estilo SentencePiece. Deducir los especiales por «no sale de una fusión» no vale en Gemma 4:
+    /// 6 298 piezas normales tampoco salen de ninguna.
+    pub fn con_spm(
+        pieces: Vec<String>,
+        bos: u32,
+        eos: u32,
+        merges: Vec<(u32, u32)>,
+        mut especiales: Vec<u32>,
+        spm: bool,
+    ) -> Self {
+        let mut t = Self::con_merges(pieces, bos, eos, merges);
+        especiales.sort_by_key(|i| core::cmp::Reverse(t.pieces[*i as usize].len()));
+        t.especiales = especiales;
+        if spm {
+            t.segmentacion = Segmentacion::BpeSpm;
+            t.space_mark = SPACE_SP;
+            t.leading_space = false;
+        }
+        t
     }
 
     /// Greedy longest-match. SentencePiece: espacios → `▁` y `▁` inicial.
@@ -381,6 +436,9 @@ impl VocabTokenizer {
 
     /// Segmenta un trozo sin tokens especiales: pre-token, byte-level y fusiones.
     fn encode_trozo_bpe(&self, texto: &str, out: &mut Vec<u32>) {
+        if self.segmentacion == Segmentacion::BpeSpm {
+            return self.encode_trozo_spm(texto, out);
+        }
         let mut resto = texto;
         while !resto.is_empty() {
             let largo = largo_pretoken(resto).max(1);
@@ -402,6 +460,110 @@ impl VocabTokenizer {
             }
             self.fusionar(&mut simbolos);
             out.extend_from_slice(&simbolos);
+        }
+    }
+
+    /// Gemma 4: espacios → `▁`, se corta en tramos sin `\n` y tramos de `\n`, y cada tramo se fusiona
+    /// en bloque. Un tramo hecho solo de `\n` que es una pieza entera se emite sin fusionar.
+    fn encode_trozo_spm(&self, texto: &str, out: &mut Vec<u32>) {
+        let texto = texto.replace(' ', "\u{2581}");
+        let mut resto = texto.as_str();
+        while !resto.is_empty() {
+            let solo_nl = resto.starts_with('\n');
+            let largo = resto.find(|c: char| (c == '\n') != solo_nl).unwrap_or(resto.len());
+            let (tramo, siguiente) = resto.split_at(largo);
+            resto = siguiente;
+            if solo_nl {
+                if let Some(&id) = self.lookup.get(tramo) {
+                    out.push(id);
+                    continue;
+                }
+            }
+            self.fusionar_spm(tramo, out);
+        }
+    }
+
+    /// BPE por rangos sobre los caracteres de `tramo`, con lista doblemente enlazada y montículo: el coste es
+    /// `n log n`, no `n²` (una línea de código minificado tiene decenas de miles de caracteres).
+    fn fusionar_spm(&self, tramo: &str, out: &mut Vec<u32>) {
+        use alloc::collections::BinaryHeap;
+        use core::cmp::Reverse;
+        // Símbolo = tramo de bytes [ini, fin) de `tramo`; `id` NO_TOKEN si no es una pieza del vocabulario.
+        struct Sim {
+            ini: usize,
+            fin: usize,
+            id: u32,
+            prev: isize,
+            sig: isize,
+            vivo: bool,
+        }
+        let mut sims: Vec<Sim> = Vec::new();
+        for (i, c) in tramo.char_indices() {
+            let fin = i + c.len_utf8();
+            let id = self.lookup.get(&tramo[i..fin]).copied().unwrap_or(NO_TOKEN);
+            let n = sims.len() as isize;
+            sims.push(Sim { ini: i, fin, id, prev: n - 1, sig: n + 1, vivo: true });
+        }
+        if let Some(u) = sims.last_mut() {
+            u.sig = -1;
+        }
+        // (rango, izquierda) menor primero; se guardan los ids para detectar entradas viejas.
+        let mut cola: BinaryHeap<Reverse<(u32, usize, u32, u32, u32)>> = BinaryHeap::new();
+        let empujar = |cola: &mut BinaryHeap<Reverse<(u32, usize, u32, u32, u32)>>, sims: &Vec<Sim>, l: usize| {
+            let r = sims[l].sig;
+            if r < 0 {
+                return;
+            }
+            let (a, b) = (sims[l].id, sims[r as usize].id);
+            if a == NO_TOKEN || b == NO_TOKEN {
+                return;
+            }
+            if let Some((rango, res)) = self.fusion_de(a, b) {
+                cola.push(Reverse((rango, l, r as u32, a, res)));
+            }
+        };
+        for l in 0..sims.len().saturating_sub(1) {
+            empujar(&mut cola, &sims, l);
+        }
+        while let Some(Reverse((_, l, r, a, res))) = cola.pop() {
+            let r = r as usize;
+            if !sims[l].vivo || !sims[r].vivo || sims[l].id != a || sims[l].sig != r as isize {
+                continue;
+            }
+            // El lado derecho puede haberse fusionado con otro vecino: comprobar su id guardado no basta
+            // (el id de `r` cambia al fusionarse), así que se recalcula el resultado esperado.
+            match self.fusion_de(a, sims[r].id) {
+                Some((_, esperado)) if esperado == res => {}
+                _ => continue,
+            }
+            sims[l].id = res;
+            sims[l].fin = sims[r].fin;
+            sims[r].vivo = false;
+            sims[l].sig = sims[r].sig;
+            if sims[r].sig >= 0 {
+                let sg = sims[r].sig as usize;
+                sims[sg].prev = l as isize;
+            }
+            if sims[l].prev >= 0 {
+                let pv = sims[l].prev as usize;
+                empujar(&mut cola, &sims, pv);
+            }
+            empujar(&mut cola, &sims, l);
+        }
+        let mut i = 0isize;
+        while i >= 0 {
+            let s = &sims[i as usize];
+            if s.id != NO_TOKEN {
+                out.push(s.id);
+            } else {
+                // Carácter sin pieza: sus bytes UTF-8 como `<0xXX>`.
+                for b in tramo[s.ini..s.fin].bytes() {
+                    if let Some(&id) = self.lookup.get(&format!("<0x{b:02X}>")) {
+                        out.push(id);
+                    }
+                }
+            }
+            i = s.sig;
         }
     }
 
@@ -442,7 +604,7 @@ impl VocabTokenizer {
         if bos && self.bos != NO_TOKEN {
             out.push(self.bos);
         }
-        if self.segmentacion == Segmentacion::BpeByteLevel {
+        if self.segmentacion != Segmentacion::PiezaMasLarga {
             self.encode_bpe(text, &mut out);
             return out;
         }
@@ -532,6 +694,9 @@ impl VocabTokenizer {
             self.token_bytes(t, &mut bytes);
         }
         let text = String::from_utf8_lossy(&bytes).into_owned();
+        if self.segmentacion == Segmentacion::BpeSpm {
+            return text;
+        }
         String::from(text.strip_prefix(' ').unwrap_or(&text))
     }
 }

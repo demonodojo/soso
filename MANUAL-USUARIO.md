@@ -2082,9 +2082,9 @@ Añade además `/etc/grub.d/41_soso` (chainload a `BOOTX64.EFI`) y ejecuta
 # En la máquina de desarrollo:
 cargo xtask flash-usb-live /dev/sdX --yes   # mide el stick y empaqueta el mejor modelo que quepa
 
-# Escalera automática (Q4_K_M):
+# Escalera automática (Q4_K_M; Gemma 4 va en Q4_0 de QAT):
 #   8 GB  → qwen3-4b-instruct-2507
-#  16 GB  → mistral-7b
+#  16 GB  → gemma-4-12b
 #  32 GB+ → qwen3.8-27b
 # La primera vez descarga desde Hugging Face (puede tardar horas en modelos grandes).
 # Sin descargas: el mayor ya materializado que quepa en el stick:
@@ -2095,7 +2095,7 @@ cargo xtask package-usb-live
 SOSO_LIVE_CAPACITY=64G cargo xtask package-usb-live
 
 # En placa: ask  o  soso-llm run <modelo> --prompt "hola" --max 32
-# (<modelo> = el empaquetado: qwen3-4b-instruct-2507, tinyllama, mistral-7b o qwen3.8-27b)
+# (<modelo> = el empaquetado: qwen3-4b-instruct-2507, tinyllama, mistral-7b, gemma-4-12b o qwen3.8-27b)
 
 # Override manual:
 # SOSO_MODELS_DIR=target/mi-modelo cargo xtask flash-usb-live /dev/sdX --yes

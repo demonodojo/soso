@@ -53,7 +53,14 @@ fn make_layer_kv(
     } else {
         let head_dim = manifest.effective_head_dim(layer) as usize;
         let kv_dim = manifest.effective_num_kv_heads(layer) as usize * head_dim;
-        LayerKv::with_capacity_dtype(kv_cap, kv_dim, dtype)
+        // Una capa local de Gemma sólo guarda su ventana (más la holgura de expulsión).
+        let ventana = manifest.layer_window(layer) as usize;
+        let cap = if ventana > 0 {
+            kv_cap.min(ventana + crate::gemma::EXPULSION_DISPARO + Runtime::BLOQUE_PREFILL)
+        } else {
+            kv_cap
+        };
+        LayerKv::with_capacity_dtype(cap, kv_dim, dtype)
     }
 }
 
@@ -409,10 +416,16 @@ impl Runtime {
         {
             return 0;
         }
+        // Con ventana deslizante real (Gemma), una capa que ya expulsó filas sólo puede volver a una posición
+        // `p` si conserva las `ventana` filas que preceden a `p`: de ahí el suelo `minimo`.
+        let mut minimo = 0usize;
         for (l, kv) in self.kv.iter().enumerate() {
             match self.kv_dim_recortable(l) {
-                Some(d) if kv.tokens(d) == self.pos => {}
+                Some(d) if kv.posiciones(d) == self.pos => {}
                 _ => return 0,
+            }
+            if kv.dropped > 0 {
+                minimo = minimo.max(kv.dropped + self.manifest.layer_window(l as u32) as usize);
             }
         }
         let comun = self
@@ -421,7 +434,11 @@ impl Runtime {
             .zip(prompt)
             .take_while(|(a, b)| a == b)
             .count();
-        comun.min(prompt.len() - 1)
+        let p = comun.min(prompt.len() - 1);
+        if p < minimo {
+            return 0;
+        }
+        p
     }
 
     /// Empieza una secuencia reaprovechando el prefijo de la anterior. Devuelve
@@ -552,7 +569,7 @@ impl Runtime {
             if !exec.soporta_bloque(l, kv) {
                 return Some("capa no soportada (MLA/KDA/gated/GDN/MoE)");
             }
-            if kv.tokens(kv_dim) != self.pos {
+            if kv.posiciones(kv_dim) != self.pos {
                 return Some("el KV ya no coincide con la posición");
             }
         }
