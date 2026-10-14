@@ -790,6 +790,7 @@ Si hace falta un comando, te lo da escrito; no inventa la salida. Con
 verás qué modelo está contestando (`ask: modelo qwen3-4b-instruct-2507 (plantilla chat, GPU)`),
 luego `ask: generando...` y, mientras calcula, una ristra de puntos. Cuando
 empieza el texto, los puntos paran: la respuesta no se mezcla con el diagnóstico.
+**Ctrl-C** corta esa respuesta y vuelve al prompt; el modelo sigue cargado.
 
 Las trazas de carga (prefetch, VRAM, capas, tok/s) van al canal de registro
 (fd 3). Míralas con `log`, `log | grep askd` o

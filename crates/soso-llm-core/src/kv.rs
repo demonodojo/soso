@@ -37,6 +37,10 @@ pub struct LayerKv {
     /// Filas expulsadas por delante (ventana deslizante de las capas locales de Gemma). Las filas
     /// guardadas son las posiciones absolutas `dropped..dropped + tokens(kv_dim)`.
     pub dropped: usize,
+    /// El KV de esta capa vive en la GPU (G9): las filas guardadas aquí están vacías y `gpu_pos` cuenta las
+    /// posiciones absolutas que tiene el dispositivo.
+    pub en_gpu: bool,
+    pub gpu_pos: usize,
 }
 
 impl LayerKv {
@@ -64,6 +68,8 @@ impl LayerKv {
                 gdn_s: Vec::new(),
                 gdn_conv: Vec::new(),
                 dropped: 0,
+                en_gpu: false,
+                gpu_pos: 0,
             },
             KvDtype::I8 => Self {
                 dtype,
@@ -78,6 +84,8 @@ impl LayerKv {
                 gdn_s: Vec::new(),
                 gdn_conv: Vec::new(),
                 dropped: 0,
+                en_gpu: false,
+                gpu_pos: 0,
             },
         }
     }
@@ -106,10 +114,15 @@ impl LayerKv {
         self.gdn_s.fill(0.0);
         self.gdn_conv.fill(0.0);
         self.dropped = 0;
+        self.en_gpu = false;
+        self.gpu_pos = 0;
     }
 
     /// Posiciones absolutas cubiertas (expulsadas + guardadas).
     pub fn posiciones(&self, kv_dim: usize) -> usize {
+        if self.en_gpu {
+            return self.gpu_pos;
+        }
         self.dropped + self.tokens(kv_dim)
     }
 
@@ -133,6 +146,11 @@ impl LayerKv {
     /// la petición anterior). `kv_dim` es el ancho de K/V por token; no vale
     /// para MLA ni GDN, cuyo estado no se puede recortar.
     pub fn truncate_tokens(&mut self, tokens: usize, kv_dim: usize) {
+        if self.en_gpu {
+            // El dispositivo rebobina solo cuando la siguiente llamada trae una `pos0` menor.
+            self.gpu_pos = tokens;
+            return;
+        }
         // `tokens` es una posición absoluta: con filas expulsadas se guardan `tokens - dropped`.
         let tokens = tokens.saturating_sub(self.dropped);
         let n = tokens.saturating_mul(kv_dim);

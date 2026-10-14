@@ -608,7 +608,7 @@ pub fn perfil_fases_ns() -> [u64; N_FASES] {
 }
 
 #[inline]
-fn perfil_ahora() -> u64 {
+pub(crate) fn perfil_ahora() -> u64 {
     let r = PERFIL_RELOJ_NS.load(Ordering::Relaxed);
     if r == 0 {
         0
@@ -620,7 +620,7 @@ fn perfil_ahora() -> u64 {
 
 /// Suma a `fase` lo transcurrido desde `*t` y reinicia `*t`.
 #[inline]
-fn perfil_marca(t: &mut u64, fase: usize) {
+pub(crate) fn perfil_marca(t: &mut u64, fase: usize) {
     if PERFIL_RELOJ_NS.load(Ordering::Relaxed) == 0 {
         return;
     }
@@ -1178,9 +1178,11 @@ impl<'a> LayerExecutor<'a> {
         kv: &mut LayerKv,
         source: &mut S,
         planner: Option<&crate::plan::ResourcePlanner>,
+        gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
+        use_gpu: bool,
     ) -> Result<(), ()> {
         if crate::gemma::es_capa_gemma(self.manifest.layer(layer).map_or(0, |l| l.flags)) {
-            return crate::gemma::forward_layer_gemma_block(self, layer, pos0, n, hs, bs, s, kv, source);
+            return crate::gemma::forward_layer_gemma_block(self, layer, pos0, n, hs, bs, s, kv, source, gpu, use_gpu);
         }
         let h = self.manifest.hidden_dim as usize;
         let heads = self.manifest.effective_num_heads(layer) as usize;

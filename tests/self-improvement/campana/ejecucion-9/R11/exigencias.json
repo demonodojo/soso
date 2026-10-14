@@ -1,1 +1,0 @@
-{"requisitos": [{"nombre": "aceptacion reservada de R11", "argv": ["/home/jmdiez/Trabajo/demonodojo/soso/target/debug/soso-improve", "verificar", "repo", "--caso", "R11", "--banco", "/home/jmdiez/Trabajo/demonodojo/soso/tests/self-improvement/campana2", "--arbol", "{arbol}"], "cwd": ".", "timeout_s": 1500}], "rutas_protegidas": ["tests/self-improvement"], "regresion": null}

@@ -250,6 +250,9 @@ pub struct Process {
     /// Si es true, al morir el proceso pasa a huérfano (`parent = 0`).
     /// Solo el teardown SSH lo pide; las señales no.
     pub kill_orphan: bool,
+    /// Ctrl-C llegó con la shell en primer plano y en marcha (no bloqueada).
+    /// La siguiente syscall devuelve `EINTR` en vez de matarla.
+    pub sigint_pendiente: bool,
     /// Grupo de procesos y sesión (job control mínimo).
     pub pgid: u64,
     pub sid: u64,
@@ -377,14 +380,40 @@ fn signal_one(procs: &mut Vec<Process>, pid: u64, sig: u8) -> bool {
                     | State::Sleeping(_)
             );
         if bloqueado {
+            procs[idx].sigint_pendiente = false;
             procs[idx].ctx.rax = (-soso_abi::EINTR) as u64;
             procs[idx].state = State::Runnable;
+            return true;
+        }
+        // `ask` es un builtin: la shell es el grupo en primer plano y, mientras
+        // copia la respuesta, está `Running`. Matarla cierra la sesión SSH y no
+        // corta la pregunta. La siguiente syscall devuelve `EINTR` y sosh suelta
+        // el socket; askd (otro grupo) se entera y para.
+        if sig == soso_abi::SIGINT as u8 && es_shell_en_primer_plano(&procs[idx]) {
+            procs[idx].sigint_pendiente = true;
             return true;
         }
         deliver_death(procs, pid, soso_abi::exit_by_signal(sig), false);
         return true;
     }
     false
+}
+
+/// La shell: líder de su sesión y grupo en primer plano de su consola.
+fn es_shell_en_primer_plano(p: &Process) -> bool {
+    p.sid == p.pid && p.pgid != 0 && p.pgid == p.console.fg_pgid()
+}
+
+/// La consume la entrada de syscall. `true` = hay que devolver `EINTR`.
+pub fn tomar_sigint_pendiente() -> bool {
+    let me = current_pid();
+    let mut procs = PROCS.lock();
+    let Some(p) = procs.iter_mut().find(|p| p.pid == me) else {
+        return false;
+    };
+    let pendiente = p.sigint_pendiente;
+    p.sigint_pendiente = false;
+    pendiente
 }
 
 fn signal_pgid(procs: &mut Vec<Process>, pgid: u64, sig: u8) -> u32 {
@@ -1089,6 +1118,7 @@ pub fn spawn_console_io_cwd(
         kill_pending: false,
         kill_code: 255,
         kill_orphan: false,
+        sigint_pendiente: false,
         pgid,
         sid,
         tls_base,
@@ -1185,6 +1215,7 @@ pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> Re
         kill_pending: false,
         kill_code: 255,
         kill_orphan: false,
+        sigint_pendiente: false,
         pgid,
         sid,
         tls_base,

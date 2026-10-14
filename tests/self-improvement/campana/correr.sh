@@ -4,7 +4,7 @@
 set -u
 R0=/home/jmdiez/Trabajo/demonodojo/soso
 OUT=$1; shift
-BIN=$R0/target/debug/soso-improve
+BIN=${SOSO_IMPROVE_BIN:-$R0/target/debug/soso-improve}
 CAMP=${CAMPANA_JSON:-$R0/tests/self-improvement/campaign.json}
 # Las tareas son las que fija el JSON de la campaña (o las que se pasen como argumentos).
 TAREAS=${@:-$(python3 -I -c "import json,sys;print(' '.join(t['id'] for t in json.load(open(sys.argv[1]))['tareas']))" $CAMP)}

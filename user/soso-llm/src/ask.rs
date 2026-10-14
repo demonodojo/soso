@@ -241,7 +241,11 @@ fn spawn_askd() -> Result<u64, i64> {
         abi::FD_SERIAL_TTY,
         abi::FD_SERIAL_TTY,
     );
-    if rc < 0 { Err(rc) } else { Ok(rc as u64) }
+    if rc < 0 {
+        return Err(rc);
+    }
+    let _ = sys::setpgid(rc as u64, rc as u64);
+    Ok(rc as u64)
 }
 
 fn connect_askd() -> Result<TcpFd, i64> {
@@ -356,6 +360,9 @@ fn repl_interactivo() -> u8 {
 
 /// Demonio de máquina: escucha en loopback y atiende una pregunta por conexión.
 pub fn run_askd() -> u8 {
+    // Sesión propia: Ctrl-C va a la shell, no a este proceso. Si no, la señal
+    // mata el demonio y la siguiente pregunta recarga el modelo.
+    let _ = sys::setsid();
     let listener = match TcpFd::listen(ASK_PORT) {
         Ok(l) => l,
         Err(e) if e == -abi::EADDRINUSE => return 0,

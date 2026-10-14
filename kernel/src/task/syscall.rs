@@ -218,6 +218,11 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         }
     }
     let (a1, a2, a3, a4) = (f.rdi, f.rsi, f.rdx, f.r10);
+    // Ctrl-C con la shell en marcha (copiando `ask`): no la mata; esta
+    // syscall sale con EINTR para que suelte el socket.
+    if f.nr != abi::SYS_EXIT && super::tomar_sigint_pendiente() {
+        return -abi::EINTR;
+    }
     let r = match f.nr {
         abi::SYS_EXIT => super::exit_current(a1 as u8),
         abi::SYS_READ => sys_read(f, a1, a2, a3),
@@ -928,6 +933,11 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
     })?;
     if let Some(slot) = tcp_slot {
         if len == 0 {
+            // Sondeo sin dormir: askd lo usa en cada capa para ver si el
+            // cliente cerró (Ctrl-C). Un write vacío no manda datos.
+            if crate::net::tcp_cerrado_seguro(slot) {
+                return Err(-abi::EPIPE);
+            }
             return Ok(0);
         }
         if !user_range_ok(buf, len, false) {

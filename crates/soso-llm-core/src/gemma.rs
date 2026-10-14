@@ -85,6 +85,156 @@ fn expulsar_si_hace_falta(kv: &mut LayerKv, ventana: usize, kv_dim: usize) {
     }
 }
 
+/// `up[i] *= gelu(gate[i])`, repartido entre hilos: la GELU (con `tanh`) en un solo hilo costaba ~12 ms por
+/// token en el MLP de 15 360 columnas × 48 capas, casi lo que cuesta toda la multiplicación en una GPU.
+pub fn geglu_par(par: &dyn RowParallel, up: &mut [f32], gate: &[f32]) {
+    const TROZO: usize = 2048;
+    let n = up.len().min(gate.len());
+    if n <= TROZO {
+        for i in 0..n {
+            up[i] *= gelu(gate[i]);
+        }
+        return;
+    }
+    let up_ptr = up.as_mut_ptr() as usize;
+    let gate_ptr = gate.as_ptr() as usize;
+    let tareas = n.div_ceil(TROZO);
+    par.for_rows(tareas, &move |t0: usize, t1: usize| {
+        for t in t0..t1 {
+            let (a, b) = (t * TROZO, ((t + 1) * TROZO).min(n));
+            let (u, g) = unsafe {
+                (
+                    core::slice::from_raw_parts_mut((up_ptr as *mut f32).add(a), b - a),
+                    core::slice::from_raw_parts((gate_ptr as *const f32).add(a), b - a),
+                )
+            };
+            for i in 0..u.len() {
+                u[i] *= gelu(g[i]);
+            }
+        }
+    });
+}
+
+/// Intenta ejecutar la capa **entera** en la GPU. `Ok(true)` si el `hidden` ya es el de salida de la capa y el
+/// KV de la capa está en el dispositivo; `Ok(false)` si hay que hacerla en CPU (sin tocar nada).
+#[allow(clippy::too_many_arguments)]
+fn capa_en_gpu<S: TensorSource>(
+    exec: &LayerExecutor<'_>,
+    layer: u32,
+    pos0: usize,
+    n: usize,
+    hs: &mut [f32],
+    kv: &mut LayerKv,
+    source: &mut S,
+    gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
+    use_gpu: bool,
+) -> Result<bool, ()> {
+    if !use_gpu || kv.dtype != KvDtype::F16 {
+        return Ok(false);
+    }
+    let Some(g) = gpu.as_deref_mut() else { return Ok(false) };
+    if !g.available() || !g.gemma_puede(layer) {
+        return Ok(false);
+    }
+    let m = exec.manifest;
+    let spec = m.layer(layer).cloned().unwrap_or_default();
+    let h = m.hidden_dim as usize;
+    let heads = m.effective_num_heads(layer) as usize;
+    let kv_heads = m.effective_num_kv_heads(layer) as usize;
+    let hd = m.effective_head_dim(layer) as usize;
+    let ffn = m.effective_ffn_dim(layer) as usize;
+    let p = format!("L{layer:02}");
+    let (nq, nk, nv, no) = (format!("{p}.attn_q"), format!("{p}.attn_k"), format!("{p}.attn_v"), format!("{p}.attn_output"));
+    let (nu, ng, nd) = (format!("{p}.ffn_up"), format!("{p}.ffn_gate"), format!("{p}.ffn_down"));
+    let v_de_k = spec.flags & FLAG_V_FROM_K != 0;
+    let mut tensores: alloc::vec::Vec<(&str, usize, usize)> = alloc::vec![
+        (nq.as_str(), heads * hd, h),
+        (nk.as_str(), kv_heads * hd, h),
+        (no.as_str(), h, heads * hd),
+        (nu.as_str(), ffn, h),
+        (ng.as_str(), ffn, h),
+        (nd.as_str(), h, ffn),
+    ];
+    if !v_de_k {
+        tensores.push((nv.as_str(), kv_heads * hd, h));
+    }
+    for (clave, rows, cols) in tensores {
+        if !g.gemma_residente(clave) {
+            let vista = source.tensor_view(clave)?;
+            if !g.gemma_subir(clave, &vista, rows, cols).unwrap_or(false) {
+                return Ok(false);
+            }
+        }
+    }
+    let cargar = |source: &mut S, nombre: String, n: usize| -> Result<alloc::vec::Vec<f32>, ()> {
+        let mut v = alloc::vec![0.0f32; n];
+        source.load_f32(&nombre, &mut v)?;
+        Ok(v)
+    };
+    let attn_norm = cargar(source, format!("{p}.attn_norm"), h)?;
+    let post_attn = cargar(source, format!("{p}.post_attn_norm"), h)?;
+    let ffn_norm = cargar(source, format!("{p}.ffn_norm"), h)?;
+    let post_ffn = cargar(source, format!("{p}.post_ffn_norm"), h)?;
+    let qk = spec.flags & FLAG_QK_NORM != 0;
+    let q_norm = if qk { cargar(source, format!("{p}.attn_q_norm"), hd)? } else { alloc::vec::Vec::new() };
+    let k_norm = if qk { cargar(source, format!("{p}.attn_k_norm"), hd)? } else { alloc::vec::Vec::new() };
+    let rope = if spec.flags & FLAG_ROPE_FACTORS != 0 { Some(cargar(source, "rope_freqs".into(), hd / 2)?) } else { None };
+    let layer_scale = if spec.flags & FLAG_LAYER_SCALE != 0 {
+        let mut e = [0.0f32; 1];
+        source.load_f32(&format!("{p}.layer_scale"), &mut e)?;
+        e[0]
+    } else {
+        1.0
+    };
+    let mut capa = crate::gpu::GemmaCapa {
+        layer,
+        pos0,
+        n,
+        hidden: hs,
+        h,
+        heads,
+        kv_heads,
+        head_dim: hd,
+        ffn,
+        ventana: m.layer_window(layer) as usize,
+        ctx_max: (m.max_seq as usize).min(32768),
+        eps: m.rms_eps,
+        theta: m.layer_rope_theta(layer),
+        escala: if m.ext.attn_scale > 0.0 { m.ext.attn_scale } else { 1.0 / libm::sqrtf(hd as f32) },
+        v_de_k,
+        v_norm: spec.flags & FLAG_V_NORM != 0,
+        qk_norm: qk,
+        geglu: spec.flags & FLAG_GEGLU != 0,
+        layer_scale,
+        clave_q: &nq,
+        clave_k: &nk,
+        clave_v: &nv,
+        clave_o: &no,
+        clave_up: &nu,
+        clave_gate: &ng,
+        clave_down: &nd,
+        attn_norm: &attn_norm,
+        q_norm: &q_norm,
+        k_norm: &k_norm,
+        post_attn_norm: &post_attn,
+        ffn_norm: &ffn_norm,
+        post_ffn_norm: &post_ffn,
+        rope_freqs: rope.as_deref(),
+        expulsadas: 0,
+    };
+    match g.gemma_capa(&mut capa) {
+        Ok(true) => {}
+        Ok(false) => return Ok(false),
+        // Con el KV de esta capa ya en el dispositivo, seguir en CPU leería un KV vacío: se aborta.
+        Err(()) if kv.en_gpu => return Err(()),
+        Err(()) => return Ok(false),
+    }
+    kv.en_gpu = true;
+    kv.gpu_pos = pos0 + n;
+    kv.dropped = capa.expulsadas;
+    Ok(true)
+}
+
 /// ¿Esta capa se ejecuta con el camino de Gemma?
 pub fn es_capa_gemma(flags: u32) -> bool {
     flags & sosomodel::manifest::FLAG_SANDWICH_NORM != 0
@@ -124,6 +274,9 @@ pub fn forward_layer_gemma<S: TensorSource>(
     let seq = Sequential;
     let par: &dyn RowParallel = exec.parallel.unwrap_or(&seq);
 
+    if capa_en_gpu(exec, layer, pos, 1, hidden, kv, source, gpu, use_gpu)? {
+        return Ok(LayerTiming::default());
+    }
     // ---------------------------------------------------------------- atención
     s.residual.copy_from_slice(hidden);
     source.load_f32(&format!("{p}.attn_norm"), &mut s.norm_w[..h])?;
@@ -211,9 +364,7 @@ pub fn forward_layer_gemma<S: TensorSource>(
     matvec_step(use_gpu, gpu, &nu, source.tensor_view(&nu)?, ffn, h, hidden, &mut s.up[..ffn], par, planner, layer)?;
     matvec_step(use_gpu, gpu, &ng_, source.tensor_view(&ng_)?, ffn, h, hidden, &mut s.gate[..ffn], par, planner, layer)?;
     if spec.flags & FLAG_GEGLU != 0 {
-        for i in 0..ffn {
-            s.up[i] *= gelu(s.gate[i]);
-        }
+        geglu_par(par, &mut s.up[..ffn], &s.gate[..ffn]);
     } else {
         crate::gemm::swiglu_inplace(&mut s.up[..ffn], &s.gate[..ffn]);
     }
@@ -250,8 +401,34 @@ pub fn forward_layer_gemma_block<S: TensorSource>(
     s: &mut LayerScratch,
     kv: &mut LayerKv,
     source: &mut S,
+    gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
+    use_gpu: bool,
 ) -> Result<(), ()> {
     use crate::layer::matvec_view_batch_par;
+    if capa_en_gpu(exec, layer, pos0, n, hs, kv, source, gpu, use_gpu)? {
+        return Ok(());
+    }
+    // `matmul` de la GPU si el despacho lo acepta; si no, el núcleo por lotes de CPU.
+    let mut mm = |source: &mut S,
+                  bs_q8k: &mut alloc::vec::Vec<u8>,
+                  name: &str,
+                  rows: usize,
+                  cols: usize,
+                  xs: &[f32],
+                  n: usize,
+                  out: &mut [f32],
+                  par: &dyn RowParallel|
+     -> Result<(), ()> {
+        let vista = source.tensor_view(name)?;
+        if use_gpu {
+            if let Some(g) = gpu.as_deref_mut() {
+                if crate::gpu::try_gpu_matmul(g, name, &vista, rows, cols, n, xs, out).unwrap_or(false) {
+                    return Ok(());
+                }
+            }
+        }
+        matvec_view_batch_par(&vista, rows, cols, xs, n, out, par, Some(bs_q8k))
+    };
     if kv.dtype != KvDtype::F16 {
         return Err(());
     }
@@ -277,6 +454,8 @@ pub fn forward_layer_gemma_block<S: TensorSource>(
     }
     bs.ensure_q8k(n, h.max(q_dim).max(ffn));
 
+    let mut t_perfil = crate::layer::perfil_ahora();
+    use crate::layer::{perfil_marca, FASE_ATENCION, FASE_FFN_DOWN, FASE_FFN_UP_GATE, FASE_O, FASE_OTROS, FASE_QKV, FASE_ROPE_KV, FASE_SWIGLU};
     // ---------------------------------------------------------------- atención
     bs.residual[..n * h].copy_from_slice(hs);
     source.load_f32(&format!("{p}.attn_norm"), &mut s.norm_w[..h])?;
@@ -284,14 +463,15 @@ pub fn forward_layer_gemma_block<S: TensorSource>(
         rmsnorm(&mut hs[i * h..(i + 1) * h], &s.norm_w[..h], eps);
     }
     let (nq, nk, nv, no) = (format!("{p}.attn_q"), format!("{p}.attn_k"), format!("{p}.attn_v"), format!("{p}.attn_output"));
-    matvec_view_batch_par(&source.tensor_view(&nq)?, q_dim, h, hs, n, &mut bs.q[..n * q_dim], par, Some(&mut bs.q8k_x))?;
-    matvec_view_batch_par(&source.tensor_view(&nk)?, kv_dim, h, hs, n, &mut bs.k[..n * kv_dim], par, Some(&mut bs.q8k_x))?;
+    mm(source, &mut bs.q8k_x, &nq, q_dim, h, hs, n, &mut bs.q[..n * q_dim], par)?;
+    mm(source, &mut bs.q8k_x, &nk, kv_dim, h, hs, n, &mut bs.k[..n * kv_dim], par)?;
     if spec.flags & FLAG_V_FROM_K != 0 {
         let (k, v) = (&bs.k[..n * kv_dim], &mut bs.v[..n * kv_dim]);
         v.copy_from_slice(k);
     } else {
-        matvec_view_batch_par(&source.tensor_view(&nv)?, kv_dim, h, hs, n, &mut bs.v[..n * kv_dim], par, Some(&mut bs.q8k_x))?;
+        mm(source, &mut bs.q8k_x, &nv, kv_dim, h, hs, n, &mut bs.v[..n * kv_dim], par)?;
     }
+    perfil_marca(&mut t_perfil, FASE_QKV);
     if spec.flags & FLAG_QK_NORM != 0 {
         source.load_f32(&format!("{p}.attn_q_norm"), &mut s.head_out[..hd])?;
         for i in 0..n {
@@ -331,6 +511,7 @@ pub fn forward_layer_gemma_block<S: TensorSource>(
         kv.append_f16(&bs.k[i * kv_dim..(i + 1) * kv_dim], &bs.v[i * kv_dim..(i + 1) * kv_dim]);
     }
 
+    perfil_marca(&mut t_perfil, FASE_ROPE_KV);
     // Tareas: (token, cabeza KV, trozo de cabezas Q). Cada token ve su propio prefijo.
     let trozos = if g >= 8 { 4 } else { 1 };
     let por_token = kv_heads * trozos;
@@ -357,8 +538,10 @@ pub fn forward_layer_gemma_block<S: TensorSource>(
         }
     };
     par.for_rows(tareas, &trabajo);
+    perfil_marca(&mut t_perfil, FASE_ATENCION);
 
-    matvec_view_batch_par(&source.tensor_view(&no)?, h, q_dim, &bs.attn[..n * q_dim], n, &mut bs.o[..n * h], par, Some(&mut bs.q8k_x))?;
+    mm(source, &mut bs.q8k_x, &no, h, q_dim, &bs.attn[..n * q_dim], n, &mut bs.o[..n * h], par)?;
+    perfil_marca(&mut t_perfil, FASE_O);
     source.load_f32(&format!("{p}.post_attn_norm"), &mut s.norm_w[..h])?;
     for i in 0..n {
         rmsnorm(&mut bs.o[i * h..(i + 1) * h], &s.norm_w[..h], eps);
@@ -374,16 +557,18 @@ pub fn forward_layer_gemma_block<S: TensorSource>(
         rmsnorm(&mut hs[i * h..(i + 1) * h], &s.norm_w[..h], eps);
     }
     let (nu, ng_, nd) = (format!("{p}.ffn_up"), format!("{p}.ffn_gate"), format!("{p}.ffn_down"));
-    matvec_view_batch_par(&source.tensor_view(&nu)?, ffn, h, hs, n, &mut bs.up[..n * ffn], par, Some(&mut bs.q8k_x))?;
-    matvec_view_batch_par(&source.tensor_view(&ng_)?, ffn, h, hs, n, &mut bs.gate[..n * ffn], par, Some(&mut bs.q8k_x))?;
+    perfil_marca(&mut t_perfil, FASE_OTROS);
+    mm(source, &mut bs.q8k_x, &nu, ffn, h, hs, n, &mut bs.up[..n * ffn], par)?;
+    mm(source, &mut bs.q8k_x, &ng_, ffn, h, hs, n, &mut bs.gate[..n * ffn], par)?;
+    perfil_marca(&mut t_perfil, FASE_FFN_UP_GATE);
     if spec.flags & FLAG_GEGLU != 0 {
-        for i in 0..n * ffn {
-            bs.up[i] *= gelu(bs.gate[i]);
-        }
+        geglu_par(par, &mut bs.up[..n * ffn], &bs.gate[..n * ffn]);
     } else {
         crate::gemm::swiglu_inplace(&mut bs.up[..n * ffn], &bs.gate[..n * ffn]);
     }
-    matvec_view_batch_par(&source.tensor_view(&nd)?, h, ffn, &bs.up[..n * ffn], n, &mut bs.o[..n * h], par, Some(&mut bs.q8k_x))?;
+    perfil_marca(&mut t_perfil, FASE_SWIGLU);
+    mm(source, &mut bs.q8k_x, &nd, h, ffn, &bs.up[..n * ffn], n, &mut bs.o[..n * h], par)?;
+    perfil_marca(&mut t_perfil, FASE_FFN_DOWN);
     source.load_f32(&format!("{p}.post_ffn_norm"), &mut s.norm_w[..h])?;
     let escala_capa = if spec.flags & FLAG_LAYER_SCALE != 0 {
         let mut e = [0.0f32; 1];

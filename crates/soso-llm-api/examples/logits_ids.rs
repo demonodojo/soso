@@ -38,14 +38,46 @@ fn main() {
     let pool = std::env::var("HILOS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&n| n > 1).map(HostPool::new);
     let par: Option<&dyn RowParallel> = pool.as_ref().map(|p| p as &dyn RowParallel);
 
+    // `SOSO_CUDA=1`: kernels CUDA del host para los matmul y la cabeza de logits.
+    let mut cuda = if matches!(std::env::var("SOSO_CUDA").as_deref(), Ok("1")) {
+        Some(soso_llm_api::cuda::CudaGpu::nueva().expect("CUDA"))
+    } else {
+        None
+    };
+    let mut gpu: Option<&mut dyn soso_llm_core::gpu::GpuDispatch> =
+        cuda.as_mut().map(|g| g as &mut dyn soso_llm_core::gpu::GpuDispatch);
+
+    fn reloj_ns() -> u64 {
+        use std::sync::OnceLock;
+        static T0: OnceLock<Instant> = OnceLock::new();
+        T0.get_or_init(Instant::now).elapsed().as_nanos() as u64 + 1
+    }
+    let perfil = std::env::var("PERFIL").is_ok();
+    if perfil {
+        soso_llm_core::layer::perfil_activar(Some(reloj_ns));
+    }
     let t0 = Instant::now();
     rt.reset_sequence();
-    rt.prefill_prompt(&mut source, &ids, par, &mut None, None).expect("prefill");
+    rt.prefill_prompt(&mut source, &ids, par, &mut gpu, None).expect("prefill");
     let t_prefill = t0.elapsed();
     let t1 = Instant::now();
-    let logits = rt.logits_par(&mut source, par).expect("logits").to_vec();
+    let logits = rt.logits_gpu(&mut source, par, &mut gpu).expect("logits").to_vec();
     eprintln!("prefill {} token(s): {:.2?}; logits: {:.2?}", ids.len(), t_prefill, t1.elapsed());
 
+    if perfil {
+        let f = soso_llm_core::layer::perfil_fases_ns();
+        let total: u64 = f.iter().sum::<u64>().max(1);
+        for (n, v) in soso_llm_core::layer::NOMBRES_FASES.iter().zip(f) {
+            eprintln!("  fase {n:<12} {:>8.2} s  {:>4.1} %", v as f64 / 1e9, v as f64 * 100.0 / total as f64);
+        }
+    }
+    if let Some(g) = cuda.as_mut() {
+        let p = g.perfil_capa();
+        let total: f64 = p.iter().map(|(_, ms)| ms).sum::<f64>().max(1e-9);
+        for (n, ms) in p {
+            eprintln!("  gpu {n:<16} {:>8.1} ms  {:>4.1} %", ms, ms * 100.0 / total);
+        }
+    }
     let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let suma: f64 = logits.iter().map(|&l| ((l - max) as f64).exp()).sum();
     let mut orden: Vec<usize> = (0..logits.len()).collect();

@@ -65,21 +65,31 @@ pub fn sha256_hex(data: &[u8]) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// `FileMapper` host con liberación real (no leak como `hostrun`).
+/// `FileMapper` del host. Por defecto **mapea** los shards con `mmap` de sólo lectura (los pesos viven en la
+/// caché de páginas: se comparten entre procesos y el kernel puede recuperarlos bajo presión, en vez de que cada
+/// proceso copie el modelo entero a memoria anónima y el OOM killer mate a uno). `SOSO_LEER_SHARDS=1` vuelve a
+/// leer cada shard a un búfer propio (con liberación real, no leak como `hostrun`).
 pub struct OwnedMapper {
     slabs: HashMap<u64, Box<[u8]>>,
+    mmap: crate::host_mmap::MmapMapper,
+    leer: bool,
 }
 
 impl Default for OwnedMapper {
     fn default() -> Self {
         Self {
             slabs: HashMap::new(),
+            mmap: crate::host_mmap::MmapMapper::default(),
+            leer: std::env::var_os("SOSO_LEER_SHARDS").is_some(),
         }
     }
 }
 
 impl FileMapper for OwnedMapper {
     fn map_file(&mut self, path: &str) -> Result<MappedShard, ()> {
+        if !self.leer {
+            return self.mmap.map_file(path);
+        }
         let data = std::fs::read(path).map_err(|_| ())?;
         let len = data.len();
         let boxed = data.into_boxed_slice();
@@ -89,7 +99,9 @@ impl FileMapper for OwnedMapper {
     }
 
     fn unmap_file(&mut self, shard: &MappedShard) {
-        self.slabs.remove(&shard.addr);
+        if self.slabs.remove(&shard.addr).is_none() {
+            self.mmap.unmap_file(shard);
+        }
     }
 }
 
@@ -193,6 +205,8 @@ pub struct CpuBackend {
     pub rt: Runtime,
     /// Hilos para repartir las filas del matvec, la atención y la FFN (`None` = un hilo).
     pub parallel: Option<std::sync::Arc<crate::host_pool::HostPool>>,
+    /// Aceleración por GPU (p. ej. [`crate::cuda::CudaGpu`]); `None` = todo en CPU.
+    pub gpu: Option<Box<dyn soso_llm_core::gpu::GpuDispatch + Send>>,
     source: RunSource,
     profile: ModelProfile,
     tokenizer: Tokenizer,
@@ -252,6 +266,7 @@ pub fn load_cpu_backend(model_dir: &str, profile: ModelProfile) -> Result<CpuBac
     Ok(CpuBackend {
         rt,
         parallel: None,
+        gpu: None,
         source,
         profile,
         tokenizer,
@@ -290,6 +305,8 @@ impl ChatBackend for CpuBackend {
             prepared.top_p as f32,
             seed,
         );
+        let mut gpu: Option<&mut dyn soso_llm_core::gpu::GpuDispatch> =
+            self.gpu.as_mut().map(|b| &mut **b as &mut dyn soso_llm_core::gpu::GpuDispatch);
         let (secuencia, report) = self.rt.generate_stream_par_observed(
             &mut self.source,
             prompt_ids,
@@ -297,7 +314,7 @@ impl ChatBackend for CpuBackend {
             &mut sampler,
             observer,
             self.parallel.as_deref().map(|p| p as &dyn soso_llm_core::parallel::RowParallel),
-            &mut None,
+            &mut gpu,
         )?;
         // `ChatBackend` devuelve sólo lo generado. El runtime devuelve la secuencia
         // entera (prompt + generación): sin recortarla el parser de llamadas leía el

@@ -1246,7 +1246,7 @@ fn ayuda() {
     println!("sosolog:  persistir el log ahora: /var/log/*.log y, en live, SOSOLOG.TXT");
     println!("wifi:     wifi scan | status | setup | connect <ssid> [psk]");
     println!("ask:      ask <pregunta>  — el texto va literal al modelo");
-    println!("          ask             — modo interactivo (Ctrl-D o «salir»)");
+    println!("          ask             — modo interactivo (Ctrl-D o «salir»; Ctrl-C corta)");
     println!("          /bin/ask-modelo — elegir el modelo que usa ask");
     println!("          log | grep askd  — trazas de carga de ask (fd 3)");
     println!("voz:      voz             — dictar; Enter confirma la línea");
@@ -1316,7 +1316,12 @@ fn spawn_askd() -> Result<u64, i64> {
         abi::FD_SERIAL_TTY,
         abi::FD_SERIAL_TTY,
     );
-    if rc < 0 { Err(rc) } else { Ok(rc as u64) }
+    if rc < 0 {
+        return Err(rc);
+    }
+    // Fuera del grupo de la shell: Ctrl-C no mata el modelo cargado.
+    let _ = sys::setpgid(rc as u64, rc as u64);
+    Ok(rc as u64)
 }
 
 fn connect_askd() -> Result<u64, i64> {
@@ -1345,12 +1350,14 @@ fn copiar_respuesta_ask(fd: u64) -> Result<bool, ()> {
         }
         let n = n as usize;
         if let Some(i) = buf[..n].iter().position(|&b| b == PROTO_FIN) {
-            if i > 0 {
-                let _ = sys::write(1, &buf[..i]);
+            if i > 0 && sys::write(1, &buf[..i]) == -(abi::EINTR as i64) {
+                return Ok(false);
             }
             return Ok(true);
         }
-        let _ = sys::write(1, &buf[..n]);
+        if sys::write(1, &buf[..n]) == -(abi::EINTR as i64) {
+            return Ok(false);
+        }
     }
     Ok(true)
 }
@@ -1396,14 +1403,19 @@ fn preguntar_via_askd(texto: &str) -> u8 {
     let n = bytes.len().min(LINE_MAX - 1);
     linea[..n].copy_from_slice(&bytes[..n]);
     linea[n] = b'\n';
-    if sys::write_all(fd, &linea[..=n]).is_err() {
+    if let Err(e) = sys::write_all(fd, &linea[..=n]) {
         let _ = sys::close(fd);
+        if e == -(abi::EINTR as i64) {
+            println!("^C");
+            return 130;
+        }
         println!("ask: error al enviar la pregunta");
         return 1;
     }
     let interrumpido = copiar_respuesta_ask(fd) == Ok(false);
     let _ = sys::close(fd);
     if interrumpido {
+        println!("^C");
         130
     } else {
         0
@@ -1570,7 +1582,7 @@ fn repl_ask() -> Option<u8> {
         return None;
     };
     println!("ask: modelo {modelo}, máx {max} tokens");
-    println!("ask: escribe la pregunta; «salir» o Ctrl-D para terminar");
+    println!("ask: escribe la pregunta; «salir» o Ctrl-D para terminar; Ctrl-C corta la respuesta");
     let mut lector = Lector::new();
     loop {
         print!("?> ");

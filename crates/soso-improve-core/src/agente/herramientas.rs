@@ -577,16 +577,35 @@ fn reemplazar<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<
             pos.push((i, i + c.len_utf8()));
         }
     }
-    let aguja: String = buscar.chars().filter(|c| !c.is_whitespace()).collect();
+    let mut aguja: String = buscar.chars().filter(|c| !c.is_whitespace()).collect();
     if aguja.is_empty() {
         return Err(Error::uso("`buscar` está vacío"));
+    }
+    // Si no está tal cual, quizá el modelo copió los números de línea que muestra `read` (`33: …`): se quitan y se reintenta.
+    if !plano.contains(&aguja) {
+        let sin_numeros: String = buscar
+            .lines()
+            .map(|l| {
+                let t = l.trim_start();
+                let d = t.trim_start_matches(|c: char| c.is_ascii_digit());
+                if d.len() < t.len() && (d.starts_with(':') || d.starts_with('|') || d.starts_with('\t')) { d[1..].to_string() } else { l.to_string() }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let alterna: String = sin_numeros.chars().filter(|c| !c.is_whitespace()).collect();
+        if !alterna.is_empty() && plano.contains(&alterna) {
+            aguja = alterna;
+        }
     }
     let n_aguja = aguja.chars().count();
     // Índice de carácter de cada coincidencia en `plano`.
     let en_chars = |byte: usize| plano[..byte].chars().count();
     let Some(primero_b) = plano.find(&aguja) else {
+        let pista = linea_parecida(&texto, buscar)
+            .map(|p| format!("\nLa línea más parecida del archivo es:\n{p}\nCopia de ahí UNA línea completa y corta."))
+            .unwrap_or_default();
         return Ok(Respuesta::mal(format!(
-            "No encuentro ese fragmento en {}. Copia un trozo más corto de lo que te mostró `read`.",
+            "No encuentro ese fragmento en {}. Copia un trozo más corto de lo que te mostró `read`, sin los números de línea.{pista}",
             mostrar(&rel)
         )));
     };
@@ -897,4 +916,31 @@ fn forja<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<Respu
     // El token no debe volver al modelo aunque la salida lo repita.
     let texto = s.texto().replace(f.token.as_str(), "***");
     Ok(Respuesta { texto: format!("{cabecera}\n{texto}"), error: s.codigo != Some(0) })
+}
+
+
+/// La línea del archivo que más se parece a la primera línea no vacía de `buscar` (por palabras en común), con dos
+/// líneas de contexto a cada lado y su número, para que el modelo corrija en vez de repetir la misma búsqueda.
+fn linea_parecida(texto: &str, buscar: &str) -> Option<String> {
+    fn palabras(s: &str) -> Vec<String> {
+        s.split(|c: char| !c.is_alphanumeric() && c != '_').filter(|w| w.len() > 1).map(|w| w.to_string()).collect()
+    }
+    let objetivo = palabras(buscar.lines().map(|l| l.trim()).find(|l| !l.is_empty())?);
+    if objetivo.is_empty() {
+        return None;
+    }
+    let lineas: Vec<&str> = texto.lines().collect();
+    let (mut mejor, mut punt) = (0usize, 0usize);
+    for (i, l) in lineas.iter().enumerate() {
+        let pl = palabras(l);
+        let comunes = objetivo.iter().filter(|w| pl.contains(w)).count();
+        if comunes > punt {
+            (mejor, punt) = (i, comunes);
+        }
+    }
+    if punt == 0 || punt * 2 < objetivo.len() {
+        return None;
+    }
+    let (a, b) = (mejor.saturating_sub(2), (mejor + 3).min(lineas.len()));
+    Some((a..b).map(|i| format!("{}: {}", i + 1, lineas[i])).collect::<Vec<_>>().join("\n"))
 }

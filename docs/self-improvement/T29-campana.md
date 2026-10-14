@@ -1,6 +1,6 @@
 # T29 — Ejecutar una campaña reproducible de diez tareas
 
-**Hito:** SI-4 · **Tipo:** Integración y evaluación · **Estado:** **hecha con NO-GO publicado** (2026-10-12; tres campañas: 1, 2 y 3 de 10 aceptadas; [campaña](campana.md), [seguimiento](seguimiento/T29.md)). SI-4 no se cierra.
+**Hito:** SI-4 · **Tipo:** Integración y evaluación · **Estado:** **hecha con GO mínimo** (2026-10-13). Con el 14B: 1→2→3 y 2 de 10 (NO-GO); con **Gemma 4 12B servido por soso**: **5 de 10** en el banco R11–R20, umbral de SI-4 cumplido ([campaña 6](campana.md), [seguimiento](seguimiento/T29.md)). Confirmado en un banco nuevo que nadie había visto (R21–R30, campaña 7): otros **5 de 10**; pero un tercer banco ciego (R31–R40, campañas 8 y 9) da **2 de 10** con el agente anterior y con el mejorado: el GO es frágil (12 de 30 en conjunto).
 
 **Dependencias:** [T22](T22-primera-mejora.md), [T27](T27-reanudacion.md), [T28](T28-conocimiento.md), [T49](T49-pruebas-guest.md)
 

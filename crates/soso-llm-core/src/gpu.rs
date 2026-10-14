@@ -35,9 +35,63 @@ pub struct MatvecOp<'a> {
     pub out: &'a mut [f32],
 }
 
+/// Una capa de Gemma entera para un despacho que la ejecute **en la GPU** (G9): del `hidden` de entrada al de
+/// salida, con su KV residente en el dispositivo. Los pesos van por clave (el despacho ya los tiene subidos:
+/// ver [`GpuDispatch::gemma_subir`]); las normas, que son pequeñas, viajan en cada llamada.
+///
+/// **Posición y KV.** `pos0` es la posición absoluta del primer token del bloque. El despacho guarda cuántas
+/// posiciones tiene de cada capa: si `pos0` es menor que las que guarda, **rebobina** (reutilización de prefijo
+/// o secuencia nueva); si es mayor, no puede seguir y devuelve `Ok(false)`.
+pub struct GemmaCapa<'a> {
+    pub layer: u32,
+    pub pos0: usize,
+    pub n: usize,
+    /// `n` vectores de `h` floats; entra el estado antes de la capa y sale el de después.
+    pub hidden: &'a mut [f32],
+    pub h: usize,
+    pub heads: usize,
+    pub kv_heads: usize,
+    pub head_dim: usize,
+    pub ffn: usize,
+    /// Ventana deslizante de la capa (0 = global).
+    pub ventana: usize,
+    /// Filas máximas del KV de una capa global.
+    pub ctx_max: usize,
+    pub eps: f32,
+    pub theta: f32,
+    pub escala: f32,
+    pub v_de_k: bool,
+    pub v_norm: bool,
+    pub qk_norm: bool,
+    pub geglu: bool,
+    pub layer_scale: f32,
+    pub clave_q: &'a str,
+    pub clave_k: &'a str,
+    pub clave_v: &'a str,
+    pub clave_o: &'a str,
+    pub clave_up: &'a str,
+    pub clave_gate: &'a str,
+    pub clave_down: &'a str,
+    pub attn_norm: &'a [f32],
+    pub q_norm: &'a [f32],
+    pub k_norm: &'a [f32],
+    pub post_attn_norm: &'a [f32],
+    pub ffn_norm: &'a [f32],
+    pub post_ffn_norm: &'a [f32],
+    pub rope_freqs: Option<&'a [f32]>,
+    /// Salida: filas expulsadas por delante del KV de esta capa.
+    pub expulsadas: usize,
+}
+
 /// Despacho opcional hacia la GPU del kernel (implementado en userspace).
 pub trait GpuDispatch {
     fn available(&self) -> bool;
+
+    /// ¿Sabe este despacho presentar tensores de ese dtype? Por defecto, los de [`dtype_ofrecible`]; un
+    /// backend con más núcleos (el CUDA del host acepta Q4_0) lo amplía sin tocar a los demás.
+    fn dtype_soportado(&self, dtype: u8) -> bool {
+        dtype_ofrecible(dtype)
+    }
 
     fn stats(&self) -> GpuStats {
         GpuStats::default()
@@ -45,6 +99,30 @@ pub trait GpuDispatch {
 
     fn cost_model(&self) -> CostModel {
         CostModel::default()
+    }
+
+    /// ¿Puede este despacho intentar la capa `layer` de Gemma entera? `false` si ya la rechazó.
+    fn gemma_puede(&self, layer: u32) -> bool {
+        let _ = layer;
+        false
+    }
+
+    /// ¿Está ya subido ese tensor para [`Self::gemma_capa`]?
+    fn gemma_residente(&self, key: &str) -> bool {
+        let _ = key;
+        false
+    }
+
+    /// Sube un tensor para [`Self::gemma_capa`]; `Ok(false)` si no lo acepta (dtype, VRAM).
+    fn gemma_subir(&mut self, key: &str, view: &TensorView<'_>, rows: usize, cols: usize) -> Result<bool, ()> {
+        let _ = (key, view, rows, cols);
+        Ok(false)
+    }
+
+    /// Ejecuta una capa de Gemma entera en el dispositivo; `Ok(false)` si no puede (la CPU la hace).
+    fn gemma_capa(&mut self, capa: &mut GemmaCapa<'_>) -> Result<bool, ()> {
+        let _ = capa;
+        Ok(false)
     }
 
     /// matvec de una fila por elemento de `out`.
@@ -145,7 +223,7 @@ pub fn try_gpu_matvec(
     x: &[f32],
     out: &mut [f32],
 ) -> Result<bool, ()> {
-    if !gpu.available() || !dtype_ofrecible(view.dtype) {
+    if !gpu.available() || !gpu.dtype_soportado(view.dtype) {
         return Ok(false);
     }
     if view.dtype == DTYPE_F32 && view.f32().is_none() {
@@ -169,7 +247,7 @@ pub fn try_gpu_matvec_batch(
         return Ok(false);
     }
     for op in ops.iter() {
-        if !dtype_ofrecible(op.view.dtype) {
+        if !gpu.dtype_soportado(op.view.dtype) {
             return Ok(false);
         }
         if op.view.dtype == DTYPE_F32 && op.view.f32().is_none() {
@@ -209,7 +287,7 @@ pub fn try_gpu_matmul(
     x: &[f32],
     out: &mut [f32],
 ) -> Result<bool, ()> {
-    if !gpu.available() || !dtype_ofrecible(view.dtype) {
+    if !gpu.available() || !gpu.dtype_soportado(view.dtype) {
         return Ok(false);
     }
     if view.dtype == DTYPE_F32 && view.f32().is_none() {

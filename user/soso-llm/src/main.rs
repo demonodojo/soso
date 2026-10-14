@@ -31,7 +31,10 @@ use soso_llm_core::plan::{MemSnapshot, MemoryPlanConfig, MemoryPreset, ResourceP
 use soso_llm_core::pipeline::{PipelinePlan, PipelineRole};
 use soso_llm_core::runtime::{Backend, Runtime};
 use soso_llm_core::conversation::ModelProfile;
-use soso_llm_core::generation::{GenerationOptions, GenerationReport};
+use soso_llm_core::generation::{
+    stops_from_eos, GenCheckpoint, GenerationObserver, GenerationOptions, GenerationReport,
+    StopReason,
+};
 use soso_llm_core::sample::Sampler;
 use soso_llm_core::tokenizer::StreamDecoder;
 use soso_llm_api::PreparedChatCompletion;
@@ -409,7 +412,9 @@ fn traza(askd: bool, msg: &str) {
 }
 
 fn keepalive_dot(fd: u64) {
-    let _ = sys::write_all(fd, b".");
+    if sys::write_all(fd, b".").is_err() {
+        ASK_CANCEL.store(true, Ordering::Relaxed);
+    }
 }
 
 fn traza_gpu_askd(g: &soso_gpu::SysGpu) {
@@ -660,12 +665,32 @@ fn texto_ask_seguro(s: &str) -> alloc::string::String {
 }
 
 /// Escribe un trozo al cliente de ask y cede el CPU para que sosh lo imprima.
-fn emitir_ask(fd: u64, s: &str) {
+/// `false` = el cliente ya no está (Ctrl-C); hay que dejar de generar.
+fn emitir_ask(fd: u64, s: &str) -> bool {
     let limpio = texto_ask_seguro(s);
     if limpio.is_empty() {
-        return;
+        return true;
     }
-    let _ = sys::write_all(fd, limpio.as_bytes());
+    if sys::write_all(fd, limpio.as_bytes()).is_err() {
+        ASK_CANCEL.store(true, Ordering::Relaxed);
+        false
+    } else {
+        true
+    }
+}
+
+/// `write` de longitud 0: no envía nada y falla al momento si el par cerró.
+fn ask_cliente_cerrado(fd: u64) -> bool {
+    if ASK_CANCEL.load(Ordering::Relaxed) {
+        return true;
+    }
+    let n = sys::write(fd, &[]);
+    if n < 0 {
+        ASK_CANCEL.store(true, Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
 }
 
 /// Socket del cliente de askd mientras se genera. El hook de capa no puede
@@ -677,6 +702,8 @@ static ASK_GPU_FOR_TICK: AtomicU64 = AtomicU64::new(0);
 static ASK_TICK_N: AtomicU32 = AtomicU32::new(0);
 /// Puntos de espera al socket hasta el primer token; el texto no se mezcla.
 static ASK_KEEPALIVE: AtomicBool = AtomicBool::new(false);
+/// El cliente cerró (Ctrl-C). Lo mira el observador de la generación.
+static ASK_CANCEL: AtomicBool = AtomicBool::new(false);
 
 fn askd_elapsed_ms(t0: u64) -> u64 {
     let now = sys::uptime_ms().max(0) as u64;
@@ -790,6 +817,32 @@ pub(crate) fn generar_para_api(
     )
 }
 
+struct AskObs<F, G> {
+    on_token: F,
+    on_prefill: G,
+    fd: u64,
+}
+
+impl<F, G> GenerationObserver for AskObs<F, G>
+where
+    F: FnMut(u32),
+    G: FnMut(usize, usize),
+{
+    fn on_token(&mut self, token: u32) {
+        (self.on_token)(token);
+    }
+
+    fn cancel_at(&mut self, at: GenCheckpoint) -> bool {
+        if let GenCheckpoint::PrefillToken { done, total } = at {
+            if ask_cliente_cerrado(self.fd) {
+                return true;
+            }
+            (self.on_prefill)(done, total);
+        }
+        ask_cliente_cerrado(self.fd)
+    }
+}
+
 /// Igual que `generar` pero con el prompt YA tokenizado.
 ///
 /// Existe porque una plantilla de chat no se puede expresar como texto: el fin de
@@ -849,14 +902,11 @@ pub(crate) fn generar_tokens(
         // el cliente corta a los ~4 min.
         if let Some(fd) = fd_out {
             let t_prefill = sys::uptime_ms();
+            ASK_CANCEL.store(false, Ordering::Relaxed);
             keepalive_dot(fd);
-            bundle.rt.generate_stream_par(
-                &mut bundle.source,
-                prompt_tokens,
-                max_new,
-                eos,
-                sampler,
-                |t| {
+            let mut obs = AskObs {
+                fd,
+                on_token: |t| {
                     let s = decoder.push(&bundle.tokenizer, t);
                     if !s.is_empty() {
                         let limpio = texto_ask_seguro(&s);
@@ -869,9 +919,7 @@ pub(crate) fn generar_tokens(
                         }
                     }
                 },
-                par,
-                &mut gpu_ref,
-                &mut |i, total| {
+                on_prefill: |i, total| {
                     let ms = (sys::uptime_ms() - t_prefill).max(0) as u64;
                     if i == 1 || i == total || (total > 4 && i % 4 == 0) {
                         libsoso::logln!("askd: prefill token {i}/{total} (+{ms} ms)");
@@ -881,7 +929,24 @@ pub(crate) fn generar_tokens(
                         emitir_ask(fd, "\n");
                     }
                 },
-            )
+            };
+            match bundle.rt.generate_stream_par_observed(
+                &mut bundle.source,
+                prompt_tokens,
+                GenerationOptions::new(max_new, stops_from_eos(eos)),
+                sampler,
+                &mut obs,
+                par,
+                &mut gpu_ref,
+            ) {
+                Ok((tokens, report)) => {
+                    if report.stop == StopReason::Cancelled {
+                        ASK_CANCEL.store(true, Ordering::Relaxed);
+                    }
+                    Ok(tokens)
+                }
+                Err(()) => Err(()),
+            }
         } else {
             bundle.rt.generate_stream_planned(
                 &mut bundle.source,
@@ -918,6 +983,14 @@ pub(crate) fn generar_tokens(
     }
     match result {
         Ok(tokens) => {
+            if fd_out.is_some() && ASK_CANCEL.swap(false, Ordering::Relaxed) {
+                libsoso::logln!("askd: generación interrumpida");
+                if let Some(fd) = fd_out {
+                    let _ = sys::write_all(fd, &[crate::ask::PROTO_FIN]);
+                }
+                let _ = tokens;
+                return 0;
+            }
             let elapsed_ms = (sys::uptime_ms() - t0).max(1) as u64;
             let resto = decoder.finish();
             if !resto.is_empty() {

@@ -37,7 +37,11 @@ pub use sse::{
 };
 
 #[cfg(feature = "std")]
+pub mod cuda;
+#[cfg(feature = "std")]
 pub mod e2e;
+#[cfg(feature = "std")]
+pub mod host_mmap;
 #[cfg(feature = "std")]
 pub mod host_pool;
 #[cfg(feature = "std")]

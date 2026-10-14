@@ -45,6 +45,13 @@ pub struct Config {
     /// Cuántas veces se acepta que el servidor rechace la respuesta del modelo por mal formada (`400`: texto tras
     /// una llamada, argumentos que no son JSON…). Se le devuelve el motivo y se reintenta; pasado el tope, es error.
     pub errores_de_formato: usize,
+    /// A la `n`-ésima llamada **idéntica** seguida a otra que ya falló, no se ejecuta: se le devuelve al modelo que se
+    /// ha repetido `n` veces y qué cambiar. (Con T=0 un modelo que falla una edición suele repetirla veinte veces:
+    /// campañas 6 y 7.) `0` lo apaga.
+    pub repetidas_max: usize,
+    /// Ventana de contexto del modelo, en tokens. Con ella se recortan las salidas de herramienta **antiguas**
+    /// antes de que la conversación llegue al límite (el servidor rechaza con 422 lo que no cabe). `None` lo apaga.
+    pub contexto_tokens: Option<usize>,
 }
 
 impl Config {
@@ -60,6 +67,8 @@ impl Config {
             max_llamadas: None,
             empujones: 2,
             errores_de_formato: 5,
+            repetidas_max: 3,
+            contexto_tokens: Some(32_768),
         }
     }
 }
@@ -89,6 +98,10 @@ pub struct Informe {
     pub empujones: usize,
     /// Respuestas del modelo que el servidor rechazó por mal formadas y se le devolvieron para que se corrigiera.
     pub formato: usize,
+    /// Llamadas idénticas a una que ya había fallado y que no se ejecutaron (ver `Config::repetidas_max`).
+    pub repetidas: usize,
+    /// Salidas de herramienta antiguas recortadas para no pasar de la ventana (ver `Config::contexto_tokens`).
+    pub recortadas: usize,
     /// Conversación completa (formato de la API), para auditar.
     pub mensajes: Vec<Value>,
 }
@@ -126,10 +139,13 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
     sesion::normalizar(&mut mensajes);
     if sesion::terminada(&mensajes) {
         let r = mensajes.last().and_then(|m| m["content"].as_str()).unwrap_or("").to_string();
-        return Informe { fin: Fin::Terminado, turnos: 0, llamadas: 0, respuesta_final: r, error: None, empujones: 0, formato: 0, mensajes };
+        return Informe { fin: Fin::Terminado, turnos: 0, llamadas: 0, respuesta_final: r, error: None, empujones: 0, formato: 0, repetidas: 0, recortadas: 0, mensajes };
     }
     let t0 = reloj.ahora_ms();
-    let mut informe = Informe { fin: Fin::SinTurnos, turnos: 0, llamadas: 0, respuesta_final: String::new(), error: None, empujones: 0, formato: 0, mensajes: Vec::new() };
+    let mut informe = Informe { fin: Fin::SinTurnos, turnos: 0, llamadas: 0, respuesta_final: String::new(), error: None, empujones: 0, formato: 0, repetidas: 0, recortadas: 0, mensajes: Vec::new() };
+    // Última llamada ejecutada, si falló, y cuántas veces seguidas se ha repetido igual.
+    let mut ultima: Option<(String, String, bool)> = None;
+    let mut seguidas = 0usize;
     for _ in 0..cfg.max_turnos {
         let gastado = reloj.ahora_ms().saturating_sub(t0);
         if gastado >= cfg.plazo_total_ms {
@@ -137,6 +153,9 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
             break;
         }
         let plazo = cfg.plazo_turno_ms.min(cfg.plazo_total_ms - gastado);
+        if let Some(limite) = cfg.contexto_tokens {
+            informe.recortadas += recortar_contexto(&mut mensajes, limite);
+        }
         let peticion = json!({
             "model": cfg.modelo, "messages": mensajes, "tools": herramientas::definiciones(pol),
             "temperature": cfg.temperatura, "max_tokens": cfg.max_tokens, "stream": false,
@@ -206,7 +225,23 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
                 _ => None,
             };
             let r = match args {
-                Some(a) => ejecutar(e, pol, nombre, &a),
+                Some(a) => {
+                    let clave = (nombre.to_string(), serde_json::to_string(&a).unwrap_or_default());
+                    let repite = ultima.as_ref().is_some_and(|(n, c, fallo)| *fallo && *n == clave.0 && *c == clave.1);
+                    seguidas = if repite { seguidas + 1 } else { 1 };
+                    let r = if cfg.repetidas_max > 0 && repite && seguidas >= cfg.repetidas_max {
+                        informe.repetidas += 1;
+                        Respuesta { texto: aviso_de_repeticion(nombre, seguidas), error: true }
+                    } else {
+                        let mut r = ejecutar(e, pol, nombre, &a);
+                        if repite && r.error {
+                            r.texto.push_str(&format!("\n\nAVISO: es la misma llamada que acabas de hacer y ha fallado igual ({seguidas} veces). No la repitas: cambia lo que envías (ver la pista de arriba) o usa otra herramienta."));
+                        }
+                        r
+                    };
+                    ultima = Some((clave.0, clave.1, r.error));
+                    r
+                }
                 None => Respuesta { texto: "Los argumentos de la llamada no son un objeto JSON válido. Vuelve a llamar con JSON correcto.".to_string(), error: true },
             };
             mensajes.push(json!({"role": "tool", "tool_call_id": id, "content": r.texto}));
@@ -290,4 +325,50 @@ fn aviso_de_empuje(mensajes: &[Value], texto: &str) -> Option<String> {
         return Some("La última comprobación ha fallado. Lee el error que te devolvió, corrige el archivo con `reemplazar_texto` o `insertar` y vuelve a ejecutar la comprobación. No termines con la prueba en rojo.".to_string());
     }
     None
+}
+
+/// Qué decirle al modelo cuando repite una llamada que ya falló: no se ejecuta, y se le da una vía distinta.
+fn aviso_de_repeticion(herramienta: &str, veces: usize) -> String {
+    let consejo = match herramienta {
+        "reemplazar_texto" => "Vuelve a leer el tramo exacto con `read` (con `offset` y `limit`) y copia en `buscar` UNA sola línea completa y corta, sin los números de línea que muestra `read`. Para añadir código nuevo usa `insertar` con el número de línea.",
+        "insertar" => "Lee con `read` el tramo alrededor y comprueba el número de línea; inserta bloques completos (con su `{` y su `}`).",
+        "bash" => "Lee el error de la salida anterior: la orden no va a cambiar de resultado si no cambias antes el archivo con `reemplazar_texto` o `insertar`.",
+        "read" | "grep" | "glob" => "Ya tienes esa información en la conversación; úsala para dar el siguiente paso (editar o comprobar).",
+        _ => "Cambia los argumentos o usa otra herramienta.",
+    };
+    format!("No he ejecutado esta llamada: es la misma que ya falló {} veces seguidas y volvería a fallar. {consejo}", veces - 1)
+}
+
+/// Tokens que ocupa la conversación, por exceso (una cadena de código o castellano da ~3,5 caracteres por token).
+fn tokens_estimados(mensajes: &[Value]) -> usize {
+    mensajes.iter().map(|m| m.to_string().len()).sum::<usize>() / 3
+}
+
+/// Recorta las salidas de herramienta **antiguas** cuando la conversación pasa del 70 % de la ventana (y, si aún sobra,
+/// del 90 %, más a fondo). Se conservan el sistema, la tarea y los últimos mensajes tal cual; de las salidas viejas
+/// queda el principio. Las llamadas no se tocan, así que cada resultado sigue atado a su `tool_call_id`.
+/// Devuelve cuántas salidas se recortaron en esta pasada.
+fn recortar_contexto(mensajes: &mut [Value], limite: usize) -> usize {
+    const MARCA: &str = "\n[… salida antigua recortada para no agotar el contexto; vuelve a pedirla si la necesitas]";
+    let mut recortadas = 0;
+    for (umbral, conservar, cabeza) in [(limite * 7 / 10, 10usize, 400usize), (limite * 9 / 10, 4, 120)] {
+        if tokens_estimados(mensajes) <= umbral || mensajes.len() <= conservar + 2 {
+            continue;
+        }
+        let hasta = mensajes.len() - conservar;
+        for m in mensajes[2..hasta].iter_mut() {
+            if m["role"] != "tool" {
+                continue;
+            }
+            let c = m["content"].as_str().unwrap_or("");
+            if c.len() <= cabeza + MARCA.len() || c.ends_with(MARCA) {
+                continue;
+            }
+            let corte = c.char_indices().take_while(|(i, _)| *i < cabeza).last().map_or(0, |(i, ch)| i + ch.len_utf8());
+            let nuevo = format!("{}{MARCA}", &c[..corte]);
+            m["content"] = Value::String(nuevo);
+            recortadas += 1;
+        }
+    }
+    recortadas
 }

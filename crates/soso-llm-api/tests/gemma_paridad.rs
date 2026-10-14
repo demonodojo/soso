@@ -111,3 +111,38 @@ fn gemma4_bloque_y_token_a_token_coinciden() {
     let max = logits[0].iter().zip(&logits[1]).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
     assert!(max < 0.05, "bloque y token a token difieren en {max}");
 }
+
+/// Con la GPU del host (kernels CUDA Q4_0/Q8_0) el resultado debe ser el mismo. Se salta sin CUDA.
+#[test]
+#[ignore = "necesita target/gemma4-12b-model (7 GB) y una GPU NVIDIA"]
+fn gemma4_con_gpu_coincide_con_llama_cpp() {
+    let mut cuda = match soso_llm_api::cuda::CudaGpu::nueva() {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("gemma_paridad: SALTADA, no hay CUDA ({e})");
+            return;
+        }
+    };
+    let dir = format!("{}/../../target/gemma4-12b-model", env!("CARGO_MANIFEST_DIR"));
+    let leer = |f: &str| std::fs::read(format!("{dir}/{f}")).unwrap_or_else(|e| panic!("falta {dir}/{f}: {e}"));
+    let manifest = Manifest::parse(&leer("manifest.som")).expect("manifest válido");
+    let index = TensorIndex::parse(&leer("index.som")).expect("index válido");
+    let mut rt = Runtime::new(manifest, index.clone(), 0, 0);
+    let mut source = MmapTensorSource::new(format!("{dir}/shards"), index, OwnedMapper::default());
+    let pool = std::env::var("HILOS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&n| n > 1).map(HostPool::new);
+    let par: Option<&dyn RowParallel> = pool.as_ref().map(|p| p as &dyn RowParallel);
+    let mut gpu: Option<&mut dyn soso_llm_core::gpu::GpuDispatch> = Some(&mut cuda);
+    for c in CASOS {
+        rt.reset_sequence();
+        rt.prefill_prompt(&mut source, c.ids, par, &mut gpu, None).expect("prefill");
+        let logits = rt.logits_gpu(&mut source, par, &mut gpu).expect("logits").to_vec();
+        let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let suma: f64 = logits.iter().map(|&l| ((l - max) as f64).exp()).sum();
+        let mut orden: Vec<usize> = (0..logits.len()).collect();
+        orden.sort_by(|&a, &b| logits[b].partial_cmp(&logits[a]).unwrap());
+        let p1 = ((logits[orden[0]] - max) as f64).exp() / suma;
+        assert_eq!(orden[0] as u32, c.top1, "{} (GPU): top-1", c.nombre);
+        assert_eq!(orden[1] as u32, c.top2, "{} (GPU): top-2", c.nombre);
+        assert!((p1 - c.p1).abs() < 0.12, "{} (GPU): p(top-1) {p1:.4} vs {:.4}", c.nombre, c.p1);
+    }
+}

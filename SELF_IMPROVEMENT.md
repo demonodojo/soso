@@ -253,6 +253,8 @@ predefinidas, sin regresiones en la base, más un fallo y un reinicio forzados
 con recuperación comprobada. Registrar tasa de éxito, intentos y coste por
 mejora aceptada; no contar parches abandonados como mejoras.
 
+**Estado (2026-10-13):** el cierre propuesto se cumple **en el umbral** con Gemma 4 12B servido por soso (campaña 6 de T29: 5 de 10, recuperación `kill -9` en R12 y R17, base final verde) y repetido **sobre un banco nuevo que nadie había visto** (campaña 7: 5 de 10, `kill -9` en R22 y R27, base final verde). Margen mínimo. **Un tercer banco ciego (campañas 8 y 9) da 2 de 10** con dos versiones del agente: 12 de 30 en total, así que el cierre es frágil; ver `docs/self-improvement/campana.md`.
+
 ### SI-5 — Uso sostenido en hardware real
 
 **Dependencias:** SI-4 y conectividad del equipo validada. **Resultado:** el

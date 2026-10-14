@@ -541,7 +541,10 @@ impl Runtime {
         }
         let base_gpu = matches!(self.backend, Backend::Gpu | Backend::Auto)
             && gpu.as_ref().is_some_and(|g| g.available());
-        if base_gpu {
+        // Con GPU, Gemma sigue por bloques (su capa por bloques usa `matmul` de la GPU); el resto de modelos
+        // van token a token por el camino de GPU de siempre.
+        let es_gemma = self.manifest.layer(0).is_some_and(|l| crate::gemma::es_capa_gemma(l.flags));
+        if base_gpu && !es_gemma {
             return Some("hay GPU");
         }
         if let Some(pl) = self.planner.as_ref() {
@@ -586,8 +589,11 @@ impl Runtime {
         ledger: &mut GenerationLedger,
         observer: &mut dyn GenerationObserver,
         cancel_slot: &mut Option<&mut GenCancel>,
+        gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
     ) -> Result<bool, ()> {
         let n = tokens.len();
+        let use_gpu = matches!(self.backend, Backend::Gpu | Backend::Auto)
+            && gpu.as_ref().is_some_and(|g| g.available());
         let h = self.manifest.hidden_dim as usize;
         let mut bs = self
             .block
@@ -626,6 +632,8 @@ impl Runtime {
                 &mut self.kv[layer as usize],
                 source,
                 self.planner.as_ref(),
+                gpu,
+                use_gpu,
             );
             if r.is_err() {
                 self.block = Some(bs);
@@ -720,7 +728,7 @@ impl Runtime {
                     }
                 }
                 let sigue =
-                    self.forward_bloque(source, &prompt[i..i + n], parallel, ledger, observer, cancel_slot)?;
+                    self.forward_bloque(source, &prompt[i..i + n], parallel, ledger, observer, cancel_slot, gpu)?;
                 if !sigue {
                     return Ok(());
                 }
@@ -1079,6 +1087,17 @@ impl Runtime {
         source: &mut impl TensorSource,
         parallel: Option<&dyn RowParallel>,
     ) -> Result<&[f32], ()> {
+        self.logits_gpu(source, parallel, &mut None)
+    }
+
+    /// Como [`Self::logits_par`], pero la cabeza de logits (la matriz más grande del modelo: `vocab × hidden`)
+    /// puede ir a la GPU si el despacho la acepta; si no, CPU.
+    pub fn logits_gpu(
+        &mut self,
+        source: &mut impl TensorSource,
+        parallel: Option<&dyn RowParallel>,
+        gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
+    ) -> Result<&[f32], ()> {
         let h = self.manifest.hidden_dim as usize;
         let vocab = self.manifest.vocab_size as usize;
         let name = if self.has_lm_head { "lm_head" } else { "embed" };
@@ -1089,6 +1108,17 @@ impl Runtime {
             rmsnorm(&mut self.scratch.residual, &self.scratch.norm_w, self.manifest.rms_eps);
         }
         let view = source.tensor_view(name)?;
+        let usar_gpu = matches!(self.backend, Backend::Gpu | Backend::Auto);
+        if usar_gpu {
+            if let Some(g) = gpu.as_deref_mut() {
+                if crate::gpu::try_gpu_matvec(g, name, &view, vocab, h, &self.scratch.residual, &mut self.logits_buf)
+                    .unwrap_or(false)
+                {
+                    self.softcap_logits();
+                    return Ok(&self.logits_buf);
+                }
+            }
+        }
         let seq = Sequential;
         let par: &dyn RowParallel = parallel.unwrap_or(&seq);
         matvec_view_par(
@@ -1243,7 +1273,7 @@ impl Runtime {
             }) {
                 break;
             }
-            let logits = self.logits_par(source, parallel)?;
+            let logits = self.logits_gpu(source, parallel, gpu)?;
             let next = sampler.sample(logits);
             if !ledger.accept_sample(next, &stop_token_ids, &mut tokens, observer) {
                 break;
@@ -1278,7 +1308,7 @@ impl Runtime {
                 }) {
                     break;
                 }
-                let logits = self.logits_par(source, parallel)?;
+                let logits = self.logits_gpu(source, parallel, gpu)?;
                 let next = Self::argmax(logits);
                 if next != draft {
                     break;
@@ -1429,7 +1459,7 @@ impl Runtime {
             if let Some(pl) = self.planner.as_mut() {
                 pl.begin_token();
             }
-            let logits = self.logits_par(source, parallel)?;
+            let logits = self.logits_gpu(source, parallel, gpu)?;
             let next = sampler.sample(logits);
             if !ledger.accept_sample(next, &stop_token_ids, &mut tokens, observer) {
                 break;
@@ -1489,7 +1519,7 @@ impl Runtime {
                 }) {
                     break;
                 }
-                let logits = self.logits_par(source, parallel)?;
+                let logits = self.logits_gpu(source, parallel, gpu)?;
                 let next = Self::argmax(logits);
                 if next != draft {
                     break;

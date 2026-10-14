@@ -44,3 +44,16 @@ board.txt
 /vendor/rust/
 
 node_modules/
+# Campañas de automejora (tests/self-improvement/campana/ejecucion-*): el arnés deja copias completas del repo por
+# tarea (~25 MB cada una) mientras corre; sólo se versionan registros, conversaciones, eventos e informes.
+/tests/self-improvement/campana/ejecucion-*/base-*/
+/tests/self-improvement/campana/ejecucion-*/refs/
+/tests/self-improvement/campana/ejecucion-*/*/copia/
+/tests/self-improvement/campana/ejecucion-*/*/validador/
+/tests/self-improvement/campana/ejecucion-*/*/captura/
+/tests/self-improvement/campana/ejecucion-*/*/estado/
+
+# Evidencia de las ejecuciones de campaña 6 en adelante: sólo local (los bancos campana3/, campana4/ y los
+# campaign-N.json sí se versionan, que son lo que hace falta para repetirlas). Las ejecuciones 1–8 ya estaban versionadas.
+/tests/self-improvement/campana/ejecucion-9/
+/tests/self-improvement/campana/ejecucion-1[0-9]*/

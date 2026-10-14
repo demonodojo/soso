@@ -1,1 +1,5 @@
   base de «campana-R11» publicada (generación 0)
+  ejecutado: r-R11/lanzar/0
+  ejecutado: r-R11/exportar/0
+  ejecutado: r-R11/validar/0
+tarea: aceptada

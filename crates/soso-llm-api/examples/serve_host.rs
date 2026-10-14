@@ -75,6 +75,18 @@ fn main() {
         backend.parallel = Some(std::sync::Arc::new(soso_llm_api::HostPool::new(n)));
         eprintln!("serve_host: {n} hilos");
     }
+    // `SOSO_CUDA=1`: pesos residentes en la GPU NVIDIA del host (kernels Q4_0/Q8_0); lo que no cabe va a CPU.
+    let mut con_gpu = false;
+    if matches!(std::env::var("SOSO_CUDA").as_deref(), Ok("1") | Ok("true")) {
+        match soso_llm_api::cuda::CudaGpu::nueva() {
+            Ok(g) => {
+                backend.gpu = Some(Box::new(g));
+                con_gpu = true;
+                eprintln!("serve_host: GPU CUDA activa (pesos residentes bajo demanda)");
+            }
+            Err(e) => eprintln!("serve_host: sin GPU ({e}); sigo en CPU"),
+        }
+    }
     let model_id = backend.profile().id.clone();
     let service = Arc::new(HostService::new(token, backend));
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
@@ -83,7 +95,8 @@ fn main() {
         std::process::exit(1);
     });
     eprintln!(
-        "serve_host: escuchando en http://127.0.0.1:{port} model={model_id} backend=host-cpu"
+        "serve_host: escuchando en http://127.0.0.1:{port} model={model_id} backend={}",
+        if con_gpu { "host-cpu+cuda" } else { "host-cpu" }
     );
     if let Err(e) = run_accept_loop(service, listener) {
         eprintln!("accept: {e}");

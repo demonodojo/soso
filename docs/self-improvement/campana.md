@@ -246,3 +246,104 @@ Evidencia: `tests/self-improvement/campana/ejecucion-8/` (misma organización; m
 - Misma vara que la campaña 4: mismo banco, mismo agente congelado (huellas idénticas), mismos límites e inyecciones. Cambian el **modelo** y el **runtime** (llama.cpp en GPU; Gemma recibe las llamadas a herramientas en su formato nativo por `--jinja`; Qwen las recibía por el parser de soso).
 - El banco R11–R20 ya lo había visto el agente en la campaña 4, pero **no se tocó nada del agente después**, y Gemma no participó en ningún ajuste: la ventaja es del modelo, no de un ajuste a estas tareas. Sigue siendo una sola tanda de diez; un 6/10 tiene un margen de error amplio.
 - **El criterio SI-4 pide el modelo servido por soso**, y aquí se sirvió con llama.cpp. Por eso SI-4 **no se cierra aún**: se cerrará cuando esta misma campaña se repita con Gemma 4 **sobre soso** (etapa G8 de `docs/PLAN-GEMMA4.md`). Lo que queda acreditado es la **capacidad del modelo** y la decisión de portarlo.
+
+---
+
+# Campaña 6 (`campana-si4-6-gemma-soso`): el mismo banco, con Gemma servido por soso
+
+**Estado:** terminada (2026-10-12 22:23 → 2026-10-13 01:10): **GO mínimo, 5 de 10**. Interrumpida una vez entre R12 y R13 por el reinicio de la sesión (unidades paradas; reanudada desde R13 con la base promovida tras R12; ver `ejecucion-9/reanudacion.txt`). R13 se repitió entera.
+
+**Qué es:** la campaña 5 con una sola diferencia, el **runtime**: el modelo lo sirve **soso** (`serve_host`: núcleos Q4_0 nativos, prefill por bloques, KV f16 con ventana deslizante real, T=0, 16 hilos en CPU), no llama.cpp. Mismo banco R11–R20, mismo agente congelado (`mod.rs` `986a8692…`, `herramientas.rs` `b4ea58ae…`), mismos límites e inyecciones. `campaign-6.json` sha256 `c2998b40f2e624e935d83da7697bbe26445234fca3a1d3b76342695a879be6e5`. Evidencia: `tests/self-improvement/campana/ejecucion-9/`.
+
+**Diferencia conocida de modelo:** llama-server activa el **pensamiento** de Gemma por defecto (`<|think|>` en el turno de sistema) y soso lo deja **apagado** (el aviso de generación acaba en `<|channel>thought\n<channel|>`). No se ha medido el efecto.
+
+| tarea | Qwen2.5-Coder-14B (c. 4) | Gemma 4 12B, llama.cpp GPU (c. 5) | **Gemma 4 12B, soso CPU (c. 6)** |
+|---|---|---|---|
+| R11 | rechazada | rechazada | **aceptada** (428 s) |
+| R12 (inyección) | rechazada | aceptada | **aceptada** (628 s; recuperada tras `kill -9`) |
+| R13 | rechazada | aceptada | error: 30 herramientas agotadas |
+| R14 | bloqueada | aceptada | **aceptada** (515 s) |
+| R15 | aceptada | aceptada | error: 30 herramientas agotadas |
+| R16 | bloqueada | rechazada | rechazada |
+| R17 (inyección) | bloqueada | rechazada | rechazada (recuperada tras `kill -9`) |
+| R18 | rechazada | aceptada | **aceptada** (424 s) |
+| R19 | aceptada | aceptada | **aceptada** (306 s) |
+| R20 | rechazada | rechazada | error: 30 herramientas agotadas |
+| **aceptadas** | **2** | **6** | **5** |
+
+**Resultado: 5 de 10 → GO en el criterio de SI-4, en el mínimo exacto** (≥ 5; recuperación acreditada con `kill -9` real en R12 y R17; base final R11+R12+R14+R18+R19 con las pruebas de los tres crates tocados en verde, `base-final.txt`; modelo servido por soso). `soso-improve report` lo da como GO. Fallos: 2 de programación (R16, R17: editó y la prueba reservada no pasa) y 3 que el arnés clasifica como «protocolo» (R13, R15, R20: el intento no terminó, `LimiteHerramientas`).
+
+**Qué son esos tres «protocolo».** Mirando las conversaciones (`R1x/r-R1x-intento0.conversacion.json`): en R15 y R20 el modelo repite **20 y 22 veces la misma llamada** `reemplazar_texto` con un `buscar` de varias líneas que no coincide («No encuentro ese fragmento… Copia un trozo más corto»), y a T=0 no cambia de estrategia; R13 hace 30 llamadas con 20 variantes del mismo intento fallido. Es un fallo del **modelo con el agente congelado** (bucle ante una edición que no encaja), no de la infraestructura ni de soso. Con llama.cpp (pensamiento activo) no ocurrió ninguna vez.
+
+**Cómo leerlo, sin pasarse:**
+- 5 de 10 es el umbral, no un margen: una tarea menos habría sido NO-GO, y entre la campaña 5 (6) y esta (5) la diferencia es una tarea, dentro del ruido de una tanda de diez. Lo que sí queda claro es que **el port conserva la capacidad**: 5 tareas aceptadas contra las 2 del 14B con la misma vara.
+- El banco R11–R20 ya lo vio el agente en la campaña 4, así que **no es una medida ciega**; SI-4 queda cerrado **en el criterio escrito**, no acreditado como generalización.
+- Velocidad: tareas aceptadas en 5–10 minutos cada una en CPU; las que agotan herramientas tardan 20–40 minutos.
+- Lo más rentable para subir la cifra está identificado en la campaña 4: que `reemplazar_texto` acepte la línea completa con su número de `read` y avisar al modelo cuando repite una llamada idéntica. Es un cambio del **agente**: va con campaña y banco nuevos, no aquí.
+
+---
+
+# Campaña 7 (`campana-si4-7-ciega`): banco nuevo, medida ciega
+
+**Estado:** terminada (2026-10-13): **5 de 10, GO en el umbral exacto**, esta vez sobre un banco que **nadie había visto**.
+
+**Qué es:** la comparación que faltaba. Banco **nuevo R21–R30** (`tests/self-improvement/campana3/`: un crate o función distinto en cada tarea, sin solape con R01–R20), escrito y verificado **antes** de correr (las diez: la base falla con la prueba reservada y la referencia pasa, comprobado de forma independiente con el comando del arnés), y el **agente congelado** (`mod.rs` `986a8692…`, `herramientas.rs` `b4ea58ae…`, sin cambios desde la campaña 4). Mismo modelo (Gemma 4 12B QAT Q4_0, servido por soso, T=0, sin pensamiento), mismos límites e inyecciones (`kill -9` en R22 y R27) y mismo criterio. `campaign-7.json` sha256 `32ed8dda6ddfd57c80e8e424646221e14cb11b735419c094084a3b68181dd8f0`. Evidencia: `ejecucion-11/` (y `ejecucion-11-R26/`, `ejecucion-10-parcial-cpu/`).
+
+| tarea | resultado | detalle |
+|---|---|---|
+| R21 | **aceptada** | 496 s |
+| R22 (`kill -9`) | rechazada (programación) | recuperada tras la inyección; la prueba reservada no pasa |
+| R23 | **aceptada** | 645 s |
+| R24 | error (protocolo) | 30 herramientas agotadas |
+| R25 | **aceptada** | 359 s |
+| R26 | **aceptada** | 164 s (repetida aparte, ver incidencias) |
+| R27 (`kill -9`) | **aceptada** | 276 s, recuperada |
+| R28 | error (contexto agotado) | 34 765 tokens > 32 768 del perfil; el arnés lo etiquetó «infraestructura» y se reclasificó (originales en `registros-originales/`) |
+| R29 | rechazada (programación) | 170 s |
+| R30 | rechazada (programación) | 186 s |
+| **aceptadas** | **5 de 10** | |
+
+**Resultado: 5 de 10 → GO en el criterio de SI-4** (≥ 5; recuperación acreditada con `kill -9` real en R22 y R27; base final con los cinco parches juntos en verde, `base-final.txt`; modelo servido por soso). `soso-improve report` lo da como GO.
+
+**Cómo leerlo, sin pasarse:**
+- **Es el mismo 5/10 de la campaña 6 sobre un banco ciego**: el modelo no dependía de haber «visto» R11–R20. Con el 14B salían 2/10 en la misma vara (banco ya visto); con Gemma/llama.cpp 6/10, con Gemma/soso 5/10 y 5/10. La capacidad es real y estable, pero **el margen sigue siendo el mínimo**: una tarea menos sería NO-GO y una tanda de diez no distingue 5 de 6.
+- Fallos: tres de programación (editó y la prueba reservada no pasa) y dos de agotamiento (herramientas en R24; contexto en R28). Ninguno es del runtime ni de la infraestructura.
+- Qué mejoraría la cifra, identificado ya en las campañas 4 y 6: aviso al modelo ante una llamada idéntica repetida, `reemplazar_texto` por línea con número y un tope de contexto con resumen. Es un cambio del **agente**: va con otro banco nuevo, no aquí.
+
+**Incidencias (todas del asistente o de la máquina, ninguna del modelo):**
+- Una prueba de GPU y otra de CPU lanzadas a la vez agotaron la RAM y el OOM killer mató el servidor: R25–R26 de esa tirada salieron como infraestructura. Se paró y se repitió entera; las cuatro tareas válidas de aquel intento (R21–R24) quedan en `ejecucion-10-parcial-cpu/`.
+- Un reinicio ordenado del sistema a las 11:18 mató la campaña recién lanzada (sin resultados); se relanzó desde cero.
+- Al cambiar el servidor al binario con la capa de Gemma entera en GPU justo al acabar R25, R26 se encontró el puerto cerrado (el arnés lanza la siguiente tarea en ~1 s). R26 se repitió aparte desde la base promovida tras R25 (`ejecucion-11-R26/`).
+- **Qué sirvió a qué:** R21–R25 con el backend CPU + matmul en GPU; R26 (repetida), R27–R30 con la capa entera en GPU. Mismos pesos y mismo resultado numérico a ruido de f32 (paridad comprobada); no se midió el efecto en las decisiones del modelo.
+
+---
+
+# Campañas 8 y 9: A/B del agente sobre un tercer banco ciego (R31–R40)
+
+**Estado:** terminadas (2026-10-13/14). **Resultado: 2 de 10 con el agente anterior y 2 de 10 con el agente mejorado → NO-GO en las dos.** Mejorar el agente no cambió la cifra, y este banco desmiente la lectura optimista de las campañas 6 y 7.
+
+**Qué se hizo.** Banco **nuevo** R31–R40 (`tests/self-improvement/campana4/`: `sosomfs`, `sosofs`, `soso-audio`, `soso-llm-core`, `gguf2som`, `sosomodel`, `soso-http`, `soso-web-core`, `block-dev`, `soso-abi`; cinco subagentes lo escribieron y yo verifiqué las diez: la base falla y la referencia pasa), fijado **antes** de correr. Mismo modelo (Gemma 4 12B, soso, GPU, T=0), mismos límites e inyecciones (`kill -9` en R33 y R38), mismo servidor, y **dos agentes**:
+- **Campaña 8, agente v1** (congelado desde la campaña 4: `mod.rs` `986a8692…`, `herramientas.rs` `b4ea58ae…`). `campaign-8.json` sha256 `956d22aa…`. Evidencia: `ejecucion-12-agente-v1/`.
+- **Campaña 9, agente v2** (`mod.rs` `25484f48…`, `herramientas.rs` `9e7f908d…`): bloqueo de la llamada idéntica que ya falló (con consejo), pista de la línea más parecida y limpieza de números de línea en `reemplazar_texto`, y recorte de salidas antiguas antes de agotar el contexto. Mejoras genéricas diseñadas con los fallos de las campañas 4–7, antes de ver este banco. `campaign-9.json` sha256 `a4084349…`. Evidencia: `ejecucion-13-agente-v2/` (y `…-parcial-detenida/`, un primer intento que se paró a medias y no cuenta).
+
+| tarea | v1 | v2 |
+|---|---|---|
+| R31 | rechazada | rechazada |
+| R32 | error: contexto agotado (422, 32 777 > 32 768) | error: 400 por argumentos que no son JSON tras agotar los reintentos de formato |
+| R33 (`kill -9`) | rechazada | rechazada |
+| R34 | rechazada | rechazada |
+| R35 | rechazada | error: 30 herramientas agotadas |
+| R36 | **aceptada** | **aceptada** |
+| R37, R38 (`kill -9`), R39 | rechazadas | rechazadas |
+| R40 | **aceptada** | **aceptada** |
+| **aceptadas** | **2 de 10** | **2 de 10** |
+
+**Lo que se ve en las conversaciones.**
+- **El recorte de contexto funciona:** en R32 recortó 7 salidas y el 422 desapareció, pero la tarea acabó por otra causa. No se puede atribuir una mejora.
+- **Bloqueo de repeticiones y pista: no llegaron a dispararse** (0 en las dos tareas que acabaron en error). Los bucles de las campañas 6 y 7 no se repitieron en este banco; había otros fallos.
+- **R35 fue peor con v2** (30 herramientas, 13 `reemplazar_texto` y 10 `read`): sospecho que recortar salidas antiguas le hizo releer, pero no lo he comprobado. Con diez tareas no se distingue de la variación entre tiradas.
+- **Los rechazos de programación son rápidos (76–161 s):** el modelo hace una edición plausible, las pruebas visibles pasan y la reservada no. No es un problema de herramientas sino de comprensión del enunciado.
+
+**Lo que cambia en las conclusiones anteriores.** Con Gemma servido por soso hay ya **tres bancos distintos**: 5 de 10 (R11–R20, visto), 5 de 10 (R21–R30, ciego) y 2 de 10 (R31–R40, ciego). Son **12 de 30 (40 %)** sobre treinta tareas distintas, por debajo del 50 % que fija el criterio. El GO de las campañas 6 y 7 fue real pero **frágil**: dos tandas en el umbral exacto y una por debajo. Lo honesto es que el modelo resuelve algo más de un tercio de estas tareas, no la mitad, y que una tanda de diez no distingue 2 de 5.
+- **Qué no se ha probado:** que v2 sea mejor que v1 (empate a 2/10; el cambio más claro es que ya no hay 422 por contexto). Tampoco que sea peor.
+- **Qué mejoraría de verdad la cifra:** no las herramientas sino cómo se usa el enunciado: leer la especificación punto por punto y escribir pruebas propias por punto antes de dar la tarea por hecha (la idea ya apuntada en la memoria del proyecto), o dejar que el modelo piense (el pensamiento de Gemma está apagado en soso y la campaña 5 de llama.cpp lo llevaba activo). Son experimentos distintos, con banco nuevo.

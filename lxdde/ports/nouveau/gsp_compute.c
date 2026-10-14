@@ -1025,6 +1025,33 @@ int gsp_compute_encode_qmd(struct gsp_compute *cp, const GspQmdV05 *qmd,
     return 0;
 }
 
+/* Cuánto tarda un lanzamiento de verdad (de encolar a ver el semáforo). En la ROG
+ * (2026-10-12) la GPU ya acierta pero va a 0,34 tok/s: unos 9 ms por matvec, que
+ * es órdenes de magnitud más que el cálculo. Con esto se ve si la espera es de la
+ * GPU o del camino hasta ella, y cuántos lanzamientos pasan de los 2 ms de sondeo
+ * activo y caen al bucle de `lx_mdelay`. Una línea cada LAUNCH_STAT_CADA. */
+#define LAUNCH_STAT_CADA 4000u
+static uint64_t g_ls_ns, g_ls_max;
+static unsigned g_ls_n, g_ls_lentos;
+
+static void launch_stat(uint64_t ns, int lento)
+{
+    g_ls_ns += ns;
+    if (ns > g_ls_max) {
+        g_ls_max = ns;
+    }
+    g_ls_lentos += (unsigned)lento;
+    if (++g_ls_n >= LAUNCH_STAT_CADA) {
+        lx_printk("nouveau-lx: %u lanzamientos: media %llu us, max %llu us, %u "
+                  "pasaron de %u us\n", g_ls_n,
+                  (unsigned long long)(g_ls_ns / g_ls_n / 1000ull),
+                  (unsigned long long)(g_ls_max / 1000ull), g_ls_lentos,
+                  G4F_SPIN_US);
+        g_ls_ns = g_ls_max = 0;
+        g_ls_n = g_ls_lentos = 0;
+    }
+}
+
 /* Encola el QMD de `k` y espera su semáforo. El semáforo tiene que estar a cero
  * ANTES de llamar aquí: quien stagea los datos es quien lo pone, porque es la
  * misma escritura que publica lo que el kernel va a leer.
@@ -1064,23 +1091,28 @@ static int launch_wait_sem(struct gsp_compute *cp, const struct gsp_kernel *k,
 
     sem = (const volatile uint32_t *)cp_data(cp, G4F_SEM_SLOT(sem_slot));
     {
-        uint64_t t_fin = lx_ktime_get_ns() + (uint64_t)G4F_SPIN_US * 1000ull;
+        uint64_t t_ini = lx_ktime_get_ns();
+        uint64_t t_fin = t_ini + (uint64_t)G4F_SPIN_US * 1000ull;
+        uint64_t t_now;
 
         do {
             __asm__ __volatile__("mfence" ::: "memory");
             if (*sem == G4F_SEM_PAYLOAD) {
                 gsp_chan_ack_progress(cp->chan);
+                launch_stat(lx_ktime_get_ns() - t_ini, 0);
                 return 0;
             }
-        } while (lx_ktime_get_ns() < t_fin);
-    }
-    for (waited = 0; waited <= G4F_WAIT_MS; waited++) {
-        __asm__ __volatile__("mfence" ::: "memory");
-        if (*sem == G4F_SEM_PAYLOAD) {
-            gsp_chan_ack_progress(cp->chan);
-            return 0;
+            t_now = lx_ktime_get_ns();
+        } while (t_now < t_fin);
+        for (waited = 0; waited <= G4F_WAIT_MS; waited++) {
+            __asm__ __volatile__("mfence" ::: "memory");
+            if (*sem == G4F_SEM_PAYLOAD) {
+                gsp_chan_ack_progress(cp->chan);
+                launch_stat(lx_ktime_get_ns() - t_ini, 1);
+                return 0;
+            }
+            lx_mdelay(1);
         }
-        lx_mdelay(1);
     }
     lx_printk("nouveau-lx: %s — el QMD no señalizó en %u ms (sem=0x%08x)\n",
               what, G4F_WAIT_MS, *sem);

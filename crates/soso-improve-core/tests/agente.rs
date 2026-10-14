@@ -484,3 +484,74 @@ fn una_respuesta_mal_formada_rechazada_con_400_se_devuelve_al_modelo_con_el_moti
     let inf = correr(&mut repo(), &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg, "t", &mut |_, _| {});
     assert_eq!((inf.fin, inf.formato), (Fin::ErrorModelo, 2));
 }
+
+#[test]
+fn una_llamada_identica_que_ya_fallo_no_se_repite_veinte_veces() {
+    let mut e = repo();
+    let mala = || llamada("reemplazar_texto", json!({"filePath": "src/lib.rs", "buscar": "esto no existe en el archivo", "nuevo": "x"}));
+    let mut m = Guion(vec![mala(), mala(), mala(), mala(), json!({"role": "assistant", "content": "me rindo"})], vec![]);
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), "t", &mut |_, _| {});
+    let salidas: Vec<String> = inf.mensajes.iter().filter(|x| x["role"] == "tool").map(|x| x["content"].as_str().unwrap().to_string()).collect();
+    assert_eq!(salidas.len(), 4);
+    assert!(salidas[0].starts_with("No encuentro") && !salidas[0].contains("AVISO"));
+    // La segunda sí se ejecuta, pero lleva el aviso; a la tercera se la bloquea sin ejecutarla.
+    assert!(salidas[1].contains("AVISO: es la misma llamada"), "{}", salidas[1]);
+    assert!(salidas[2].starts_with("No he ejecutado esta llamada"), "{}", salidas[2]);
+    assert!(salidas[2].contains("`read`") && salidas[3].starts_with("No he ejecutado"));
+    assert_eq!(inf.repetidas, 2);
+}
+
+#[test]
+fn una_llamada_distinta_o_que_funciona_reinicia_la_cuenta() {
+    let mut e = repo();
+    let mala = |b: &str| llamada("reemplazar_texto", json!({"filePath": "src/lib.rs", "buscar": b, "nuevo": "x"}));
+    let mut m = Guion(vec![mala("nada uno"), mala("nada dos"), mala("nada uno"), mala("nada uno"), json!({"role": "assistant", "content": "fin"})], vec![]);
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), "t", &mut |_, _| {});
+    assert_eq!(inf.repetidas, 0, "sólo cuentan las idénticas seguidas");
+}
+
+#[test]
+fn repetidas_max_cero_lo_apaga() {
+    let mut e = repo();
+    let mala = || llamada("reemplazar_texto", json!({"filePath": "src/lib.rs", "buscar": "no existe", "nuevo": "x"}));
+    let mut cfg = Config::nueva("m", "s");
+    cfg.repetidas_max = 0;
+    let mut m = Guion(vec![mala(), mala(), mala(), json!({"role": "assistant", "content": "fin"})], vec![]);
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg, "t", &mut |_, _| {});
+    assert_eq!(inf.repetidas, 0);
+}
+
+#[test]
+fn reemplazar_acepta_los_numeros_de_linea_de_read_y_da_una_pista_si_no_encuentra() {
+    let mut e = repo();
+    // El modelo copia la línea con el número que mostró `read`.
+    let r = ejecutar(&mut e, &Politica::nueva(R), "reemplazar_texto", &json!({"filePath": "src/lib.rs", "buscar": "2:     if k == key {", "nuevo": "    if k.eq_ignore_ascii_case(key) {"}));
+    assert!(!r.error, "{}", r.texto);
+    assert!(String::from_utf8(e.f["/w/src/lib.rs"].clone()).unwrap().contains("eq_ignore_ascii_case"));
+    // Un fragmento inventado que se parece a una línea real: la respuesta enseña la más parecida, con su número.
+    let r = ejecutar(&mut e, &Politica::nueva(R), "reemplazar_texto", &json!({"filePath": "src/lib.rs", "buscar": "if k.eq_ignore_ascii_case(chave) {", "nuevo": "x"}));
+    assert!(r.error);
+    assert!(r.texto.contains("La línea más parecida del archivo es:") && r.texto.contains("2: "), "{}", r.texto);
+}
+
+#[test]
+fn las_salidas_antiguas_se_recortan_antes_de_agotar_el_contexto() {
+    let mut e = repo();
+    let grande = "x".repeat(6000);
+    e.f.insert("/w/grande.txt".into(), grande.clone().into_bytes());
+    let lecturas: Vec<Value> = (0..12).map(|_| llamada("read", json!({"filePath": "grande.txt"}))).collect();
+    let mut resto = lecturas;
+    resto.push(json!({"role": "assistant", "content": "listo"}));
+    let mut cfg = Config::nueva("m", "s");
+    cfg.contexto_tokens = Some(6000); // ventana pequeña para forzarlo
+    cfg.repetidas_max = 0; // las doce lecturas son iguales a propósito
+    let mut m = Guion(resto, vec![]);
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg, "t", &mut |_, _| {});
+    assert_eq!(inf.fin, Fin::Terminado);
+    assert!(inf.recortadas > 0, "debía recortar salidas viejas");
+    let tools: Vec<&str> = inf.mensajes.iter().filter(|x| x["role"] == "tool").map(|x| x["content"].as_str().unwrap()).collect();
+    assert!(tools[0].contains("salida antigua recortada") && tools[0].len() < 600, "{}", tools[0].len());
+    assert!(!tools.last().unwrap().contains("salida antigua recortada"), "la última salida se conserva entera");
+    // Cada resultado sigue atado a su llamada.
+    assert_eq!(inf.mensajes.iter().filter(|x| x["role"] == "tool").count(), 12);
+}
