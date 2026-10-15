@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "R40",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "open_flags_validos y O_FLAGS_MASK en soso-abi",
+  "etiqueta": "open-flags",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R40/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R40",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R40/aceptacion.rs",
+    "reservado/R40/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R40/enunciado.md": "149dbf4176c41c288c58c7394bb78df0eb5b4c184288d8e03e3973bdaf394530"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/soso-abi/src/lib.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "open_flags_validos rechaza combinaciones incoherentes de flags de open",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "soso-abi"
+    ],
+    "prueba_reservada": "reservado/R40/aceptacion.rs",
+    "destino_prueba": "crates/soso-abi/tests/aceptacion_R40.rs",
+    "referencia": "reservado/R40/referencia.patch"
+  }
+}

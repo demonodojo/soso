@@ -578,6 +578,7 @@ pub fn forward_gated_attn<S: TensorSource>(
             &mut s.head_out[..head_dim],
             None,
             false,
+            0,
         );
         let gbase = head * head_dim;
         for d in 0..head_dim {

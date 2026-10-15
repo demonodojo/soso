@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "R37",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "parse_url es pública y rechaza hosts, puertos y credenciales inválidos",
+  "etiqueta": "parse-url",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R37/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R37",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R37/aceptacion.rs",
+    "reservado/R37/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R37/enunciado.md": "a4b6d76a1ec23ae4ae63740c35ee179289152bc4211751a3b2c9fc5390c7d50c"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/soso-http/src/lib.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "parse_url es pública y rechaza hosts, puertos y credenciales inválidos",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "soso-http"
+    ],
+    "prueba_reservada": "reservado/R37/aceptacion.rs",
+    "destino_prueba": "crates/soso-http/tests/aceptacion_R37.rs",
+    "referencia": "reservado/R37/referencia.patch"
+  }
+}

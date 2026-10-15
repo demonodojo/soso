@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "R24",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "Header::parse rechaza entry_size no 128*2^n y rango utilizable invertido",
+  "etiqueta": "gpt-cabecera-coherente",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R24/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R24",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R24/aceptacion.rs",
+    "reservado/R24/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R24/enunciado.md": "443ad79a71ff70055faeae97891b625bee167d48c0f771b6e1c8791493702664"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/gptdisk/src/lib.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "Header::parse rechaza entry_size no 128*2^n y rango utilizable invertido",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "gptdisk"
+    ],
+    "prueba_reservada": "reservado/R24/aceptacion.rs",
+    "destino_prueba": "crates/gptdisk/tests/aceptacion_R24.rs",
+    "referencia": "reservado/R24/referencia.patch"
+  }
+}

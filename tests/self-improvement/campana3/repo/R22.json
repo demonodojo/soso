@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "R22",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "ModelBundle::validate rechaza byte_len, dtype y nombres incoherentes",
+  "etiqueta": "validar-bundle",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R22/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R22",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R22/aceptacion.rs",
+    "reservado/R22/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R22/enunciado.md": "c7cb50897e3eda89474cdeef5747777d2543a73c8b8cac4bbc97686b083d0ed8"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/sosomodel/src/validate.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "ModelBundle::validate rechaza byte_len, dtype y nombres incoherentes",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "sosomodel"
+    ],
+    "prueba_reservada": "reservado/R22/aceptacion.rs",
+    "destino_prueba": "crates/sosomodel/tests/aceptacion_R22.rs",
+    "referencia": "reservado/R22/referencia.patch"
+  }
+}

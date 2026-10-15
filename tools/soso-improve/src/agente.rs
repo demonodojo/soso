@@ -36,6 +36,10 @@ pub fn agente(op: &Opciones) -> Result<i32, Error> {
     };
     let puerto = numero("puerto", 17299)? as u16;
     let mut cfg = Config::nueva(op.uno("modelo").filter(|s| !s.is_empty()).unwrap_or("soso-coder"), &sistema);
+    // El tokenizador manda: con Mellum son ~1,5 caracteres por token y el recorte de contexto necesita saberlo.
+    if let Some(c) = std::env::var("SOSO_AGENTE_CHARS_POR_TOKEN").ok().and_then(|v| v.parse::<f32>().ok()).filter(|v| *v >= 0.5) {
+        cfg.chars_por_token = c;
+    }
     cfg.max_turnos = numero("max-turnos", cfg.max_turnos as u64)? as usize;
     cfg.max_tokens = numero("max-tokens", cfg.max_tokens as u64)? as u32;
     cfg.plazo_turno_ms = numero("plazo-ms", cfg.plazo_turno_ms)?;

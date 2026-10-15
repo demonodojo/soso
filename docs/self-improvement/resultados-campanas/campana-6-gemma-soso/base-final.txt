@@ -1,0 +1,5 @@
+Base final = base promovida tras R19 (R11+R12+R14+R18+R19 sobre 6f558f072). Crates tocados: gptdisk, soso-update-core, soso-wpa2.
+cargo test -p gptdisk -p soso-wpa2            -> ok (12 + 27 + 1 pruebas, 0 fallos)
+cargo test -p soso-update-core --features std -> ok (17 + 4 + 11 pruebas, 0 fallos)
+Nota: `cargo test -p soso-update-core` SIN --features std no compila (`vec`, `to_string`, `PackWriter` en no_std): ocurre igual en la base original 6f558f072, no lo introdujo la campaña.
+Comprobado el 2026-10-13 por el asistente, fuera del arnés (el arnés no hace regresión: "regresion": None).

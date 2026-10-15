@@ -1,0 +1,49 @@
+--- a/crates/soso-http/src/lib.rs	2026-10-13 14:14:05.544906124 +0200
++++ b/crates/soso-http/src/lib.rs	2026-10-13 14:14:20.767771009 +0200
+@@ -598,18 +598,37 @@
+     Ok((status, body))
+ }
+ 
+-fn parse_url(url: &str) -> Result<(&str, &str, u16, String), HttpError> {
++/// Descompone una URL `https://` en (esquema, host, puerto, ruta con query).
++pub fn parse_url(url: &str) -> Result<(&str, &str, u16, String), HttpError> {
+     let rest = url.strip_prefix("https://").ok_or(HttpError::Parse)?;
+-    let (host_port, path) = match rest.split_once('/') {
+-        Some((h, p)) => (h, format!("/{p}")),
+-        None => (rest, String::from("/")),
+-    };
+-    if let Some((host, port)) = host_port.rsplit_once(':') {
+-        let port: u16 = port.parse().map_err(|_| HttpError::Parse)?;
+-        Ok(("https", host, port, path))
++    // El fragmento no viaja al servidor.
++    let rest = rest.split('#').next().unwrap_or(rest);
++    let end = rest.find(['/', '?']).unwrap_or(rest.len());
++    let (host_port, tail) = rest.split_at(end);
++    let path = if tail.is_empty() {
++        String::from("/")
++    } else if tail.starts_with('?') {
++        format!("/{tail}")
+     } else {
+-        Ok(("https", host_port, 443, path))
++        tail.to_string()
++    };
++    if host_port.contains('@') {
++        return Err(HttpError::Parse);
++    }
++    let (host, port) = match host_port.rsplit_once(':') {
++        Some((host, port)) => {
++            let port: u16 = port.parse().map_err(|_| HttpError::Parse)?;
++            if port == 0 {
++                return Err(HttpError::Parse);
++            }
++            (host, port)
++        }
++        None => (host_port, 443),
++    };
++    if host.is_empty() {
++        return Err(HttpError::Parse);
+     }
++    Ok(("https", host, port, path))
+ }
+ 
+ fn parse_response_head(head: &[u8]) -> Result<(u16, Vec<(String, String)>), HttpError> {

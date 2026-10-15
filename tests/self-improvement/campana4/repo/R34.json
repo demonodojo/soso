@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "id": "R34",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "Sampler tolera NaN, infinitos y desempata por el menor índice",
+  "etiqueta": "sampler-nan",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R34/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R34",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R34/aceptacion.rs",
+    "reservado/R34/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R34/enunciado.md": "10d33cb62a8b72093501810cfec39c3bbf81926f021a9181f8d49e7e789ee52e"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/soso-llm-core/src/sample.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "Sampler tolera NaN, infinitos y desempata por el menor índice",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "soso-llm-core",
+      "--features",
+      "std"
+    ],
+    "prueba_reservada": "reservado/R34/aceptacion.rs",
+    "destino_prueba": "crates/soso-llm-core/tests/aceptacion_R34.rs",
+    "referencia": "reservado/R34/referencia.patch"
+  }
+}

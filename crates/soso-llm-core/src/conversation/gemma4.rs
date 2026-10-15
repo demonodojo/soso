@@ -29,7 +29,7 @@ const CIERRA_CANAL: &str = "<channel|>";
 
 /// ¿Tiene este texto generado la forma de una respuesta de Gemma 4? Las marcas no aparecen en otras familias.
 pub fn parece_gemma4(texto: &str) -> bool {
-    texto.contains(ABRE_LLAMADA) || texto.contains(ABRE_CANAL) || texto.contains("<turn|>")
+    texto.contains(ABRE_LLAMADA) || texto.contains(ABRE_CANAL) || texto.contains(CIERRA_CANAL) || texto.contains("<turn|>")
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -416,6 +416,16 @@ fn declaracion(nombre: &str, descripcion: &str, params: &Value) -> String {
 /// Los canales de pensamiento se descartan. Si hay varias llamadas se atiende **la primera**, como con Qwen.
 pub fn interpretar(entrada: &ChatInput, generado: &str, id_next: u32, pasante: bool) -> Result<AssistantTurn, ChatError> {
     let mut texto = String::new();
+    // Con el pensamiento activo, tras un resultado de herramienta el aviso de generación ya abre el canal
+    // (`<|channel>thought\n`), así que lo generado empieza **dentro** del pensamiento y lo cierra con `<channel|>`
+    // sin haber escrito la apertura: todo lo anterior a ese cierre es razonamiento.
+    let mut resto = generado;
+    if let Some(c) = resto.find(CIERRA_CANAL) {
+        if resto[..c].find(ABRE_CANAL).is_none() {
+            resto = &resto[c + CIERRA_CANAL.len()..];
+        }
+    }
+    let generado = resto;
     // Quitar canales de pensamiento; uno sin cerrar se lleva el resto (el modelo se quedó pensando).
     let mut resto = generado;
     loop {

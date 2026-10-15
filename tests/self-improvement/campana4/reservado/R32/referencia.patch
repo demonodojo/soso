@@ -1,0 +1,23 @@
+--- a/crates/sosofs/src/fs.rs	2026-10-13 14:13:47.884704071 +0200
++++ b/crates/sosofs/src/fs.rs	2026-10-13 14:14:58.183237361 +0200
+@@ -210,13 +210,20 @@
+     }
+ 
+     /// Resuelve una ruta absoluta (o relativa a la raíz) a un inode.
++    /// `.` se ignora y `..` sube al directorio padre (la raíz es su propio padre).
+     pub fn resolve(&mut self, path: &str) -> Result<u64, FsError> {
++        let mut pila = Vec::new();
+         let mut ino = ROOT_INODE;
+         for comp in path.split('/').filter(|c| !c.is_empty() && *c != ".") {
+             let st = self.stat_inode(ino)?;
+             if st.file_type != FT_DIR {
+                 return Err(FsError::NotADir);
+             }
++            if comp == ".." {
++                ino = pila.pop().unwrap_or(ROOT_INODE);
++                continue;
++            }
++            pila.push(ino);
+             ino = self.lookup(ino, comp)?;
+         }
+         Ok(ino)

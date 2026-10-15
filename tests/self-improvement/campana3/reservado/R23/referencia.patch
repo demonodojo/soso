@@ -1,0 +1,19 @@
+diff --git a/crates/soso-web-core/src/html.rs b/crates/soso-web-core/src/html.rs
+index 0179480..3e43dd0 100644
+--- a/crates/soso-web-core/src/html.rs
++++ b/crates/soso-web-core/src/html.rs
+@@ -48,11 +48,13 @@ pub fn reflow_html(html: &str, base_url: &str, width: usize) -> ReflowOutput {
+                     ctx.anchor_href = attr_value(attrs, "href");
+                     ctx.anchor_text.clear();
+                 } else if tag == "li" {
++                    // Un `<li>` sin cerrar el anterior también abre línea nueva.
++                    ctx.newline();
+                     ctx.push_text("• ");
+                 } else if BLOCK_TAGS.contains(&tag.as_str()) {
+                     ctx.ensure_blank_line();
+                 }
+-                if *self_closing && tag == "hr" {
++                if tag == "hr" {
+                     ctx.newline();
+                     ctx.push_line_of_dashes(width);
+                 }

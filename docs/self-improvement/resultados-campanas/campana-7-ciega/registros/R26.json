@@ -1,0 +1,9 @@
+{
+ "id": "R26",
+ "resultado": "aceptada",
+ "intentos": 1,
+ "segundos": 164,
+ "nota": "repetida aparte (ejecucion-11-R26) tras el corte del servidor que provoc\u00f3 el asistente al cambiar de binario; ver incidencias.txt",
+ "herramientas": 8,
+ "tokens": 65397
+}

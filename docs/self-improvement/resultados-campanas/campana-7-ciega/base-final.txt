@@ -1,0 +1,5 @@
+Base final = composición de los cinco parches aceptados (R21 soso-http, R23 soso-web-core, R25 soso-update-core, R26 soso-resize-core, R27 soso-wpa2) sobre 6f558f072.
+R26 se repitió aparte (ejecucion-11-R26) desde la base promovida tras R25; sus archivos son disjuntos de los de R27, así que se superponen sin conflicto.
+cargo test -p soso-http -p soso-web-core -p soso-resize-core -p soso-wpa2   -> ok (10 + 23 + 5 + 27 + 1 pruebas, 0 fallos)
+cargo test -p soso-update-core --features std                              -> ok (17 + 4 + 11 pruebas, 0 fallos)
+Comprobado el 2026-10-13 por el asistente, fuera del arnés (el arnés no hace regresión: "regresion": None).

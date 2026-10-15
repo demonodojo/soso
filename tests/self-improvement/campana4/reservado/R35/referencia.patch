@@ -1,0 +1,50 @@
+--- a/crates/gguf2som/src/lib.rs
++++ b/crates/gguf2som/src/lib.rs
+@@ -1030,6 +1030,9 @@
+     for _ in 0..tensor_count {
+         let name = read_string(file)?;
+         let n_dims = read_u32(file)? as usize;
++        if n_dims > MAX_DIMS {
++            return Err(format!("tensor {name}: {n_dims} dimensiones (máximo {MAX_DIMS})"));
++        }
+         let mut shape = Vec::with_capacity(n_dims);
+         for _ in 0..n_dims {
+             shape.push(read_u64(file)?);
+@@ -1192,7 +1195,7 @@
+             let elem_type = read_u32(file)?;
+             let count = read_u64(file)?;
+             if elem_type == 8 {
+-                let mut v = Vec::with_capacity(count.min(1 << 24) as usize);
++                let mut v = Vec::with_capacity(count.min(1 << 12) as usize);
+                 for _ in 0..count {
+                     v.push(read_string(file)?);
+                 }
+@@ -1227,10 +1230,25 @@
+     read_bytes_le(file, 8)
+ }
+ 
++/// Longitud máxima de una cadena GGUF (nombres, tokens, plantillas).
++const MAX_CADENA: u64 = 16 << 20;
++/// Máximo de dimensiones de un tensor (ggml usa 4; se deja margen).
++const MAX_DIMS: usize = 8;
++
+ fn read_string<R: Read + Seek>(file: &mut R) -> Result<String, String> {
+-    let len = read_u64(file)? as usize;
+-    let mut buf = vec![0u8; len];
+-    file.read_exact(&mut buf)?;
++    let len = read_u64(file)?;
++    if len > MAX_CADENA {
++        return Err(format!("cadena de {len} bytes demasiado larga (máximo {MAX_CADENA})"));
++    }
++    // Se lee por trozos: la memoria reservada nunca pasa de lo que el fichero trae.
++    let len = len as usize;
++    let mut buf = Vec::new();
++    while buf.len() < len {
++        let n = (len - buf.len()).min(1 << 16);
++        let ini = buf.len();
++        buf.resize(ini + n, 0);
++        file.read_exact(&mut buf[ini..])?;
++    }
+     String::from_utf8(buf).map_err(|e| e.to_string())
+ }
+ 

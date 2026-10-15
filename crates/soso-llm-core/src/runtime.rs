@@ -507,6 +507,20 @@ impl Runtime {
     /// Tokens por bloque en el prefill (T82). 8 son los acumuladores que caben en los
     /// registros YMM de los kernels por lotes; con más baja el rendimiento por caché.
     pub const BLOQUE_PREFILL: usize = 8;
+    /// Bloque del prefill de un modelo MoE que la GPU hace entero: más tokens por bloque = cada experto lee sus pesos
+    /// una vez para varios tokens.
+    pub const BLOQUE_PREFILL_MOE_GPU: usize = 32;
+
+    /// Tokens por bloque de prefill según el modelo y el despacho.
+    fn bloque_prefill(&self, gpu: &Option<&mut dyn crate::gpu::GpuDispatch>) -> usize {
+        let base_gpu = matches!(self.backend, Backend::Gpu | Backend::Auto)
+            && gpu.as_ref().is_some_and(|g| g.available());
+        let exec = LayerExecutor { manifest: &self.manifest, has_gate: self.has_gate, parallel: None };
+        let moe_gpu = base_gpu
+            && gpu.as_ref().is_some_and(|g| g.moe_puede(0))
+            && (0..self.manifest.num_layers).all(|l| exec.es_capa_moe_gpu(l));
+        if moe_gpu { Self::BLOQUE_PREFILL_MOE_GPU } else { Self::BLOQUE_PREFILL }
+    }
 
     /// ¿Puede ejecutarse el siguiente bloque de `n` tokens con `forward_layer_block`?
     ///
@@ -544,7 +558,13 @@ impl Runtime {
         // Con GPU, Gemma sigue por bloques (su capa por bloques usa `matmul` de la GPU); el resto de modelos
         // van token a token por el camino de GPU de siempre.
         let es_gemma = self.manifest.layer(0).is_some_and(|l| crate::gemma::es_capa_gemma(l.flags));
-        if base_gpu && !es_gemma {
+        // Y las MoE de GQA clásica: la GPU las hace enteras por bloques (con fallback token a token si no puede).
+        let es_moe_gpu = base_gpu
+            && gpu.as_ref().is_some_and(|g| g.moe_puede(0))
+            && (0..self.manifest.num_layers).all(|l| {
+                LayerExecutor { manifest: &self.manifest, has_gate: self.has_gate, parallel: None }.es_capa_moe_gpu(l)
+            });
+        if base_gpu && !es_gemma && !es_moe_gpu {
             return Some("hay GPU");
         }
         if let Some(pl) = self.planner.as_ref() {
@@ -569,7 +589,7 @@ impl Runtime {
             let kv = &self.kv[l as usize];
             let kv_dim = self.manifest.effective_num_kv_heads(l) as usize
                 * self.manifest.effective_head_dim(l) as usize;
-            if !exec.soporta_bloque(l, kv) {
+            if !exec.soporta_bloque(l, kv) && !(base_gpu && exec.es_capa_moe_gpu(l)) {
                 return Some("capa no soportada (MLA/KDA/gated/GDN/MoE)");
             }
             if kv.posiciones(kv_dim) != self.pos {
@@ -598,7 +618,7 @@ impl Runtime {
         let mut bs = self
             .block
             .take()
-            .unwrap_or_else(|| BlockScratch::new(&self.manifest, Self::BLOQUE_PREFILL));
+            .unwrap_or_else(|| BlockScratch::new(&self.manifest, Self::BLOQUE_PREFILL_MOE_GPU));
         let mut hs = vec![0.0f32; n * h];
         for (i, &tok) in tokens.iter().enumerate() {
             self.embed_token(tok, source)?;
@@ -705,11 +725,12 @@ impl Runtime {
         } else {
             let _ = observer.cancel_at(GenCheckpoint::BeforePrefill);
         }
+        let bloque = self.bloque_prefill(gpu);
         let mut i = 0usize;
         while i < total {
             // Prefill por bloques (T82): ~4× más rápido que token a token y con el
             // mismo resultado bit a bit. Cae al camino de siempre si no es seguro.
-            let n = (total - i).min(Self::BLOQUE_PREFILL);
+            let n = (total - i).min(bloque);
             if n >= 2 && self.bloque_posible(n, gpu) {
                 // El observador ve cada `done` como en el camino token a token (hay
                 // quien cancela en uno concreto); la cancelación surte efecto al

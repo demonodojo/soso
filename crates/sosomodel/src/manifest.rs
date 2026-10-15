@@ -92,8 +92,35 @@ impl ModelKind {
     }
 }
 
-/// Extensiones del manifest v7 (Gemma 4). Todo a «sin efecto» por defecto: un modelo que no las usa se
-/// serializa **exactamente** como antes (v5/v6), así que ningún modelo existente cambia de bytes.
+/// YaRN de las capas de atención completa (Mellum 2.1). `factor == 0` es RoPE plano.
+///
+/// El factor de magnitud no se guarda: llama.cpp lo recalcula (`1 + 0.1·ln(factor)`) dentro
+/// de `rope_yarn` y anula el que viniera en el GGUF. Aquí se hace igual.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct YarnSpec {
+    /// Factor de interpolación (16 en Mellum). 0 = inactivo.
+    pub factor: f32,
+    /// Contexto original sobre el que se entrenó el RoPE antes de estirarlo (8192 en Mellum).
+    pub orig_ctx: u32,
+    pub beta_fast: f32,
+    pub beta_slow: f32,
+}
+
+impl Default for YarnSpec {
+    fn default() -> Self {
+        Self { factor: 0.0, orig_ctx: 0, beta_fast: 0.0, beta_slow: 0.0 }
+    }
+}
+
+impl YarnSpec {
+    pub fn activa(&self) -> bool {
+        self.factor > 1.0 && self.orig_ctx > 0
+    }
+}
+
+/// Extensiones del manifest v7 (Gemma 4) y v8 (YaRN de Mellum). Todo a «sin efecto» por defecto: un
+/// modelo que no las usa se serializa **exactamente** como antes (v5/v6), así que ningún modelo
+/// existente cambia de bytes. YaRN (v8) sólo se escribe si `yarn.activa()`.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct ManifestExt {
     /// Los embeddings se multiplican por este factor al entrar (Gemma: `sqrt(hidden)`); 0 = sin escala.
@@ -108,6 +135,8 @@ pub struct ManifestExt {
     pub window: Vec<u32>,
     /// Base RoPE por capa (0 = la global); vacío = todas la global.
     pub rope_theta: Vec<f32>,
+    /// YaRN de las capas con ventana 0. Las capas con ventana llevan RoPE plano.
+    pub yarn: YarnSpec,
 }
 
 impl ManifestExt {
@@ -910,7 +939,7 @@ impl Manifest {
         body.extend_from_slice(&self.audio.n_text_layer.to_le_bytes());
         body.extend_from_slice(&self.audio.n_text_head.to_le_bytes());
         debug_assert_eq!(LAYER_SPEC_BYTES, 60);
-        let version = if !self.ext.es_vacia() {
+        let version = if self.ext.yarn.activa() || !self.ext.es_vacia() {
             // v7: trailer tras el AudioSpec. Un lector antiguo no lo ve (llega a su fin natural).
             body.extend_from_slice(&self.ext.embed_scale.to_le_bytes());
             body.extend_from_slice(&self.ext.logit_softcap.to_le_bytes());
@@ -924,7 +953,17 @@ impl Manifest {
             for t in &self.ext.rope_theta {
                 body.extend_from_slice(&t.to_le_bytes());
             }
-            7
+            if self.ext.yarn.activa() {
+                // v8: YaRN, detrás del trailer v7.
+                let y = &self.ext.yarn;
+                body.extend_from_slice(&y.factor.to_le_bytes());
+                body.extend_from_slice(&y.orig_ctx.to_le_bytes());
+                body.extend_from_slice(&y.beta_fast.to_le_bytes());
+                body.extend_from_slice(&y.beta_slow.to_le_bytes());
+                8
+            } else {
+                7
+            }
         } else if self.model_kind == ModelKind::AsrEncoderDecoder {
             6
         } else {
@@ -1034,7 +1073,24 @@ impl Manifest {
             for _ in 0..n_t {
                 rope_theta.push(r.f32()?);
             }
-            ManifestExt { embed_scale, logit_softcap, attn_scale, tied_lm_head, window, rope_theta }
+            let mut ext = ManifestExt {
+                embed_scale,
+                logit_softcap,
+                attn_scale,
+                tied_lm_head,
+                window,
+                rope_theta,
+                yarn: YarnSpec::default(),
+            };
+            if version >= 8 {
+                ext.yarn = YarnSpec {
+                    factor: r.f32()?,
+                    orig_ctx: r.u32()?,
+                    beta_fast: r.f32()?,
+                    beta_slow: r.f32()?,
+                };
+            }
+            ext
         } else {
             ManifestExt::default()
         };

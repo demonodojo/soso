@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "R28",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "Rot::parse admite mayúsculas, signo, sufijos y módulo 360",
+  "etiqueta": "fbrot-parse",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R28/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R28",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R28/aceptacion.rs",
+    "reservado/R28/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R28/enunciado.md": "e1d83b2ebd3439da43933c2e77a0493546afd1bfb392caaf2efc49f5ce736fcd"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/soso-hw/src/fbrot.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "Rot::parse admite mayúsculas, signo, sufijos y módulo 360",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "soso-hw"
+    ],
+    "prueba_reservada": "reservado/R28/aceptacion.rs",
+    "destino_prueba": "crates/soso-hw/tests/aceptacion_R28.rs",
+    "referencia": "reservado/R28/referencia.patch"
+  }
+}

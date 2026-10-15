@@ -1,0 +1,538 @@
+[
+ {
+  "nombre": "sistema+usuario",
+  "messages": [
+   {
+    "role": "system",
+    "content": "  Sé breve.  "
+   },
+   {
+    "role": "user",
+    "content": "Hola\n"
+   }
+  ],
+  "tools": [],
+  "prompt": "<|im_start|>system\n  Sé breve.  <|im_end|>\n<|im_start|>user\nHola\n<|im_end|>\n<|im_start|>assistant\n"
+ },
+ {
+  "nombre": "solo usuario",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Hola"
+   }
+  ],
+  "tools": [],
+  "prompt": "<|im_start|>user\nHola<|im_end|>\n<|im_start|>assistant\n"
+ },
+ {
+  "nombre": "herramientas sin sistema",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Lee src/lib.rs"
+   }
+  ],
+  "tools": [
+   {
+    "name": "read",
+    "description": "Lee un archivo",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string",
+       "description": "ruta"
+      },
+      "limit": {
+       "type": "integer"
+      }
+     },
+     "required": [
+      "filePath"
+     ]
+    }
+   },
+   {
+    "name": "bash",
+    "description": "Ejecuta una orden",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "timeout": {
+       "type": "number",
+       "description": "segundos"
+      },
+      "env": {
+       "type": "object",
+       "properties": {
+        "A": {
+         "type": "string"
+        }
+       }
+      },
+      "flags": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "modo": {
+       "type": "string",
+       "enum": [
+        "rapido",
+        "lento"
+       ]
+      }
+     },
+     "required": [
+      "command",
+      "modo"
+     ]
+    }
+   },
+   {
+    "name": "ping",
+    "description": "Sin parámetros",
+    "parameters": {
+     "type": "object",
+     "properties": {}
+    }
+   }
+  ],
+  "prompt": "<|im_start|>system\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"read\", \"description\": \"Lee un archivo\", \"parameters\": {\"type\": \"object\", \"properties\": {\"filePath\": {\"type\": \"string\", \"description\": \"ruta\"}, \"limit\": {\"type\": \"integer\"}}, \"required\": [\"filePath\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"bash\", \"description\": \"Ejecuta una orden\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}, \"timeout\": {\"type\": \"number\", \"description\": \"segundos\"}, \"env\": {\"type\": \"object\", \"properties\": {\"A\": {\"type\": \"string\"}}}, \"flags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"modo\": {\"type\": \"string\", \"enum\": [\"rapido\", \"lento\"]}}, \"required\": [\"command\", \"modo\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"ping\", \"description\": \"Sin parámetros\", \"parameters\": {\"type\": \"object\", \"properties\": {}}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nLee src/lib.rs<|im_end|>\n<|im_start|>assistant\n"
+ },
+ {
+  "nombre": "ronda de herramienta",
+  "messages": [
+   {
+    "role": "system",
+    "content": "Sys"
+   },
+   {
+    "role": "user",
+    "content": "Lee src/lib.rs"
+   },
+   {
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+     {
+      "id": "call_1",
+      "name": "read",
+      "arguments": "{\"filePath\":\"src/lib.rs\",\"limit\":5}"
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_1",
+    "content": "fn main(){}"
+   }
+  ],
+  "tools": [
+   {
+    "name": "read",
+    "description": "Lee un archivo",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string",
+       "description": "ruta"
+      },
+      "limit": {
+       "type": "integer"
+      }
+     },
+     "required": [
+      "filePath"
+     ]
+    }
+   },
+   {
+    "name": "bash",
+    "description": "Ejecuta una orden",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "timeout": {
+       "type": "number",
+       "description": "segundos"
+      },
+      "env": {
+       "type": "object",
+       "properties": {
+        "A": {
+         "type": "string"
+        }
+       }
+      },
+      "flags": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "modo": {
+       "type": "string",
+       "enum": [
+        "rapido",
+        "lento"
+       ]
+      }
+     },
+     "required": [
+      "command",
+      "modo"
+     ]
+    }
+   }
+  ],
+  "prompt": "<|im_start|>system\nSys\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"read\", \"description\": \"Lee un archivo\", \"parameters\": {\"type\": \"object\", \"properties\": {\"filePath\": {\"type\": \"string\", \"description\": \"ruta\"}, \"limit\": {\"type\": \"integer\"}}, \"required\": [\"filePath\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"bash\", \"description\": \"Ejecuta una orden\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}, \"timeout\": {\"type\": \"number\", \"description\": \"segundos\"}, \"env\": {\"type\": \"object\", \"properties\": {\"A\": {\"type\": \"string\"}}}, \"flags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"modo\": {\"type\": \"string\", \"enum\": [\"rapido\", \"lento\"]}}, \"required\": [\"command\", \"modo\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nLee src/lib.rs<|im_end|>\n<|im_start|>assistant\n<tool_call>\n{\"name\": \"read\", \"arguments\": {\"filePath\": \"src/lib.rs\", \"limit\": 5}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nfn main(){}\n</tool_response><|im_end|>\n<|im_start|>assistant\n"
+ },
+ {
+  "nombre": "ronda y respuesta final",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Lee"
+   },
+   {
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+     {
+      "id": "call_1",
+      "name": "read",
+      "arguments": "{\"filePath\":\"a.rs\"}"
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_1",
+    "content": "x"
+   },
+   {
+    "role": "assistant",
+    "content": "Hecho. \n"
+   },
+   {
+    "role": "user",
+    "content": "Gracias"
+   }
+  ],
+  "tools": [
+   {
+    "name": "read",
+    "description": "Lee un archivo",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string",
+       "description": "ruta"
+      },
+      "limit": {
+       "type": "integer"
+      }
+     },
+     "required": [
+      "filePath"
+     ]
+    }
+   }
+  ],
+  "prompt": "<|im_start|>system\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"read\", \"description\": \"Lee un archivo\", \"parameters\": {\"type\": \"object\", \"properties\": {\"filePath\": {\"type\": \"string\", \"description\": \"ruta\"}, \"limit\": {\"type\": \"integer\"}}, \"required\": [\"filePath\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nLee<|im_end|>\n<|im_start|>assistant\n<tool_call>\n{\"name\": \"read\", \"arguments\": {\"filePath\": \"a.rs\"}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nx\n</tool_response><|im_end|>\n<|im_start|>assistant\nHecho. \n<|im_end|>\n<|im_start|>user\nGracias<|im_end|>\n<|im_start|>assistant\n"
+ },
+ {
+  "nombre": "dos rondas seguidas",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Haz"
+   },
+   {
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+     {
+      "id": "call_1",
+      "name": "read",
+      "arguments": "{\"filePath\":\"a.rs\"}"
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_1",
+    "content": "uno"
+   },
+   {
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+     {
+      "id": "call_2",
+      "name": "bash",
+      "arguments": "{\"command\":\"ls\",\"modo\":\"lento\",\"timeout\":2.5}"
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_2",
+    "content": "dos"
+   }
+  ],
+  "tools": [
+   {
+    "name": "read",
+    "description": "Lee un archivo",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string",
+       "description": "ruta"
+      },
+      "limit": {
+       "type": "integer"
+      }
+     },
+     "required": [
+      "filePath"
+     ]
+    }
+   },
+   {
+    "name": "bash",
+    "description": "Ejecuta una orden",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "timeout": {
+       "type": "number",
+       "description": "segundos"
+      },
+      "env": {
+       "type": "object",
+       "properties": {
+        "A": {
+         "type": "string"
+        }
+       }
+      },
+      "flags": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "modo": {
+       "type": "string",
+       "enum": [
+        "rapido",
+        "lento"
+       ]
+      }
+     },
+     "required": [
+      "command",
+      "modo"
+     ]
+    }
+   }
+  ],
+  "prompt": "<|im_start|>system\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"read\", \"description\": \"Lee un archivo\", \"parameters\": {\"type\": \"object\", \"properties\": {\"filePath\": {\"type\": \"string\", \"description\": \"ruta\"}, \"limit\": {\"type\": \"integer\"}}, \"required\": [\"filePath\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"bash\", \"description\": \"Ejecuta una orden\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}, \"timeout\": {\"type\": \"number\", \"description\": \"segundos\"}, \"env\": {\"type\": \"object\", \"properties\": {\"A\": {\"type\": \"string\"}}}, \"flags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"modo\": {\"type\": \"string\", \"enum\": [\"rapido\", \"lento\"]}}, \"required\": [\"command\", \"modo\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nHaz<|im_end|>\n<|im_start|>assistant\n<tool_call>\n{\"name\": \"read\", \"arguments\": {\"filePath\": \"a.rs\"}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nuno\n</tool_response><|im_end|>\n<|im_start|>assistant\n<tool_call>\n{\"name\": \"bash\", \"arguments\": {\"command\": \"ls\", \"modo\": \"lento\", \"timeout\": 2.5}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\ndos\n</tool_response><|im_end|>\n<|im_start|>assistant\n"
+ },
+ {
+  "nombre": "argumentos anidados",
+  "messages": [
+   {
+    "role": "user",
+    "content": "x"
+   },
+   {
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+     {
+      "id": "call_1",
+      "name": "bash",
+      "arguments": "{\"command\":\"echo \\\"hi\\\"\",\"env\":{\"B\":\"2\",\"A\":null},\"flags\":[\"-a\",true,3],\"timeout\":1.5,\"modo\":\"rapido\"}"
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_1",
+    "content": "{\"ok\":true}"
+   }
+  ],
+  "tools": [
+   {
+    "name": "bash",
+    "description": "Ejecuta una orden",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "timeout": {
+       "type": "number",
+       "description": "segundos"
+      },
+      "env": {
+       "type": "object",
+       "properties": {
+        "A": {
+         "type": "string"
+        }
+       }
+      },
+      "flags": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "modo": {
+       "type": "string",
+       "enum": [
+        "rapido",
+        "lento"
+       ]
+      }
+     },
+     "required": [
+      "command",
+      "modo"
+     ]
+    }
+   }
+  ],
+  "prompt": "<|im_start|>system\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"bash\", \"description\": \"Ejecuta una orden\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}, \"timeout\": {\"type\": \"number\", \"description\": \"segundos\"}, \"env\": {\"type\": \"object\", \"properties\": {\"A\": {\"type\": \"string\"}}}, \"flags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"modo\": {\"type\": \"string\", \"enum\": [\"rapido\", \"lento\"]}}, \"required\": [\"command\", \"modo\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nx<|im_end|>\n<|im_start|>assistant\n<tool_call>\n{\"name\": \"bash\", \"arguments\": {\"command\": \"echo \\\"hi\\\"\", \"env\": {\"B\": \"2\", \"A\": null}, \"flags\": [\"-a\", true, 3], \"timeout\": 1.5, \"modo\": \"rapido\"}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n{\"ok\":true}\n</tool_response><|im_end|>\n<|im_start|>assistant\n"
+ },
+ {
+  "nombre": "llamada con texto",
+  "messages": [
+   {
+    "role": "user",
+    "content": "x"
+   },
+   {
+    "role": "assistant",
+    "content": "Voy a leer.",
+    "tool_calls": [
+     {
+      "id": "call_1",
+      "name": "read",
+      "arguments": "{\"filePath\":\"a\"}"
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_1",
+    "content": "r"
+   },
+   {
+    "role": "assistant",
+    "content": "Listo"
+   },
+   {
+    "role": "user",
+    "content": "ok"
+   }
+  ],
+  "tools": [
+   {
+    "name": "read",
+    "description": "Lee un archivo",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string",
+       "description": "ruta"
+      },
+      "limit": {
+       "type": "integer"
+      }
+     },
+     "required": [
+      "filePath"
+     ]
+    }
+   }
+  ],
+  "prompt": "<|im_start|>system\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"read\", \"description\": \"Lee un archivo\", \"parameters\": {\"type\": \"object\", \"properties\": {\"filePath\": {\"type\": \"string\", \"description\": \"ruta\"}, \"limit\": {\"type\": \"integer\"}}, \"required\": [\"filePath\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nx<|im_end|>\n<|im_start|>assistant\nVoy a leer.\n<tool_call>\n{\"name\": \"read\", \"arguments\": {\"filePath\": \"a\"}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nr\n</tool_response><|im_end|>\n<|im_start|>assistant\nListo<|im_end|>\n<|im_start|>user\nok<|im_end|>\n<|im_start|>assistant\n"
+ },
+ {
+  "nombre": "herramienta sin argumentos",
+  "messages": [
+   {
+    "role": "user",
+    "content": "x"
+   },
+   {
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+     {
+      "id": "call_1",
+      "name": "ping",
+      "arguments": "{}"
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "tool_call_id": "call_1",
+    "content": "pong"
+   }
+  ],
+  "tools": [
+   {
+    "name": "ping",
+    "description": "Sin parámetros",
+    "parameters": {
+     "type": "object",
+     "properties": {}
+    }
+   }
+  ],
+  "prompt": "<|im_start|>system\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"ping\", \"description\": \"Sin parámetros\", \"parameters\": {\"type\": \"object\", \"properties\": {}}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nx<|im_end|>\n<|im_start|>assistant\n<tool_call>\n{\"name\": \"ping\", \"arguments\": {}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\npong\n</tool_response><|im_end|>\n<|im_start|>assistant\n"
+ },
+ {
+  "nombre": "pensamiento en el historial",
+  "messages": [
+   {
+    "role": "user",
+    "content": "x"
+   },
+   {
+    "role": "assistant",
+    "content": "<|channel>thought\nmmm<channel|>Respuesta"
+   },
+   {
+    "role": "user",
+    "content": "y"
+   }
+  ],
+  "tools": [],
+  "prompt": "<|im_start|>user\nx<|im_end|>\n<|im_start|>assistant\n<|channel>thought\nmmm<channel|>Respuesta<|im_end|>\n<|im_start|>user\ny<|im_end|>\n<|im_start|>assistant\n"
+ }
+]

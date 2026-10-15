@@ -19,6 +19,7 @@
 //! factores por frecuencia de `rope_freqs` (`theta_i / factor_i`).
 
 use alloc::format;
+use alloc::string::String;
 
 use sosomodel::manifest::{
     FLAG_GEGLU, FLAG_LAYER_SCALE, FLAG_QK_NORM, FLAG_ROPE_FACTORS, FLAG_V_FROM_K, FLAG_V_NORM,
@@ -75,7 +76,7 @@ pub const EXPULSION_HOLGURA: usize = 1024;
 
 /// Ventana deslizante real de una capa local: antes de añadir filas nuevas, tira las más antiguas si hay
 /// demasiadas. Las capas globales (`ventana == 0`) conservan todo.
-fn expulsar_si_hace_falta(kv: &mut LayerKv, ventana: usize, kv_dim: usize) {
+pub(crate) fn expulsar_si_hace_falta(kv: &mut LayerKv, ventana: usize, kv_dim: usize) {
     if ventana == 0 {
         return;
     }

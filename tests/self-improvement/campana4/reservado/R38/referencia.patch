@@ -1,0 +1,64 @@
+--- a/crates/soso-web-core/src/decode.rs	2026-10-13 14:14:05.651878968 +0200
++++ b/crates/soso-web-core/src/decode.rs	2026-10-13 14:14:29.456220144 +0200
+@@ -2,7 +2,7 @@
+ 
+ use alloc::string::String;
+ use alloc::vec::Vec;
+-use miniz_oxide::inflate::decompress_to_vec_zlib;
++use miniz_oxide::inflate::{decompress_to_vec, decompress_to_vec_zlib};
+ 
+ /// Descomprime el cuerpo si `Content-Encoding` indica gzip/deflate.
+ pub fn maybe_decompress(body: &[u8], content_encoding: Option<&str>) -> Result<Vec<u8>, ()> {
+@@ -10,13 +10,50 @@
+     if enc.is_empty() || enc == "identity" {
+         return Ok(body.to_vec());
+     }
+-    if enc.contains("gzip") || enc.contains("deflate") {
+-        decompress_to_vec_zlib(body).map_err(|_| ())
++    if enc.contains("gzip") {
++        gunzip(body)
++    } else if enc.contains("deflate") {
++        // Unos servidores mandan zlib (lo correcto) y otros deflate crudo.
++        decompress_to_vec_zlib(body)
++            .or_else(|_| decompress_to_vec(body))
++            .map_err(|_| ())
+     } else {
+         Ok(body.to_vec())
+     }
+ }
+ 
++/// Descomprime un miembro gzip (RFC 1952): cabecera, deflate crudo y cola.
++fn gunzip(body: &[u8]) -> Result<Vec<u8>, ()> {
++    if body.len() < 18 || body[0] != 0x1f || body[1] != 0x8b || body[2] != 8 {
++        return Err(());
++    }
++    let flags = body[3];
++    let mut pos = 10;
++    if flags & 0x04 != 0 {
++        let xlen = u16::from_le_bytes([*body.get(pos).ok_or(())?, *body.get(pos + 1).ok_or(())?]);
++        pos += 2 + xlen as usize;
++    }
++    for bit in [0x08, 0x10] {
++        if flags & bit != 0 {
++            let nul = body.get(pos..).ok_or(())?.iter().position(|&b| b == 0).ok_or(())?;
++            pos += nul + 1;
++        }
++    }
++    if flags & 0x02 != 0 {
++        pos += 2;
++    }
++    if pos + 8 > body.len() {
++        return Err(());
++    }
++    let (data, tail) = body[pos..].split_at(body.len() - pos - 8);
++    let out = decompress_to_vec(data).map_err(|_| ())?;
++    let isize = u32::from_le_bytes([tail[4], tail[5], tail[6], tail[7]]);
++    if isize != out.len() as u32 {
++        return Err(());
++    }
++    Ok(out)
++}
++
+ /// Convierte bytes HTML a `String` (UTF-8 con fallback Latin-1).
+ pub fn bytes_to_text(body: &[u8], charset: Option<&str>) -> String {
+     let cs = charset.unwrap_or("utf-8").trim().to_ascii_lowercase();

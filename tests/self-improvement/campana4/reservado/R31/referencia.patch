@@ -1,0 +1,51 @@
+--- a/crates/sosomfs/src/catalog.rs	2026-10-13 14:13:47.672742826 +0200
++++ b/crates/sosomfs/src/catalog.rs	2026-10-13 14:14:02.750792926 +0200
+@@ -51,6 +51,10 @@
+         }
+         let nmodels = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+         let mut off = 4usize;
++        if nmodels > data.len() / (NAME_MAX + 37) {
++            // Cada modelo ocupa al menos NAME_MAX + 37 bytes: ese contador es corrupción.
++            return Err(());
++        }
+         let mut models = Vec::with_capacity(nmodels);
+         for _ in 0..nmodels {
+             let (m, used) = read_model(&data[off..])?;
+@@ -99,7 +103,7 @@
+ }
+ 
+ fn read_model(data: &[u8]) -> Result<(ModelEntry, usize), ()> {
+-    if data.len() < NAME_MAX + 32 {
++    if data.len() < NAME_MAX + 37 {
+         return Err(());
+     }
+     let nlen = data[0] as usize;
+@@ -115,6 +119,9 @@
+     off += 8;
+     let nshards = u32::from_le_bytes(data[off..off + 4].try_into().unwrap()) as usize;
+     off += 4;
++    if nshards > (data.len() - off) / (PATH_MAX + 31) {
++        return Err(());
++    }
+     let mut shards = Vec::with_capacity(nshards);
+     for _ in 0..nshards {
+         let (s, used) = read_shard(&data[off..])?;
+@@ -135,7 +142,7 @@
+ }
+ 
+ fn read_shard(data: &[u8]) -> Result<(ShardEntry, usize), ()> {
+-    if data.len() < PATH_MAX + 20 {
++    if data.len() < PATH_MAX + 11 {
+         return Err(());
+     }
+     let plen = data[0] as usize;
+@@ -151,6 +158,9 @@
+         off += 28;
+         extents.push(e);
+     }
++    if data.len() - off < 20 {
++        return Err(());
++    }
+     let prefetch_next_lba = u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
+     off += 8;
+     let prefetch_bytes = u32::from_le_bytes(data[off..off + 4].try_into().unwrap());

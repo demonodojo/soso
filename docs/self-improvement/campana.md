@@ -347,3 +347,29 @@ Evidencia: `tests/self-improvement/campana/ejecucion-8/` (misma organización; m
 **Lo que cambia en las conclusiones anteriores.** Con Gemma servido por soso hay ya **tres bancos distintos**: 5 de 10 (R11–R20, visto), 5 de 10 (R21–R30, ciego) y 2 de 10 (R31–R40, ciego). Son **12 de 30 (40 %)** sobre treinta tareas distintas, por debajo del 50 % que fija el criterio. El GO de las campañas 6 y 7 fue real pero **frágil**: dos tandas en el umbral exacto y una por debajo. Lo honesto es que el modelo resuelve algo más de un tercio de estas tareas, no la mitad, y que una tanda de diez no distingue 2 de 5.
 - **Qué no se ha probado:** que v2 sea mejor que v1 (empate a 2/10; el cambio más claro es que ya no hay 422 por contexto). Tampoco que sea peor.
 - **Qué mejoraría de verdad la cifra:** no las herramientas sino cómo se usa el enunciado: leer la especificación punto por punto y escribir pruebas propias por punto antes de dar la tarea por hecha (la idea ya apuntada en la memoria del proyecto), o dejar que el modelo piense (el pensamiento de Gemma está apagado en soso y la campaña 5 de llama.cpp lo llevaba activo). Son experimentos distintos, con banco nuevo.
+
+## Campaña 11 — Mellum 2.1 12B (JetBrains) en la GPU del host, banco R31–R40
+
+**Qué se probó.** El mismo banco ciego de la campaña 8/9 (`tests/self-improvement/campana4/`, `campaign-11.json`) con otro modelo: **Mellum 2.1 12B** (MoE de 64 expertos, 8 activos; Q4_K_M, sólo existe la variante *Thinking*), servido por soso con la capa MoE entera en la GPU (`SOSO_CUDA=1`, ver `crates/soso-llm-core/src/moe_gpu.rs` y `crates/soso-llm-api/src/cuda/capa/moe.rs`). T=0, 30 herramientas, 1 intento, `max_tokens` 6144, mismo punto de partida (`base0`). **No se ejecutó** la comprobación de la base final ni la inyección de `kill -9`, así que ninguna de estas tandas podría acreditar SI-4 aunque hubiera llegado a 5/10.
+
+| tanda | agente | aceptadas | evidencia versionada |
+|---|---|---|---|
+| 11a | v1 | **1/10** (R40) | [`campana-11-mellum-v1`](resultados-campanas/campana-11-mellum-v1/resumen.md) |
+| 11b | v2, estimador de contexto a 3 car./token | **1/10** (R40) | [`campana-11-mellum-v2-sin-ajuste`](resultados-campanas/campana-11-mellum-v2-sin-ajuste/resumen.md) |
+| 11c | v2, `chars_por_token = 1.5` | **0/10** | [`campana-11-mellum-v2-ctx`](resultados-campanas/campana-11-mellum-v2-ctx/resumen.md) |
+
+Comparación sobre el **mismo banco**: Gemma 4 sin pensamiento 2/10 (campañas 8 y 9) y con pensamiento 3/10 (campaña 10, con 3 errores de infraestructura); Mellum 1/10, 1/10 y 0/10. **Mellum no mejora a Gemma aquí** y queda muy por debajo del mínimo de 5/10.
+
+**Lo que se ve.**
+- **Patrón estable entre tandas:** R31 agota las 30 herramientas; R32, R34 y R37 las rechazan las pruebas reservadas; R33, R38 y R39 acaban con «el candidato no cambió nada» (el modelo da la tarea por terminada sin haber editado). Sólo R35, R36 (ver abajo) y R40 cambian de una tanda a otra.
+- **R40 pasó de aceptada (11a, 11b) a agotar herramientas (11c)** con el mismo modelo y T=0: es variación entre ejecuciones (el entorno de compilación y pruebas de cada tarea no es determinista), no efecto del agente. Con 0–1 de 10 no se distingue v1 de v2.
+- **El estimador de contexto del agente v2 era inútil con este tokenizador.** R35 y R36 se caían con un 422 (`el render necesita 36243 / 33193 tokens y hay 32768`) tanto con v1 como con v2: el recorte de salidas antiguas ni se activaba. R35 tiene 56 k caracteres, que el estimador contaba como ~19 k tokens, pero el servidor los renderiza como 36 k: **~1,5 caracteres por token** (Mellum parte los dígitos uno a uno y los volcados con número de línea son carísimos). Se añadió `Config::chars_por_token` (por defecto 3,0; el adaptador de host lo fija con `SOSO_AGENTE_CHARS_POR_TOKEN`) y en 11c el 422 desaparece: R35 y R36 terminan, pero las rechazan las pruebas. Se elimina el fallo de infraestructura, no el de fondo.
+- **Las ejecuciones largas de las primeras pruebas eran de infraestructura, no del modelo:** con el offload por operación a la GPU Mellum iba más lento que en CPU y una tarea agotó su hora con 15 llamadas. La capa MoE entera en GPU llevó el decode de 10,7 tok/s (CPU) a ~170 y el prefill de 13 a ~435; cada tarea pasó de agotar la hora a durar 6–18 min (detalles en la memoria del proyecto, `soso-mellum-gpu-capa-moe`).
+
+**Qué no se ha probado.** Que el agente v2 sea mejor o peor que el v1 (ni siquiera con el recorte activo hay datos suficientes); que Mellum con otra plantilla o con el pensamiento acortado rinda más; la recuperación tras `kill -9` y la base final con este modelo.
+
+**Estado del agente.** El agente v2 (con `chars_por_token`) sigue sin versionar y es neutro en resultados; queda como candidato, la decisión de hacer commit es de quien lo revise.
+
+---
+
+**Nota sobre la evidencia de las campañas 6–11:** las carpetas `tests/self-improvement/campana/ejecucion-9` a `ejecucion-17-*` están en el `.gitignore` (sólo locales). Sus resúmenes, registros por tarea, comprobaciones de la base final e incidencias están versionados en [`resultados-campanas/`](resultados-campanas/README.md).

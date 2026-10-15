@@ -1,0 +1,51 @@
+--- a/crates/block-dev/src/lib.rs	2026-10-13 14:14:24.463373563 +0200
++++ b/crates/block-dev/src/lib.rs	2026-10-13 14:14:31.419613671 +0200
+@@ -72,6 +72,17 @@
+         self.reads.get()
+     }
+ 
++    /// `len` bytes desde el inicio del bloque `block`, sin desbordar aritmética.
++    fn rango(&self, block: u64, len: usize) -> Option<&[u8]> {
++        let off = usize::try_from(block).ok()?.checked_mul(BLOCK_SIZE)?;
++        self.data.get(off..off.checked_add(len)?)
++    }
++
++    fn rango_mut(&mut self, block: u64, len: usize) -> Option<&mut [u8]> {
++        let off = usize::try_from(block).ok()?.checked_mul(BLOCK_SIZE)?;
++        self.data.get_mut(off..off.checked_add(len)?)
++    }
++
+     pub fn data(&self) -> &[u8] {
+         &self.data
+     }
+@@ -94,15 +105,13 @@
+     fn read_block(&mut self, block: u64, buf: &mut Block) -> Result<(), BlockError> {
+         #[cfg(feature = "std")]
+         self.reads.set(self.reads.get() + 1);
+-        let off = block as usize * BLOCK_SIZE;
+-        let src = self.data.get(off..off + BLOCK_SIZE).ok_or(BlockError::OutOfRange)?;
++        let src = self.rango(block, BLOCK_SIZE).ok_or(BlockError::OutOfRange)?;
+         buf.copy_from_slice(src);
+         Ok(())
+     }
+ 
+     fn write_block(&mut self, block: u64, buf: &Block) -> Result<(), BlockError> {
+-        let off = block as usize * BLOCK_SIZE;
+-        let dst = self.data.get_mut(off..off + BLOCK_SIZE).ok_or(BlockError::OutOfRange)?;
++        let dst = self.rango_mut(block, BLOCK_SIZE).ok_or(BlockError::OutOfRange)?;
+         dst.copy_from_slice(buf);
+         Ok(())
+     }
+@@ -124,11 +133,7 @@
+         }
+         #[cfg(feature = "std")]
+         self.reads.set(self.reads.get() + 1);
+-        let off = start as usize * BLOCK_SIZE;
+-        let src = self
+-            .data
+-            .get(off..off + buf.len())
+-            .ok_or(BlockError::OutOfRange)?;
++        let src = self.rango(start, buf.len()).ok_or(BlockError::OutOfRange)?;
+         buf.copy_from_slice(src);
+         Ok(())
+     }

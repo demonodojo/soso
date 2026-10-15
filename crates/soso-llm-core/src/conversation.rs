@@ -37,7 +37,9 @@ pub mod tools;
 pub mod gemma4;
 
 pub use render::render_messages;
-pub use tools::{parse_assistant_output, parse_assistant_output_pasante, AssistantTurn, ToolCallParser};
+pub use tools::{
+    parse_assistant_output, parse_assistant_output_familia, parse_assistant_output_pasante, AssistantTurn, ToolCallParser,
+};
 
 pub use validate::{
     validate_assistant_turn, validate_input, validate_input_pasante, validate_parsed_tool_call, MAX_ARGUMENTOS_BYTES,

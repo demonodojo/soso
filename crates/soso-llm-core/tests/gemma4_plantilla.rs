@@ -5,6 +5,7 @@
 #![cfg(feature = "std")]
 
 use soso_llm_core::conversation::gemma4::{interpretar, render_gemma4};
+use soso_llm_core::conversation::parse_assistant_output_familia;
 use soso_llm_core::conversation::{ChatInput, Message, ToolDefinition};
 
 #[test]
@@ -82,4 +83,36 @@ fn respuesta_sin_llamada_y_argumentos_anidados() {
 fn llamada_mal_formada_es_error() {
     let e = entrada_con_read();
     assert!(interpretar(&e, "<|tool_call>call:read{filePath:<|\"|>sin cerrar", 1, true).is_err());
+}
+
+#[test]
+fn el_pensamiento_que_empieza_dentro_del_canal_se_descarta() {
+    let e = entrada_con_read();
+    // Tras un resultado de herramienta el prompt ya abrió `<|channel>thought\n`: sólo llega el cierre.
+    let t = interpretar(&e, "Debo leer el archivo primero.\nPaso 1...<channel|><|tool_call>call:read{filePath:<|\"|>a.rs<|\"|>}<tool_call|>", 1, true).unwrap();
+    assert_eq!(t.content, None);
+    assert_eq!(t.tool_call.expect("llamada").name, "read");
+    // Y si lo que sigue al cierre es una respuesta de texto.
+    let t = interpretar(&e, "razono un poco<channel|>Listo.<turn|>", 1, true).unwrap();
+    assert_eq!((t.content.as_deref(), t.tool_call.is_none()), (Some("Listo."), true));
+    // Un canal completo seguido de otro cierre suelto: sólo vale lo que va tras el último cierre.
+    let t = interpretar(&e, "<|channel>thought\nA<channel|>Hola", 1, true).unwrap();
+    assert_eq!(t.content.as_deref(), Some("Hola"));
+}
+
+#[test]
+fn un_pensamiento_cortado_tras_un_resultado_no_es_una_respuesta() {
+    use soso_llm_core::conversation::{Message, ToolCall};
+    let mut e = entrada_con_read();
+    e.messages.push(Message::llamadas(vec![ToolCall::nueva("call_1", "read", "{\"filePath\":\"a.rs\"}")]));
+    e.messages.push(Message::resultado("call_1", "contenido"));
+    // El prompt acabó dentro del canal: razonamiento sin cierre ni llamada = nada que decir.
+    let t = parse_assistant_output_familia(&e, "Okay, tengo el código y debo ver cómo arreglar...", 2, "gemma4-pensar").unwrap();
+    assert_eq!((t.content, t.tool_call.is_none()), (None, true));
+    // Con cierre o con llamada, se interpreta como siempre.
+    let t = parse_assistant_output_familia(&e, "pienso<channel|>Listo.", 2, "gemma4-pensar").unwrap();
+    assert_eq!(t.content.as_deref(), Some("Listo."));
+    // Sin pensamiento (familia `gemma4`) el texto es la respuesta, como antes.
+    let t = parse_assistant_output_familia(&e, "Listo.", 2, "gemma4").unwrap();
+    assert_eq!(t.content.as_deref(), Some("Listo."));
 }

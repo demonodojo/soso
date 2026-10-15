@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "nombre": "campana-si4-8-agente-v1",
+  "fijada": "2026-10-13",
+  "nota": "A/B, brazo A: banco NUEVO R31–R40 (campana4, ciego) con el agente ANTERIOR (v1, huellas de las campañas 4–7). Mismo modelo y runtime que el brazo B.",
+  "modelo": {
+    "id": "google/gemma-4-12B-it-qat-q4_0-gguf",
+    "archivo": "gemma-4-12b-it-qat-q4_0.gguf",
+    "tamano_bytes": 6975879296,
+    "runtime": "soso (serve_host, CPU AVX2, 16 hilos, núcleos Q4_0 nativos, KV f16 con ventana real, T=0, sin pensamiento)",
+    "max_tokens": 4096,
+    "agente": "el mismo agente nativo (T35)"
+  },
+  "base_inicial": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "como": "git archive del commit; después, cada tarea parte de la base aceptada por el validador (secuencial)"
+  },
+  "limites_por_defecto": {
+    "intentos_max": 1,
+    "herramientas_max": 30,
+    "segundos_max": 3600
+  },
+  "criterio": {
+    "aceptadas_minimas": 5,
+    "recuperacion_acreditada": true,
+    "base_final": "verde (checks de C6 sobre lo promovido)"
+  },
+  "tareas": [
+    {
+      "id": "R31",
+      "banco": "tests/self-improvement/campana4",
+      "origen": "mejora_especificada (banco ciego 4, 2026-10-13)"
+    },
+    {
+      "id": "R32",
+      "banco": "tests/self-improvement/campana4",
+      "origen": "mejora_especificada (banco ciego 4, 2026-10-13)"
+    },
+    {
+      "id": "R33",
+      "banco": "tests/self-improvement/campana4",
+      "origen": "mejora_especificada (banco ciego 4, 2026-10-13)",
+      "inyeccion": {
+        "tipo": "matar_agente_y_reiniciar_coordinador",
+        "a_los_segundos": 75,
+        "intentos_max": 2
+      }
+    },
+    {
+      "id": "R34",
+      "banco": "tests/self-improvement/campana4",
+      "origen": "mejora_especificada (banco ciego 4, 2026-10-13)"
+    },
+    {
+      "id": "R35",
+      "banco": "tests/self-improvement/campana4",
+      "origen": "mejora_especificada (banco ciego 4, 2026-10-13)"
+    },
+    {
+      "id": "R36",
+      "banco": "tests/self-improvement/campana4",
+      "origen": "mejora_especificada (banco ciego 4, 2026-10-13)"
+    },
+    {
+      "id": "R37",
+      "banco": "tests/self-improvement/campana4",
+      "origen": "mejora_especificada (banco ciego 4, 2026-10-13)"
+    },
+    {
+      "id": "R38",
+      "banco": "tests/self-improvement/campana4",
+      "origen": "mejora_especificada (banco ciego 4, 2026-10-13)",
+      "inyeccion": {
+        "tipo": "matar_agente_y_reiniciar_coordinador",
+        "a_los_segundos": 75,
+        "intentos_max": 2
+      }
+    },
+    {
+      "id": "R39",
+      "banco": "tests/self-improvement/campana4",
+      "origen": "mejora_especificada (banco ciego 4, 2026-10-13)"
+    },
+    {
+      "id": "R40",
+      "banco": "tests/self-improvement/campana4",
+      "origen": "mejora_especificada (banco ciego 4, 2026-10-13)"
+    }
+  ],
+  "agente_congelado": {
+    "herramientas.rs": "b4ea58ae365be63df656a0e737969fff36c04d41ca25969ffdb8017d2f8f7657",
+    "mod.rs": "986a8692156f3d0b8eff0d634c71eee9f4fd62cc968bd968db37708cc2b40696"
+  }
+}

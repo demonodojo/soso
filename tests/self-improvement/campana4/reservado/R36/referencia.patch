@@ -1,0 +1,35 @@
+--- a/crates/sosomodel/src/manifest.rs
++++ b/crates/sosomodel/src/manifest.rs
+@@ -224,6 +224,10 @@
+ }
+ 
+ const LAYER_SPEC_BYTES: usize = 60;
++/// Última versión del manifest que sabe leer este crate.
++const MAX_MANIFEST_VERSION: u32 = 6;
++/// Máximo de capas en manifests v1–v3 (sin tabla de `LayerSpec`).
++const MAX_LAYERS_LEGACY: u32 = 1024;
+ 
+ impl LayerSpec {
+     fn serialize_into(&self, body: &mut Vec<u8>) {
+@@ -842,6 +846,10 @@
+ 
+     pub fn parse(data: &[u8]) -> Result<Self, ()> {
+         let (version, body) = parse_som(data)?;
++        // Sólo existen las versiones 1 a 6; una desconocida no se interpreta a ciegas.
++        if !(1..=MAX_MANIFEST_VERSION).contains(&version) {
++            return Err(());
++        }
+         let mut r = Reader::new(body);
+         let name = String::from(r.cstr()?);
+         let vocab_size = r.u32()?;
+@@ -863,6 +871,10 @@
+         if num_heads == 0 || num_kv_heads == 0 {
+             return Err(());
+         }
++        // Antes de v4 no hay tabla de capas que respalde `num_layers`: se acota.
++        if version < 4 && num_layers > MAX_LAYERS_LEGACY {
++            return Err(());
++        }
+         // v4+ puede traer head_dim explícito (Qwen3.8: hidden % heads ≠ 0).
+         // En v1–v3 la divisibilidad clásica sigue siendo contrato.
+         if version < 4

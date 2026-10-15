@@ -1,0 +1,5 @@
+2026-10-13 13:23 — el asistente cambió el servidor del modelo (binario con la capa de Gemma entera en GPU) en el instante en que
+terminó R25, creyendo que el arnés tardaba varios segundos en lanzar la tarea siguiente. Tarda ~1 s: R26 se encontró con el
+puerto 7441 cerrado ("Connection refused") y salió como infraestructura SIN llegar a hablar con el modelo. R26 no mide al
+modelo y debe repetirse aparte (base: base-R25). Las tareas R21–R25 se sirvieron con el binario anterior (matmul en GPU,
+atención en CPU); desde R27, con el nuevo (capa entera en GPU): mismos pesos y mismo resultado numérico a ruido de f32.

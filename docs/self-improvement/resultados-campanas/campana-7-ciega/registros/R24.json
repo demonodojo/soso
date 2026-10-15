@@ -1,0 +1,10 @@
+{
+ "id": "R24",
+ "resultado": "error",
+ "intentos": 1,
+ "segundos": 774,
+ "nota": "error: entorno: el intento no termin\u00f3: LimiteHerramientas",
+ "fallo": "protocolo",
+ "herramientas": 30,
+ "tokens": 176939
+}

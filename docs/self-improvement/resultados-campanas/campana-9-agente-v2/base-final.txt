@@ -1,0 +1,3 @@
+Base final = base promovida tras R40 (parches aceptados R36 sosomodel y R40 soso-abi sobre 6f558f072).
+cargo test -p sosomodel -p soso-abi -> ok (3 + 13 pruebas con asserts, 0 fallos).
+Comprobado el 2026-10-14 por el asistente, fuera del arnés.

@@ -217,6 +217,12 @@ Estado vigente y siguiente ficha en [README](../../../docs/self-improvement/READ
 resuelve R03). OpenCode sólo envía `temperature` si el modelo declara `"temperature": true` en `opencode.json`.
 **Modelo de trabajo de T25–T29: `qwen2.5-coder-14b`** (D9, aceptada 11-oct; GO 10/10 en T14, lock `model-lock-14b.json`); el 7B es el perfil ligero. Siguiente: T35.
 
+**15-oct-2026 (campañas con otros modelos):** Gemma 4 12B servido por soso dio 5/10 y 5/10 en R11–R30 (GO mínimo de SI-4) y 2/10 en el banco ciego R31–R40 (3/10 pensando); **Mellum 2.1 12B dio 1/10, 1/10 y 0/10 en R31–R40** (peor que Gemma; tres tareas acaban con «el candidato no cambió nada»). Resúmenes en `docs/self-improvement/resultados-campanas/` y `campana.md`. Operativa que ya no hay que redescubrir:
+- Arnés: `tests/self-improvement/campana/correr.sh DIR [tareas]` con `CAMPANA_JSON`, `MODELO`, `PUERTO`, `MAX_TOKENS`, `BASE_INICIAL`, `CARGO_TARGET_DIR`, `SOSO_IMPROVE_BIN`; lanza la tarea siguiente ~1 s después de la anterior (**nunca cambies el servidor a mitad**). Lo largo, con `systemd-run --user` y un vigilante (éxito, error, servidor caído, estancamiento).
+- Servidor en GPU del host: `SOSO_CUDA=1 serve_host` (ver skill `soso-dev`, «Modelos en la GPU del host»); un solo hueco, así que un 429 es que sigue ocupado con una petición abandonada.
+- **El estimador de contexto del agente depende del tokenizador:** `Config::chars_por_token` (3,0 por defecto; el adaptador de host lo lee de `SOSO_AGENTE_CHARS_POR_TOKEN`). Con Mellum son ~1,5 car./token y a 3,0 el recorte nunca actuaba (422 en R35/R36).
+- Una tarea que agota la hora con pocas llamadas no es del modelo: mide primero tok/s de prefill y decode del servidor.
+
 Revisión del **2-oct-2026**: el perfil elegido es `qwen2.5-coder-7b` (campaña 10×3, cobertura `completa`, **GO 10/10**; el 3B quedó NO-GO 8/10). **T20** está pendiente con esa identidad. **T40 y T41 están cerradas** (2026-10-02: `cargo build --offline` compila en el guest un workspace de dos crates, uno con `build.rs`, y `soso-abi`). **T40, T41 y T80 están cerradas; T42 en curso** (2026-10-03: `mkfs-soso` compila en el guest —2 min 28 s— y su imagen se verifica con el `sosofs` del host; faltan C-113 `-Zbuild-std`, C-115…C-117 C/ensamblador/objcopy y la imagen arrancable). Truco: `SOSO_REUSE_DATA=1 cargo xtask run` conserva lo que el guest escribió.
 
 Trabajo independiente: **T72** está cerrada (26-sep): `soso-alloc` lo usan

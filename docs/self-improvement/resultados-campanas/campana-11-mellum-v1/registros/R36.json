@@ -1,0 +1,10 @@
+{
+ "id": "R36",
+ "resultado": "error",
+ "intentos": 1,
+ "segundos": 746,
+ "nota": "error: entorno: el intento no termin\u00f3: ErrorModelo entorno: el servidor contest\u00f3 Some(422): {\"error\":{\"message\":\"el render necesita 33193 tokens y hay 32768\",\"type\":\"invalid_request_error\",\"code\":\"con",
+ "fallo": "infraestructura",
+ "herramientas": 20,
+ "tokens": 339477
+}

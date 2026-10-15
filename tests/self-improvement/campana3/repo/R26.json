@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "R26",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "GeomCache::reload fallido no deja la caché a medias",
+  "etiqueta": "geomcache-atomico",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R26/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R26",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R26/aceptacion.rs",
+    "reservado/R26/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R26/enunciado.md": "e90e0fbd47d5eced336e85d9a631718a3f7ade324f66ef5893f6192a3b4d7657"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/soso-resize-core/src/lib.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "GeomCache::reload fallido no deja la caché a medias",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "soso-resize-core"
+    ],
+    "prueba_reservada": "reservado/R26/aceptacion.rs",
+    "destino_prueba": "crates/soso-resize-core/tests/aceptacion_R26.rs",
+    "referencia": "reservado/R26/referencia.patch"
+  }
+}

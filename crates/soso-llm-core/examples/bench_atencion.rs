@@ -48,7 +48,7 @@ fn main() {
     let t = Instant::now();
     for _ in 0..reps {
         for h in 0..heads {
-            attention_decode_kv(&q, &kv, head_dim, kv_dim, h / group, tokens, &mut out, Some(&mut masa), false);
+            attention_decode_kv(&q, &kv, head_dim, kv_dim, h / group, tokens, &mut out, Some(&mut masa), false, 0);
         }
     }
     let generica = t.elapsed().as_secs_f64() / reps as f64;

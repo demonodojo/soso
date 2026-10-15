@@ -83,6 +83,58 @@ pub struct GemmaCapa<'a> {
     pub expulsadas: usize,
 }
 
+/// Lo que de una capa MoE es pequeño y fijo: se envía una sola vez (la primera llamada de la capa).
+pub struct MoeNormas<'a> {
+    pub attn_norm: &'a [f32],
+    pub q_norm: &'a [f32],
+    pub k_norm: &'a [f32],
+    pub ffn_norm: &'a [f32],
+    /// Pesos del router, `n_exp × h` f32.
+    pub router: &'a [f32],
+    /// Factores de frecuencia del RoPE (YaRN): la frecuencia se **divide** por ellos. `None` = RoPE plano.
+    pub rope_factores: Option<&'a [f32]>,
+}
+
+/// Una capa MoE (Qwen3-MoE / Mellum: GQA con QK-norm, RoPE NeoX, router top-k, expertos SwiGLU Q4_K/Q8_0)
+/// entera en el dispositivo, como [`GemmaCapa`]: atención con KV residente, router, expertos elegidos en la GPU.
+/// Los expertos son los tensores `{prefijo}.E{nn}.ffn_{gate,up,down}`, ya subidos con `gemma_subir`.
+pub struct MoeCapa<'a> {
+    pub layer: u32,
+    pub pos0: usize,
+    pub n: usize,
+    pub hidden: &'a mut [f32],
+    pub h: usize,
+    pub heads: usize,
+    pub kv_heads: usize,
+    pub head_dim: usize,
+    /// Ancho de la FFN de cada experto.
+    pub ffn: usize,
+    pub n_exp: usize,
+    pub top_k: usize,
+    pub ventana: usize,
+    pub ctx_max: usize,
+    pub eps: f32,
+    pub theta: f32,
+    pub escala: f32,
+    pub qk_norm: bool,
+    /// Factor que multiplica cos/sin del RoPE (YaRN: `1 + 0.1·ln(factor)`; 1 si no hay).
+    pub rope_mscale: f32,
+    /// El `hidden` de entrada ya está en el dispositivo (salida de la capa anterior, ver [`GpuDispatch::moe_pendiente`]):
+    /// no se sube el de `hidden`.
+    pub continuar: bool,
+    /// La capa siguiente también irá en la GPU: no se descarga la salida (queda pendiente en el dispositivo) y no se
+    /// sincroniza.
+    pub encadenar: bool,
+    pub clave_q: &'a str,
+    pub clave_k: &'a str,
+    pub clave_v: &'a str,
+    pub clave_o: &'a str,
+    pub prefijo: &'a str,
+    /// `Some` sólo si el despacho aún no tiene las normas de esta capa (`moe_lista` = false).
+    pub normas: Option<MoeNormas<'a>>,
+    pub expulsadas: usize,
+}
+
 /// Despacho opcional hacia la GPU del kernel (implementado en userspace).
 pub trait GpuDispatch {
     fn available(&self) -> bool;
@@ -121,6 +173,36 @@ pub trait GpuDispatch {
 
     /// Ejecuta una capa de Gemma entera en el dispositivo; `Ok(false)` si no puede (la CPU la hace).
     fn gemma_capa(&mut self, capa: &mut GemmaCapa<'_>) -> Result<bool, ()> {
+        let _ = capa;
+        Ok(false)
+    }
+
+    /// ¿Puede intentar la capa MoE `layer` entera? `false` si ya la rechazó (o no sabe hacerlo).
+    fn moe_puede(&self, layer: u32) -> bool {
+        let _ = layer;
+        false
+    }
+
+    /// ¿Tiene ya las normas, el router y las tablas de expertos de esa capa MoE?
+    fn moe_lista(&self, layer: u32) -> bool {
+        let _ = layer;
+        false
+    }
+
+    /// ¿Tiene el dispositivo pendiente (sin descargar) la salida de la capa `layer` para `n` tokens desde `pos0`?
+    fn moe_pendiente(&self, layer: u32, pos0: usize, n: usize) -> bool {
+        let _ = (layer, pos0, n);
+        false
+    }
+
+    /// Descarga a `hidden` la salida pendiente y la da por entregada (no hace nada si no hay).
+    fn moe_volcar(&mut self, hidden: &mut [f32]) -> Result<(), ()> {
+        let _ = hidden;
+        Ok(())
+    }
+
+    /// Ejecuta una capa MoE entera en el dispositivo; `Ok(false)` si no puede (la CPU la hace).
+    fn moe_capa(&mut self, capa: &mut MoeCapa<'_>) -> Result<bool, ()> {
         let _ = capa;
         Ok(false)
     }

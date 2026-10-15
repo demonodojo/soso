@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "R36",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "Manifest::parse rechaza versiones desconocidas y num_layers sin respaldo",
+  "etiqueta": "manifest-version",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R36/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R36",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R36/aceptacion.rs",
+    "reservado/R36/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R36/enunciado.md": "45ae0cce4e4ccafd79ce684dfd6377b5666ec78f286bdf3fcd5cf0dcfb9d8436"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/sosomodel/src/manifest.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "Manifest::parse rechaza versiones desconocidas y num_layers sin respaldo",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "sosomodel"
+    ],
+    "prueba_reservada": "reservado/R36/aceptacion.rs",
+    "destino_prueba": "crates/sosomodel/tests/aceptacion_R36.rs",
+    "referencia": "reservado/R36/referencia.patch"
+  }
+}

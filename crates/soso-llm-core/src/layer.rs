@@ -6,7 +6,7 @@
 
 use crate::gemm::{
     add_assign_f32, add_f32, matvec_f32, matvec_q4_k, matvec_q4_k_batch_strided, matvec_q8_0,
-    matvec_q8_0_batch_strided, rmsnorm, rope_cabezas, silu_inplace,
+    matvec_q8_0_batch_strided, rmsnorm, rope_cabezas, rope_neox_yarn, silu_inplace,
     swiglu_inplace, topk_softmax,
 };
 pub use crate::kv::{KvDtype, LayerKv};
@@ -756,7 +756,8 @@ impl<'a> LayerExecutor<'a> {
         let group = heads / kv_heads;
         let ffn = self.manifest.layer_expert_ffn_dim(layer) as usize;
         let eps = self.manifest.rms_eps;
-        let theta = self.manifest.rope_theta;
+        let theta = self.manifest.layer_rope_theta(layer);
+        let ventana = self.manifest.layer_window(layer) as usize;
         let prefix = format!("L{layer:02}");
         // Los nombres se construyen UNA vez y se usan dos: para leer el tensor y
         // como clave estable del despacho a GPU (ver `GpuDispatch::matvec_f32`).
@@ -793,6 +794,13 @@ impl<'a> LayerExecutor<'a> {
             );
         }
         let mut timing = LayerTiming::default();
+        // MoE entera en la GPU (router, expertos y atención con KV residente), si el despacho puede.
+        if spec.attn_kind == AttnKind::Gqa
+            && self.manifest.layer_is_moe(layer)
+            && crate::moe_gpu::capa_moe_en_gpu(self, layer, pos, 1, hidden, kv, source, gpu, use_gpu)?
+        {
+            return Ok(timing);
+        }
 
         // --- atención ---
         if spec.attn_kind == AttnKind::Mla {
@@ -961,17 +969,29 @@ impl<'a> LayerExecutor<'a> {
         let t_attn0 = tick(clock_ms);
 
         let neox = spec.flags & FLAG_ROPE_NEOX != 0;
-        rope_cabezas(&mut s.q[..q_dim], heads, head_dim, pos, theta, neox);
-        rope_cabezas(&mut s.k[..kv_dim], kv_heads, head_dim, pos, theta, neox);
+        // YaRN sólo en las capas de atención completa. Las de ventana (Mellum, 3 de cada 4) llevan
+        // RoPE plano: llama.cpp les pone freq_scale=1 y ext_factor=0.
+        if self.manifest.ext.yarn.activa() && ventana == 0 {
+            rope_neox_yarn(&mut s.q[..q_dim], heads, head_dim, pos, theta, self.manifest.ext.yarn);
+            rope_neox_yarn(&mut s.k[..kv_dim], kv_heads, head_dim, pos, theta, self.manifest.ext.yarn);
+        } else {
+            rope_cabezas(&mut s.q[..q_dim], heads, head_dim, pos, theta, neox);
+            rope_cabezas(&mut s.k[..kv_dim], kv_heads, head_dim, pos, theta, neox);
+        }
 
+        if ventana > 0 {
+            crate::gemma::expulsar_si_hace_falta(kv, ventana, kv_dim);
+        }
         kv.append_f16(&s.k[..kv_dim], &s.v[..kv_dim]);
         let seq = kv.tokens(kv_dim);
+        let t_ini = if ventana > 0 { seq.saturating_sub(ventana) } else { 0 };
         let _ = pos;
-        let sparse = planner_ro.is_some_and(|p| p.use_sparse_attn(seq));
-        let use_h2o = planner_ro.is_some_and(|p| p.h2o_masas(seq));
+        // La ventana ya es la máscara del modelo: H2O y la atención dispersa no deben recortarla más.
+        let sparse = t_ini == 0 && planner_ro.is_some_and(|p| p.use_sparse_attn(seq));
+        let use_h2o = t_ini == 0 && planner_ro.is_some_and(|p| p.h2o_masas(seq));
         // Camino rápido: KV f16 denso sin masa → kernel por grupos GQA, repartido entre hilos.
         let fast_f16 = matches!(kv.dtype, KvDtype::F16) && !sparse && !use_h2o;
-        if fast_f16 {
+        if fast_f16 && t_ini == 0 {
             atencion_f16_grupos(
                 par,
                 &s.q[..q_dim],
@@ -985,6 +1005,29 @@ impl<'a> LayerExecutor<'a> {
                 kv_dim,
                 seq,
             );
+        } else if fast_f16 {
+            // Ventana deslizante: el kernel rápido atiende desde el token 0. Éste, el de Gemma, no.
+            let escala = 1.0 / libm::sqrtf(head_dim as f32);
+            let k_f16 = kv.k_f16_slice();
+            let v_f16 = kv.v_f16_slice();
+            s.attn_out[..q_dim].fill(0.0);
+            for kvh in 0..kv_heads {
+                let a = kvh * group * head_dim;
+                let b = a + group * head_dim;
+                crate::attn_gemma::attention_gqa_f16(
+                    &s.q[a..b],
+                    group,
+                    k_f16,
+                    v_f16,
+                    head_dim,
+                    kv_dim,
+                    kvh,
+                    t_ini,
+                    seq,
+                    escala,
+                    &mut s.attn_out[a..b],
+                );
+            }
         } else {
             if use_h2o && s.mass_buf.len() < seq {
                 s.mass_buf.resize(seq, 0.0);
@@ -1008,6 +1051,7 @@ impl<'a> LayerExecutor<'a> {
                     &mut s.head_out,
                     mass,
                     sparse,
+                    t_ini,
                 );
                 s.attn_out[head * head_dim..(head + 1) * head_dim].copy_from_slice(&s.head_out);
                 if use_h2o {
@@ -1145,6 +1189,15 @@ impl<'a> LayerExecutor<'a> {
         Ok(timing)
     }
 
+    /// ¿Es una capa MoE de atención GQA clásica, de las que la GPU puede ejecutar enteras (`moe_gpu`)?
+    pub fn es_capa_moe_gpu(&self, layer: u32) -> bool {
+        let spec = self.manifest.layer(layer).cloned().unwrap_or_default();
+        spec.attn_kind == AttnKind::Gqa
+            && spec.ffn_kind != FfnKind::LatentMoe
+            && self.manifest.layer_is_moe(layer)
+            && !crate::gemma::es_capa_gemma(spec.flags)
+    }
+
     /// ¿Se puede ejecutar esta capa por bloques (T82)? Sólo atención clásica y FFN denso
     /// (KV f16 o int8: `append` y la atención genérica ya saben de dtype): el resto (MLA,
     /// KDA, gated, GDN, MoE) sigue token a token.
@@ -1158,6 +1211,8 @@ impl<'a> LayerExecutor<'a> {
         atencion_clasica
             && spec.ffn_kind != FfnKind::LatentMoe
             && !self.manifest.layer_is_moe(layer)
+            && self.manifest.layer_window(layer) == 0
+            && !self.manifest.ext.yarn.activa()
     }
 
     /// Una capa para `n` tokens consecutivos (posiciones `pos0..pos0+n`) a la vez.
@@ -1183,6 +1238,17 @@ impl<'a> LayerExecutor<'a> {
     ) -> Result<(), ()> {
         if crate::gemma::es_capa_gemma(self.manifest.layer(layer).map_or(0, |l| l.flags)) {
             return crate::gemma::forward_layer_gemma_block(self, layer, pos0, n, hs, bs, s, kv, source, gpu, use_gpu);
+        }
+        // MoE con GPU: el bloque entero en el dispositivo; si la GPU no puede, token a token por el camino de siempre.
+        if use_gpu && self.es_capa_moe_gpu(layer) {
+            if crate::moe_gpu::capa_moe_en_gpu(self, layer, pos0, n, hs, kv, source, gpu, use_gpu)? {
+                return Ok(());
+            }
+            let h = self.manifest.hidden_dim as usize;
+            for t in 0..n {
+                self.forward_layer(layer, pos0 + t, &mut hs[t * h..(t + 1) * h], s, kv, source, gpu, use_gpu, None, None, None)?;
+            }
+            return Ok(());
         }
         let h = self.manifest.hidden_dim as usize;
         let heads = self.manifest.effective_num_heads(layer) as usize;
@@ -1338,6 +1404,7 @@ impl<'a> LayerExecutor<'a> {
                         &mut s.head_out,
                         mass,
                         sparse,
+                        0,
                     );
                     bs.attn[o..o + head_dim].copy_from_slice(&s.head_out[..head_dim]);
                     if use_h2o {

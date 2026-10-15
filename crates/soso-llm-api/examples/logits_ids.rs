@@ -64,6 +64,33 @@ fn main() {
     let logits = rt.logits_gpu(&mut source, par, &mut gpu).expect("logits").to_vec();
     eprintln!("prefill {} token(s): {:.2?}; logits: {:.2?}", ids.len(), t_prefill, t1.elapsed());
 
+    // `DECODIFICAR=N`: N pasos de decodificación (un token + logits) tras el prefill; imprime ms por paso.
+    if let Some(pasos) = std::env::var("DECODIFICAR")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        let mut tok = Runtime::argmax(&logits);
+        let t = Instant::now();
+        let (mut t_fwd, mut t_log) = (0.0f64, 0.0f64);
+        for _ in 0..pasos {
+            let a = Instant::now();
+            rt.prefill_prompt(&mut source, &[tok], par, &mut gpu, None)
+                .expect("paso");
+            t_fwd += a.elapsed().as_secs_f64();
+            let b = Instant::now();
+            let l = rt.logits_gpu(&mut source, par, &mut gpu).expect("logits");
+            tok = Runtime::argmax(l);
+            t_log += b.elapsed().as_secs_f64();
+        }
+        let tot = t.elapsed().as_secs_f64();
+        eprintln!(
+            "decodificar {pasos}: {:.2} ms/token ({:.0} tok/s); capas {:.2} ms, logits {:.2} ms",
+            tot * 1e3 / pasos as f64,
+            pasos as f64 / tot,
+            t_fwd * 1e3 / pasos as f64,
+            t_log * 1e3 / pasos as f64
+        );
+    }
     if perfil {
         let f = soso_llm_core::layer::perfil_fases_ns();
         let total: u64 = f.iter().sum::<u64>().max(1);
@@ -72,6 +99,14 @@ fn main() {
         }
     }
     if let Some(g) = cuda.as_mut() {
+        let st = soso_llm_core::gpu::GpuDispatch::stats(g);
+        eprintln!(
+            "  gpu: {} lanzamientos, {} residentes, {} MiB en VRAM, {:.0} ms de CPU en moe_capa",
+            st.launches,
+            g.residentes(),
+            g.vram_usada() >> 20,
+            st.total_ns as f64 / 1e6
+        );
         let p = g.perfil_capa();
         let total: f64 = p.iter().map(|(_, ms)| ms).sum::<f64>().max(1e-9);
         for (n, ms) in p {

@@ -1,0 +1,39 @@
+--- a/crates/soso-update-core/src/kernel_meta.rs
++++ b/crates/soso-update-core/src/kernel_meta.rs
+@@ -4,7 +4,7 @@
+ use alloc::string::String;
+ use alloc::vec::Vec;
+ 
+-use crate::hash::{decode_hex_sha256, hex_sha256};
++use crate::hash::{decode_hex_sha256, hex_sha256, sha256};
+ 
+ pub const KERNEL_META_MAGIC: &str = "SOSOKRN v1";
+ pub const KERNEL_META_SIZE: usize = 512;
+@@ -172,10 +172,9 @@
+             return Err(MetaError::MissingField);
+         }
+         let slice = &data[..self.new_size as usize];
+-        if decode_hex_sha256(&self.new_hash).is_none() {
+-            return Err(MetaError::BadHash);
+-        }
+-        if hex_sha256(slice) != self.new_hash {
++        // El digest se compara como bytes: el hex guardado puede venir en mayúsculas.
++        let expect = decode_hex_sha256(&self.new_hash).ok_or(MetaError::BadHash)?;
++        if sha256(slice) != expect {
+             return Err(MetaError::BadHash);
+         }
+         Ok(())
+@@ -189,11 +188,9 @@
+         if slot.len() < self.backup_size as usize {
+             return Err(MetaError::BackupTooShort);
+         }
+-        if decode_hex_sha256(&self.backup_hash).is_none() {
+-            return Err(MetaError::BadHash);
+-        }
++        let expect = decode_hex_sha256(&self.backup_hash).ok_or(MetaError::BadHash)?;
+         let slice = &slot[..self.backup_size as usize];
+-        if hex_sha256(slice) != self.backup_hash {
++        if sha256(slice) != expect {
+             return Err(MetaError::BackupHashMismatch);
+         }
+         Ok(slice)

@@ -1,0 +1,1 @@
+interrumpida entre R12 y R13 por el reinicio de la sesión (22:41-22:50, unidades paradas); reanudada en R13 con BASE_INICIAL=base-R12

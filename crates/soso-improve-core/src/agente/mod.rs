@@ -52,6 +52,10 @@ pub struct Config {
     /// Ventana de contexto del modelo, en tokens. Con ella se recortan las salidas de herramienta **antiguas**
     /// antes de que la conversación llegue al límite (el servidor rechaza con 422 lo que no cabe). `None` lo apaga.
     pub contexto_tokens: Option<usize>,
+    /// Caracteres por token con los que se estima el tamaño de la conversación. Depende del tokenizador: ~3,5 en
+    /// castellano o código con un BPE normal, pero ~1,5 con Mellum, que parte los dígitos uno a uno y hace carísimos los
+    /// volcados con número de línea (campaña 11: 56 k caracteres = 36 k tokens)..
+    pub chars_por_token: f32,
 }
 
 impl Config {
@@ -69,6 +73,7 @@ impl Config {
             errores_de_formato: 5,
             repetidas_max: 3,
             contexto_tokens: Some(32_768),
+            chars_por_token: 3.0,
         }
     }
 }
@@ -154,7 +159,7 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
         }
         let plazo = cfg.plazo_turno_ms.min(cfg.plazo_total_ms - gastado);
         if let Some(limite) = cfg.contexto_tokens {
-            informe.recortadas += recortar_contexto(&mut mensajes, limite);
+            informe.recortadas += recortar_contexto(&mut mensajes, limite, cfg.chars_por_token);
         }
         let peticion = json!({
             "model": cfg.modelo, "messages": mensajes, "tools": herramientas::definiciones(pol),
@@ -340,19 +345,19 @@ fn aviso_de_repeticion(herramienta: &str, veces: usize) -> String {
 }
 
 /// Tokens que ocupa la conversación, por exceso (una cadena de código o castellano da ~3,5 caracteres por token).
-fn tokens_estimados(mensajes: &[Value]) -> usize {
-    mensajes.iter().map(|m| m.to_string().len()).sum::<usize>() / 3
+fn tokens_estimados(mensajes: &[Value], chars_por_token: f32) -> usize {
+    (mensajes.iter().map(|m| m.to_string().len()).sum::<usize>() as f32 / chars_por_token) as usize
 }
 
 /// Recorta las salidas de herramienta **antiguas** cuando la conversación pasa del 70 % de la ventana (y, si aún sobra,
 /// del 90 %, más a fondo). Se conservan el sistema, la tarea y los últimos mensajes tal cual; de las salidas viejas
 /// queda el principio. Las llamadas no se tocan, así que cada resultado sigue atado a su `tool_call_id`.
 /// Devuelve cuántas salidas se recortaron en esta pasada.
-fn recortar_contexto(mensajes: &mut [Value], limite: usize) -> usize {
+fn recortar_contexto(mensajes: &mut [Value], limite: usize, chars_por_token: f32) -> usize {
     const MARCA: &str = "\n[… salida antigua recortada para no agotar el contexto; vuelve a pedirla si la necesitas]";
     let mut recortadas = 0;
     for (umbral, conservar, cabeza) in [(limite * 7 / 10, 10usize, 400usize), (limite * 9 / 10, 4, 120)] {
-        if tokens_estimados(mensajes) <= umbral || mensajes.len() <= conservar + 2 {
+        if tokens_estimados(mensajes, chars_por_token) <= umbral || mensajes.len() <= conservar + 2 {
             continue;
         }
         let hasta = mensajes.len() - conservar;

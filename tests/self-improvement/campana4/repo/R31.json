@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "id": "R31",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "Catalog::parse rechaza catálogos truncados o corruptos sin pánico",
+  "etiqueta": "parse-sin-panico",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R31/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R31",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R31/aceptacion.rs",
+    "reservado/R31/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R31/enunciado.md": "e72a729ea38c17f2c0ec414f9aea1ce676d8f20c5552a3411ff38c42ea6dda1b"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/sosomfs/src/catalog.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "Catalog::parse devuelve Err ante datos truncados o contadores absurdos",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "sosomfs",
+      "--features",
+      "std"
+    ],
+    "prueba_reservada": "reservado/R31/aceptacion.rs",
+    "destino_prueba": "crates/sosomfs/tests/aceptacion_R31.rs",
+    "referencia": "reservado/R31/referencia.patch"
+  }
+}

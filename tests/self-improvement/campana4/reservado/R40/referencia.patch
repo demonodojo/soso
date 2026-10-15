@@ -1,0 +1,34 @@
+--- a/crates/soso-abi/src/lib.rs
++++ b/crates/soso-abi/src/lib.rs
+@@ -515,6 +515,31 @@
+ /// Con `O_CREAT`: falla si el fichero ya existe.
+ pub const O_EXCL: u64 = 16;
+ 
++/// Todos los bits de `open` que el kernel conoce.
++pub const O_FLAGS_MASK: u64 = O_WRONLY | O_APPEND | O_CREAT | O_TRUNC | O_EXCL;
++
++/// Comprueba que una combinación de flags de `open` tiene sentido.
++///
++/// Devuelve `Err(-EINVAL)` si hay bits desconocidos, si `O_APPEND`, `O_CREAT`,
++/// `O_TRUNC` u `O_EXCL` van sin `O_WRONLY`, si `O_EXCL` va sin `O_CREAT`, o si
++/// se pide a la vez `O_APPEND` y `O_TRUNC` (conservar y borrar el contenido).
++pub fn open_flags_validos(flags: u64) -> Result<(), i64> {
++    if flags & !O_FLAGS_MASK != 0 {
++        return Err(-EINVAL);
++    }
++    let modificadores = O_APPEND | O_CREAT | O_TRUNC | O_EXCL;
++    if flags & modificadores != 0 && flags & O_WRONLY == 0 {
++        return Err(-EINVAL);
++    }
++    if flags & O_EXCL != 0 && flags & O_CREAT == 0 {
++        return Err(-EINVAL);
++    }
++    if flags & O_APPEND != 0 && flags & O_TRUNC != 0 {
++        return Err(-EINVAL);
++    }
++    Ok(())
++}
++
+ /// Reloj de pared (epoch Unix).
+ pub const CLOCK_REALTIME: u64 = 0;
+ /// Reloj monótono desde el arranque.

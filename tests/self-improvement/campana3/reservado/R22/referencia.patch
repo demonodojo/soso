@@ -1,0 +1,50 @@
+diff --git a/crates/sosomodel/src/validate.rs b/crates/sosomodel/src/validate.rs
+--- a/crates/sosomodel/src/validate.rs
++++ b/crates/sosomodel/src/validate.rs
+@@ -1,9 +1,30 @@
+ //! Validación de integridad de un modelo .som.
+ 
+-use crate::index::{TensorIndex, verify_shard};
++use crate::index::{TensorEntry, TensorIndex, verify_shard};
++use crate::layout::{
++    DTYPE_F32, DTYPE_MXFP4, DTYPE_Q4_K, DTYPE_Q8_0, MXFP4_BLOCK_BYTES, MXFP4_BLOCK_ELEMS,
++    Q4_K_BLOCK_BYTES, Q4_K_BLOCK_ELEMS, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMS,
++};
+ use crate::manifest::Manifest;
+ use alloc::collections::BTreeMap;
+ 
++/// Bytes que debe ocupar el tensor según su `dtype` y `shape`; `None` si el dtype
++/// es desconocido o la cuenta desborda.
++fn expected_byte_len(e: &TensorEntry) -> Option<u64> {
++    let mut elems: u64 = 1;
++    for &d in &e.shape {
++        elems = elems.checked_mul(d as u64)?;
++    }
++    let (block_elems, block_bytes) = match e.dtype {
++        DTYPE_F32 => (1, 4),
++        DTYPE_Q8_0 => (Q8_0_BLOCK_ELEMS as u64, Q8_0_BLOCK_BYTES as u64),
++        DTYPE_Q4_K => (Q4_K_BLOCK_ELEMS as u64, Q4_K_BLOCK_BYTES as u64),
++        DTYPE_MXFP4 => (MXFP4_BLOCK_ELEMS as u64, MXFP4_BLOCK_BYTES as u64),
++        _ => return None,
++    };
++    elems.div_ceil(block_elems).checked_mul(block_bytes)
++}
++
+ pub struct ModelBundle<'a> {
+     pub manifest: Manifest,
+     pub index: TensorIndex,
+@@ -12,7 +33,13 @@
+ 
+ impl<'a> ModelBundle<'a> {
+     pub fn validate(&self) -> Result<(), ()> {
+-        for e in &self.index.entries {
++        for (i, e) in self.index.entries.iter().enumerate() {
++            if expected_byte_len(e) != Some(e.byte_len) {
++                return Err(());
++            }
++            if self.index.entries[..i].iter().any(|p| p.name == e.name) {
++                return Err(());
++            }
+             let shard = self.shards.get(e.shard.as_str()).ok_or(())?;
+             let payload = verify_shard(shard)?;
+             let end = e.offset.checked_add(e.byte_len).ok_or(())?;

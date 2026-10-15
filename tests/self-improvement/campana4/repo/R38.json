@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "R38",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "maybe_decompress entiende gzip real y deflate crudo",
+  "etiqueta": "gzip-deflate",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R38/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R38",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R38/aceptacion.rs",
+    "reservado/R38/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R38/enunciado.md": "2088604d98a9bfeecd52507ad158e0461787faf5a8acbcff35e633e5585b8828"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/soso-web-core/src/decode.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "maybe_decompress entiende gzip real y deflate crudo",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "soso-web-core"
+    ],
+    "prueba_reservada": "reservado/R38/aceptacion.rs",
+    "destino_prueba": "crates/soso-web-core/tests/aceptacion_R38.rs",
+    "referencia": "reservado/R38/referencia.patch"
+  }
+}

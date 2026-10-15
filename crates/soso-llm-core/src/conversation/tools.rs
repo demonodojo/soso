@@ -314,6 +314,8 @@ pub fn parse_assistant_output_pasante(
     generated: &str,
     id_next: u32,
 ) -> Result<AssistantTurn, ChatError> {
+    let generated = sin_pensamiento_think(generated);
+    let generated = generated.as_str();
     if super::gemma4::parece_gemma4(generated) {
         return super::gemma4::interpretar(entrada, generated, id_next, true);
     }
@@ -322,18 +324,54 @@ pub fn parse_assistant_output_pasante(
     parser.finish(entrada)
 }
 
+/// Como [`parse_assistant_output_pasante`], sabiendo la **familia** del modelo. Con `gemma4-pensar` y el último
+/// mensaje siendo un resultado de herramienta, el aviso de generación terminó dentro de un canal de razonamiento
+/// abierto: si lo generado no lo cierra ni trae una llamada, es un pensamiento a medias (cortado por el tope de
+/// tokens) y no una respuesta; devolverlo como texto haría que el agente creyera que la tarea terminó.
+pub fn parse_assistant_output_familia(
+    entrada: &ChatInput,
+    generated: &str,
+    id_next: u32,
+    family: &str,
+) -> Result<AssistantTurn, ChatError> {
+    if family == "gemma4-pensar"
+        && matches!(entrada.messages.last().map(|m| m.role), Some(crate::conversation::Role::Tool))
+        && !generated.contains("<channel|>")
+        && !generated.contains("<|tool_call>")
+    {
+        return Ok(AssistantTurn { content: None, tool_call: None });
+    }
+    parse_assistant_output_pasante(entrada, generated, id_next)
+}
+
 /// Atajo para pruebas y entradas completas.
 pub fn parse_assistant_output(
     entrada: &ChatInput,
     generated: &str,
     id_next: u32,
 ) -> Result<AssistantTurn, ChatError> {
+    let generated = sin_pensamiento_think(generated);
+    let generated = generated.as_str();
     if super::gemma4::parece_gemma4(generated) {
         return super::gemma4::interpretar(entrada, generated, id_next, false);
     }
     let mut parser = ToolCallParser::new(id_next);
     parser.push(sin_marca_de_turno(generated))?;
     parser.finish(entrada)
+}
+
+/// Quita el razonamiento `<think>…</think>` con que empiezan los modelos tipo Qwen3 / Mellum antes de contestar:
+/// queda lo que viene **después** del último `</think>`. Un `<think>` que nunca se cierra (la generación se cortó
+/// pensando) no deja nada: no hay respuesta ni llamada. Sin etiqueta, el texto no cambia. Sin esto el pensamiento
+/// entraría en el contenido del turno y se reenviaría entero en cada petición siguiente.
+fn sin_pensamiento_think(texto: &str) -> String {
+    if let Some(i) = texto.rfind("</think>") {
+        return String::from(texto[i + "</think>".len()..].trim_start());
+    }
+    if texto.trim_start().starts_with("<think>") {
+        return String::new();
+    }
+    String::from(texto)
 }
 
 /// El 7B a veces abre o cierra su respuesta con marcas de turno sueltas (`<|im_start|>`,

@@ -1,4 +1,4 @@
-//! Convierte GGUF (llama, deepseek2, qwen2, qwen3, qwen35/qwen38) al layout sosomodel (.som).
+//! Convierte GGUF (llama, deepseek2, qwen2, qwen3, qwen3moe, qwen35/qwen38, gemma4, mellum) al layout sosomodel (.som).
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #[cfg(feature = "std")]
@@ -22,9 +22,9 @@ use sosomodel::layout::{
     SHARDS_DIR, TOKENIZER_FILE,
 };
 use sosomodel::manifest::{
-    AttnKind, AudioSpec, LayerPrefetch, Manifest, ManifestExt, ModelKind, NormKind, FLAG_GEGLU,
-    FLAG_LAYER_SCALE, FLAG_QK_NORM, FLAG_ROPE_FACTORS, FLAG_ROPE_NEOX, FLAG_SANDWICH_NORM,
-    FLAG_V_FROM_K, FLAG_V_NORM,
+    AttnKind, AudioSpec, LayerPrefetch, Manifest, ManifestExt, ModelKind, NormKind, YarnSpec,
+    FLAG_GEGLU, FLAG_LAYER_SCALE, FLAG_QK_NORM, FLAG_ROPE_FACTORS, FLAG_ROPE_NEOX,
+    FLAG_SANDWICH_NORM, FLAG_V_FROM_K, FLAG_V_NORM,
 };
 
 pub trait SomOut {
@@ -113,12 +113,15 @@ pub fn convert_path_with_options(
 
 const GGML_F32: u32 = 0;
 const GGML_Q4_0: u32 = 2;
+const GGML_Q5_0: u32 = 6;
 const GGML_F16: u32 = 1;
 const GGML_Q8_0: u32 = 8;
 const GGML_Q4_K: u32 = 12;
 const GGML_Q6_K: u32 = 14;
 /// MXFP4 en GGUF reciente (llama.cpp); passthrough sin re-cuantizar.
 const GGML_MXFP4: u32 = 39;
+/// Bloque GGML Q5_0: d f16 + qh u32 (quinto bit de los 32 valores) + qs[16] (cuatro bits bajos) = 22 bytes.
+const Q5_0_BLOCK_BYTES: usize = 22;
 /// Bloque GGML Q6_K: ql[128] + qh[64] + scales[16 i8] + d f16 = 210 bytes.
 const Q6_K_BLOCK_BYTES: usize = 210;
 
@@ -150,13 +153,15 @@ pub fn convert_with_options<R: Read + Seek>(
     let is_qwen2 = arch_name == "qwen2";
     // `qwen3moe` (Qwen3-30B-A3B, Qwen3-Coder-30B-A3B): la atención es la de Qwen3 (GQA, QK-norm)
     // y la FFN es MoE con la dimensión de experto propia (`expert_feed_forward_length`).
-    let is_qwen3 = arch_name == "qwen3" || arch_name == "qwen3moe";
+    // Mellum 2.1 es Qwen3-MoE (GQA, QK-norm, SwiGLU) más ventana deslizante 3:1 y YaRN en las globales.
+    let is_mellum = arch_name == "mellum";
+    let is_qwen3 = arch_name == "qwen3" || arch_name == "qwen3moe" || is_mellum;
     let is_qwen35 = arch_name == "qwen35" || arch_name == "qwen38";
     // Gemma 4 (denso): atención mixta local/global, normas en sándwich, QK-norm, GeGLU.
     let is_gemma4 = arch_name == "gemma4";
     if arch_name != "llama" && !is_mla && !is_qwen2 && !is_qwen3 && !is_qwen35 && !is_gemma4 {
         return Err(format!(
-            "arquitectura {arch_name} no soportada (llama | deepseek2 | qwen2 | qwen3 | qwen3moe | qwen35 | qwen38 | gemma4)"
+            "arquitectura {arch_name} no soportada (llama | deepseek2 | qwen2 | qwen3 | qwen3moe | qwen35 | qwen38 | gemma4 | mellum)"
         ));
     }
     let meta_prefix = if is_mla {
@@ -653,6 +658,9 @@ pub fn convert_with_options<R: Read + Seek>(
             spec.flags |= FLAG_ROPE_NEOX;
         }
     }
+    if is_mellum {
+        aplicar_mellum(&mut manifest, &gguf)?;
+    }
     if is_qwen3 {
         let hd = gguf
             .meta_u32(&format!("{meta_prefix}.attention.key_length"))
@@ -808,6 +816,49 @@ fn index_cols(index: &TensorIndex, name: &str) -> u32 {
     index.find(name).and_then(|e| e.shape.get(1).copied()).unwrap_or(0)
 }
 
+/// Ventana por capa y YaRN de las capas globales. El patrón del GGUF vale 1 en las capas de ventana
+/// (como lo escribe el conversor de llama.cpp: `layer_types == sliding_attention`). Si falta el array
+/// y hay ventana, se usa el periodo 4 de Mellum: tres locales y una global.
+fn aplicar_mellum(manifest: &mut Manifest, gguf: &GgufFile) -> Result<(), String> {
+    let n = manifest.layers.len();
+    let ventana = gguf.meta_u32("mellum.attention.sliding_window").unwrap_or(0);
+    let patron: Vec<u64> = match gguf.meta.get("mellum.attention.sliding_window_pattern") {
+        Some(MetaValue::IntArray(v)) => v.clone(),
+        Some(MetaValue::Int(periodo)) => {
+            let p = *periodo;
+            (0..n as u64)
+                .map(|i| if p == 0 || i % p < p.saturating_sub(1) { 1 } else { 0 })
+                .collect()
+        }
+        None if ventana > 0 => (0..n).map(|i| if i % 4 < 3 { 1 } else { 0 }).collect(),
+        None => alloc::vec![0; n],
+        _ => {
+            return Err(
+                "mellum: sliding_window_pattern tiene que ser un array o un periodo entero".into(),
+            );
+        }
+    };
+    if patron.len() != n {
+        return Err(format!(
+            "mellum: el patrón de ventana tiene {} entradas y el modelo {n} capas",
+            patron.len()
+        ));
+    }
+    if ventana > 0 && gguf.meta_str("mellum.rope.scaling.type") != Some("yarn") {
+        return Err("mellum: hace falta rope.scaling.type=yarn en las capas de atención completa".into());
+    }
+    manifest.ext.window = patron.iter().map(|&p| if p != 0 { ventana } else { 0 }).collect();
+    if gguf.meta_str("mellum.rope.scaling.type") == Some("yarn") {
+        manifest.ext.yarn = YarnSpec {
+            factor: gguf.meta_f32("mellum.rope.scaling.factor")?,
+            orig_ctx: gguf.meta_u32("mellum.rope.scaling.original_context_length")?,
+            beta_fast: gguf.meta_f32("mellum.rope.scaling.yarn_beta_fast").unwrap_or(32.0),
+            beta_slow: gguf.meta_f32("mellum.rope.scaling.yarn_beta_slow").unwrap_or(1.0),
+        };
+    }
+    Ok(())
+}
+
 /// Especificaciones de capa y extensiones del manifest v7 para Gemma 4. Todo sale del GGUF; lo que el GGUF
 /// no dice y el modelo necesita (escala de embeddings `sqrt(hidden)`, atención sin escalar) es contrato de
 /// la arquitectura y está fijado contra la implementación de referencia (llama.cpp, `gemma4.cpp`).
@@ -864,6 +915,7 @@ fn aplicar_gemma4(
         tied_lm_head: index.find("lm_head").is_none(),
         window,
         rope_theta: rope,
+        yarn: YarnSpec::default(),
     };
     Ok(())
 }
@@ -1383,6 +1435,21 @@ fn read_tensor<R: Read + Seek>(
             file.read_exact(&mut out)?;
             Ok((out, DTYPE_MXFP4))
         }
+        GGML_Q5_0 => {
+            // sin soporte nativo Q5_0 (las `ffn_down_exps` de los Q4_K_M de Mellum alternan Q8_0 y Q5_0):
+            // descuantizar y re-cuantizar a Q8_0
+            if elems % 32 != 0 {
+                return Err(format!("tensor Q5_0 con {elems} elems (no múltiplo de 32)"));
+            }
+            let blocks = elems / 32;
+            let mut raw = vec![0u8; blocks * Q5_0_BLOCK_BYTES];
+            file.read_exact(&mut raw)?;
+            let mut f = vec![0.0f32; elems];
+            for (b, blk) in raw.chunks_exact(Q5_0_BLOCK_BYTES).enumerate() {
+                dequant_q5_0_block(blk, &mut f[b * 32..(b + 1) * 32]);
+            }
+            Ok((quantize_q8_0(&f), DTYPE_Q8_0))
+        }
         GGML_Q6_K => {
             // sin soporte nativo Q6_K: descuantizar y re-cuantizar a Q8_0
             // (más precisión que el original; típico en output.weight de
@@ -1400,8 +1467,22 @@ fn read_tensor<R: Read + Seek>(
             Ok((quantize_q8_0(&f), DTYPE_Q8_0))
         }
         other => Err(format!(
-            "dtype GGML {other} no soportado (solo F32/F16/Q8_0/Q4_K/Q6_K)"
+            "dtype GGML {other} no soportado (solo F32/F16/Q4_0/Q5_0/Q8_0/Q4_K/Q6_K/MXFP4)"
         )),
+    }
+}
+
+/// Descuantiza un bloque GGML Q5_0 (32 elementos) — `dequantize_row_q5_0`: el valor es `d * (q - 16)` con `q` de
+/// cinco bits (nibble + bit alto de `qh`); los elementos `0..16` usan el nibble bajo de `qs[j]` y los `16..32` el alto.
+fn dequant_q5_0_block(blk: &[u8], out: &mut [f32]) {
+    let d = f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+    let qh = u32::from_le_bytes([blk[2], blk[3], blk[4], blk[5]]);
+    for j in 0..16 {
+        let q = blk[6 + j];
+        let x0 = ((q & 0x0f) as i32) | ((((qh >> j) & 1) as i32) << 4);
+        let x1 = ((q >> 4) as i32) | ((((qh >> (j + 16)) & 1) as i32) << 4);
+        out[j] = (x0 - 16) as f32 * d;
+        out[j + 16] = (x1 - 16) as f32 * d;
     }
 }
 
@@ -1940,6 +2021,23 @@ mod tests {
     }
 
     #[test]
+    fn q5_0_se_descuantiza_como_ggml() {
+        // d = 0.5; qh con sólo el bit 0 (elemento 0) y el bit 17 (elemento 17) puestos; nibbles 0x21 en todos los bytes.
+        let mut blk = vec![0u8; Q5_0_BLOCK_BYTES];
+        blk[..2].copy_from_slice(&0x3800u16.to_le_bytes()); // f16 0.5
+        blk[2..6].copy_from_slice(&((1u32 << 0) | (1u32 << 17)).to_le_bytes());
+        for b in &mut blk[6..] {
+            *b = 0x21;
+        }
+        let mut out = [0.0f32; 32];
+        dequant_q5_0_block(&blk, &mut out);
+        // elemento 0: nibble bajo 1 + bit alto = 17 -> (17-16)*0.5 ; elemento 1: 1 -> (1-16)*0.5
+        assert_eq!((out[0], out[1]), (0.5, -7.5));
+        // elemento 16: nibble alto 2 sin bit -> (2-16)*0.5 ; elemento 17: 2 + 16 = 18 -> (18-16)*0.5
+        assert_eq!((out[16], out[17]), (-7.0, 1.0));
+    }
+
+    #[test]
     fn familias_de_plantilla_reconocidas() {
         // La de TinyLlama, tal cual sale de su GGUF (410 B de Jinja).
         let tinyllama = "{% for message in messages %}\n{% if message['role'] == 'user' %}\n\
@@ -2249,6 +2347,93 @@ mod tests {
         assert!(index.find("L00.E01.ffn_up").is_some());
         let rt = soso_llm_core::runtime::Runtime::new(manifest, index, 0, 0);
         rt.validate_shapes().expect("shapes MoE fused");
+    }
+
+    /// Mellum 2.1: Qwen3-MoE, ventana 3+1 y YaRN sólo descrito en el manifest (el runtime lo aplica).
+    #[test]
+    fn convierte_mellum_ventana_y_yarn() {
+        use sosomodel::manifest::{FLAG_QK_NORM, FLAG_ROPE_NEOX};
+        const H: u64 = 8;
+        const HD: u64 = 4;
+        const HEADS: u64 = 2;
+        const KV: u64 = 1;
+        const FFN_DENSO: u64 = 32;
+        const FFN_EXP: u64 = 8;
+        const N_EXP: u64 = 2;
+        const N: u32 = 4;
+        let q = HEADS * HD;
+        let kv = KV * HD;
+        let mut tensors: Vec<(String, Vec<u64>)> = vec![
+            ("token_embd.weight".into(), vec![H, 6]),
+            ("output.weight".into(), vec![H, 6]),
+            ("output_norm.weight".into(), vec![H]),
+        ];
+        for i in 0..N {
+            let b = |n: &str| format!("blk.{i}.{n}.weight");
+            tensors.push((b("attn_norm"), vec![H]));
+            tensors.push((b("attn_q"), vec![H, q]));
+            tensors.push((b("attn_k"), vec![H, kv]));
+            tensors.push((b("attn_v"), vec![H, kv]));
+            tensors.push((b("attn_output"), vec![q, H]));
+            tensors.push((b("attn_q_norm"), vec![HD]));
+            tensors.push((b("attn_k_norm"), vec![HD]));
+            tensors.push((b("ffn_norm"), vec![H]));
+            tensors.push((b("ffn_gate_inp"), vec![H, N_EXP]));
+            tensors.push((b("ffn_gate_exps"), vec![H, FFN_EXP, N_EXP]));
+            tensors.push((b("ffn_up_exps"), vec![H, FFN_EXP, N_EXP]));
+            tensors.push((b("ffn_down_exps"), vec![FFN_EXP, H, N_EXP]));
+        }
+        let refs: Vec<(&str, Vec<u64>)> = tensors.iter().map(|(n, s)| (n.as_str(), s.clone())).collect();
+        let g = pack_gguf_v3(22, |g| {
+            gguf_kv_str(g, "general.architecture", "mellum");
+            gguf_kv_u32(g, "mellum.embedding_length", H as u32);
+            gguf_kv_u32(g, "mellum.block_count", N);
+            gguf_kv_u32(g, "mellum.feed_forward_length", FFN_DENSO as u32);
+            gguf_kv_u32(g, "mellum.expert_feed_forward_length", FFN_EXP as u32);
+            gguf_kv_u32(g, "mellum.attention.head_count", HEADS as u32);
+            gguf_kv_u32(g, "mellum.attention.head_count_kv", KV as u32);
+            gguf_kv_u32(g, "mellum.attention.key_length", HD as u32);
+            gguf_kv_f32(g, "mellum.attention.layer_norm_rms_epsilon", 1e-6);
+            gguf_kv_f32(g, "mellum.rope.freq_base", 500_000.0);
+            gguf_kv_u32(g, "mellum.context_length", 128);
+            gguf_kv_u32(g, "mellum.expert_count", N_EXP as u32);
+            gguf_kv_u32(g, "mellum.expert_used_count", 2);
+            gguf_kv_u32(g, "mellum.attention.sliding_window", 4);
+            gguf_kv_int_array(g, "mellum.attention.sliding_window_pattern", 7, &[1, 1, 1, 0]);
+            gguf_kv_str(g, "mellum.rope.scaling.type", "yarn");
+            gguf_kv_f32(g, "mellum.rope.scaling.factor", 16.0);
+            gguf_kv_u32(g, "mellum.rope.scaling.original_context_length", 8192);
+            gguf_kv_f32(g, "mellum.rope.scaling.yarn_beta_fast", 32.0);
+            gguf_kv_f32(g, "mellum.rope.scaling.yarn_beta_slow", 1.0);
+            gguf_kv_str_array(g, "tokenizer.ggml.tokens", &["<s>", "</s>", "a", "b", "c", "d"]);
+            gguf_kv_u32(g, "tokenizer.ggml.eos_token_id", 1);
+        }, &refs);
+        let dir = std::env::temp_dir().join("convert-gguf-mellum");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let gguf_path = dir.join("mellum.gguf");
+        fs::File::create(&gguf_path).unwrap().write_all(&g).unwrap();
+        let out = dir.join("out");
+        convert_path(gguf_path.to_str().unwrap(), &out, Some("mellum")).unwrap();
+        let manifest = Manifest::parse(&fs::read(out.join(MANIFEST_FILE)).unwrap()).unwrap();
+        assert_eq!(manifest.num_layers, 4);
+        assert_eq!(manifest.moe_ffn_dim, FFN_EXP as u32);
+        assert!((manifest.rope_theta - 500_000.0).abs() < 1.0);
+        assert_eq!(
+            (manifest.layer_window(0), manifest.layer_window(1), manifest.layer_window(2), manifest.layer_window(3)),
+            (4, 4, 4, 0)
+        );
+        assert!(manifest.ext.yarn.activa());
+        assert_eq!(manifest.ext.yarn.factor, 16.0);
+        assert_eq!(manifest.ext.yarn.orig_ctx, 8192);
+        let capa = manifest.layer(0).unwrap();
+        assert!(capa.flags & FLAG_ROPE_NEOX != 0 && capa.flags & FLAG_QK_NORM != 0);
+        assert_eq!(capa.v_head_dim, HD as u32);
+        let index = TensorIndex::parse(&fs::read(out.join(INDEX_FILE)).unwrap()).unwrap();
+        assert!(index.find("L00.attn_q_norm").is_some());
+        assert!(index.find("L03.E01.ffn_down").is_some());
+        let rt = soso_llm_core::runtime::Runtime::new(manifest, index, 0, 0);
+        rt.validate_shapes().expect("shapes Mellum");
     }
 
     #[test]

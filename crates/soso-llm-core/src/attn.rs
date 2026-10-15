@@ -414,6 +414,7 @@ pub fn attention_decode_kv(
     out: &mut [f32],
     mut mass_out: Option<&mut [f32]>,
     sparse: bool,
+    t_ini: usize,
 ) {
     out.fill(0.0);
     if n_tokens == 0 || head_dim == 0 {
@@ -468,7 +469,10 @@ pub fn attention_decode_kv(
             }
         }
     } else {
-        token_list.extend(0..n_tokens);
+        token_list.extend(t_ini.min(n_tokens)..n_tokens);
+    }
+    if t_ini > 0 {
+        token_list.retain(|&t| t >= t_ini);
     }
 
     let mut m = f32::NEG_INFINITY;
@@ -646,7 +650,7 @@ mod tests {
         attention_step(&q, &k_f32, &v_f32, head_dim, n, &mut dense);
         let mut out = vec![0.0f32; head_dim];
         let mut mass = vec![0.0f32; n];
-        attention_decode_kv(&q, &kv, head_dim, kv_dim, 0, n, &mut out, Some(&mut mass), false);
+        attention_decode_kv(&q, &kv, head_dim, kv_dim, 0, n, &mut out, Some(&mut mass), false, 0);
         for (a, b) in dense.iter().zip(out.iter()) {
             assert!((a - b).abs() < 1e-3, "{a} vs {b}");
         }

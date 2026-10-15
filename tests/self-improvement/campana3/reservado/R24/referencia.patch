@@ -1,0 +1,30 @@
+diff --git a/crates/gptdisk/src/lib.rs b/crates/gptdisk/src/lib.rs
+index 3837218..333f801 100644
+--- a/crates/gptdisk/src/lib.rs
++++ b/crates/gptdisk/src/lib.rs
+@@ -164,6 +164,14 @@ impl Header {
+         if num_entries == 0 || num_entries > 512 || entry_size < 128 || entry_size % 8 != 0 {
+             return Err(Error::BadHeader);
+         }
++        // La spec fija el tamaño de entrada en 128 * 2^n.
++        if !(entry_size / 128).is_power_of_two() || entry_size % 128 != 0 {
++            return Err(Error::BadHeader);
++        }
++        let (first_usable, last_usable) = (rd64(sec, 40), rd64(sec, 48));
++        if first_usable > last_usable {
++            return Err(Error::BadHeader);
++        }
+         let mut disk_guid = [0u8; 16];
+         disk_guid.copy_from_slice(&sec[56..72]);
+         Ok(Header {
+@@ -171,8 +179,8 @@ impl Header {
+             header_size,
+             my_lba: rd64(sec, 24),
+             alternate_lba: rd64(sec, 32),
+-            first_usable: rd64(sec, 40),
+-            last_usable: rd64(sec, 48),
++            first_usable,
++            last_usable,
+             disk_guid: Guid(disk_guid),
+             entries_lba: rd64(sec, 72),
+             num_entries,

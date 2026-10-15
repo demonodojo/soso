@@ -343,6 +343,24 @@ cargo build -p cuda-proxy --release --target-dir target
 
 User rule for this project: **mock HTTP and Celery calls in tests** (soso has no Celery; applies if adding HTTP client tests).
 
+## Modelos en la GPU del host (CUDA, `SOSO_CUDA=1`)
+
+Backend CUDA **del host** (no el del guest): `crates/soso-llm-api/src/cuda.rs` y `cuda/capa/`, vía libcuda por `dlopen` (sin SDK en el host). Pesos residentes en VRAM (losas de 256 MiB: `cuMemAlloc` redondea a 2 MiB), capa entera en GPU con KV residente para **Gemma 4** (`gemma_capa`) y **MoE tipo Qwen3/Mellum** (`moe_capa`, `crates/soso-llm-core/src/moe_gpu.rs`: gate/up Q4_K, down Q8_0, sin bias ni expertos compartidos; si no encaja vuelve a CPU).
+
+```sh
+scripts/build-cuda-ptx.sh                      # OBLIGATORIO tras tocar lxdde/ports/nouveau/*.cu (usa Docker nvcc; el host no tiene nvcc)
+SOSO_CUDA=1 HILOS=16 serve_host --model-dir DIR --profile perfil.json --port N   # SOSO_LLM_API_KEY en el entorno
+cargo test -p soso-llm-api --features std --release --test cuda_matvec --test cuda_capa   # paridad de kernels (se saltan sin GPU)
+# paridad y velocidad con el modelo real (mismos ids en CPU y GPU, y N pasos de decode):
+DECODIFICAR=300 HILOS=16 SOSO_CUDA=1 target/release/examples/logits_ids DIR 1,2,3,… --top 3
+```
+
+- Perfil por etapas: `SOSO_CUDA_PERFIL=1` (eventos sin sync; resta dos longitudes de `DECODIFICAR` para aislar el decode). Desactivar grafos: `SOSO_CUDA_GRAFOS=0`; atención antigua: `SOSO_CUDA_ATT_VIEJA=1`; expertos sin agrupar: `SOSO_CUDA_SIN_GRUPOS=1`.
+- **Si recompilas el `.cu` y no el PTX, el binario lleva los kernels viejos** y los grafos reutilizados dan logits erróneos que parecen un fallo de captura.
+- Un solo proceso con la GPU (~9–10 GB para Mellum en 12 GB): no cargues el modelo en una prueba mientras corre un servidor de campaña (OOM o `error CUDA 2`).
+- **No ejecutes `cargo fmt`** sobre estos crates: el repo no está formateado (edición 2024) y toca decenas de archivos ajenos.
+- Medido (RTX 5070 Ti Laptop, ~470 GB/s reales): Mellum decode ~170 tok/s y prefill ~435 tok/s; CPU 10,7 y 13. Detalle y qué optimizaciones sí/no sirvieron: memoria `soso-mellum-gpu-capa-moe`.
+
 ## Debugging
 
 - Serial output is the primary console.

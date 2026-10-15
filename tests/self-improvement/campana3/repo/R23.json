@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "R23",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "reflow_html: li sin cerrar abre linea y hr sin barra dibuja regla",
+  "etiqueta": "reflow-listas-hr",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R23/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R23",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R23/aceptacion.rs",
+    "reservado/R23/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R23/enunciado.md": "7895e6b715d2df29922820dce89b4f15a6260c9bccba1a140820df2d71a793c7"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/soso-web-core/src/html.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "reflow_html: li sin cerrar abre linea y hr sin barra dibuja regla",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "soso-web-core"
+    ],
+    "prueba_reservada": "reservado/R23/aceptacion.rs",
+    "destino_prueba": "crates/soso-web-core/tests/aceptacion_R23.rs",
+    "referencia": "reservado/R23/referencia.patch"
+  }
+}

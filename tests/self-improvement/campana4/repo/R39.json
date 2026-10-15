@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "id": "R39",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "MemBlockDevice devuelve OutOfRange con bloques enormes en vez de desbordar",
+  "etiqueta": "blockdev-desborde",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R39/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R39",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R39/aceptacion.rs",
+    "reservado/R39/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R39/enunciado.md": "fcaf6f34e861afc94321ea55ef06754f2e057bb3792354b4418848b4f318bbc7"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/block-dev/src/lib.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "MemBlockDevice no desborda con números de bloque enormes",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "block-dev",
+      "--features",
+      "std"
+    ],
+    "prueba_reservada": "reservado/R39/aceptacion.rs",
+    "destino_prueba": "crates/block-dev/tests/aceptacion_R39.rs",
+    "referencia": "reservado/R39/referencia.patch"
+  }
+}

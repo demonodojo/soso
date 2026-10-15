@@ -1,0 +1,14 @@
+{
+ "id": "R38",
+ "resultado": "bloqueada",
+ "intentos": 1,
+ "segundos": 398,
+ "nota": "el candidato no cambi\u00f3 nada",
+ "fallo": "protocolo",
+ "herramientas": 10,
+ "tokens": 88510,
+ "inyeccion": {
+  "que": "agente matado (kill -9) y coordinador reiniciado",
+  "recuperada": true
+ }
+}

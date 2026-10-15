@@ -1,0 +1,42 @@
+diff --git a/crates/soso-hw/src/fbrot.rs b/crates/soso-hw/src/fbrot.rs
+--- a/crates/soso-hw/src/fbrot.rs
++++ b/crates/soso-hw/src/fbrot.rs
+@@ -30,13 +30,32 @@
+ impl Rot {
+     /// `"0" | "90" | "180" | "270" | "auto"` → rotación. `auto` decide por la
+     /// forma del panel y necesita las dimensiones físicas.
++    ///
++    /// Además admite `normal`/`auto` en cualquier combinación de mayúsculas,
++    /// un signo (`-90` es 90° horario, o sea 270° antihorario), el sufijo
++    /// `°` o `deg` y ángulos fuera de 0..360, que se reducen módulo 360
++    /// (`450` → 90, `-180` → 180). Un ángulo que no sea múltiplo de 90 es `None`.
+     pub fn parse(s: &str, phys_w: usize, phys_h: usize) -> Option<Rot> {
+-        match s.trim() {
+-            "0" | "normal" => Some(Rot::R0),
+-            "90" => Some(Rot::R90),
+-            "180" => Some(Rot::R180),
+-            "270" => Some(Rot::R270),
+-            "auto" => Some(Rot::automatica(phys_w, phys_h)),
++        let s = s.trim();
++        if s.eq_ignore_ascii_case("normal") {
++            return Some(Rot::R0);
++        }
++        if s.eq_ignore_ascii_case("auto") {
++            return Some(Rot::automatica(phys_w, phys_h));
++        }
++        let num = match s.strip_suffix('°') {
++            Some(n) => n,
++            None => match s.len().checked_sub(3).and_then(|i| s.get(i..)) {
++                Some(suf) if suf.eq_ignore_ascii_case("deg") => &s[..s.len() - 3],
++                _ => s,
++            },
++        };
++        let g: i32 = num.trim().parse().ok()?;
++        match g.rem_euclid(360) {
++            0 => Some(Rot::R0),
++            90 => Some(Rot::R90),
++            180 => Some(Rot::R180),
++            270 => Some(Rot::R270),
+             _ => None,
+         }
+     }

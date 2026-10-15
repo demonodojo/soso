@@ -1,0 +1,13 @@
+{
+ "id": "R12",
+ "resultado": "aceptada",
+ "intentos": 1,
+ "segundos": 628,
+ "nota": "",
+ "herramientas": 4,
+ "tokens": 16165,
+ "inyeccion": {
+  "que": "agente matado (kill -9) y coordinador reiniciado",
+  "recuperada": true
+ }
+}

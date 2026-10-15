@@ -1,0 +1,10 @@
+{
+ "id": "R20",
+ "resultado": "error",
+ "intentos": 1,
+ "segundos": 1205,
+ "nota": "error: entorno: el intento no termin\u00f3: LimiteHerramientas",
+ "fallo": "protocolo",
+ "herramientas": 30,
+ "tokens": 177213
+}

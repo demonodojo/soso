@@ -1,0 +1,59 @@
+--- a/crates/soso-audio/src/wav.rs
++++ b/crates/soso-audio/src/wav.rs
+@@ -22,12 +22,16 @@
+     let mut sample_rate = 0u32;
+     let mut bits = 0u16;
+     let mut channels = 0u16;
+-    let mut pcm = Vec::new();
++    let mut tramos: Vec<(usize, usize)> = Vec::new();
+     while pos + 8 <= data.len() {
+         let id = &data[pos..pos + 4];
+         let sz = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize;
+         pos += 8;
+-        if pos + sz > data.len() {
++        if pos.saturating_add(sz) > data.len() {
++            // Fichero cortado o tamaño de streaming: el `data` llega hasta el final.
++            if id == b"data" {
++                tramos.push((pos, data.len()));
++            }
+             break;
+         }
+         if id == b"fmt " && sz >= 16 {
+@@ -39,18 +43,28 @@
+                 return Err(WavError::Unsupported);
+             }
+         } else if id == b"data" {
+-            if bits != 16 || channels != 1 {
+-                return Err(WavError::Unsupported);
+-            }
+-            let bytes = &data[pos..pos + sz];
+-            pcm.reserve(bytes.len() / 2);
+-            for chunk in bytes.chunks_exact(2) {
+-                pcm.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+-            }
++            tramos.push((pos, pos + sz));
+         }
+         pos += sz + (sz & 1);
+     }
+-    if pcm.is_empty() || sample_rate == 0 {
++    if sample_rate == 0 {
++        return Err(WavError::BadFmt);
++    }
++    if bits != 16 || !(channels == 1 || channels == 2) {
++        return Err(WavError::Unsupported);
++    }
++    let paso = 2 * channels as usize;
++    let mut pcm = Vec::new();
++    for (ini, fin) in tramos {
++        for trama in data[ini..fin].chunks_exact(paso) {
++            let mut suma = 0i32;
++            for m in trama.chunks_exact(2) {
++                suma += i16::from_le_bytes([m[0], m[1]]) as i32;
++            }
++            pcm.push((suma / channels as i32) as i16);
++        }
++    }
++    if pcm.is_empty() {
+         return Err(WavError::BadFmt);
+     }
+     Ok((sample_rate, pcm))

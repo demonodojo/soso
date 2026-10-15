@@ -1,0 +1,14 @@
+{
+ "id": "R17",
+ "resultado": "rechazada",
+ "intentos": 1,
+ "segundos": 345,
+ "nota": "",
+ "fallo": "programacion",
+ "herramientas": 5,
+ "tokens": 15575,
+ "inyeccion": {
+  "que": "agente matado (kill -9) y coordinador reiniciado",
+  "recuperada": true
+ }
+}

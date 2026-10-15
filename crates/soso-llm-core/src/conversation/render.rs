@@ -42,6 +42,10 @@ pub fn render_messages(
         "qwen3coder" => render_qwen3coder(input, true)?,
         // Sin pensamiento: el canal de razonamiento cuesta tokens y el agente no los usa.
         "gemma4" => super::gemma4::render_gemma4(input, true, false)?,
+        // Misma familia con el canal de razonamiento activo (`<|think|>`): el modelo piensa antes de contestar y el
+        // parser descarta el pensamiento. Cuesta más tokens por turno.
+        "gemma4-pensar" => super::gemma4::render_gemma4(input, true, true)?,
+        "mellum" => render_mellum(input, true)?,
         otro => {
             return Err(ChatError::FamiliaNoImplementada {
                 family: String::from(otro),
@@ -49,6 +53,106 @@ pub fn render_messages(
         }
     };
     Ok(tokenizer.encode(&texto))
+}
+
+/// Mellum 2.1 (JetBrains): ChatML con herramientas en JSON como Qwen2.5, pero **sin** el sistema por defecto de Qwen,
+/// con el contenido tal cual (sin recortar) y las herramientas al estilo `json.dumps` (`", "` y `": "`). El turno de
+/// sistema sólo existe si hay sistema o herramientas; los resultados de herramienta consecutivos van en un único turno
+/// de usuario. Contrastado con `/apply-template` de llama.cpp (`tests/mellum_plantilla.rs`). El modelo escribe su
+/// razonamiento en `<think>…</think>` por su cuenta: el aviso de generación no lo fuerza.
+pub fn render_mellum(input: &ChatInput, add_generation_prompt: bool) -> Result<String, ChatError> {
+    let mut out = String::new();
+    let mensajes = &input.messages;
+    let primero_sistema = mensajes.first().is_some_and(|m| m.role == Role::System);
+    let resto: &[Message] = if primero_sistema { &mensajes[1..] } else { &mensajes[..] };
+    let sistema = if primero_sistema { mensajes[0].content.as_deref().unwrap_or("") } else { "" };
+    if !input.tools.is_empty() {
+        out.push_str(IM_START);
+        out.push_str("system\n");
+        if primero_sistema {
+            out.push_str(sistema);
+            out.push_str(TOOLS_CABECERA);
+        } else {
+            out.push_str(&TOOLS_CABECERA[2..]);
+        }
+        for t in &input.tools {
+            out.push('\n');
+            out.push_str("{\"type\": \"function\", \"function\": {\"name\": ");
+            out.push_str(&serde_json::to_string(&t.name).unwrap_or_default());
+            if let Some(d) = &t.description {
+                out.push_str(", \"description\": ");
+                out.push_str(&serde_json::to_string(d).unwrap_or_default());
+            }
+            out.push_str(", \"parameters\": ");
+            out.push_str(&py_json(&t.parameters));
+            out.push_str("}}");
+        }
+        out.push_str(TOOLS_PIE);
+        out.push_str(IM_END);
+        out.push('\n');
+    } else if primero_sistema {
+        out.push_str(IM_START);
+        out.push_str("system\n");
+        out.push_str(sistema);
+        out.push_str(IM_END);
+        out.push('\n');
+    }
+    let mut i = 0;
+    while i < resto.len() {
+        let m = &resto[i];
+        match m.role {
+            Role::Tool => {
+                // Resultados consecutivos: un solo turno de usuario.
+                out.push_str(IM_START);
+                out.push_str("user");
+                while i < resto.len() && resto[i].role == Role::Tool {
+                    out.push_str("\n<tool_response>\n");
+                    out.push_str(resto[i].content.as_deref().unwrap_or(""));
+                    out.push_str("\n</tool_response>");
+                    i += 1;
+                }
+                out.push_str(IM_END);
+                out.push('\n');
+                continue;
+            }
+            Role::Assistant => {
+                out.push_str(IM_START);
+                out.push_str("assistant\n");
+                let texto = m.content.as_deref().unwrap_or("");
+                out.push_str(texto);
+                for (n, c) in m.tool_calls.iter().enumerate() {
+                    if n > 0 || !texto.is_empty() {
+                        out.push('\n');
+                    }
+                    let args = match serde_json::from_str::<Value>(&c.arguments) {
+                        Ok(v) => py_json(&v),
+                        Err(_) => c.arguments.clone(),
+                    };
+                    out.push_str("<tool_call>\n{\"name\": ");
+                    out.push_str(&serde_json::to_string(&c.name).unwrap_or_default());
+                    out.push_str(", \"arguments\": ");
+                    out.push_str(&args);
+                    out.push_str("}\n</tool_call>");
+                }
+                out.push_str(IM_END);
+                out.push('\n');
+            }
+            Role::System | Role::User => {
+                out.push_str(IM_START);
+                out.push_str(m.role.como_texto());
+                out.push('\n');
+                out.push_str(m.content.as_deref().unwrap_or(""));
+                out.push_str(IM_END);
+                out.push('\n');
+            }
+        }
+        i += 1;
+    }
+    if add_generation_prompt {
+        out.push_str(IM_START);
+        out.push_str("assistant\n");
+    }
+    Ok(out)
 }
 
 /// Texto ChatML Qwen2 alineado con la plantilla oficial de Hugging Face.

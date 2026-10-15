@@ -28,7 +28,7 @@ fn comparar(tokens: usize, kv_heads: usize, head_dim: usize, heads: usize) -> f3
         attention_decode_f16_tiled(
             &q, kv.k_f16_slice(), kv.v_f16_slice(), head_dim, kv_dim, kv_head, tokens, &mut a,
         );
-        attention_decode_kv(&q, &kv, head_dim, kv_dim, kv_head, tokens, &mut b, None, false);
+        attention_decode_kv(&q, &kv, head_dim, kv_dim, kv_head, tokens, &mut b, None, false, 0);
         for d in 0..head_dim {
             peor = peor.max((a[d] - b[d]).abs());
         }

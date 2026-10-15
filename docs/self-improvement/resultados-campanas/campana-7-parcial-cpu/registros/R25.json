@@ -1,0 +1,10 @@
+{
+ "id": "R25",
+ "resultado": "error",
+ "intentos": 1,
+ "segundos": 425,
+ "nota": "error: entorno: el intento no termin\u00f3: ErrorModelo entorno: respuesta HTTP sin cabeceras (0 bytes)",
+ "fallo": "infraestructura",
+ "herramientas": 2,
+ "tokens": 3318
+}

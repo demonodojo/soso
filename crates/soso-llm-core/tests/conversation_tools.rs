@@ -739,3 +739,25 @@ fn tools_que_no_es_una_llamada_sigue_siendo_texto() {
     assert!(t.tool_call.is_none());
     assert_eq!(t.content.as_deref(), Some("Mira <tools>algo"));
 }
+
+
+#[test]
+fn el_razonamiento_think_no_entra_en_el_turno() {
+    let e = entrada_auto();
+    // Pensar y luego llamar: la llamada se entiende y el pensamiento no queda como contenido.
+    let t = parse_assistant_output_pasante(&e, &format!("<think>\nDebo leer el archivo primero.\n</think>\n\n{}", llamada_valida()), 1).unwrap();
+    assert_eq!(t.content, None);
+    assert_eq!(t.tool_call.expect("llamada").name, "leer_archivo");
+    // Pensar y luego responder con texto.
+    let t = parse_assistant_output_pasante(&e, "<think>razono</think>Listo, ya está.", 1).unwrap();
+    assert_eq!((t.content.as_deref(), t.tool_call.is_none()), (Some("Listo, ya está."), true));
+    // Pensamiento sin cerrar (se cortó la generación): ni contenido ni llamada.
+    let t = parse_assistant_output_pasante(&e, "<think>sigo pensando y no acabo", 1).unwrap();
+    assert_eq!((t.content, t.tool_call.is_none()), (None, true));
+    // Un `<think>` dentro de una llamada ya cerrada antes no se confunde: manda el último `</think>`.
+    let t = parse_assistant_output(&e, "<think>a</think><think>b</think>ok", 1).unwrap();
+    assert_eq!(t.content.as_deref(), Some("ok"));
+    // Sin etiqueta, igual que siempre.
+    let t = parse_assistant_output_pasante(&e, llamada_valida(), 1).unwrap();
+    assert!(t.tool_call.is_some());
+}

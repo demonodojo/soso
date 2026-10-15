@@ -122,6 +122,19 @@ fn manifest_roundtrip() {
 }
 
 #[test]
+fn manifest_v8_yarn_roundtrip() {
+    use sosomodel::manifest::YarnSpec;
+    let mut m = Manifest::tiny("mellum");
+    m.ext.window = vec![1024, 1024, 1024, 0];
+    m.ext.yarn = YarnSpec { factor: 16.0, orig_ctx: 8192, beta_fast: 32.0, beta_slow: 1.0 };
+    let parsed = Manifest::parse(&m.serialize()).unwrap();
+    assert_eq!(parsed.ext.yarn, m.ext.yarn);
+    assert_eq!(parsed.layer_window(0), 1024);
+    assert_eq!(parsed.layer_window(3), 0);
+    assert!(parsed.ext.yarn.activa());
+}
+
+#[test]
 fn shard_crc_ok() {
     let data = [1u8, 2, 3, 4];
     let packed = pack_shard(&data);

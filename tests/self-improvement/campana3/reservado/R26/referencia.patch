@@ -1,0 +1,21 @@
+--- a/crates/soso-resize-core/src/lib.rs
++++ b/crates/soso-resize-core/src/lib.rs
+@@ -429,10 +429,14 @@
+ 
+ impl GeomCache {
+     pub fn reload(&mut self, disk: &impl Disk512) -> Result<(), Error> {
+-        self.parts[GPT_ROOT] = Some(read_part(disk, GPT_ROOT)?);
+-        self.parts[GPT_MODELS] = Some(read_part(disk, GPT_MODELS)?);
+-        self.parts[GPT_ESP] = read_part(disk, GPT_ESP).ok();
+-        self.parts[GPT_INSTALL] = read_part(disk, GPT_INSTALL).ok();
++        // Se lee todo a un lado y sólo se confirma si las obligatorias salieron bien:
++        // un error a mitad no deja la caché con geometría mezclada.
++        let mut parts: [Option<PartGeom>; 4] = [None; 4];
++        parts[GPT_ROOT] = Some(read_part(disk, GPT_ROOT)?);
++        parts[GPT_MODELS] = Some(read_part(disk, GPT_MODELS)?);
++        parts[GPT_ESP] = read_part(disk, GPT_ESP).ok();
++        parts[GPT_INSTALL] = read_part(disk, GPT_INSTALL).ok();
++        self.parts = parts;
+         self.reloads = self.reloads.saturating_add(1);
+         Ok(())
+     }

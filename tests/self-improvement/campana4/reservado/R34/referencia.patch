@@ -1,0 +1,40 @@
+--- a/crates/soso-llm-core/src/sample.rs
++++ b/crates/soso-llm-core/src/sample.rs
+@@ -39,12 +39,16 @@
+     }
+ 
+     fn argmax(logits: &[f32]) -> u32 {
+-        logits
+-            .iter()
+-            .enumerate()
+-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal))
+-            .map(|(i, _)| i as u32)
+-            .unwrap_or(0)
++        let mut mejor: Option<(usize, f32)> = None;
++        for (i, &v) in logits.iter().enumerate() {
++            if v.is_nan() {
++                continue;
++            }
++            if mejor.map_or(true, |(_, m)| v > m) {
++                mejor = Some((i, v));
++            }
++        }
++        mejor.map_or(0, |(i, _)| i as u32)
+     }
+ 
+     pub fn sample(&mut self, logits: &[f32]) -> u32 {
+@@ -55,10 +59,13 @@
+         self.probs.clear();
+         self.probs.reserve(n);
+         let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
++        if !max.is_finite() {
++            return Self::argmax(logits);
++        }
+         let inv_t = 1.0 / self.temp;
+         let mut sum = 0.0f32;
+         for &l in logits {
+-            let p = libm::expf((l - max) * inv_t);
++            let p = if l.is_nan() { 0.0 } else { libm::expf((l - max) * inv_t) };
+             self.probs.push(p);
+             sum += p;
+         }

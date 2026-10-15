@@ -1325,6 +1325,84 @@ pub fn rope_inplace_neox(x: &mut [f32], pos: usize, theta: f32) {
     }
 }
 
+/// RoPE NeoX con YaRN, transcrito de `rope_yarn` / `ggml_rope_cache_init` (ggml).
+///
+/// Las capas de ventana de Mellum no pasan por aquí: llevan RoPE plano (`freq_scale = 1`,
+/// `ext_factor = 0`). En las globales, `freq_scale = 1/factor` y `ext_factor = 1`. El factor de
+/// magnitud que entra a `rope_yarn` es 1: ggml lo vuelve a multiplicar por `1 + 0.1·ln(factor)`
+/// dentro de la función, después de haber anulado el `yarn_attn_factor` del GGUF.
+pub fn rope_neox_yarn(
+    x: &mut [f32],
+    n_heads: usize,
+    head_dim: usize,
+    pos: usize,
+    theta: f32,
+    yarn: sosomodel::manifest::YarnSpec,
+) {
+    if head_dim < 2 || n_heads == 0 || !yarn.activa() {
+        return;
+    }
+    let half = head_dim / 2;
+    let n_dims = head_dim as i32;
+    let freq_scale = 1.0 / yarn.factor;
+    let (low, high) = yarn_corr_dims(n_dims, yarn.orig_ctx as i32, theta, yarn.beta_fast, yarn.beta_slow);
+    let theta_scale = libm::powf(theta, -2.0 / head_dim as f32);
+    let mscale = 1.0 + 0.1 * libm::logf(yarn.factor);
+    let mut cos = alloc::vec![0.0f32; half];
+    let mut sin = alloc::vec![0.0f32; half];
+    let mut ang = pos as f32;
+    for i in 0..half {
+        let ramp = yarn_ramp(low, high, i as i32);
+        let extrap = ang;
+        let interp = freq_scale * extrap;
+        let mix = ramp; // ext_factor = 1
+        let angulo = interp * (1.0 - mix) + extrap * mix;
+        cos[i] = libm::cosf(angulo) * mscale;
+        sin[i] = libm::sinf(angulo) * mscale;
+        ang *= theta_scale;
+    }
+    for h in 0..n_heads {
+        let v = &mut x[h * head_dim..(h + 1) * head_dim];
+        for i in 0..half {
+            let (a, b) = (v[i], v[i + half]);
+            v[i] = a * cos[i] - b * sin[i];
+            v[i + half] = a * sin[i] + b * cos[i];
+        }
+    }
+}
+
+/// Factores por frecuencia que reproducen [`rope_neox_yarn`] en un RoPE que **divide** la frecuencia por un factor
+/// (el de la GPU): `ang_i = pos·θ^(-2i/d) / factor_i`. Devuelve también la magnitud `mscale` que multiplica cos/sin.
+pub fn yarn_factores(head_dim: usize, theta: f32, yarn: sosomodel::manifest::YarnSpec) -> (alloc::vec::Vec<f32>, f32) {
+    let half = head_dim / 2;
+    let freq_scale = 1.0 / yarn.factor;
+    let (low, high) = yarn_corr_dims(head_dim as i32, yarn.orig_ctx as i32, theta, yarn.beta_fast, yarn.beta_slow);
+    let f = (0..half)
+        .map(|i| {
+            let ramp = yarn_ramp(low, high, i as i32);
+            1.0 / (freq_scale * (1.0 - ramp) + ramp)
+        })
+        .collect();
+    (f, 1.0 + 0.1 * libm::logf(yarn.factor))
+}
+
+/// `ggml_rope_yarn_corr_dims`: el índice de corrección sale en el espacio de `n_dims`, y la rampa
+/// lo compara con el índice de pareja (`i0/2`).
+fn yarn_corr_dims(n_dims: i32, n_ctx_orig: i32, freq_base: f32, beta_fast: f32, beta_slow: f32) -> (f32, f32) {
+    let dim = |n_rot: f32| {
+        n_dims as f32 * libm::logf(n_ctx_orig as f32 / (n_rot * 2.0 * core::f32::consts::PI))
+            / (2.0 * libm::logf(freq_base))
+    };
+    let start = libm::floorf(dim(beta_fast)).max(0.0);
+    let end = libm::ceilf(dim(beta_slow)).min(n_dims as f32 - 1.0);
+    (start, end)
+}
+
+fn yarn_ramp(low: f32, high: f32, pair: i32) -> f32 {
+    let y = (pair as f32 - low) / (high - low).max(0.001);
+    1.0 - y.clamp(0.0, 1.0)
+}
+
 /// RoPE de **todas las cabezas** de un vector (`n_heads` cabezas de `head_dim`, seguidas).
 ///
 /// `cos`/`sin` de cada pareja sólo dependen de la posición y del índice de la pareja, no de la
@@ -1441,5 +1519,35 @@ mod rope_tests {
         rope_inplace(&mut llama, 3, 10000.0);
         rope_inplace_neox(&mut neox, 3, 10000.0);
         assert_ne!(llama, neox);
+    }
+
+    /// Valores calculados aparte con la misma fórmula de ggml (`rope_yarn`), no releyendo esta función.
+    #[test]
+    fn yarn_neox_coincide_con_ggml() {
+        use sosomodel::manifest::YarnSpec;
+        let yarn = YarnSpec { factor: 4.0, orig_ctx: 32, beta_fast: 32.0, beta_slow: 1.0 };
+        let mut x = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        rope_neox_yarn(&mut x, 1, 8, 1, 10_000.0, yarn);
+        let esperado = [
+            -4.17541405f32,
+            2.10577064,
+            3.39595164,
+            4.55224034,
+            4.03414418,
+            6.88656734,
+            7.97892086,
+            9.11017383,
+        ];
+        for (a, b) in x.iter().zip(esperado.iter()) {
+            assert!((a - b).abs() < 1e-4, "{a} vs {b}");
+        }
+        // En la posición 0 el ángulo es 0 y sólo queda el factor de magnitud.
+        let m = 1.0 + 0.1 * libm::logf(16.0);
+        let yarn16 = YarnSpec { factor: 16.0, orig_ctx: 8192, beta_fast: 32.0, beta_slow: 1.0 };
+        let mut z = [3.0f32, -1.0, 0.5, 2.0];
+        rope_neox_yarn(&mut z, 1, 4, 0, 500_000.0, yarn16);
+        for (a, b) in z.iter().zip([3.0f32, -1.0, 0.5, 2.0]) {
+            assert!((a - b * m).abs() < 1e-5, "{a} vs {}", b * m);
+        }
     }
 }

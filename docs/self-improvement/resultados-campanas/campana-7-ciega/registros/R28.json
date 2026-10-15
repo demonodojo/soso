@@ -1,0 +1,10 @@
+{
+ "id": "R28",
+ "resultado": "error",
+ "intentos": 1,
+ "segundos": 1773,
+ "nota": "contexto agotado: el agente acumul\u00f3 34 765 tokens (> 32 768 del perfil) en un bucle de edici\u00f3n/compilaci\u00f3n y el servidor devolvi\u00f3 422 context_length_exceeded. El arn\u00e9s lo etiquet\u00f3 'infraestructura' (ver registros-originales); se cuenta como fallo del intento, no como aver\u00eda.",
+ "fallo": "protocolo",
+ "herramientas": 22,
+ "tokens": 356715
+}

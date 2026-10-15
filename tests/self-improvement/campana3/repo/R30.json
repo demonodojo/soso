@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "R30",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "exit_by_signal satura y nueva inversa signal_de_salida",
+  "etiqueta": "abi-senales",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R30/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R30",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R30/aceptacion.rs",
+    "reservado/R30/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R30/enunciado.md": "d0a3215c892b150cd710b336f98ab5b30bb6f82fa4a5357fce9d9da2f6441457"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/soso-abi/src/lib.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "exit_by_signal satura y nueva inversa signal_de_salida",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "soso-abi"
+    ],
+    "prueba_reservada": "reservado/R30/aceptacion.rs",
+    "destino_prueba": "crates/soso-abi/tests/aceptacion_R30.rs",
+    "referencia": "reservado/R30/referencia.patch"
+  }
+}

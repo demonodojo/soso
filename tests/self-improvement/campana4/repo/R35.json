@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "R35",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "convert rechaza cadenas y dimensiones GGUF absurdas sin abortar",
+  "etiqueta": "gguf-longitudes",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R35/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R35",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R35/aceptacion.rs",
+    "reservado/R35/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R35/enunciado.md": "ee6e7bcf862d99934a77e85be8b84885bc7a04eb1d8ac92e102e1e87c2775ce5"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/gguf2som/src/lib.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "convert rechaza cadenas y dimensiones GGUF absurdas sin abortar",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "gguf2som"
+    ],
+    "prueba_reservada": "reservado/R35/aceptacion.rs",
+    "destino_prueba": "crates/gguf2som/tests/aceptacion_R35.rs",
+    "referencia": "reservado/R35/referencia.patch"
+  }
+}

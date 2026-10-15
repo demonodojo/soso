@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "R21",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "resolve_redirect entiende //host y rutas relativas, y es pública",
+  "etiqueta": "redirect-relativo",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R21/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R21",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R21/aceptacion.rs",
+    "reservado/R21/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R21/enunciado.md": "b87c4a1bf6344884a63637fad74d358ce5e75b9bea6e62ffb4ff2809e9aa47b8"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/soso-http/src/lib.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "resolve_redirect entiende //host y rutas relativas, y es pública",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "soso-http"
+    ],
+    "prueba_reservada": "reservado/R21/aceptacion.rs",
+    "destino_prueba": "crates/soso-http/tests/aceptacion_R21.rs",
+    "referencia": "reservado/R21/referencia.patch"
+  }
+}

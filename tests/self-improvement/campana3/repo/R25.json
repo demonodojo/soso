@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "id": "R25",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "KernelMeta verifica hashes en mayúsculas",
+  "etiqueta": "kernelmeta-hash-caja",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R25/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R25",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R25/aceptacion.rs",
+    "reservado/R25/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R25/enunciado.md": "0fc90bdb450c1cd294a3756de0ee4e53a609158bccc5d05f764e7acd6423618d"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/soso-update-core/src/kernel_meta.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "KernelMeta verifica hashes en mayúsculas",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "soso-update-core",
+      "--features",
+      "std"
+    ],
+    "prueba_reservada": "reservado/R25/aceptacion.rs",
+    "destino_prueba": "crates/soso-update-core/tests/aceptacion_R25.rs",
+    "referencia": "reservado/R25/referencia.patch"
+  }
+}

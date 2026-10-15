@@ -1,0 +1,45 @@
+diff --git a/crates/soso-llm-core/src/tier.rs b/crates/soso-llm-core/src/tier.rs
+--- a/crates/soso-llm-core/src/tier.rs
++++ b/crates/soso-llm-core/src/tier.rs
+@@ -43,8 +43,26 @@
+     }
+ 
+     pub fn promote(&mut self, name: &str, data: Vec<u8>, target: Tier) -> Result<(), ()> {
+-        self.clock += 1;
+         let size = data.len();
++        // Lo que no cabe ni con el nivel vacío falla sin tocar nada.
++        let budget = match target {
++            Tier::Ram => self.ram_budget,
++            Tier::Vram => self.vram_budget,
++            Tier::Disk => return Err(()),
++        };
++        if size > budget {
++            return Err(());
++        }
++        self.clock += 1;
++        // La copia anterior se libera antes de decidir si cabe la nueva: ni se cuenta
++        // dos veces ni se expulsan ajenos por su culpa.
++        if let Some(old) = self.slots.remove(name) {
++            match old.tier {
++                Tier::Ram => self.ram_used = self.ram_used.saturating_sub(old.data.len()),
++                Tier::Vram => self.vram_used = self.vram_used.saturating_sub(old.data.len()),
++                Tier::Disk => {}
++            }
++        }
+         match target {
+             Tier::Ram => {
+                 if self.ram_used + size > self.ram_budget {
+@@ -60,13 +78,6 @@
+             }
+             Tier::Disk => return Err(()),
+         }
+-        if let Some(old) = self.slots.get(name) {
+-            match old.tier {
+-                Tier::Ram => self.ram_used = self.ram_used.saturating_sub(old.data.len()),
+-                Tier::Vram => self.vram_used = self.vram_used.saturating_sub(old.data.len()),
+-                Tier::Disk => {}
+-            }
+-        }
+         self.slots.insert(
+             String::from(name),
+             TierSlot {

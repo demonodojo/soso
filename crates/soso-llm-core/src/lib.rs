@@ -12,6 +12,7 @@ pub mod f16;
 pub mod gemm;
 pub mod gemma;
 pub mod gpu;
+pub mod moe_gpu;
 pub mod sched;
 pub mod kv;
 pub mod layer;

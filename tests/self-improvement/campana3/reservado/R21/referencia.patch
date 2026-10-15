@@ -1,0 +1,45 @@
+diff --git a/crates/soso-http/src/lib.rs b/crates/soso-http/src/lib.rs
+--- a/crates/soso-http/src/lib.rs
++++ b/crates/soso-http/src/lib.rs
+@@ -645,18 +645,30 @@
+         .map(|(_, v)| v.as_str())
+ }
+ 
+-fn resolve_redirect(base: &str, loc: &str) -> String {
+-    if loc.starts_with("https://") {
+-        loc.to_string()
+-    } else if loc.starts_with('/') {
+-        let host = base
+-            .strip_prefix("https://")
+-            .and_then(|r| r.split('/').next())
+-            .unwrap_or("huggingface.co");
+-        format!("https://{host}{loc}")
+-    } else {
+-        loc.to_string()
++/// Resuelve el `Location` de un redirect contra la URL que lo devolvió.
++pub fn resolve_redirect(base: &str, loc: &str) -> String {
++    if loc.starts_with("https://") || loc.starts_with("http://") {
++        return loc.to_string();
+     }
++    if let Some(rest) = loc.strip_prefix("//") {
++        // Referencia de red: hereda el esquema (siempre https aquí).
++        return format!("https://{rest}");
++    }
++    let rest = base.strip_prefix("https://");
++    let host = rest
++        .and_then(|r| r.split(['/', '?', '#']).next())
++        .unwrap_or("huggingface.co");
++    if loc.starts_with('/') {
++        return format!("https://{host}{loc}");
++    }
++    // Relativa: se cuelga del directorio de la ruta base (sin query ni fragmento).
++    let path = rest.map(|r| &r[host.len()..]).unwrap_or("");
++    let path = path.split(['?', '#']).next().unwrap_or("");
++    let dir = match path.rfind('/') {
++        Some(i) => &path[..=i],
++        None => "/",
++    };
++    format!("https://{host}{dir}{loc}")
+ }
+ 
+ #[cfg(test)]

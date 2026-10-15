@@ -1,0 +1,21 @@
+diff --git a/crates/soso-abi/src/lib.rs b/crates/soso-abi/src/lib.rs
+--- a/crates/soso-abi/src/lib.rs
++++ b/crates/soso-abi/src/lib.rs
+@@ -302,9 +302,15 @@
+ pub const SIGKILL: u64 = 9;
+ pub const SIGTERM: u64 = 15;
+ 
+-/// Código de salida por señal: 128 + número de señal.
++/// Código de salida por señal: 128 + número de señal (satura en 255).
+ pub const fn exit_by_signal(sig: u8) -> u8 {
+-    128 + sig
++    128u8.saturating_add(sig)
++}
++
++/// Inversa de `exit_by_signal`: la señal que mató al proceso, si el código lo indica.
++/// Los códigos de 0 a 128 son salidas normales (o no corresponden a ninguna señal).
++pub const fn signal_de_salida(code: u8) -> Option<u8> {
++    if code > 128 { Some(code - 128) } else { None }
+ }
+ 
+ // ---- mmap ----

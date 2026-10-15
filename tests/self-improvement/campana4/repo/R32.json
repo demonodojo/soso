@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "id": "R32",
+  "clase": "repo",
+  "particion": "desarrollo",
+  "titulo": "Sosofs::resolve entiende ..",
+  "etiqueta": "resolve-punto-punto",
+  "origen": "mejora_especificada",
+  "entrada": {
+    "enunciado": "visible/R32/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R32",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R32/aceptacion.rs",
+    "reservado/R32/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R32/enunciado.md": "f543d6187c8c3e52db174bb186909e2560f97f8fc59163f34524aece8e301cef"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/sosofs/src/fs.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "Sosofs::resolve sube al padre con ..",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "sosofs",
+      "--features",
+      "std"
+    ],
+    "prueba_reservada": "reservado/R32/aceptacion.rs",
+    "destino_prueba": "crates/sosofs/tests/aceptacion_R32.rs",
+    "referencia": "reservado/R32/referencia.patch"
+  }
+}

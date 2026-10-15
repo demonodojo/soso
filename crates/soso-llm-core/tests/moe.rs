@@ -274,3 +274,56 @@ fn moe_ffn_referencia_escalar() {
 fn silu_ref(x: f32) -> f32 {
     x / (1.0 + libm::expf(-x))
 }
+
+/// La ventana de Mellum (capas locales) no atiende los tokens que se salen de ella.
+#[test]
+fn la_ventana_ignora_el_kv_anterior() {
+    use soso_llm_core::kv::LayerKv;
+    use soso_llm_core::layer::{LayerExecutor, LayerScratch};
+
+    let (mut manifest, index, mut source) = build_tiny_moe_tensors();
+    let _ = index;
+    manifest.ext.window = vec![2, 0];
+    let h = manifest.hidden_dim as usize;
+    let kv_dim = manifest.effective_num_kv_heads(0) as usize * manifest.effective_head_dim(0) as usize;
+    let exec = LayerExecutor { manifest: &manifest, has_gate: true, parallel: None };
+
+    // `fuera`: anula V de las filas 0..3, fuera de la ventana al añadir el sexto token.
+    // `dentro`: cambia V de la fila 4, que sí entra (`t_ini = 4`).
+    let correr = |source: &mut MemoryTensorSource, fuera: bool, dentro: bool| -> Vec<f32> {
+        let mut s = LayerScratch::new(&manifest);
+        let mut kv = LayerKv::new();
+        let mut oculto = vec![0.02f32; h];
+        let mut gpu = None;
+        let mut ultimo = vec![0.0f32; h];
+        for pos in 0..6 {
+            if pos == 5 && fuera {
+                for x in kv.v_f16.iter_mut().take(4 * kv_dim) {
+                    *x = 0;
+                }
+            }
+            if pos == 5 && dentro {
+                for x in kv.v_f16.iter_mut().take(5 * kv_dim).skip(4 * kv_dim) {
+                    *x = 0x3c00; // 1.0 en f16, distinto del V que dejó la capa
+                }
+            }
+            exec.forward_layer(0, pos, &mut oculto, &mut s, &mut kv, source, &mut gpu, false, None, None, None)
+                .unwrap();
+            if pos == 5 {
+                ultimo.copy_from_slice(&oculto);
+            }
+        }
+        ultimo
+    };
+
+    let limpia = correr(&mut source, false, false);
+    let sucia = correr(&mut source, true, false);
+    for (a, b) in limpia.iter().zip(sucia.iter()) {
+        assert!((a - b).abs() < 1e-5, "la ventana dejó colar el KV viejo: {a} vs {b}");
+    }
+    let dentro = correr(&mut source, false, true);
+    assert!(
+        limpia.iter().zip(dentro.iter()).any(|(a, b)| (a - b).abs() > 1e-4),
+        "corromper un token de la ventana no cambió la salida"
+    );
+}

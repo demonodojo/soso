@@ -1,0 +1,49 @@
+diff --git a/crates/soso-wpa2/src/crypto.rs b/crates/soso-wpa2/src/crypto.rs
+--- a/crates/soso-wpa2/src/crypto.rs
++++ b/crates/soso-wpa2/src/crypto.rs
+@@ -21,6 +21,45 @@
+     out
+ }
+ 
++/// Por qué una passphrase o un SSID no sirven para derivar la PMK.
++#[derive(Debug, PartialEq, Eq, Clone, Copy)]
++pub enum PskError {
++    /// El SSID no mide entre 1 y 32 bytes.
++    SsidLength,
++    /// La passphrase no mide entre 8 y 63 bytes (ni son 64 dígitos hex).
++    PassphraseLength,
++    /// La passphrase lleva algún byte fuera de ASCII imprimible (32..=126).
++    PassphraseChars,
++}
++
++/// Como `pbkdf2_psk`, pero valida las entradas según IEEE 802.11i anexo J.
++///
++/// Se comprueba primero el SSID y luego la passphrase. Una passphrase de
++/// exactamente 64 dígitos hexadecimales es la PMK en claro y se devuelve
++/// decodificada, sin PBKDF2.
++pub fn psk_from_passphrase(passphrase: &str, ssid: &str) -> Result<[u8; 32], PskError> {
++    if ssid.is_empty() || ssid.len() > 32 {
++        return Err(PskError::SsidLength);
++    }
++    let p = passphrase.as_bytes();
++    if p.len() == 64 && p.iter().all(u8::is_ascii_hexdigit) {
++        let mut out = [0u8; 32];
++        for (o, pair) in out.iter_mut().zip(p.chunks(2)) {
++            let hi = (pair[0] as char).to_digit(16).unwrap_or(0) as u8;
++            let lo = (pair[1] as char).to_digit(16).unwrap_or(0) as u8;
++            *o = hi << 4 | lo;
++        }
++        return Ok(out);
++    }
++    if p.len() < 8 || p.len() > 63 {
++        return Err(PskError::PassphraseLength);
++    }
++    if !p.iter().all(|b| (32..=126).contains(b)) {
++        return Err(PskError::PassphraseChars);
++    }
++    Ok(pbkdf2_psk(passphrase, ssid))
++}
++
+ /// PRF-SHA1 de IEEE 802.11i (`sha1_prf` de hostap).
+ ///
+ /// Cada bloque es `HMAC-SHA1(key, label ‖ 0x00 ‖ data ‖ i)` con `i` un byte que

@@ -1,0 +1,13 @@
+{
+ "id": "R27",
+ "resultado": "aceptada",
+ "intentos": 1,
+ "segundos": 276,
+ "nota": "",
+ "herramientas": 8,
+ "tokens": 52504,
+ "inyeccion": {
+  "que": "agente matado (kill -9) y coordinador reiniciado",
+  "recuperada": true
+ }
+}
