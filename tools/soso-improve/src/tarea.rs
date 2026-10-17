@@ -235,7 +235,7 @@ fn validar(op: &Opciones) -> Result<i32, Error> {
 /// diario con la evidencia (copia, hash del paquete, referencia de base). No repite lo ya hecho; si no puede
 /// decidir qué hizo el agente al caerse, se bloquea y dice qué comprobar (`--adoptar-copia` lo resuelve).
 fn continuar(op: &Opciones) -> Result<i32, Error> {
-    use soso_improve_core::agente::{http::ModeloHttp, Config, Politica as PolAgente, SISTEMA};
+    use soso_improve_core::agente::{http::ModeloHttp, Config, Politica as PolAgente, SISTEMA, SISTEMA_PRUEBAS};
     use soso_improve_core::recovery::{avanzar, Contexto, Desenlace};
     use soso_improve_core::transporte::Destino;
     use soso_improve_core::validate::{Exigencias, Sitios, Veredicto};
@@ -250,7 +250,10 @@ fn continuar(op: &Opciones) -> Result<i32, Error> {
     let arbol = format!("{trabajo}/arbol");
     std::fs::create_dir_all(&trabajo).map_err(|e| Error::entorno(format!("no pude crear {trabajo}: {e}")))?;
     let puerto: u16 = op.uno("puerto").and_then(|p| p.parse().ok()).unwrap_or(17299);
-    let mut cfg = Config::nueva(op.uno("modelo").filter(|s| !s.is_empty()).unwrap_or("soso-coder"), SISTEMA);
+    // `--sistema pruebas`: el agente debe escribir pruebas propias para cada caso límite del enunciado (campaña 14).
+    let con_pruebas = op.uno("sistema") == Some("pruebas");
+    let mut cfg = Config::nueva(op.uno("modelo").filter(|s| !s.is_empty()).unwrap_or("soso-coder"), if con_pruebas { SISTEMA_PRUEBAS } else { SISTEMA });
+    cfg.exigir_pruebas = con_pruebas;
     // El tokenizador manda: con Mellum son ~1,5 caracteres por token y el recorte de contexto necesita saberlo.
     if let Some(c) = std::env::var("SOSO_AGENTE_CHARS_POR_TOKEN").ok().and_then(|v| v.parse::<f32>().ok()).filter(|v| *v >= 0.5) {
         cfg.chars_por_token = c;

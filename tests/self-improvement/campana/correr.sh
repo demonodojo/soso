@@ -1,6 +1,8 @@
 #!/bin/bash
 # T29: campaña de diez tareas, secuencial desde la base aceptada. Uso: correr.sh DIR_SALIDA [TAREAS...]
 # TEMP_REINTENTO=T (por defecto 0,7): temperatura de las rondas de reintento (k>1); la ronda 1 va siempre a T=0.
+# SISTEMA_AGENTE=pruebas: prompt que exige pruebas propias por caso límite (y un aviso si termina sin ninguna).
+# MAX_TURNOS=N (por defecto 30): turnos del agente (con 60 herramientas por tarea hay que subirlo).
 # ROUNDS=N (por defecto 1): si una tarea no se acepta, se repite hasta N rondas desde la misma base con un aviso genérico de
 # rechazo en el enunciado (sin datos de la prueba reservada). El registro de la ronda k>1 se llama Rxx-rk.json.
 # Requiere el servidor del modelo en 127.0.0.1:7441 (SOSO_LLM_API_KEY=clave-host) y /tmp/base-t02 (git archive 6f558f072).
@@ -58,7 +60,9 @@ P
   RUN=r-$T$SUF
   $BIN tarea preparar --estado $W/estado --spec $W/spec.json --run $RUN > $W/preparar.txt 2>&1
   $BIN tarea copiar --estado $W/estado --run $RUN --captura $W/captura --destino $W/copia > $W/copiar.txt 2>&1
-  ARGS="--estado $W/estado --run $RUN --captura $W/captura --copia $W/copia --exigencias $W/exigencias.json --trabajo $W/validador --referencias $OUT/refs --campana campana-$T --publicar-base --modelo $MODELO --puerto $PORT --max-tokens $MAXTOK --max-turnos 30 --cargo-home $HOME/.cargo"
+  ARGS="--estado $W/estado --run $RUN --captura $W/captura --copia $W/copia --exigencias $W/exigencias.json --trabajo $W/validador --referencias $OUT/refs --campana campana-$T --publicar-base --modelo $MODELO --puerto $PORT --max-tokens $MAXTOK --max-turnos ${MAX_TURNOS:-30} --cargo-home $HOME/.cargo"
+  # SISTEMA_AGENTE=pruebas: el agente debe escribir pruebas propias para cada caso límite (campaña 14).
+  [ "${SISTEMA_AGENTE:-}" = pruebas ] && ARGS="$ARGS --sistema pruebas"
   # Rondas de reintento: temperatura > 0 (a T=0 la misma petición da la misma respuesta). TEMP_REINTENTO=0 la deja en T=0.
   [ $RONDA -gt 1 ] && ARGS="$ARGS --temperatura ${TEMP_REINTENTO:-0.7}"
   INYECTADA=0

@@ -59,6 +59,10 @@ pub struct Config {
     /// Cuántas veces se le dice al modelo, al intentar terminar, que **no ha modificado ningún archivo** (campaña 11:
     /// 3 de 10 tareas acababan con «el candidato no cambió nada»). Presupuesto aparte de `empujones`.
     pub avisos_sin_editar: usize,
+    /// Si `true`, al intentar terminar tras haber editado sin escribir **ninguna prueba propia** (un `#[test]` insertado) se le
+    /// avisa hasta `avisos_sin_pruebas` veces: el agente debe convertir cada caso límite del enunciado en una prueba suya.
+    pub exigir_pruebas: bool,
+    pub avisos_sin_pruebas: usize,
     /// A la `n`-ésima llamada **repetida** de una que ya salió bien desde la última edición (aunque no sea la inmediata anterior) no
     /// se la ejecuta: su resultado no puede cambiar si no se edita nada entre medias (campaña 12: Gemma repetía 24 veces un `cargo test` ya en verde y agotaba las herramientas sin
     /// dar el trabajo por hecho). Con dos repeticiones más sin cambiar de conducta se da el intento por terminado. `0` lo apaga.
@@ -82,6 +86,8 @@ impl Config {
             contexto_tokens: Some(32_768),
             chars_por_token: 3.0,
             avisos_sin_editar: 2,
+            exigir_pruebas: false,
+            avisos_sin_pruebas: 1,
             repetidas_ok_max: 3,
         }
     }
@@ -118,6 +124,10 @@ pub struct Informe {
     pub recortadas: usize,
     /// Avisos de «no has modificado nada» enviados (ver `Config::avisos_sin_editar`).
     pub sin_editar: usize,
+    /// Avisos de «escribe tus propias pruebas» enviados (ver `Config::exigir_pruebas`).
+    pub sin_pruebas: usize,
+    /// Llamadas que el guardián de repeticiones no ejecutó (no cuentan como llamadas a herramientas).
+    pub bloqueadas: usize,
     /// Conversación completa (formato de la API), para auditar.
     pub mensajes: Vec<Value>,
 }
@@ -155,10 +165,10 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
     sesion::normalizar(&mut mensajes);
     if sesion::terminada(&mensajes) {
         let r = mensajes.last().and_then(|m| m["content"].as_str()).unwrap_or("").to_string();
-        return Informe { fin: Fin::Terminado, turnos: 0, llamadas: 0, respuesta_final: r, error: None, empujones: 0, formato: 0, repetidas: 0, recortadas: 0, sin_editar: 0, mensajes };
+        return Informe { fin: Fin::Terminado, turnos: 0, llamadas: 0, respuesta_final: r, error: None, empujones: 0, formato: 0, repetidas: 0, recortadas: 0, sin_editar: 0, sin_pruebas: 0, bloqueadas: 0, mensajes };
     }
     let t0 = reloj.ahora_ms();
-    let mut informe = Informe { fin: Fin::SinTurnos, turnos: 0, llamadas: 0, respuesta_final: String::new(), error: None, empujones: 0, formato: 0, repetidas: 0, recortadas: 0, sin_editar: 0, mensajes: Vec::new() };
+    let mut informe = Informe { fin: Fin::SinTurnos, turnos: 0, llamadas: 0, respuesta_final: String::new(), error: None, empujones: 0, formato: 0, repetidas: 0, recortadas: 0, sin_editar: 0, sin_pruebas: 0, bloqueadas: 0, mensajes: Vec::new() };
     // Última llamada ejecutada, si falló, y cuántas veces seguidas se ha repetido igual.
     let mut ultima: Option<(String, String, bool)> = None;
     let mut seguidas = 0usize;
@@ -228,6 +238,12 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
                 al_turno(e, &mensajes);
                 continue;
             }
+            if cfg.exigir_pruebas && informe.sin_pruebas < cfg.avisos_sin_pruebas && !hubo_prueba_propia(&mensajes) {
+                informe.sin_pruebas += 1;
+                mensajes.push(json!({"role": "user", "content": AVISO_SIN_PRUEBAS}));
+                al_turno(e, &mensajes);
+                continue;
+            }
             informe.fin = Fin::Terminado;
             informe.respuesta_final = texto;
             al_turno(e, &mensajes);
@@ -262,14 +278,17 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
                     }
                     seguidas = if repite { seguidas + 1 } else { 1 };
                     let mut bloqueada_ok = false;
+                    let mut bloqueada = false;
                     let r = if cfg.repetidas_ok_max > 0 && repite_ok && racha_ok >= cfg.repetidas_ok_max {
                         bloqueada_ok = true;
+                        bloqueada = true;
                         informe.repetidas += 1;
                         if racha_ok >= cfg.repetidas_ok_max + 2 {
                             atascado = true;
                         }
                         Respuesta { texto: aviso_de_repeticion_ok(nombre, racha_ok + 1), error: true }
                     } else if cfg.repetidas_max > 0 && repite && seguidas >= cfg.repetidas_max {
+                        bloqueada = true;
                         informe.repetidas += 1;
                         Respuesta { texto: aviso_de_repeticion(nombre, seguidas), error: true }
                     } else {
@@ -285,6 +304,15 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
                         racha_ok = 0;
                     } else if !edita && !r.error && !bloqueada_ok && !vistas.contains(&clave) {
                         vistas.push(clave.clone());
+                    }
+                    // Una llamada que el guardián no llegó a ejecutar no gasta presupuesto de herramientas (el límite de turnos y el cierre
+                    // por atasco siguen acotando el bucle).
+                    if bloqueada {
+                        informe.llamadas = informe.llamadas.saturating_sub(1);
+                        informe.bloqueadas += 1;
+                        if informe.bloqueadas >= 15 {
+                            atascado = true;
+                        }
                     }
                     ultima = Some((clave.0, clave.1, r.error && !bloqueada_ok));
                     r
@@ -320,6 +348,23 @@ PASOS:\n\
 4. Llama a `bash` con las comprobaciones de TASK.md (`cargo test …`) y lee el resultado.\n\
 5. Antes de terminar, **relee TASK.md punto por punto**: cada comportamiento que describe tiene que estar cubierto por tu cambio, no sólo el caso que ya ves fallar. Si falta alguno, impleméntalo y vuelve a comprobar. Una tarea sin ningún archivo editado no está terminada.\n\
 6. Informe final en texto corto: qué cambiaste, qué comprobaciones corrieron y su salida resumida, y lo que no pudiste hacer. No inventes resultados.";
+
+/// Variante de [`SISTEMA`] que obliga a convertir cada caso límite del enunciado en una **prueba propia** antes de implementar
+/// (campaña 14): las mismas tareas se atascaban con tres modelos distintos en los casos límite de la prueba reservada.
+pub const SISTEMA_PRUEBAS: &str = "Eres el agente de mejora de soso. Trabajas sólo dentro del checkout actual.\n\n\
+PROTOCOLO (obligatorio):\n\
+- En cada respuesta escribes **una sola llamada a una herramienta y nada más**: sin texto antes ni después.\n\
+- El resultado de la herramienta llega en el mensaje siguiente. **Nunca lo inventes**: espera a recibirlo.\n\
+- No des por leído un archivo que no hayas leído con `read`; no edites sin haber leído antes el archivo.\n\
+- Sólo cuando hayas terminado todos los pasos respondes con texto, y entonces es el informe final.\n\n\
+PASOS:\n\
+1. Llama a `read` con `TASK.md` (raíz del checkout): contiene el objetivo, el archivo que puedes tocar y las comprobaciones.\n\
+2. Localiza el código. Si el archivo es corto (menos de 150 líneas) lee entero; si es largo, **no lo recorras por tramos**: llama primero a `grep` con el nombre de la función o un texto que aparezca en ella y después a `read` sólo del tramo que rodea la línea (`offset` y `limit`).\n\
+3. **Escribe primero tus pruebas.** De la sección «Qué se pide» de TASK.md saca TODOS los comportamientos y casos límite: cada viñeta, cada valor raro, cada «en caso de empate», «nunca», «si todos…». Añade al final del MISMO archivo que puedes tocar (llama a `read` cerca del final para ver el número de la última línea y usa `insertar` con ese número) un módulo `#[cfg(test)] mod pruebas_agente { use super::*; … }` con **una prueba `#[test]` por caso**, con valores concretos y la salida exacta que pide el enunciado. Ejecútalas con `bash` (`cargo test …` con el filtro `pruebas_agente`) y comprueba que las que describen el fallo de hoy **fallan**.\n\
+4. Para **cambiar** algo que ya existe, llama a `reemplazar_texto` con `filePath`, `buscar` (un fragmento corto de lo que leíste; los espacios no importan) y `nuevo`. Para **añadir** código nuevo, llama a `insertar` con `filePath`, `linea` y `texto`. Siempre bloques completos: con su `{` y su `}`. Cambio mínimo en el código; no toques otros archivos. Si una herramienta dice que no lo encuentra, que aparece varias veces o que desequilibra las llaves, corrige y repite.\n\
+5. Ejecuta con `bash` las comprobaciones de TASK.md **y** tus pruebas: todas en verde. Si alguna falla, corrige el CÓDIGO (no borres la prueba salvo que contradiga el enunciado).\n\
+6. Antes de terminar, repasa el enunciado punto por punto: ¿hay una prueba tuya por cada uno? Si falta alguno, añádelo, ejecútalo y corrige.\n\
+7. Informe final en texto corto: qué cambiaste, qué pruebas escribiste, qué comprobaciones corrieron y su salida resumida, y lo que no pudiste hacer. No inventes resultados.";
 
 /// Prompt del perfil Forja (T37): el agente edita fuentes de userspace y compila **en el host** por
 /// la herramienta `forja`; el diagnóstico vuelve a él sin que nadie lo copie.
@@ -364,6 +409,8 @@ fn aviso_de_empuje(mensajes: &[Value], texto: &str) -> Option<String> {
                     sin_comprobar = true;
                     ultima_fallo = false;
                 }
+                // Un `bash` que el guardián no llegó a ejecutar no es una comprobación (ni verde ni roja): no cambia el estado.
+                "bash" | "forja" if c.starts_with("No he ejecutado") => {}
                 "bash" | "forja" => {
                     sin_comprobar = false;
                     ultima_fallo = !c.starts_with("exit code: 0");
@@ -383,6 +430,35 @@ fn aviso_de_empuje(mensajes: &[Value], texto: &str) -> Option<String> {
 
 /// Lo que se le dice al modelo que intenta terminar sin haber cambiado nada.
 const AVISO_SIN_EDITAR: &str = "No has modificado ningún archivo, y esta tarea exige un cambio en el código. Vuelve a leer TASK.md: busca el comportamiento que hoy falla, localízalo en el archivo que puedes tocar y corrígelo con `reemplazar_texto` o `insertar`. Después ejecuta las comprobaciones. No termines sin haber editado.";
+
+/// Lo que se le dice al modelo que quiere terminar sin haber escrito ninguna prueba propia.
+const AVISO_SIN_PRUEBAS: &str = "No has escrito ninguna prueba propia. Vuelve a leer la sección «Qué se pide» de TASK.md y haz una lista de cada comportamiento y caso límite que menciona (cada viñeta, cada valor raro, cada empate, cada «nunca» y cada «si todos…»). Añade al final del MISMO archivo que puedes tocar un módulo `#[cfg(test)] mod pruebas_agente { use super::*; … }` con una prueba `#[test]` por caso, con valores concretos; ejecútalas con `bash` y corrige el código hasta que todas pasen. Después escribe el informe final.";
+
+/// ¿Ha insertado el modelo alguna prueba propia (`#[test]`) con éxito?
+fn hubo_prueba_propia(mensajes: &[Value]) -> bool {
+    let mut candidatas: Vec<String> = Vec::new();
+    for m in mensajes {
+        if m["role"] == "assistant" {
+            for l in m["tool_calls"].as_array().map(|v| v.as_slice()).unwrap_or(&[]) {
+                let nombre = l.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or("");
+                let args = match l.pointer("/function/arguments") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(v) => v.to_string(),
+                    None => String::new(),
+                };
+                if matches!(nombre, "insertar" | "reemplazar_texto") && args.contains("#[test]") {
+                    candidatas.push(l["id"].as_str().unwrap_or("").to_string());
+                }
+            }
+        } else if m["role"] == "tool" {
+            let id = m["tool_call_id"].as_str().unwrap_or("");
+            if candidatas.iter().any(|c| c == id) && m["content"].as_str().unwrap_or("").starts_with("Hecho") {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 /// ¿Ha logrado el modelo editar algún archivo (`reemplazar_texto` o `insertar` con resultado «Hecho…»)?
 fn hubo_edicion(mensajes: &[Value]) -> bool {

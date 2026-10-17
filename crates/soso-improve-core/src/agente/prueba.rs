@@ -80,7 +80,8 @@ pub fn autoprueba<E: Entorno + Durable, R: Reloj>(
     anota("glob encuentra", s(1).contains("src/lib.rs"), s(1));
     anota("grep literal", s(2).contains("src/lib.rs:4:"), s(2));
     anota("grep rechaza regex", s(3).contains("expresión regular"), s(3));
-    anota("read con offset y limit", s(4).contains("4:") && !s(4).contains("5:"), s(4));
+    // `limit` pequeño se amplía a una ventana mínima, pero `offset` se respeta: empieza en la línea 4 y no enseña las anteriores.
+    anota("read con offset y limit", s(4).contains("\n4:") && !s(4).contains("\n3:"), s(4));
     anota("reemplazar_texto escribe", fuente.contains("k.eq_ignore_ascii_case(key)") && !fuente.contains("k == key"), fuente.clone());
     anota("bash rechaza shell", s(6).contains("sin shell"), s(6));
     anota("bash rechaza lo no permitido", s(7).contains("no está permitida") && e.existe(&format!("{raiz}/src")), s(7));
