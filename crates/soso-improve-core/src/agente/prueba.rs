@@ -60,7 +60,8 @@ pub fn autoprueba<E: Entorno + Durable, R: Reloj>(
         llamada("read", json!({"filePath": "../fuera"})),
         json!({"role": "assistant", "content": "listo"}),
     ]);
-    let cfg = Config::nueva("guion", "sistema");
+    let mut cfg = Config::nueva("guion", "sistema");
+    cfg.avisos_sin_editar = 0;
     let inf = correr(e, &mut m, reloj, &pol, &cfg, "tarea", &mut |_, _| {});
 
     // Resultados de herramienta, en orden.

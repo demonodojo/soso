@@ -182,6 +182,8 @@ pub struct CudaGpu {
     ctx: CuCtx,
     f_matvec_q4: CuFunction,
     f_matmul_q4: CuFunction,
+    /// GEMM con tensor cores para el prefill de Q4_0 (`gemm_q4_0_tc`), si no se desactiva con `SOSO_CUDA_SIN_TC=1`.
+    f_gemm_q4: CuFunction,
     /// `None` = ya se intentó y no sirve (otro dtype, no cabe): no se reintenta en cada token.
     pesos: HashMap<String, Option<Peso>>,
     presupuesto: usize,
@@ -235,6 +237,7 @@ impl CudaGpu {
             };
             let f_matvec_q4 = func(m4, "matvec_q4_0r")?;
             let f_matmul_q4 = func(m4, "matmul_q4_0r8")?;
+            let f_gemm_q4 = func(m4, "gemm_q4_0_tc")?;
             let (mut libre, mut total) = (0usize, 0usize);
             ck((api.mem_info)(&mut libre, &mut total), "cuMemGetInfo")?;
             let capa = capa::Estado::nueva(&api)?;
@@ -252,6 +255,7 @@ impl CudaGpu {
                 ctx,
                 f_matvec_q4,
                 f_matmul_q4,
+                f_gemm_q4,
                 pesos: HashMap::new(),
                 presupuesto: libre.saturating_sub(RESERVA_VRAM),
                 usado: 0,
@@ -556,20 +560,18 @@ impl CudaGpu {
                 }
             }
             DTYPE_Q8_0 => {
-                // El kernel Q8_0 es de un solo vector: un lanzamiento por token.
-                for t in 0..n {
-                    let (mut a0, mut a2) = (pd, x_dev + (t * cols * 4) as u64);
-                    let mut a3 = y_dev + (t * rows * 4) as u64;
-                    let (mut a4, mut a5) = (r32, c32);
-                    let args = vec![
-                        &mut a0 as *mut _ as *mut c_void,
-                        &mut a2 as *mut _ as *mut c_void,
-                        &mut a3 as *mut _ as *mut c_void,
-                        &mut a4 as *mut _ as *mut c_void,
-                        &mut a5 as *mut _ as *mut c_void,
-                    ];
-                    self.lanzar(self.capa.fns.q80, rows, args)?;
-                }
+                // 4 filas por warp y varios tokens por lectura de pesos (cabeza de logits incluida).
+                let (mut a0, mut a1, mut a2) = (pd, x_dev, y_dev);
+                let (mut a3, mut a4, mut a5) = (r32, c32, n as c_int);
+                let mut args = [
+                    &mut a0 as *mut _ as *mut c_void,
+                    &mut a1 as *mut _ as *mut c_void,
+                    &mut a2 as *mut _ as *mut c_void,
+                    &mut a3 as *mut _ as *mut c_void,
+                    &mut a4 as *mut _ as *mut c_void,
+                    &mut a5 as *mut _ as *mut c_void,
+                ];
+                self.lanzar3(self.capa.fns.mm8n, ((rows as u32).div_ceil(32), 1, 1), (256, 1, 1), &mut args)?;
             }
             _ => return Ok(false),
         }
@@ -612,6 +614,23 @@ impl GpuDispatch for CudaGpu {
 
     fn moe_puede(&self, layer: u32) -> bool {
         self.moe_puede_capa(layer)
+    }
+
+    fn moe_flujo_activo(&self) -> bool {
+        self.moe_flujo_activo_capa()
+    }
+
+    fn moe_modo(&mut self, layer: u32, plan: &soso_llm_core::gpu::MoePlan) -> soso_llm_core::gpu::ModoMoe {
+        self.moe_modo_capa(layer, plan)
+    }
+
+    fn moe_cabe(&self, pesos: usize, kv: usize) -> bool {
+        // Además de los pesos y el KV, la capa necesita los búferes de trabajo y las tablas (unas decenas de MiB).
+        self.usado + pesos + kv + (96 << 20) <= self.presupuesto
+    }
+
+    fn moe_descartar(&mut self, layer: u32) {
+        self.capa.rechazar(layer);
     }
 
     fn moe_lista(&self, layer: u32) -> bool {

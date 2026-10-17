@@ -370,6 +370,55 @@ Comparación sobre el **mismo banco**: Gemma 4 sin pensamiento 2/10 (campañas 8
 
 **Estado del agente.** El agente v2 (con `chars_por_token`) sigue sin versionar y es neutro en resultados; queda como candidato, la decisión de hacer commit es de quien lo revise.
 
+## Campaña 12 — Gemma 4 12B con agente v3 y reintentos (banco R31–R40, 2026-10-15/16)
+
+**Qué se probó.** Dos palancas sobre el mismo banco (R31–R40, ya visto: ver aviso al final) y el mismo modelo (Gemma 4 12B por soso, GPU del host, ahora con prefill ~350 tok/s): (1) un **agente v3** que se niega a terminar sin haber editado nada (aviso con presupuesto propio, `avisos_sin_editar`), añade un paso «relee TASK.md punto por punto» al prompt y **no ejecuta una llamada que ya salió bien desde la última edición** (`repetidas_ok_max`, cuenta aunque se alterne entre dos comandos; con dos repeticiones más cierra el intento); (2) **hasta 3 rondas por tarea** (`ROUNDS=3` en `correr.sh`): si la validación independiente rechaza, se repite desde la misma base con una nota genérica de rechazo en el enunciado (sin nada de la prueba reservada), a T=0 en la ronda 1 y a `TEMP_REINTENTO` (0,7) en las siguientes.
+
+| tanda | cambio | 1.ª ronda | con 3 rondas |
+|---|---|---|---|
+| 12a | v3, reintentos a T=0 | 2/10 (R34, R36) | 3/10 (+R35) |
+| 12b | + guardián de repetición consecutiva, reintentos a T=0,7 | 1/10 (R36) | **5/10** (R32, R34, R35, R36, R37) |
+| 12c | guardián «ya salió bien desde la última edición» | 3/10 (R34, R36, R40) | 4/10 (+R32) |
+
+Referencia: Gemma con el agente v2 sobre este banco, un intento: 2/10 (campaña 9). Evidencia ligera en [`resultados-campanas/campana-12*`](resultados-campanas/README.md).
+
+**Lo que se ve.**
+- **A la primera, el v3 no se distingue del v2** (2, 1 y 3 de 10 frente a 2 de 10): la variación entre tandas con el mismo agente y T=0 es de ±1–2 tareas (R34 pasó a la primera en 12a y 12c y no en 12b). El ruido viene de la GPU y de los entornos de compilación y prueba de cada tarea, no del modelo, que se sirve de forma determinista.
+- **Reintentar a T=0 es inútil:** las rondas 2 y 3 repiten la 1 (R31: 61 s, 61 s, 61 s). Con temperatura 0,7 sí aparecen aciertos nuevos: **+1 a +4 tareas por tanda**, el único efecto grande medido. Con verificación independiente, muestrear varias veces funciona.
+- **El aviso «no has modificado nada» sirve a medias:** en Gemma ninguna tarea acabó ya sin editar en 12a y 12b, pero en 12c R35 volvió a cerrar con «el candidato no cambió nada» las tres rondas (14–26 herramientas): el aviso ni siquiera forzó la edición.
+- **Bucle de comprobaciones en verde (R39/R40):** Gemma repetía `cargo test -p soso-abi` en verde (el crate tiene 0 pruebas) hasta agotar las 30 herramientas, alternando dos variantes del comando. El guardián de «repetición consecutiva» no lo cazaba; el de «ya salió bien desde la última edición» sí (R40 se acepta en 12 herramientas en 12c).
+- **R33 y R38 (`kill -9` inyectado)** no pasan nunca en este banco y sus registros salen sin datos de herramientas; no se ha investigado.
+- **Tareas que no pasan en ninguna ronda en ninguna tanda:** R31, R33, R37 (salvo una vez), R38, R39. Coinciden con el patrón de la campaña 9 (rechazos de programación rápidos: edición plausible que pasa las pruebas visibles y no la reservada).
+
+**Conclusión honesta sobre la viabilidad.** Un modelo local de 12 B resuelve entre 1 y 3 de estas 10 tareas a la primera y 3–5 de 10 con tres rondas muestreadas, con un coste de ~1 h por tanda. **Eso es utilizable como generador de candidatos con validación independiente, no como agente autónomo sin ella.** La cifra con reintentos **no** es comparable con el mínimo de 5/10 a un intento de SI-4, y la comparación entre las tandas v3 y la v2 no demuestra que el v3 sea mejor.
+
+**Avisos.** El banco R31–R40 se había usado ya con Gemma (campañas 8–10) y con Mellum (campaña 11), y los cambios del v3 salen de ver fallos de esas campañas: está contaminado como banco ciego. No se ha ejecutado la comprobación de la base final ni la recuperación tras `kill -9` con el v3. El agente v3 sigue sin versionar.
+
+## Campaña 13 — Qwen3-Coder-30B-A3B (modelo más capaz) con flujo de expertos (banco R31–R40, 2026-10-16)
+
+**Qué se probó.** El mismo banco y el mismo agente v3 con hasta 3 rondas (T=0 en la primera, 0,7 en las siguientes) que la campaña 12, pero con un modelo mucho mayor: **Qwen3-Coder-30B-A3B** (30 B de parámetros, 3 B activos, 128 expertos), que no cabe en los 12 GB de VRAM. Se sirve con el **flujo de expertos** (plan de VRAM con 12 de 48 capas de expertos residentes; las demás traen sus expertos por demanda a un pool de 265 huecos con LRU; ver la memoria del proyecto `soso-mellum-gpu-capa-moe`). Con ~19 GB de RAM libres: decode ~8–9 tok/s, prefill ~200 tok/s marginal.
+
+| tarea | rondas | resultado |
+|---|---|---|
+| R32 | 3 | aceptada en la ronda 3 |
+| R35 | 3 | aceptada en la ronda 3 |
+| R36 | 1 | aceptada |
+| R40 | 1 | aceptada |
+| R31, R33, R34, R37 | 3 | rechazadas por la prueba reservada en las tres rondas |
+| R38, R39 | 3 | agotan las 30 herramientas (R39 en las tres rondas) o rechazadas |
+
+**2/10 a la primera y 4/10 con 3 rondas.** Gemma 4 12B con el mismo agente y las mismas rondas: 1–3/10 y 3–5/10 (campaña 12). **El modelo 2,5× mayor no mejora el resultado en este banco.**
+
+**Lo que se ve.**
+- **Las mismas tareas se atascan con tres modelos de familias distintas** (Gemma 12 B, Mellum 12 B y Qwen3-Coder 30 B): R31, R33, R34, R37, R38 y R39 no pasan casi nunca. El enunciado está bien especificado (R34 detalla el comportamiento ante NaN, infinitos y empates); lo que falla son los **casos límite** de la prueba reservada. No es un problema de capacidad bruta ni de herramientas.
+- **R39 sigue agotando las 30 herramientas en las tres rondas** pese al guardián de repeticiones con éxito: es otro bucle, no una repetición exacta.
+- **Con los reintentos a T=0,7 hay rondas idénticas** (R34: 180, 182 y 182 s; R35: 259 y 259 s): cuando el modelo está muy seguro, la temperatura no cambia la salida.
+- **Coste:** ~3 h para las 10 tareas con hasta 3 rondas. Decodificar a 8–9 tok/s limita; el prefill ya no.
+
+**Conclusión sobre la viabilidad.** Subir de 12 B a 30 B-A3B no mueve la aguja: la tasa de acierto con reintentos sigue en torno al 40 %. Lo siguiente con más probabilidad de funcionar no es un modelo mayor sino **mejor uso del enunciado y de las pruebas**: que el agente escriba pruebas propias para cada caso límite descrito antes de dar la tarea por hecha. Aviso: el banco ya estaba contaminado como ciego (ver campaña 12).
+
+**Operativa aprendida:** el 30B sólo es utilizable con ≥ ~14 GB de RAM libres para la caché de páginas; con el escritorio cargado cae a ~1 GB/s de lectura, y a las 11:40 del 2026-10-16 el OOM killer mató Cursor mientras corría. El vigilante de la campaña ahora para el servidor si baja de 1,5 GB disponibles.
+
 ---
 
-**Nota sobre la evidencia de las campañas 6–11:** las carpetas `tests/self-improvement/campana/ejecucion-9` a `ejecucion-17-*` están en el `.gitignore` (sólo locales). Sus resúmenes, registros por tarea, comprobaciones de la base final e incidencias están versionados en [`resultados-campanas/`](resultados-campanas/README.md).
+**Nota sobre la evidencia de las campañas 6–13:** las carpetas `tests/self-improvement/campana/ejecucion-9` a `ejecucion-17-*` están en el `.gitignore` (sólo locales). Sus resúmenes, registros por tarea, comprobaciones de la base final e incidencias están versionados en [`resultados-campanas/`](resultados-campanas/README.md).

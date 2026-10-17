@@ -1,0 +1,11 @@
+{
+ "id": "R31",
+ "ronda": 1,
+ "resultado": "rechazada",
+ "intentos": 1,
+ "segundos": 40,
+ "nota": "",
+ "fallo": "programacion",
+ "herramientas": 7,
+ "tokens": 43582
+}

@@ -13,6 +13,9 @@ use soso_llm_core::source::{FileMapper, MappedShard};
 
 const PROT_READ: c_int = 1;
 const MAP_PRIVATE: c_int = 2;
+/// Mapea todas las páginas de una vez: el modelo está troceado en un archivo por tensor (un experto son tres de ~1–2 MiB) y
+/// tocarlos con fallos de página sueltos limitaba la copia a la GPU a ~1 GB/s.
+const MAP_POPULATE: c_int = 0x8000;
 
 unsafe extern "C" {
     fn mmap(
@@ -43,7 +46,7 @@ impl FileMapper for MmapMapper {
                 std::ptr::null_mut(),
                 len,
                 PROT_READ,
-                MAP_PRIVATE,
+                MAP_PRIVATE | if std::env::var_os("SOSO_SIN_POPULATE").is_some() { 0 } else { MAP_POPULATE },
                 f.as_raw_fd(),
                 0,
             )

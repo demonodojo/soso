@@ -186,6 +186,13 @@ impl Modelo for Guion {
     }
 }
 
+/// Configuración de los tests que no hablan del aviso «no has modificado nada»: sin él, un guion que acaba sin editar sigue acabando.
+fn cfg_base() -> Config {
+    let mut c = Config::nueva("m", "s");
+    c.avisos_sin_editar = 0;
+    c
+}
+
 fn llamada(n: &str, a: Value) -> Value {
     json!({"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": n, "arguments": a.to_string()}}]})
 }
@@ -204,7 +211,7 @@ fn el_bucle_lee_edita_prueba_y_termina() {
     );
     let reloj = RelojSimulado::nuevo(0);
     let mut vistos = 0;
-    let inf = correr(&mut e, &mut m, &reloj, &Politica::nueva(R), &Config::nueva("m", "eres un agente"), "arregla", &mut |_, _| vistos += 1);
+    let inf = correr(&mut e, &mut m, &reloj, &Politica::nueva(R), &{ let mut c = Config::nueva("m", "eres un agente"); c.avisos_sin_editar = 0; c }, "arregla", &mut |_, _| vistos += 1);
     assert_eq!(inf.fin, Fin::Terminado, "{:?}", inf.error);
     assert_eq!((inf.turnos, inf.llamadas, vistos), (4, 3, 4));
     assert_eq!(inf.respuesta_final, "Listo: corregí la comparación.");
@@ -222,7 +229,7 @@ fn argumentos_ilegibles_se_devuelven_al_modelo() {
     let mut e = repo();
     let malo = json!({"role": "assistant", "content": "", "tool_calls": [{"id": "x", "function": {"name": "read", "arguments": "{no json"}}]});
     let mut m = Guion(vec![malo, json!({"role": "assistant", "content": "ok"})], vec![]);
-    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), "t", &mut |_, _| {});
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg_base(), "t", &mut |_, _| {});
     assert_eq!(inf.fin, Fin::Terminado);
     assert!(m.1[1].contains("no son un objeto JSON"));
 }
@@ -231,11 +238,11 @@ fn argumentos_ilegibles_se_devuelven_al_modelo() {
 fn tope_de_turnos_y_error_del_modelo() {
     let mut e = repo();
     let bucle: Vec<Value> = (0..5).map(|_| llamada("read", json!({"filePath": "README.md"}))).collect();
-    let mut cfg = Config::nueva("m", "s");
+    let mut cfg = cfg_base();
     cfg.max_turnos = 3;
     let inf = correr(&mut e, &mut Guion(bucle, vec![]), &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg, "t", &mut |_, _| {});
     assert_eq!((inf.fin, inf.turnos), (Fin::SinTurnos, 3));
-    let inf = correr(&mut e, &mut Guion(vec![], vec![]), &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), "t", &mut |_, _| {});
+    let inf = correr(&mut e, &mut Guion(vec![], vec![]), &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg_base(), "t", &mut |_, _| {});
     assert_eq!(inf.fin, Fin::ErrorModelo);
     assert!(inf.error.unwrap().contains("sin más guion"));
 }
@@ -269,7 +276,7 @@ fn la_sesion_se_recupera_tras_morir_el_agente() {
     let mut e = repo();
     // Primer agente: dos llamadas y se acaba el modelo (el proceso «muere»).
     let mut m = Guion(vec![llamada("read", json!({"filePath": "README.md"})), llamada("grep", json!({"pattern": "k == key"}))], vec![]);
-    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), "t", &mut |h, ms| {
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg_base(), "t", &mut |h, ms| {
         sesion::guardar(h, "/w/.sesion", ms).unwrap();
     });
     assert_eq!(inf.fin, Fin::ErrorModelo);
@@ -278,7 +285,7 @@ fn la_sesion_se_recupera_tras_morir_el_agente() {
     assert_eq!(previa.len(), 6);
     // Otro proceso la recoge y termina sin repetir el trabajo ya hecho.
     let mut m2 = Guion(vec![json!({"role": "assistant", "content": "fin"})], vec![]);
-    let inf = correr_desde(&mut e, &mut m2, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), previa, &mut |h, ms| {
+    let inf = correr_desde(&mut e, &mut m2, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg_base(), previa, &mut |h, ms| {
         sesion::guardar(h, "/w/.sesion", ms).unwrap();
     });
     assert_eq!((inf.fin, inf.turnos, inf.llamadas), (Fin::Terminado, 1, 0));
@@ -286,7 +293,7 @@ fn la_sesion_se_recupera_tras_morir_el_agente() {
     // Una sesión ya terminada no vuelve a llamar al modelo.
     let hecha = sesion::cargar(&e, "/w/.sesion").unwrap().unwrap();
     let mut m3 = Guion(vec![], vec![]);
-    let inf = correr_desde(&mut e, &mut m3, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), hecha, &mut |_, _| {});
+    let inf = correr_desde(&mut e, &mut m3, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg_base(), hecha, &mut |_, _| {});
     assert_eq!((inf.fin, inf.respuesta_final.as_str(), m3.1.len()), (Fin::Terminado, "fin", 0));
 }
 
@@ -420,13 +427,13 @@ fn el_modelo_que_acaba_a_medias_recibe_un_recordatorio_en_vez_de_darse_por_termi
     let edita = llamada("reemplazar_texto", json!({"filePath": "src/lib.rs", "buscar": "k == key", "nuevo": "k == *key"}));
     let mut e = repo();
     let mut m = Guion(vec![edita.clone(), json!({"role": "assistant", "content": "Continuar"}), llamada("bash", json!({"command": "cargo test"})), json!({"role": "assistant", "content": "hecho"})], vec![]);
-    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), "t", &mut |_, _| {});
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg_base(), "t", &mut |_, _| {});
     assert_eq!((inf.fin, inf.empujones, inf.llamadas), (Fin::Terminado, 1, 2), "{:?}", inf.error);
     assert!(m.1[2].contains("Todavía no has comprobado"), "el recordatorio llega al modelo");
     // Respuesta vacía y llamada escrita como texto.
     let mut e = repo();
     let mut m = Guion(vec![json!({"role": "assistant", "content": ""}), json!({"role": "assistant", "content": "{\"name\": \"bash\", \"arguments\": {\"command\": \"x\"}}"}), json!({"role": "assistant", "content": "fin"})], vec![]);
-    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), "t", &mut |_, _| {});
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg_base(), "t", &mut |_, _| {});
     assert_eq!((inf.fin, inf.empujones), (Fin::Terminado, 2));
     assert!(m.1[1].contains("estaba vacía") && m.1[2].contains("como texto"));
 }
@@ -454,7 +461,7 @@ fn una_comprobacion_fallida_empuja_a_corregir_y_los_recordatorios_tienen_tope() 
         vec![llamada("bash", json!({"command": "cargo test"})), json!({"role": "assistant", "content": "no pude"}), json!({"role": "assistant", "content": "sigo sin poder"}), json!({"role": "assistant", "content": "me rindo"})],
         vec![],
     );
-    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), "t", &mut |_, _| {});
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg_base(), "t", &mut |_, _| {});
     assert_eq!((inf.fin, inf.empujones), (Fin::Terminado, 2), "dos recordatorios y entonces se acepta que termine");
     assert!(m.1[2].contains("ha fallado"));
     assert_eq!(inf.respuesta_final, "me rindo");
@@ -474,11 +481,11 @@ fn una_respuesta_mal_formada_rechazada_con_400_se_devuelve_al_modelo_con_el_moti
     }
     let mut e = repo();
     let mut m = Mal400(vec![None, Some(llamada("read", json!({"filePath": "README.md"}))), Some(json!({"role": "assistant", "content": "fin"}))], vec![]);
-    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), "t", &mut |_, _| {});
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg_base(), "t", &mut |_, _| {});
     assert_eq!((inf.fin, inf.formato, inf.llamadas), (Fin::Terminado, 1, 1), "{:?}", inf.error);
     assert!(m.1[1].contains("varias llamadas o texto tras una llamada") && m.1[1].contains("una sola llamada"), "el motivo del servidor llega al modelo");
     // Con el tope agotado es un error del modelo, no un bucle.
-    let mut cfg = Config::nueva("m", "s");
+    let mut cfg = cfg_base();
     cfg.errores_de_formato = 2;
     let mut m = Mal400(vec![None, None, None, None], vec![]);
     let inf = correr(&mut repo(), &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg, "t", &mut |_, _| {});
@@ -490,7 +497,7 @@ fn una_llamada_identica_que_ya_fallo_no_se_repite_veinte_veces() {
     let mut e = repo();
     let mala = || llamada("reemplazar_texto", json!({"filePath": "src/lib.rs", "buscar": "esto no existe en el archivo", "nuevo": "x"}));
     let mut m = Guion(vec![mala(), mala(), mala(), mala(), json!({"role": "assistant", "content": "me rindo"})], vec![]);
-    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), "t", &mut |_, _| {});
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg_base(), "t", &mut |_, _| {});
     let salidas: Vec<String> = inf.mensajes.iter().filter(|x| x["role"] == "tool").map(|x| x["content"].as_str().unwrap().to_string()).collect();
     assert_eq!(salidas.len(), 4);
     assert!(salidas[0].starts_with("No encuentro") && !salidas[0].contains("AVISO"));
@@ -506,7 +513,7 @@ fn una_llamada_distinta_o_que_funciona_reinicia_la_cuenta() {
     let mut e = repo();
     let mala = |b: &str| llamada("reemplazar_texto", json!({"filePath": "src/lib.rs", "buscar": b, "nuevo": "x"}));
     let mut m = Guion(vec![mala("nada uno"), mala("nada dos"), mala("nada uno"), mala("nada uno"), json!({"role": "assistant", "content": "fin"})], vec![]);
-    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), "t", &mut |_, _| {});
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg_base(), "t", &mut |_, _| {});
     assert_eq!(inf.repetidas, 0, "sólo cuentan las idénticas seguidas");
 }
 
@@ -514,7 +521,7 @@ fn una_llamada_distinta_o_que_funciona_reinicia_la_cuenta() {
 fn repetidas_max_cero_lo_apaga() {
     let mut e = repo();
     let mala = || llamada("reemplazar_texto", json!({"filePath": "src/lib.rs", "buscar": "no existe", "nuevo": "x"}));
-    let mut cfg = Config::nueva("m", "s");
+    let mut cfg = cfg_base();
     cfg.repetidas_max = 0;
     let mut m = Guion(vec![mala(), mala(), mala(), json!({"role": "assistant", "content": "fin"})], vec![]);
     let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg, "t", &mut |_, _| {});
@@ -542,9 +549,10 @@ fn las_salidas_antiguas_se_recortan_antes_de_agotar_el_contexto() {
     let lecturas: Vec<Value> = (0..12).map(|_| llamada("read", json!({"filePath": "grande.txt"}))).collect();
     let mut resto = lecturas;
     resto.push(json!({"role": "assistant", "content": "listo"}));
-    let mut cfg = Config::nueva("m", "s");
+    let mut cfg = cfg_base();
     cfg.contexto_tokens = Some(6000); // ventana pequeña para forzarlo
     cfg.repetidas_max = 0; // las doce lecturas son iguales a propósito
+    cfg.repetidas_ok_max = 0;
     let mut m = Guion(resto, vec![]);
     let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg, "t", &mut |_, _| {});
     assert_eq!(inf.fin, Fin::Terminado);
@@ -554,4 +562,82 @@ fn las_salidas_antiguas_se_recortan_antes_de_agotar_el_contexto() {
     assert!(!tools.last().unwrap().contains("salida antigua recortada"), "la última salida se conserva entera");
     // Cada resultado sigue atado a su llamada.
     assert_eq!(inf.mensajes.iter().filter(|x| x["role"] == "tool").count(), 12);
+}
+
+#[test]
+fn quien_intenta_terminar_sin_haber_editado_nada_recibe_un_aviso_con_tope() {
+    // Lee, comprueba (en verde) y acaba sin editar: dos avisos y entonces se acepta que termine.
+    let mut e = repo();
+    let mut m = Guion(
+        vec![llamada("read", json!({"filePath": "src/lib.rs"})), json!({"role": "assistant", "content": "ya está"}), json!({"role": "assistant", "content": "sigue sin haber nada"}), json!({"role": "assistant", "content": "de verdad, terminé"})],
+        vec![],
+    );
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), "t", &mut |_, _| {});
+    assert_eq!((inf.fin, inf.sin_editar, inf.empujones), (Fin::Terminado, 2, 0), "{:?}", inf.error);
+    assert!(m.1[2].contains("No has modificado ningún archivo"), "el aviso llega al modelo: {:?}", m.1);
+    assert_eq!(inf.respuesta_final, "de verdad, terminé");
+}
+
+#[test]
+fn con_una_edicion_hecha_no_hay_aviso_de_sin_editar() {
+    let edita = llamada("reemplazar_texto", json!({"filePath": "src/lib.rs", "buscar": "k == key", "nuevo": "k == *key"}));
+    let mut e = repo();
+    let mut m = Guion(vec![edita, llamada("bash", json!({"command": "cargo test"})), json!({"role": "assistant", "content": "hecho"})], vec![]);
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &Config::nueva("m", "s"), "t", &mut |_, _| {});
+    assert_eq!((inf.fin, inf.sin_editar), (Fin::Terminado, 0), "{:?}", inf.error);
+}
+
+#[test]
+fn una_llamada_identica_que_ya_salio_bien_no_se_repite_y_el_intento_se_cierra() {
+    // `cargo test` sale bien (el repo en memoria lo da por pasado) y el modelo lo repite sin cesar tras una edición.
+    let edita = llamada("reemplazar_texto", json!({"filePath": "src/lib.rs", "buscar": "k == key", "nuevo": "k == *key"}));
+    let test = llamada("bash", json!({"command": "cargo test"}));
+    let mut e = repo();
+    let mut guion = vec![edita];
+    for _ in 0..8 {
+        guion.push(test.clone());
+    }
+    let mut m = Guion(guion, vec![]);
+    let mut c = Config::nueva("m", "s");
+    c.avisos_sin_editar = 0;
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &c, "t", &mut |_, _| {});
+    // La 1ª es nueva y las repeticiones 1ª y 2ª se ejecutan; la 3ª se bloquea con aviso y la 5ª repetición (3 + 2) cierra el intento.
+    assert_eq!(inf.fin, Fin::Terminado, "{:?}", inf.error);
+    assert!(inf.respuesta_final.contains("intento cerrado"), "{}", inf.respuesta_final);
+    assert!(inf.repetidas >= 3, "repetidas = {}", inf.repetidas);
+    assert!(inf.llamadas <= 7, "no debe llegar al final del guion: {} llamadas", inf.llamadas);
+    assert!(m.1.iter().any(|t| t.contains("es idéntica a la anterior")), "el aviso llega al modelo");
+}
+
+#[test]
+fn una_llamada_igual_pero_con_una_edicion_en_medio_si_se_ejecuta() {
+    let edita = llamada("reemplazar_texto", json!({"filePath": "src/lib.rs", "buscar": "k == key", "nuevo": "k == *key"}));
+    let edita2 = llamada("reemplazar_texto", json!({"filePath": "src/lib.rs", "buscar": "k == *key", "nuevo": "*k == *key"}));
+    let test = llamada("bash", json!({"command": "cargo test"}));
+    let mut e = repo();
+    let mut m = Guion(vec![edita, test.clone(), edita2, test.clone(), json!({"role": "assistant", "content": "listo"})], vec![]);
+    let mut c = Config::nueva("m", "s");
+    c.avisos_sin_editar = 0;
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &c, "t", &mut |_, _| {});
+    assert_eq!((inf.fin, inf.repetidas), (Fin::Terminado, 0), "{:?}", inf.error);
+}
+
+#[test]
+fn alternar_dos_comprobaciones_ya_en_verde_tambien_cuenta_como_repetir() {
+    // Como R40 de la campaña 12: `cargo test` y `cargo test -- --nocapture` alternados, sin editar nada entre medias.
+    let edita = llamada("reemplazar_texto", json!({"filePath": "src/lib.rs", "buscar": "k == key", "nuevo": "k == *key"}));
+    let a = llamada("bash", json!({"command": "cargo test"}));
+    let b = llamada("bash", json!({"command": "cargo test -- --nocapture"}));
+    let mut e = repo();
+    let mut guion = vec![edita];
+    for i in 0..12 {
+        guion.push(if i % 2 == 0 { a.clone() } else { b.clone() });
+    }
+    let mut m = Guion(guion, vec![]);
+    let mut c = Config::nueva("m", "s");
+    c.avisos_sin_editar = 0;
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &c, "t", &mut |_, _| {});
+    assert_eq!(inf.fin, Fin::Terminado, "{:?}", inf.error);
+    assert!(inf.respuesta_final.contains("intento cerrado"), "{}", inf.respuesta_final);
+    assert!(inf.llamadas <= 8, "no debe agotar el guion: {} llamadas", inf.llamadas);
 }

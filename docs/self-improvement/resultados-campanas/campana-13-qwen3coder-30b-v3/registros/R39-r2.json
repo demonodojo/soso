@@ -1,0 +1,11 @@
+{
+ "id": "R39",
+ "ronda": 2,
+ "resultado": "error",
+ "intentos": 1,
+ "segundos": 419,
+ "nota": "error: entorno: el intento no termin\u00f3: LimiteHerramientas",
+ "fallo": "protocolo",
+ "herramientas": 30,
+ "tokens": 432448
+}

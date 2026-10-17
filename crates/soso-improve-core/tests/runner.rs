@@ -35,6 +35,13 @@ fn orden() -> Orden {
     Orden::nueva(&["opencode", "run", "--format", "json"], "/w")
 }
 
+/// Sin el aviso «no has modificado nada»: estos tests miden otra cosa y su modelo de guion acaba sin editar.
+fn cfg_sin_aviso() -> Config {
+    let mut c = Config::nueva("m", "s");
+    c.avisos_sin_editar = 0;
+    c
+}
+
 #[test]
 fn la_salida_real_de_opencode_se_cuenta_por_paso_sin_duplicar() {
     let p = falso(REAL.as_bytes(), b"", Some(0), None);
@@ -214,7 +221,7 @@ fn el_agente_nativo_respeta_el_tope_de_herramientas_en_vivo() {
     e.0.insert("/w/a".into(), b"x\n".to_vec());
     let mut m = Guion(vec![lee(), lee(), lee(), lee(), json!({"role": "assistant", "content": "fin"})]);
     let lim = Limites { max_herramientas: 2, ..Limites::default() };
-    let inf = ejecutar_agente(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva("/w"), &Config::nueva("m", "s"), "t", &lim);
+    let inf = ejecutar_agente(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva("/w"), &cfg_sin_aviso(), "t", &lim);
     assert_eq!(inf.fin, Fin::LimiteHerramientas);
     assert!(inf.limites_en_vivo);
     assert_eq!(inf.cuenta.herramientas, 2, "la tercera llamada no se lanzó");
@@ -226,7 +233,7 @@ fn el_uso_nativo_se_suma_por_respuesta_y_termina_completo() {
     let mut e = Mem::default();
     e.0.insert("/w/a".into(), b"x\n".to_vec());
     let mut m = Guion(vec![lee(), json!({"role": "assistant", "content": "listo"})]);
-    let inf = ejecutar_agente(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva("/w"), &Config::nueva("m", "s"), "t", &Limites::default());
+    let inf = ejecutar_agente(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva("/w"), &cfg_sin_aviso(), "t", &Limites::default());
     assert_eq!(inf.fin, Fin::Completo);
     assert_eq!((inf.cuenta.tokens_entrada, inf.cuenta.tokens_salida), (200, 20));
     assert!(inf.eventos.contains(&Evento::Herramienta { id: "c".into(), nombre: "read".into(), completada: true }));
@@ -279,7 +286,7 @@ fn un_intento_de_tarea_deja_estado_registro_y_medidas_honestas() {
     use soso_improve_core::state::{cargar, Estado, Medida};
     let mut e = preparado(30);
     let mut m = Guion(vec![lee(), json!({"role": "assistant", "content": "listo"})]);
-    let inf = soso_improve_core::runner::ejecutar_intento(&mut e, &mut m, &RelojSimulado::nuevo(5), "/w/estado", "r1", "/w", &Config::nueva("m", "s"), &Politica::nueva("/w")).unwrap();
+    let inf = soso_improve_core::runner::ejecutar_intento(&mut e, &mut m, &RelojSimulado::nuevo(5), "/w/estado", "r1", "/w", &cfg_sin_aviso(), &Politica::nueva("/w")).unwrap();
     assert_eq!(inf.fin, Fin::Completo);
     let (man, _) = cargar(&e, "/w/estado", "r1").unwrap().unwrap();
     assert_eq!(man.estado, Estado::Verificando, "el coordinador no acepta: eso es del validador");
@@ -295,7 +302,7 @@ fn el_limite_de_herramientas_de_la_tarea_bloquea_el_intento() {
     use soso_improve_core::state::{cargar, Estado};
     let mut e = preparado(1);
     let mut m = Guion(vec![lee(), lee(), json!({"role": "assistant", "content": "x"})]);
-    let inf = soso_improve_core::runner::ejecutar_intento(&mut e, &mut m, &RelojSimulado::nuevo(0), "/w/estado", "r1", "/w", &Config::nueva("m", "s"), &Politica::nueva("/w")).unwrap();
+    let inf = soso_improve_core::runner::ejecutar_intento(&mut e, &mut m, &RelojSimulado::nuevo(0), "/w/estado", "r1", "/w", &cfg_sin_aviso(), &Politica::nueva("/w")).unwrap();
     assert_eq!(inf.fin, Fin::LimiteHerramientas);
     assert_eq!(cargar(&e, "/w/estado", "r1").unwrap().unwrap().0.estado, Estado::Bloqueada);
 }
@@ -308,6 +315,6 @@ fn un_intento_abierto_no_se_repite_a_ciegas() {
     man.abrir_intento(&L::default(), 1).unwrap();
     guardar(&mut e, "/w/estado", &man, Some(&h)).unwrap();
     let mut m = Guion(vec![]);
-    let r = soso_improve_core::runner::ejecutar_intento(&mut e, &mut m, &RelojSimulado::nuevo(0), "/w/estado", "r1", "/w", &Config::nueva("m", "s"), &Politica::nueva("/w"));
+    let r = soso_improve_core::runner::ejecutar_intento(&mut e, &mut m, &RelojSimulado::nuevo(0), "/w/estado", "r1", "/w", &cfg_sin_aviso(), &Politica::nueva("/w"));
     assert!(r.unwrap_err().to_string().contains("T27"));
 }

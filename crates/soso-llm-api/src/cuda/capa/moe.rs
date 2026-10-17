@@ -2,9 +2,10 @@
 //! Reutiliza los kernels de la capa de Gemma (normas, RoPE, atención) y añade los de `mo_*` (router + top-k,
 //! gate/up Q4_K con SiLU, down Q8_0, combinación). Por llamada sólo viaja el `hidden` (entrada y salida).
 
+use std::collections::HashMap;
 use std::ffi::{c_int, c_void};
 
-use soso_llm_core::gpu::MoeCapa;
+use soso_llm_core::gpu::{ModoMoe, MoeCapa, MoePlan};
 
 use super::{
     ATT_CH, B_ACT, B_ATTN, B_GO, B_GS, B_HS, B_IDX, B_K, B_LG, B_ML, B_O, B_PARCIAL, B_Q, B_SC,
@@ -22,6 +23,38 @@ pub(super) struct MoeDev {
     pg: u64,
     pu: u64,
     pd: u64,
+    /// `ffn_down` de los expertos en Q4_K (si no, Q8_0).
+    down_q4k: bool,
+    /// Los expertos no viven aquí: se traen a un pool por demanda (`pg`/`pu`/`pd` valen 0).
+    flujo: bool,
+}
+
+/// Cuántas capas llevan los expertos residentes y cuántos huecos tiene el pool del resto (ver `planificar_moe`).
+pub(super) struct PlanGpu {
+    residentes_libres: usize,
+    pool_huecos: usize,
+}
+
+/// Huecos de VRAM con expertos traídos por demanda (gate, up y down seguidos), con expulsión LRU.
+pub(super) struct Pool {
+    base: u64,
+    hueco_bytes: usize,
+    offs: [usize; 3],
+    caps: [usize; 3],
+    claves: Vec<Option<(u32, u32)>>,
+    usos: Vec<u64>,
+    mapa: HashMap<(u32, u32), usize>,
+    reloj: u64,
+    /// Tablas de punteros de la capa en curso: gate, up y down, `n_exp` entradas cada una.
+    tabla_dev: u64,
+}
+
+/// Margen para los búferes de trabajo, las tablas y los grafos de un modelo MoE.
+const RESERVA_TRABAJO: usize = 512 << 20;
+const ALINEA: usize = 256;
+
+fn alinear(n: usize) -> usize {
+    n.div_ceil(ALINEA) * ALINEA
 }
 
 impl CudaGpu {
@@ -39,13 +72,26 @@ impl CudaGpu {
             .normas
             .as_ref()
             .ok_or_else(|| format!("capa {}: faltan las normas de la capa MoE", c.layer))?;
+        let flujo = self.capa.modos_moe.get(&c.layer) == Some(&ModoMoe::Flujo);
         let mut tablas = [0u64; 3];
+        let mut down_dtype = if flujo && c.down_q4k { sosomodel::layout::DTYPE_Q4_K } else { 0u8 };
         for (i, suf) in ["ffn_gate", "ffn_up", "ffn_down"].iter().enumerate() {
+            if flujo {
+                break; // las tablas de un modo «en flujo» las construye cada llamada (ver `moe_flujo_tabla`)
+            }
             let mut ptrs = Vec::with_capacity(c.n_exp);
             for e in 0..c.n_exp {
                 let clave = format!("{}.E{e:02}.{suf}", c.prefijo);
                 match self.pesos.get(&clave) {
-                    Some(Some(p)) => ptrs.push(p.d),
+                    Some(Some(p)) => {
+                        ptrs.push(p.d);
+                        if i == 2 {
+                            if down_dtype != 0 && down_dtype != p.dtype {
+                                return Err(format!("{clave}: los `down` de la capa mezclan dtypes"));
+                            }
+                            down_dtype = p.dtype;
+                        }
+                    }
                     _ => return Err(format!("experto {clave} no residente")),
                 }
             }
@@ -68,9 +114,184 @@ impl CudaGpu {
             pg: tablas[0],
             pu: tablas[1],
             pd: tablas[2],
+            down_q4k: down_dtype == sosomodel::layout::DTYPE_Q4_K,
+            flujo,
         };
         self.capa.moe.insert(c.layer, md);
         Ok(())
+    }
+
+    /// Modo de una capa MoE. La primera vez planifica la VRAM: si el modelo cabe entero, todas residentes; si no, las
+    /// primeras `residentes_libres` capas llevan los expertos residentes y el resto los trae por demanda. (`SOSO_CUDA_RESIDENTES=N`
+    /// fija ese número, para probar el flujo con un modelo que sí cabe.)
+    pub(in crate::cuda) fn moe_modo_capa(&mut self, layer: u32, plan: &MoePlan) -> ModoMoe {
+        if let Some(m) = self.capa.modos_moe.get(&layer) {
+            return *m;
+        }
+        if self.capa.plan_moe.is_none() {
+            let pl = self.planificar_moe(plan);
+            eprintln!(
+                "cuda: plan MoE: {} de {} capas con expertos residentes, pool de {} huecos para el resto",
+                pl.residentes_libres, plan.n_layers, pl.pool_huecos
+            );
+            self.capa.plan_moe = Some(pl);
+        }
+        let pl = self.capa.plan_moe.as_mut().unwrap();
+        let modo = if pl.residentes_libres > 0 {
+            pl.residentes_libres -= 1;
+            ModoMoe::Residente
+        } else {
+            ModoMoe::Flujo
+        };
+        self.capa.modos_moe.insert(layer, modo);
+        modo
+    }
+
+    fn planificar_moe(&self, p: &MoePlan) -> PlanGpu {
+        let libre = self.presupuesto.saturating_sub(self.usado);
+        let fijo = p.attn_total + p.kv_total + p.fijo + RESERVA_TRABAJO;
+        let hueco = p.bytes_experto.iter().map(|b| alinear(*b)).sum::<usize>();
+        let forzado = std::env::var("SOSO_CUDA_RESIDENTES").ok().and_then(|v| v.parse::<usize>().ok());
+        if forzado.is_none() && libre >= fijo + p.n_layers * p.expertos_capa {
+            return PlanGpu { residentes_libres: p.n_layers, pool_huecos: 0 };
+        }
+        let minimo = p.n_exp + 16;
+        let util = libre.saturating_sub(fijo + minimo * hueco);
+        let r = forzado.unwrap_or(util / p.expertos_capa.max(1)).min(p.n_layers);
+        let sobra = util.saturating_sub(r * p.expertos_capa);
+        let extra = (sobra / hueco.max(1)).min(3 * p.n_exp);
+        PlanGpu { residentes_libres: r, pool_huecos: minimo + extra }
+    }
+
+    /// Crea el pool de expertos (la primera capa «en flujo»).
+    fn crear_pool(&mut self, c: &MoeCapa<'_>) -> Result<(), String> {
+        let huecos = self.capa.plan_moe.as_ref().map_or(c.n_exp + 16, |p| p.pool_huecos).max(c.n_exp + 1);
+        let caps = c.bytes_experto;
+        let offs = [0, alinear(caps[0]), alinear(caps[0]) + alinear(caps[1])];
+        let hueco_bytes = offs[2] + alinear(caps[2]);
+        let base = self.alloc(huecos * hueco_bytes)?;
+        let tabla_dev = self.alloc(3 * c.n_exp * 8)?;
+        self.usado += huecos * hueco_bytes + 3 * c.n_exp * 8;
+        eprintln!("cuda: pool de expertos: {huecos} huecos de {} KiB ({} MiB)", hueco_bytes >> 10, (huecos * hueco_bytes) >> 20);
+        self.capa.pool = Some(Pool {
+            base,
+            hueco_bytes,
+            offs,
+            caps,
+            claves: vec![None; huecos],
+            usos: vec![0; huecos],
+            mapa: HashMap::new(),
+            reloj: 0,
+            tabla_dev,
+        });
+        Ok(())
+    }
+
+    /// Capa «en flujo», tras el router: lee qué expertos eligió cada token, trae a un hueco del pool los que falten (los
+    /// menos recientes se expulsan) y deja listas las tablas de punteros que usan los kernels de expertos.
+    fn moe_flujo_tabla(&mut self, c: &mut MoeCapa<'_>, p: &mut Ptrs, f: &Forma) -> Result<(), String> {
+        let (n, k) = (f.n, f.k);
+        if self.capa.pool.is_none() {
+            self.crear_pool(c)?;
+        }
+        let t_sync = std::time::Instant::now();
+        ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
+        self.capa.flujo_diag[2] += t_sync.elapsed().as_nanos() as u64;
+        let mut idx = vec![0i32; n * k];
+        ck(
+            unsafe { (self.api.dtoh)(idx.as_mut_ptr() as *mut c_void, p.idx, idx.len() * 4) },
+            "cuMemcpyDtoH",
+        )?;
+        let mut usados: Vec<usize> = Vec::with_capacity(idx.len());
+        for &e in &idx {
+            if e < 0 || e as usize >= c.n_exp {
+                return Err(format!("el router devolvió el experto {e} (hay {})", c.n_exp));
+            }
+            usados.push(e as usize);
+        }
+        usados.sort_unstable();
+        usados.dedup();
+        let htod = self.api.htod;
+        let mut pool = self.capa.pool.take().unwrap();
+        pool.reloj += 1;
+        let reloj = pool.reloj;
+        let n_exp = c.n_exp;
+        let mut tabla = vec![0u64; 3 * n_exp];
+        let (mut aciertos, mut fallos) = (0u64, 0u64);
+        let mut copiados = 0u64;
+        let t_copia = std::time::Instant::now();
+        let res: Result<(), String> = (|| {
+            let prov = c.flujo.as_mut().ok_or_else(|| format!("capa {}: sin proveedor de expertos", c.layer))?;
+            for &e in &usados {
+                let clave = (c.layer, e as u32);
+                let hueco = match pool.mapa.get(&clave) {
+                    Some(&h) => {
+                        aciertos += 1;
+                        h
+                    }
+                    None => {
+                        fallos += 1;
+                        // El hueco libre o el menos reciente que no se esté usando en esta llamada.
+                        let mut mejor: Option<usize> = None;
+                        for h in 0..pool.claves.len() {
+                            if pool.claves[h].is_none() {
+                                mejor = Some(h);
+                                break;
+                            }
+                            if pool.usos[h] != reloj && mejor.is_none_or(|m| pool.usos[h] < pool.usos[m]) {
+                                mejor = Some(h);
+                            }
+                        }
+                        let h = mejor.ok_or("el pool no tiene huecos libres para los expertos de esta llamada")?;
+                        if let Some(vieja) = pool.claves[h].take() {
+                            pool.mapa.remove(&vieja);
+                        }
+                        let (base, offs, caps) = (pool.base + (h * pool.hueco_bytes) as u64, pool.offs, pool.caps);
+                        prov.experto(e, &mut |i, _dtype, bytes| {
+                            if bytes.len() > caps[i] {
+                                return Err(());
+                            }
+                            copiados += bytes.len() as u64;
+                            ck(unsafe { htod(base + offs[i] as u64, bytes.as_ptr() as *const c_void, bytes.len()) }, "cuMemcpyHtoD")
+                                .map_err(|_| ())
+                        })
+                        .map_err(|_| format!("no pude traer el experto {e} de la capa {}", c.layer))?;
+                        pool.claves[h] = Some(clave);
+                        pool.mapa.insert(clave, h);
+                        h
+                    }
+                };
+                pool.usos[hueco] = reloj;
+                let base = pool.base + (hueco * pool.hueco_bytes) as u64;
+                for i in 0..3 {
+                    tabla[i * n_exp + e] = base + pool.offs[i] as u64;
+                }
+            }
+            Ok(())
+        })();
+        let tabla_dev = pool.tabla_dev;
+        self.capa.pool = Some(pool);
+        res?;
+        self.capa.flujo_diag[0] += t_copia.elapsed().as_nanos() as u64;
+        self.capa.flujo_diag[1] += copiados;
+        self.stats.flujo_aciertos += aciertos;
+        self.stats.flujo_fallos += fallos;
+        let bytes: Vec<u8> = tabla.iter().flat_map(|v| v.to_le_bytes()).collect();
+        self.subir(tabla_dev, &bytes)?;
+        p.pg = tabla_dev;
+        p.pu = tabla_dev + (n_exp * 8) as u64;
+        p.pd = tabla_dev + (2 * n_exp * 8) as u64;
+        Ok(())
+    }
+
+    /// Diagnóstico del flujo: (ms de CPU trayendo expertos, MiB copiados, ms esperando a la GPU antes de leer el router).
+    pub fn flujo_diagnostico(&self) -> (f64, f64, f64) {
+        let d = self.capa.flujo_diag;
+        (d[0] as f64 / 1e6, d[1] as f64 / 1048576.0, d[2] as f64 / 1e6)
+    }
+
+    pub(in crate::cuda) fn moe_flujo_activo_capa(&self) -> bool {
+        self.capa.plan_moe.as_ref().is_some_and(|p| p.pool_huecos > 0)
     }
 
     pub(in crate::cuda) fn moe_pendiente_capa(&self, layer: u32, pos0: usize, n: usize) -> bool {
@@ -135,9 +356,9 @@ impl CudaGpu {
                 self.capa.pinned = p;
             }
         }
-        let (n_attn, n_q, n_k, n_ffn, d_router, n_rope, pg, pu, pd) = {
+        let (n_attn, n_q, n_k, n_ffn, d_router, n_rope, pg, pu, pd, down_q4k, flujo) = {
             let m = &self.capa.moe[&c.layer];
-            (m.attn, m.q, m.k, m.ffn, m.router, m.rope, m.pg, m.pu, m.pd)
+            (m.attn, m.q, m.k, m.ffn, m.router, m.rope, m.pg, m.pu, m.pd, m.down_q4k, m.flujo)
         };
         // Tramo de contexto (potencia de dos): fija la malla de las puntuaciones y los trozos de P·V, de modo que el
         // mismo grafo sirve para todos los tokens del tramo (los kernels leen la posición exacta de `dyn`).
@@ -212,6 +433,7 @@ impl CudaGpu {
         let bytes =
             unsafe { std::slice::from_raw_parts(dinamicos.as_ptr() as *const u8, DYN_BYTES) };
         let con_grafo = self.grafo.is_some()
+            && !flujo
             && self.capa.perfil.is_none()
             && !self.capa.depurar
             && !self.capa.pinned.is_null();
@@ -231,7 +453,7 @@ impl CudaGpu {
             self.subir(dyn_ptr, bytes)?;
         }
 
-        let p = Ptrs {
+        let mut p = Ptrs {
             hs: d_hs,
             xn: d_xn,
             q: d_q,
@@ -278,8 +500,14 @@ impl CudaGpu {
             usar_split,
             s_att,
             agrupar,
+            down_q4k,
         };
-        if con_grafo {
+        if flujo {
+            // Atención y router → qué expertos hacen falta → traerlos al pool → expertos y combinación.
+            self.moe_cuerpo_atencion(c, &p, &forma)?;
+            self.moe_flujo_tabla(c, &mut p, &forma)?;
+            self.moe_cuerpo_expertos(c, &p, &forma)?;
+        } else if con_grafo {
             if self.capa.grafos_gen != self.capa.gen_bufs {
                 self.grafos_olvidar();
                 self.capa.grafos_gen = self.capa.gen_bufs;
@@ -355,6 +583,13 @@ impl CudaGpu {
     /// Todos los lanzamientos de la capa, del `hidden` de entrada al de salida. Sólo hace lanzamientos y copias
     /// entre búferes ya reservados: es lo que se captura en un grafo CUDA.
     fn moe_cuerpo(&mut self, c: &MoeCapa<'_>, p: &Ptrs, f: &Forma) -> Result<(), String> {
+        self.moe_cuerpo_atencion(c, p, f)?;
+        self.moe_cuerpo_expertos(c, p, f)
+    }
+
+    /// Primera mitad de la capa: atención, residual y router (deja en `idx`/`wgt` los expertos elegidos).
+    #[allow(unused_variables)]
+    fn moe_cuerpo_atencion(&mut self, c: &MoeCapa<'_>, p: &Ptrs, f: &Forma) -> Result<(), String> {
         let Forma {
             n,
             h,
@@ -371,6 +606,7 @@ impl CudaGpu {
             usar_split,
             s_att,
             agrupar,
+            down_q4k,
         } = *f;
         // ---------------------------------------------------------------- atención
         self.rms_rows(p.hs, p.n_attn, p.xn, n, h, c.eps)?;
@@ -468,6 +704,30 @@ impl CudaGpu {
             )?;
         }
         self.marca("k router(2)")?;
+        Ok(())
+    }
+
+    /// Segunda mitad de la capa: los expertos elegidos por el router y la combinación con el residual.
+    #[allow(unused_variables)]
+    fn moe_cuerpo_expertos(&mut self, c: &MoeCapa<'_>, p: &Ptrs, f: &Forma) -> Result<(), String> {
+        let Forma {
+            n,
+            h,
+            heads,
+            kvh,
+            hd,
+            ffn,
+            k,
+            kv_dim,
+            cap,
+            s_split,
+            tramo,
+            seq_antes,
+            usar_split,
+            s_att,
+            agrupar,
+            down_q4k,
+        } = *f;
         let slots = (n * k) as u32;
         if agrupar {
             {
@@ -506,12 +766,22 @@ impl CudaGpu {
             {
                 let (mut a0, mut a1, mut a2, mut a3, mut a4) = (p.act, p.pd, p.gs, p.go, p.ye);
                 let (mut a5, mut a6) = (h as c_int, ffn as c_int);
-                self.lanzar3(
-                    self.capa.fns.down_grp,
-                    ((h as u32).div_ceil(32), c.n_exp as u32, 1),
-                    (256, 1, 1),
-                    &mut [a!(a0), a!(a1), a!(a2), a!(a3), a!(a4), a!(a5), a!(a6)],
-                )?;
+                if down_q4k {
+                    self.lanzar3s(
+                        self.capa.fns.down_grp_q4k,
+                        ((h as u32).div_ceil(16), c.n_exp as u32, 1),
+                        (256, 1, 1),
+                        (GRP_TT * (ffn / 32 * XPAD_RUST) * 4) as u32,
+                        &mut [a!(a0), a!(a1), a!(a2), a!(a3), a!(a4), a!(a5), a!(a6)],
+                    )?;
+                } else {
+                    self.lanzar3(
+                        self.capa.fns.down_grp,
+                        ((h as u32).div_ceil(32), c.n_exp as u32, 1),
+                        (256, 1, 1),
+                        &mut [a!(a0), a!(a1), a!(a2), a!(a3), a!(a4), a!(a5), a!(a6)],
+                    )?;
+                }
             }
         } else {
             {
@@ -538,7 +808,7 @@ impl CudaGpu {
                 let (mut a0, mut a1, mut a2, mut a3) = (p.act, p.pd, p.idx, p.ye);
                 let (mut a4, mut a5) = (h as c_int, ffn as c_int);
                 self.lanzar3(
-                    self.capa.fns.mo_down,
+                    if down_q4k { self.capa.fns.down_q4k } else { self.capa.fns.mo_down },
                     ((h as u32).div_ceil(32), slots, 1),
                     (256, 1, 1),
                     &mut [a!(a0), a!(a1), a!(a2), a!(a3), a!(a4), a!(a5)],
@@ -611,4 +881,5 @@ struct Forma {
     usar_split: bool,
     s_att: usize,
     agrupar: bool,
+    down_q4k: bool,
 }

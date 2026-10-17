@@ -56,7 +56,7 @@ fn make_layer_kv(
         // Una capa local de Gemma sólo guarda su ventana (más la holgura de expulsión).
         let ventana = manifest.layer_window(layer) as usize;
         let cap = if ventana > 0 {
-            kv_cap.min(ventana + crate::gemma::EXPULSION_DISPARO + Runtime::BLOQUE_PREFILL)
+            kv_cap.min(ventana + crate::gemma::EXPULSION_DISPARO + Runtime::BLOQUE_PREFILL_MOE_GPU)
         } else {
             kv_cap
         };
@@ -507,9 +507,11 @@ impl Runtime {
     /// Tokens por bloque en el prefill (T82). 8 son los acumuladores que caben en los
     /// registros YMM de los kernels por lotes; con más baja el rendimiento por caché.
     pub const BLOQUE_PREFILL: usize = 8;
-    /// Bloque del prefill de un modelo MoE que la GPU hace entero: más tokens por bloque = cada experto lee sus pesos
+    /// Bloque del prefill de un modelo (MoE o Gemma) que la GPU hace entero: más tokens por bloque = cada experto lee sus pesos
     /// una vez para varios tokens.
-    pub const BLOQUE_PREFILL_MOE_GPU: usize = 32;
+    pub const BLOQUE_PREFILL_MOE_GPU: usize = 64;
+    /// Máximo del bloque con capas MoE «en flujo».
+    pub const BLOQUE_PREFILL_FLUJO: usize = 256;
 
     /// Tokens por bloque de prefill según el modelo y el despacho.
     fn bloque_prefill(&self, gpu: &Option<&mut dyn crate::gpu::GpuDispatch>) -> usize {
@@ -519,7 +521,22 @@ impl Runtime {
         let moe_gpu = base_gpu
             && gpu.as_ref().is_some_and(|g| g.moe_puede(0))
             && (0..self.manifest.num_layers).all(|l| exec.es_capa_moe_gpu(l));
-        if moe_gpu { Self::BLOQUE_PREFILL_MOE_GPU } else { Self::BLOQUE_PREFILL }
+        let gemma_gpu = base_gpu
+            && gpu.as_ref().is_some_and(|g| g.gemma_puede(0))
+            && self.manifest.layer(0).is_some_and(|l| crate::gemma::es_capa_gemma(l.flags));
+        if moe_gpu && gpu.as_ref().is_some_and(|g| g.moe_flujo_activo()) {
+            // Con capas «en flujo» cada bloque lee de RAM los expertos de esas capas una vez: cuanto mayor el bloque, menos
+            // lecturas por token. Lo limita el búfer de parciales de la atención, que crece con n × (contexto / 256).
+            let por_token = (self.pos / 256 + 1) * 16384;
+            let max = (160usize << 20) / por_token.max(1);
+            max.clamp(Self::BLOQUE_PREFILL_MOE_GPU, Self::BLOQUE_PREFILL_FLUJO).next_power_of_two().min(Self::BLOQUE_PREFILL_FLUJO)
+        } else if moe_gpu {
+            Self::BLOQUE_PREFILL_MOE_GPU
+        } else if gemma_gpu {
+            32
+        } else {
+            Self::BLOQUE_PREFILL
+        }
     }
 
     /// ¿Puede ejecutarse el siguiente bloque de `n` tokens con `forward_layer_block`?
@@ -589,7 +606,10 @@ impl Runtime {
             let kv = &self.kv[l as usize];
             let kv_dim = self.manifest.effective_num_kv_heads(l) as usize
                 * self.manifest.effective_head_dim(l) as usize;
-            if !exec.soporta_bloque(l, kv) && !(base_gpu && exec.es_capa_moe_gpu(l)) {
+            // Con GPU, las capas de Gemma (con ventana) y las MoE de GQA clásica van por bloques por su propio camino
+            // (`forward_layer_gemma_block` / `moe_gpu`), que cae a token a token por CPU si la GPU las rechaza.
+            let es_gemma_l = self.manifest.layer(l).is_some_and(|sp| crate::gemma::es_capa_gemma(sp.flags));
+            if !exec.soporta_bloque(l, kv) && !(base_gpu && (exec.es_capa_moe_gpu(l) || es_gemma_l)) {
                 return Some("capa no soportada (MLA/KDA/gated/GDN/MoE)");
             }
             if kv.posiciones(kv_dim) != self.pos {
@@ -618,7 +638,7 @@ impl Runtime {
         let mut bs = self
             .block
             .take()
-            .unwrap_or_else(|| BlockScratch::new(&self.manifest, Self::BLOQUE_PREFILL_MOE_GPU));
+            .unwrap_or_else(|| BlockScratch::new(&self.manifest, Self::BLOQUE_PREFILL_FLUJO));
         let mut hs = vec![0.0f32; n * h];
         for (i, &tok) in tokens.iter().enumerate() {
             self.embed_token(tok, source)?;
@@ -725,9 +745,9 @@ impl Runtime {
         } else {
             let _ = observer.cancel_at(GenCheckpoint::BeforePrefill);
         }
-        let bloque = self.bloque_prefill(gpu);
         let mut i = 0usize;
         while i < total {
+            let bloque = self.bloque_prefill(gpu);
             // Prefill por bloques (T82): ~4× más rápido que token a token y con el
             // mismo resultado bit a bit. Cae al camino de siempre si no es seguro.
             let n = (total - i).min(bloque);

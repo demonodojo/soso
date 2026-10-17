@@ -27,13 +27,18 @@ pub(super) const DYN_SLOTS: usize = 256;
 
 /// Posiciones por trozo de la atención por trozos de KV (debe coincidir con `ATT_CH` del kernel).
 pub(super) const ATT_CH: usize = 256;
+/// Posiciones por trozo de la atención por trozos para Gemma (debe coincidir con `GA_CH` del kernel).
+pub(super) const GA_CH: usize = 128;
+
+/// Con al menos tantos tokens el matmul de Q4_0 usa los tensor cores (a menos de 16 no compensa llenar el CTA).
+pub(super) const GEMM_TC_MIN_TOKENS: usize = 16;
 
 /// Tokens por pasada de los kernels agrupados (`TT` en el .cu) y relleno de la `x` en shared (`XPAD`).
 pub(super) const GRP_TT: usize = 4;
 pub(super) const XPAD_RUST: usize = 36;
 
 /// Tokens máximos por llamada (los bloques del prefill son de 8).
-pub(super) const N_MAX: usize = 32;
+pub(super) const N_MAX: usize = 256;
 
 macro_rules! a {
     ($v:expr) => {
@@ -81,9 +86,14 @@ pub(super) struct Fns {
     pub(super) q80: CuFunction,
     pub(super) q4k_x3: CuFunction,
     pub(super) att_split: CuFunction,
+    pub(super) ga_256_2: CuFunction,
+    pub(super) ga_512_16: CuFunction,
+    pub(super) ga_combine: CuFunction,
     pub(super) grp: CuFunction,
     pub(super) gateup_grp: CuFunction,
     pub(super) down_grp: CuFunction,
+    pub(super) down_q4k: CuFunction,
+    pub(super) down_grp_q4k: CuFunction,
     pub(super) mm4n: CuFunction,
     pub(super) mm8n: CuFunction,
     pub(super) att_combine: CuFunction,
@@ -140,6 +150,14 @@ pub(super) struct Estado {
     dyn_dev: u64,
     pinned: *mut c_void,
     slot: usize,
+    /// ¿Se permiten los tensor cores? (`SOSO_CUDA_SIN_TC=1` los apaga, para comparar.)
+    tensor_cores: bool,
+    /// Plan de VRAM de un modelo MoE que no cabe entero (ver `moe::planificar_moe`), modo de cada capa y pool de expertos.
+    plan_moe: Option<moe::PlanGpu>,
+    modos_moe: HashMap<u32, soso_llm_core::gpu::ModoMoe>,
+    pool: Option<moe::Pool>,
+    /// Diagnóstico del flujo: ns de CPU en traer expertos, bytes copiados y ns esperando al router.
+    pub(super) flujo_diag: [u64; 3],
     /// Salida de capa MoE aún sin descargar: (capa, pos0, n). El `hidden` vive en el búfer `B_HS`.
     pendiente: Option<(u32, usize, usize)>,
     pub(super) kvs: HashMap<u32, KvDev>,
@@ -199,9 +217,14 @@ impl Estado {
                     q80: f("gm_matvec_q80")?,
                     q4k_x3: f("gm_matvec_q4k_x3")?,
                     att_split: f("mo_attn_split")?,
+                    ga_256_2: f("ga_split_256_2")?,
+                    ga_512_16: f("ga_split_512_16")?,
+                    ga_combine: f("ga_combine")?,
                     grp: f("mo_group")?,
                     gateup_grp: f("mo_gateup_grp")?,
                     down_grp: f("mo_down_grp")?,
+                    down_q4k: f("mo_down_q4k")?,
+                    down_grp_q4k: f("mo_down_grp_q4k")?,
                     mm4n: f("gm_matmul_q4k_n")?,
                     mm8n: f("gm_matmul_q80_n")?,
                     att_combine: f("mo_attn_combine")?,
@@ -211,6 +234,11 @@ impl Estado {
                 },
                 moe: HashMap::new(),
                 pendiente: None,
+                plan_moe: None,
+                modos_moe: HashMap::new(),
+                pool: None,
+                flujo_diag: [0; 3],
+                tensor_cores: std::env::var_os("SOSO_CUDA_SIN_TC").is_none(),
                 grafos: HashMap::new(),
                 grafos_gen: 0,
                 gen_bufs: 0,
@@ -433,6 +461,12 @@ impl CudaGpu {
                 self.lanzar(self.f_matvec_q4, rows, args.to_vec())?;
                 let _ = &mut args;
             }
+            DTYPE_Q4_0 if n >= GEMM_TC_MIN_TOKENS && self.capa.tensor_cores => {
+                // Tensor cores: 64 filas x 32 tokens por CTA, los pesos se leen una vez para los 32 tokens.
+                let (mut a0, mut a1, mut a2, mut a3, mut a4, mut a5, mut a6) = (pd, pq, x, y, r32, c32, n as c_int);
+                let mut args = [a!(a0), a!(a1), a!(a2), a!(a3), a!(a4), a!(a5), a!(a6)];
+                self.lanzar3(self.f_gemm_q4, ((rows as u32).div_ceil(64), (n as u32).div_ceil(32), 1), (128, 1, 1), &mut args)?;
+            }
             DTYPE_Q4_0 => {
                 let mut t0 = 0usize;
                 while t0 < n {
@@ -629,6 +663,18 @@ impl CudaGpu {
         }
         let kv = &self.capa.kvs[&layer];
         Ok(Some((kv.dk, kv.dv, kv.stored, kv.cap)))
+    }
+
+    /// Atención GQA por trozos de KV para formas generales (`ga_split_*` + `ga_combine`): `gp` cabezas por grupo (padding a potencia
+    /// de dos), `s` trozos de `GA_CH` posiciones por (token, cabeza KV).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn atencion_ga_dev(&mut self, f: CuFunction, gp: usize, d_q: u64, dk: u64, dv: u64, d_par: u64, d_ml: u64, d_attn: u64, n: usize, heads: usize, kvh: usize, hd: usize, kv_dim: usize, seq_antes: usize, ventana: usize, escala: f32, s: usize) -> Result<(), String> {
+        let (mut a0, mut a1, mut a2, mut a3, mut a4) = (d_q, dk, dv, d_par, d_ml);
+        let (mut a5, mut a6, mut a7, mut a8, mut a9, mut a10, mut a11, mut a12) = (heads as c_int, kvh as c_int, kv_dim as c_int, seq_antes as c_int, ventana as c_int, escala, s as c_int, 0u64);
+        self.lanzar3(f, (s as u32, kvh as u32, n as u32), (256, 1, 1), &mut [a!(a0), a!(a1), a!(a2), a!(a3), a!(a4), a!(a5), a!(a6), a!(a7), a!(a8), a!(a9), a!(a10), a!(a11), a!(a12)])?;
+        self.marca("k attn.split")?;
+        let (mut b0, mut b1, mut b2, mut b3, mut b4, mut b5, mut b6, mut b7) = (d_par, d_ml, d_attn, heads as c_int, kvh as c_int, hd as c_int, s as c_int, gp as c_int);
+        self.lanzar3(self.capa.fns.ga_combine, (heads as u32, n as u32, 1), (hd as u32, 1, 1), &mut [a!(b0), a!(b1), a!(b2), a!(b3), a!(b4), a!(b5), a!(b6), a!(b7)])
     }
 
     /// Atención GQA por trozos de KV (`mo_attn_split` + `mo_attn_combine`): sólo para `hd == 128` y a lo sumo 8 cabezas
@@ -863,7 +909,22 @@ impl CudaGpu {
         let d_o = self.buf(B_O, n * h)?;
         let d_up = self.buf(B_UP, n * ffn)?;
         let d_gate = self.buf(B_GATE, n * ffn)?;
-        let d_sc = self.buf(B_SC, n * heads * cap)?;
+        // Atención por trozos de KV (`ga_split_*`) para las dos formas de Gemma 4: hd 256 con 2 cabezas por grupo y hd 512 con 16.
+        let g_grupo = heads / kvh;
+        let variante_ga: Option<(usize, CuFunction)> = if std::env::var_os("SOSO_CUDA_ATT_VIEJA").is_some() {
+            None
+        } else if hd == 256 && g_grupo == 2 {
+            Some((2, self.capa.fns.ga_256_2))
+        } else if hd == 512 && g_grupo == 16 {
+            Some((16, self.capa.fns.ga_512_16))
+        } else {
+            None
+        };
+        let s_ga = {
+            let total = seq_antes + n;
+            (if c.ventana > 0 { total.min(c.ventana + n) } else { total }).div_ceil(GA_CH).max(1)
+        };
+        let d_sc = if variante_ga.is_some() { 0 } else { self.buf(B_SC, n * heads * cap)? };
         let s_split = {
             let total = seq_antes + n;
             let len = if c.ventana > 0 {
@@ -873,7 +934,10 @@ impl CudaGpu {
             };
             len.div_ceil(256).clamp(1, 16)
         };
-        let d_par = self.buf(B_PARCIAL, n * heads * s_split * hd)?;
+        let (d_par, d_ml) = match variante_ga {
+            Some((gp, _)) => (self.buf(B_PARCIAL, n * kvh * s_ga * gp * hd)?, self.buf(B_ML, n * kvh * s_ga * gp * 2)?),
+            None => (self.buf(B_PARCIAL, n * heads * s_split * hd)?, 0),
+        };
         if let Some((a, _)) = self.capa.perfil {
             ck(
                 unsafe { (self.api.ev_record)(a, std::ptr::null_mut()) },
@@ -941,26 +1005,30 @@ impl CudaGpu {
         self.marca("rope + kv")?;
         self.volcar("2 q (rope)", d_q, n * q_dim)?;
         self.volcar("2 k (rope)", d_k, n * kv_dim)?;
-        self.atencion_dev(
-            d_q,
-            dk,
-            dv,
-            d_sc,
-            d_par,
-            d_attn,
-            n,
-            heads,
-            kvh,
-            hd,
-            kv_dim,
-            seq_antes,
-            c.ventana,
-            c.escala,
-            cap,
-            s_split,
-            0,
-            seq_antes + n,
-        )?;
+        if let Some((gp, f)) = variante_ga {
+            self.atencion_ga_dev(f, gp, d_q, dk, dv, d_par, d_ml, d_attn, n, heads, kvh, hd, kv_dim, seq_antes, c.ventana, c.escala, s_ga)?;
+        } else {
+            self.atencion_dev(
+                d_q,
+                dk,
+                dv,
+                d_sc,
+                d_par,
+                d_attn,
+                n,
+                heads,
+                kvh,
+                hd,
+                kv_dim,
+                seq_antes,
+                c.ventana,
+                c.escala,
+                cap,
+                s_split,
+                0,
+                seq_antes + n,
+            )?;
+        }
         self.marca("atención")?;
         self.volcar("3 atención", d_attn, n * q_dim)?;
         self.mm_dev(c.clave_o, d_attn, d_o, n)?;

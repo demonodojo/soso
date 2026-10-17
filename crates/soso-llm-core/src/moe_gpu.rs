@@ -11,9 +11,25 @@ use alloc::vec::Vec;
 use sosomodel::layout::{DTYPE_Q4_K, DTYPE_Q8_0};
 use sosomodel::manifest::{AttnKind, FfnKind, FLAG_QK_NORM, FLAG_ROPE_NEOX};
 
-use crate::gpu::{MoeCapa, MoeNormas};
+use crate::gpu::{MoeCapa, MoeNormas, ProveedorExpertos};
 use crate::kv::{KvDtype, LayerKv};
 use crate::layer::{LayerExecutor, TensorSource};
+
+/// Entrega los expertos de una capa desde la fuente de tensores (para el modo «en flujo»).
+struct ProvExpertos<'a, S: TensorSource> {
+    source: &'a mut S,
+    prefijo: &'a str,
+}
+
+impl<S: TensorSource> ProveedorExpertos for ProvExpertos<'_, S> {
+    fn experto(&mut self, e: usize, destino: &mut dyn FnMut(usize, u8, &[u8]) -> Result<(), ()>) -> Result<(), ()> {
+        for (i, suf) in ["ffn_gate", "ffn_up", "ffn_down"].into_iter().enumerate() {
+            let vista = self.source.tensor_view(&format!("{}.E{e:02}.{suf}", self.prefijo))?;
+            destino(i, vista.dtype, vista.bytes)?;
+        }
+        Ok(())
+    }
+}
 
 /// Intenta ejecutar la capa MoE `layer` entera en la GPU para `n` tokens (`hidden` son `n` vectores). `Ok(true)` si `hidden` ya es el de salida y el KV de
 /// la capa está en el dispositivo; `Ok(false)` si hay que hacerla en CPU.
@@ -58,6 +74,9 @@ pub fn capa_moe_en_gpu<S: TensorSource>(
     let p = format!("L{layer:02}");
     let (nq, nk, nv, no) = (format!("{p}.attn_q"), format!("{p}.attn_k"), format!("{p}.attn_v"), format!("{p}.attn_output"));
     let lista = g.moe_lista(layer);
+    // Bytes de un experto (gate, up, down): sólo se calculan la primera vez que se toca la capa; el pool de la GPU los usa.
+    let mut bytes_experto = [0usize; 3];
+    // `Flujo`: los expertos se traen por demanda (la GPU decide en la primera llamada de la capa según la VRAM que quede).
     if !lista {
         // Primera vez: se comprueban las formas y se sube todo (si algo no cabe, la capa se queda en CPU).
         if n_exp == 0 || top_k == 0 || top_k > n_exp || n_exp > 256 || h > 4096 || h % 256 != 0 || ffn % 32 != 0 {
@@ -71,21 +90,82 @@ pub fn capa_moe_en_gpu<S: TensorSource>(
             }
         }
         let attn: [(&str, usize, usize); 4] = [(&nq, heads * hd, h), (&nk, kv_heads * hd, h), (&nv, kv_heads * hd, h), (&no, h, heads * hd)];
+        let down_ok = |dtype: u8| dtype == DTYPE_Q8_0 || (dtype == DTYPE_Q4_K && ffn % 256 == 0);
+        // Tamaños de esta capa (pesos de atención y de expertos); los dtypes del `down` se comprueban aquí.
+        let mut attn_bytes = 0usize;
+        for (clave, _, _) in attn {
+            attn_bytes += source.tensor_view(clave)?.bytes.len();
+        }
+        let mut exp_bytes = [0usize; 3];
+        for e in 0..n_exp {
+            for (i, suf) in ["ffn_gate", "ffn_up", "ffn_down"].into_iter().enumerate() {
+                let clave = format!("{p}.E{e:02}.{suf}");
+                let vista = source.tensor_view(&clave)?;
+                let bien = if i == 2 { down_ok(vista.dtype) } else { vista.dtype == DTYPE_Q4_K };
+                if !bien {
+                    g.moe_descartar(layer);
+                    return Ok(false);
+                }
+                exp_bytes[i] = exp_bytes[i].max(vista.bytes.len());
+            }
+        }
+        // El `down` de otras capas puede ser mayor (Q8_0 frente a Q4_K): se toma el del tipo más grande para el plan.
+        let down_max = if ffn % 256 == 0 { (h * ffn / 32 * 36).max(exp_bytes[2]) } else { exp_bytes[2] };
+        bytes_experto = [exp_bytes[0], exp_bytes[1], down_max];
+        let expertos_capa = n_exp * (bytes_experto[0] + bytes_experto[1] + bytes_experto[2]);
+        let mut kv_total = 0usize;
+        for l in 0..m.num_layers {
+            let v = m.layer_window(l) as usize;
+            let filas = if v > 0 { v + crate::gemma::EXPULSION_DISPARO + 64 } else { (m.max_seq as usize).min(32768) };
+            kv_total += 2 * filas * m.effective_num_kv_heads(l) as usize * m.effective_head_dim(l) as usize * 2;
+        }
+        let plan = crate::gpu::MoePlan {
+            n_layers: m.num_layers as usize,
+            n_exp,
+            attn_total: attn_bytes * m.num_layers as usize,
+            expertos_capa,
+            kv_total,
+            // Cabeza de logits (Q8_0) y el resto de lo que la GPU guarda aparte de las capas.
+            fijo: m.vocab_size as usize * h / 32 * 36,
+            bytes_experto,
+        };
+        let modo = g.moe_modo(layer, &plan);
+        let flujo = modo == crate::gpu::ModoMoe::Flujo;
         for (clave, rows, cols) in attn {
             if !g.gemma_residente(clave) {
                 let vista = source.tensor_view(clave)?;
                 if !g.gemma_subir(clave, &vista, rows, cols).unwrap_or(false) {
+                    g.moe_descartar(layer);
                     return Ok(false);
                 }
             }
         }
-        for e in 0..n_exp {
-            for (suf, rows, cols, dtype) in [("ffn_gate", ffn, h, DTYPE_Q4_K), ("ffn_up", ffn, h, DTYPE_Q4_K), ("ffn_down", h, ffn, DTYPE_Q8_0)] {
-                let clave = format!("{p}.E{e:02}.{suf}");
-                if !g.gemma_residente(&clave) {
-                    let vista = source.tensor_view(&clave)?;
-                    if vista.dtype != dtype || !g.gemma_subir(&clave, &vista, rows, cols).unwrap_or(false) {
-                        return Ok(false);
+        if !flujo {
+            // ¿Cabe la capa entera (expertos + KV)? Si no, se descarta **antes** de subir nada.
+            let kv_filas = if ventana > 0 { ventana + crate::gemma::EXPULSION_DISPARO + 64 } else { (m.max_seq as usize).min(32768) };
+            let kv_bytes = 2 * kv_filas * kv_heads * hd * 2;
+            let mut pesos_bytes = 0usize;
+            for e in 0..n_exp {
+                for suf in ["ffn_gate", "ffn_up", "ffn_down"] {
+                    let clave = format!("{p}.E{e:02}.{suf}");
+                    if !g.gemma_residente(&clave) {
+                        pesos_bytes += source.tensor_view(&clave)?.bytes.len();
+                    }
+                }
+            }
+            if !g.moe_cabe(pesos_bytes, kv_bytes) {
+                g.moe_descartar(layer);
+                return Ok(false);
+            }
+            for e in 0..n_exp {
+                for (suf, rows, cols) in [("ffn_gate", ffn, h), ("ffn_up", ffn, h), ("ffn_down", h, ffn)] {
+                    let clave = format!("{p}.E{e:02}.{suf}");
+                    if !g.gemma_residente(&clave) {
+                        let vista = source.tensor_view(&clave)?;
+                        if !g.gemma_subir(&clave, &vista, rows, cols).unwrap_or(false) {
+                            g.moe_descartar(layer);
+                            return Ok(false);
+                        }
                     }
                 }
             }
@@ -131,6 +211,8 @@ pub fn capa_moe_en_gpu<S: TensorSource>(
         router: r,
         rope_factores: factores.as_deref(),
     });
+    let down_q4k = !lista && n_exp > 0 && source.tensor_view(&format!("{p}.E00.ffn_down")).is_ok_and(|v| v.dtype == DTYPE_Q4_K);
+    let mut prov = ProvExpertos { source, prefijo: &p };
     let mut capa = MoeCapa {
         layer,
         pos0,
@@ -158,6 +240,9 @@ pub fn capa_moe_en_gpu<S: TensorSource>(
         clave_o: &no,
         prefijo: &p,
         normas,
+        flujo: Some(&mut prov),
+        down_q4k,
+        bytes_experto,
         expulsadas: 0,
     };
     let r = g.moe_capa(&mut capa);

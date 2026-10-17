@@ -56,4 +56,4 @@ node_modules/
 # Evidencia de las ejecuciones de campaña 6 en adelante: sólo local (los bancos campana3/, campana4/ y los
 # campaign-N.json sí se versionan, que son lo que hace falta para repetirlas). Las ejecuciones 1–8 ya estaban versionadas.
 /tests/self-improvement/campana/ejecucion-9/
-/tests/self-improvement/campana/ejecucion-1[0-9]*/
+/tests/self-improvement/campana/ejecucion-[1-9][0-9]*/

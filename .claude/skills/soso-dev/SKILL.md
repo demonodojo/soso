@@ -359,7 +359,10 @@ DECODIFICAR=300 HILOS=16 SOSO_CUDA=1 target/release/examples/logits_ids DIR 1,2,
 - **Si recompilas el `.cu` y no el PTX, el binario lleva los kernels viejos** y los grafos reutilizados dan logits erróneos que parecen un fallo de captura.
 - Un solo proceso con la GPU (~9–10 GB para Mellum en 12 GB): no cargues el modelo en una prueba mientras corre un servidor de campaña (OOM o `error CUDA 2`).
 - **No ejecutes `cargo fmt`** sobre estos crates: el repo no está formateado (edición 2024) y toca decenas de archivos ajenos.
-- Medido (RTX 5070 Ti Laptop, ~470 GB/s reales): Mellum decode ~170 tok/s y prefill ~435 tok/s; CPU 10,7 y 13. Detalle y qué optimizaciones sí/no sirvieron: memoria `soso-mellum-gpu-capa-moe`.
+- Gemma en GPU: prefill por bloques de 32 con **tensor cores** (`gemm_q4_0_tc`, `SOSO_CUDA_SIN_TC=1` lo apaga) y atención por trozos de KV (`ga_split_*`); sin ellos el prefill de Gemma era ~49 tok/s, con ellos ~350–390. El decode de Gemma (~31 tok/s) es de ancho de banda y no cambió.
+- Medido (RTX 5070 Ti Laptop, ~470 GB/s reales): Mellum decode ~170 tok/s y prefill ~435 tok/s; CPU 10,7 y 13. Gemma: decode ~31, prefill ~350. Los decodes varían ±20 % entre ejecuciones: compara A/B en la misma ventana.
+- **Modelos MoE que no caben en VRAM (flujo de expertos):** el plan decide cuántas capas llevan los expertos residentes y el resto los trae a un pool con LRU (`cuda: plan MoE: …` en el log). `SOSO_CUDA_RESIDENTES=N` fuerza el número (para probar el flujo con un modelo que sí cabe). Va tan rápido como lea el modelo de la caché de páginas: **necesita ≥ ~14 GB de RAM libre** para el 30B; con el escritorio cargado cae a ~1 GB/s. **Un servidor así junto a Chrome/Cursor llegó a provocar que el OOM killer matara Cursor: ciérralos antes.**
+- La referencia en CPU de Gemma sólo es viable con contextos cortos (12–40 tokens) si hay poca RAM libre. Detalle y qué optimizaciones sí/no sirvieron: memoria `soso-mellum-gpu-capa-moe`.
 
 ## Debugging
 

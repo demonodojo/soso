@@ -14,6 +14,7 @@
  * prefill: la fila de pesos se decodifica una vez y se aplica a los 8 tokens).
  */
 #include <cuda_fp16.h>
+#include <mma.h>
 
 __device__ __forceinline__ float q40_warp_sum(float v)
 {
@@ -232,4 +233,107 @@ extern "C" __global__ void matmul_q4_0r8(const unsigned short *d, const uint4 *q
                                          int rows, int cols, int n)
 {
     q40_body_filas<8>(d, qs, x, y, rows, cols, n);
+}
+
+/* ------------------------------------------------------------------------------------------------------------
+ * GEMM con tensor cores para el prefill (n >= 16 tokens): Y[n x rows] = X[n x cols] . W^T con W en el formato
+ * reempaquetado de arriba. Cada CTA calcula 64 filas x 32 tokens; el bloque de 32 columnas de K de cada fila se
+ * descuantiza a f16 en shared (d * (nibble - 8)), la activación se pasa a f16 y los productos se acumulan en f32
+ * con `wmma` 16x16x16. Los pesos se leen UNA vez para los 32 tokens: con el kernel escalar, cada fila se releía
+ * por tanda de 8 tokens y la tarjeta daba ~1,5 TFLOPs.
+ *
+ * La activación en f16 pierde precisión respecto al kernel f32 (11 bits de mantisa en lugar de 24): el error
+ * relativo por elemento es ~5e-4 y se promedia en la suma; `gemma_paridad` fija cuánto desvía los logits.
+ * ---------------------------------------------------------------------------------------------------------- */
+#define GM_BM 64
+#define GM_BN 32
+#define GM_LDK 40 /* 32 + 8 de relleno (halfs): evita conflictos de banco en las cargas de fragmentos */
+
+extern "C" __global__ void gemm_q4_0_tc(const unsigned short *d, const uint4 *qs, const float *x, float *y,
+                                        int rows, int cols, int n)
+{
+    using namespace nvcuda;
+    __shared__ __align__(32) __half As[GM_BM * GM_LDK];
+    __shared__ __align__(32) __half Bs[GM_BN * GM_LDK];
+    __shared__ __align__(32) float Cs[4][16 * 16];
+    int tid = (int)threadIdx.x; /* 128 hilos = 4 warps */
+    int warp = tid >> 5;
+    int row0 = (int)blockIdx.x * GM_BM;
+    int tok0 = (int)blockIdx.y * GM_BN;
+    int nb = cols >> 5;
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> c0, c1;
+    wmma::fill_fragment(c0, 0.0f);
+    wmma::fill_fragment(c1, 0.0f);
+    for (int b = 0; b < nb; b++) {
+        __syncthreads();
+        /* A: 64 filas; 2 hilos por fila (cada uno 8 bytes de nibbles = 16 elementos). */
+        {
+            int r = tid >> 1;
+            int h = tid & 1;
+            int row = row0 + r;
+            float sc = 0.0f;
+            uint2 q = make_uint2(0x88888888u, 0x88888888u);
+            if (row < rows) {
+                long o = (long)row * nb + b;
+                sc = __half2float(__ushort_as_half(d[o]));
+                q = ((const uint2 *)(qs + o))[h];
+            }
+            unsigned w[2] = {q.x, q.y};
+#pragma unroll
+            for (int i = 0; i < 2; i++) {
+#pragma unroll
+                for (int k = 0; k < 4; k++) {
+                    unsigned byte = (w[i] >> (8 * k)) & 0xffu;
+                    int j = h * 8 + i * 4 + k; /* elemento j (nibble bajo) y j + 16 (nibble alto) */
+                    As[r * GM_LDK + j] = __float2half(sc * (float)((int)(byte & 0xfu) - 8));
+                    As[r * GM_LDK + 16 + j] = __float2half(sc * (float)((int)(byte >> 4) - 8));
+                }
+            }
+        }
+        /* B: 32 tokens x 32 columnas de K; 4 hilos por token, 8 columnas cada uno. */
+        {
+            int t = tid >> 2;
+            int q8 = tid & 3;
+            int tok = tok0 + t;
+            float4 a = make_float4(0.f, 0.f, 0.f, 0.f), c = a;
+            if (tok < n) {
+                const float4 *xp = (const float4 *)(x + (long)tok * cols + (long)b * 32 + q8 * 8);
+                a = xp[0];
+                c = xp[1];
+            }
+            __half2 *dst = (__half2 *)&Bs[t * GM_LDK + q8 * 8];
+            dst[0] = __floats2half2_rn(a.x, a.y);
+            dst[1] = __floats2half2_rn(a.z, a.w);
+            dst[2] = __floats2half2_rn(c.x, c.y);
+            dst[3] = __floats2half2_rn(c.z, c.w);
+        }
+        __syncthreads();
+#pragma unroll
+        for (int ks = 0; ks < 2; ks++) {
+            wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> fa;
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> fb0, fb1;
+            wmma::load_matrix_sync(fa, &As[(warp * 16) * GM_LDK + ks * 16], GM_LDK);
+            wmma::load_matrix_sync(fb0, &Bs[0 * GM_LDK + ks * 16], GM_LDK);
+            wmma::load_matrix_sync(fb1, &Bs[16 * GM_LDK + ks * 16], GM_LDK);
+            wmma::mma_sync(c0, fa, fb0, c0);
+            wmma::mma_sync(c1, fa, fb1, c1);
+        }
+    }
+    /* Salida: C es [fila][token]; y es [token][fila]. Cada warp vuelca su fragmento por shared. */
+#pragma unroll
+    for (int f = 0; f < 2; f++) {
+        wmma::store_matrix_sync(&Cs[warp][0], f == 0 ? c0 : c1, 16, wmma::mem_row_major);
+        __syncwarp();
+        int lane = tid & 31;
+        for (int i = lane; i < 256; i += 32) {
+            int r = i & 15;   /* fila dentro del fragmento: la más rápida, para que las escrituras sean contiguas */
+            int t = i >> 4;
+            int row = row0 + warp * 16 + r;
+            int tok = tok0 + f * 16 + t;
+            if (row < rows && tok < n) {
+                y[(long)tok * rows + row] = Cs[warp][r * 16 + t];
+            }
+        }
+        __syncwarp();
+    }
 }

@@ -56,6 +56,13 @@ pub struct Config {
     /// castellano o código con un BPE normal, pero ~1,5 con Mellum, que parte los dígitos uno a uno y hace carísimos los
     /// volcados con número de línea (campaña 11: 56 k caracteres = 36 k tokens)..
     pub chars_por_token: f32,
+    /// Cuántas veces se le dice al modelo, al intentar terminar, que **no ha modificado ningún archivo** (campaña 11:
+    /// 3 de 10 tareas acababan con «el candidato no cambió nada»). Presupuesto aparte de `empujones`.
+    pub avisos_sin_editar: usize,
+    /// A la `n`-ésima llamada **repetida** de una que ya salió bien desde la última edición (aunque no sea la inmediata anterior) no
+    /// se la ejecuta: su resultado no puede cambiar si no se edita nada entre medias (campaña 12: Gemma repetía 24 veces un `cargo test` ya en verde y agotaba las herramientas sin
+    /// dar el trabajo por hecho). Con dos repeticiones más sin cambiar de conducta se da el intento por terminado. `0` lo apaga.
+    pub repetidas_ok_max: usize,
 }
 
 impl Config {
@@ -74,6 +81,8 @@ impl Config {
             repetidas_max: 3,
             contexto_tokens: Some(32_768),
             chars_por_token: 3.0,
+            avisos_sin_editar: 2,
+            repetidas_ok_max: 3,
         }
     }
 }
@@ -107,6 +116,8 @@ pub struct Informe {
     pub repetidas: usize,
     /// Salidas de herramienta antiguas recortadas para no pasar de la ventana (ver `Config::contexto_tokens`).
     pub recortadas: usize,
+    /// Avisos de «no has modificado nada» enviados (ver `Config::avisos_sin_editar`).
+    pub sin_editar: usize,
     /// Conversación completa (formato de la API), para auditar.
     pub mensajes: Vec<Value>,
 }
@@ -144,13 +155,16 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
     sesion::normalizar(&mut mensajes);
     if sesion::terminada(&mensajes) {
         let r = mensajes.last().and_then(|m| m["content"].as_str()).unwrap_or("").to_string();
-        return Informe { fin: Fin::Terminado, turnos: 0, llamadas: 0, respuesta_final: r, error: None, empujones: 0, formato: 0, repetidas: 0, recortadas: 0, mensajes };
+        return Informe { fin: Fin::Terminado, turnos: 0, llamadas: 0, respuesta_final: r, error: None, empujones: 0, formato: 0, repetidas: 0, recortadas: 0, sin_editar: 0, mensajes };
     }
     let t0 = reloj.ahora_ms();
-    let mut informe = Informe { fin: Fin::SinTurnos, turnos: 0, llamadas: 0, respuesta_final: String::new(), error: None, empujones: 0, formato: 0, repetidas: 0, recortadas: 0, mensajes: Vec::new() };
+    let mut informe = Informe { fin: Fin::SinTurnos, turnos: 0, llamadas: 0, respuesta_final: String::new(), error: None, empujones: 0, formato: 0, repetidas: 0, recortadas: 0, sin_editar: 0, mensajes: Vec::new() };
     // Última llamada ejecutada, si falló, y cuántas veces seguidas se ha repetido igual.
     let mut ultima: Option<(String, String, bool)> = None;
     let mut seguidas = 0usize;
+    let mut atascado = false;
+    let mut vistas: Vec<(String, String)> = Vec::new();
+    let mut racha_ok = 0usize;
     for _ in 0..cfg.max_turnos {
         let gastado = reloj.ahora_ms().saturating_sub(t0);
         if gastado >= cfg.plazo_total_ms {
@@ -208,6 +222,12 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
                     continue;
                 }
             }
+            if informe.sin_editar < cfg.avisos_sin_editar && !hubo_edicion(&mensajes) {
+                informe.sin_editar += 1;
+                mensajes.push(json!({"role": "user", "content": AVISO_SIN_EDITAR}));
+                al_turno(e, &mensajes);
+                continue;
+            }
             informe.fin = Fin::Terminado;
             informe.respuesta_final = texto;
             al_turno(e, &mensajes);
@@ -233,8 +253,23 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
                 Some(a) => {
                     let clave = (nombre.to_string(), serde_json::to_string(&a).unwrap_or_default());
                     let repite = ultima.as_ref().is_some_and(|(n, c, fallo)| *fallo && *n == clave.0 && *c == clave.1);
+                    // Llamada que no edita y que ya se ejecutó con éxito desde la última edición: su resultado no puede cambiar.
+                    // Cuenta aunque no sea consecutiva (Gemma alternaba dos `cargo test` casi iguales); una llamada nueva reinicia la racha.
+                    let edita = matches!(nombre, "reemplazar_texto" | "insertar");
+                    let repite_ok = !edita && vistas.iter().any(|v| *v == clave);
+                    if !edita {
+                        if repite_ok { racha_ok += 1 } else { racha_ok = 0 }
+                    }
                     seguidas = if repite { seguidas + 1 } else { 1 };
-                    let r = if cfg.repetidas_max > 0 && repite && seguidas >= cfg.repetidas_max {
+                    let mut bloqueada_ok = false;
+                    let r = if cfg.repetidas_ok_max > 0 && repite_ok && racha_ok >= cfg.repetidas_ok_max {
+                        bloqueada_ok = true;
+                        informe.repetidas += 1;
+                        if racha_ok >= cfg.repetidas_ok_max + 2 {
+                            atascado = true;
+                        }
+                        Respuesta { texto: aviso_de_repeticion_ok(nombre, racha_ok + 1), error: true }
+                    } else if cfg.repetidas_max > 0 && repite && seguidas >= cfg.repetidas_max {
                         informe.repetidas += 1;
                         Respuesta { texto: aviso_de_repeticion(nombre, seguidas), error: true }
                     } else {
@@ -244,7 +279,14 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
                         }
                         r
                     };
-                    ultima = Some((clave.0, clave.1, r.error));
+                    // Una llamada bloqueada por repetirse con éxito sigue contando como «salió bien»: así se cuenta hasta cerrar.
+                    if edita && !r.error {
+                        vistas.clear();
+                        racha_ok = 0;
+                    } else if !edita && !r.error && !bloqueada_ok && !vistas.contains(&clave) {
+                        vistas.push(clave.clone());
+                    }
+                    ultima = Some((clave.0, clave.1, r.error && !bloqueada_ok));
                     r
                 }
                 None => Respuesta { texto: "Los argumentos de la llamada no son un objeto JSON válido. Vuelve a llamar con JSON correcto.".to_string(), error: true },
@@ -252,6 +294,12 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
             mensajes.push(json!({"role": "tool", "tool_call_id": id, "content": r.texto}));
         }
         al_turno(e, &mensajes);
+        if atascado {
+            // Repite sin cesar una llamada que ya salió bien: no hay nada más que averiguar. Se cierra el intento y decide el validador.
+            informe.fin = Fin::Terminado;
+            informe.respuesta_final = String::from("(intento cerrado: el modelo repetía una llamada idéntica que ya había salido bien)");
+            break;
+        }
     }
     informe.mensajes = mensajes;
     informe
@@ -270,7 +318,8 @@ PASOS:\n\
 2. Localiza el código. Si el archivo es corto (menos de 150 líneas) lee entero; si es largo, **no lo recorras por tramos**: llama primero a `grep` con el nombre de la función o un texto que aparezca en ella y después a `read` sólo del tramo que rodea la línea (`offset` y `limit`).\n\
 3. Para **cambiar** algo que ya existe, llama a `reemplazar_texto` con `filePath`, `buscar` (un fragmento corto de lo que leíste; los espacios no importan) y `nuevo`. Para **añadir** código nuevo (una función, una rama), llama a `insertar` con `filePath`, `linea` (el número que te mostró `read`; se inserta después de esa línea) y `texto`. Siempre bloques completos: con su `{` y su `}`. Cambio mínimo: no toques otros archivos. Si una herramienta dice que no lo encuentra, que aparece varias veces o que desequilibra las llaves, corrige y repite.\n\
 4. Llama a `bash` con las comprobaciones de TASK.md (`cargo test …`) y lee el resultado.\n\
-5. Informe final en texto corto: qué cambiaste, qué comprobaciones corrieron y su salida resumida, y lo que no pudiste hacer. No inventes resultados.";
+5. Antes de terminar, **relee TASK.md punto por punto**: cada comportamiento que describe tiene que estar cubierto por tu cambio, no sólo el caso que ya ves fallar. Si falta alguno, impleméntalo y vuelve a comprobar. Una tarea sin ningún archivo editado no está terminada.\n\
+6. Informe final en texto corto: qué cambiaste, qué comprobaciones corrieron y su salida resumida, y lo que no pudiste hacer. No inventes resultados.";
 
 /// Prompt del perfil Forja (T37): el agente edita fuentes de userspace y compila **en el host** por
 /// la herramienta `forja`; el diagnóstico vuelve a él sin que nadie lo copie.
@@ -330,6 +379,33 @@ fn aviso_de_empuje(mensajes: &[Value], texto: &str) -> Option<String> {
         return Some("La última comprobación ha fallado. Lee el error que te devolvió, corrige el archivo con `reemplazar_texto` o `insertar` y vuelve a ejecutar la comprobación. No termines con la prueba en rojo.".to_string());
     }
     None
+}
+
+/// Lo que se le dice al modelo que intenta terminar sin haber cambiado nada.
+const AVISO_SIN_EDITAR: &str = "No has modificado ningún archivo, y esta tarea exige un cambio en el código. Vuelve a leer TASK.md: busca el comportamiento que hoy falla, localízalo en el archivo que puedes tocar y corrígelo con `reemplazar_texto` o `insertar`. Después ejecuta las comprobaciones. No termines sin haber editado.";
+
+/// ¿Ha logrado el modelo editar algún archivo (`reemplazar_texto` o `insertar` con resultado «Hecho…»)?
+fn hubo_edicion(mensajes: &[Value]) -> bool {
+    let mut nombres: Vec<(String, String)> = Vec::new();
+    for m in mensajes {
+        if m["role"] == "assistant" {
+            for l in m["tool_calls"].as_array().map(|v| v.as_slice()).unwrap_or(&[]) {
+                nombres.push((l["id"].as_str().unwrap_or("").to_string(), l.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or("").to_string()));
+            }
+        } else if m["role"] == "tool" {
+            let id = m["tool_call_id"].as_str().unwrap_or("");
+            let nombre = nombres.iter().rev().find(|(i, _)| i == id).map(|(_, n)| n.as_str()).unwrap_or("");
+            if matches!(nombre, "reemplazar_texto" | "insertar") && m["content"].as_str().unwrap_or("").starts_with("Hecho") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Qué decirle al modelo que repite una llamada que ya salió bien (su resultado no puede cambiar).
+fn aviso_de_repeticion_ok(herramienta: &str, veces: usize) -> String {
+    format!("No he ejecutado esta llamada de `{herramienta}`: es idéntica a la anterior ({} veces seguidas) y como no has cambiado nada entre medias daría el mismo resultado. Si las comprobaciones de la tarea ya pasan y has cubierto lo que pide TASK.md, escribe ahora el informe final (texto, sin llamada). Si falta algo, edita con `reemplazar_texto` o `insertar` antes de volver a comprobar.", veces - 1)
 }
 
 /// Qué decirle al modelo cuando repite una llamada que ya falló: no se ejecuta, y se le da una vía distinta.

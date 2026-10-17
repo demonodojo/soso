@@ -1,0 +1,11 @@
+{
+ "id": "R34",
+ "ronda": 1,
+ "resultado": "rechazada",
+ "intentos": 1,
+ "segundos": 180,
+ "nota": "",
+ "fallo": "programacion",
+ "herramientas": 11,
+ "tokens": 68815
+}

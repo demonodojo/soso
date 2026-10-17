@@ -258,6 +258,10 @@ fn continuar(op: &Opciones) -> Result<i32, Error> {
     if let Some(n) = op.uno("max-tokens").and_then(|v| v.parse().ok()) {
         cfg.max_tokens = n;
     }
+    // Los reintentos de una campaña usan temperatura > 0: a T=0 repetir la misma petición da la misma respuesta.
+    if let Some(t) = op.uno("temperatura").and_then(|v| v.parse::<f64>().ok()).filter(|t| (0.0..=2.0).contains(t)) {
+        cfg.temperatura = t;
+    }
     let mut pol = PolAgente::nueva(&copia);
     if let Some(h) = op.uno("cargo-home").filter(|s| !s.is_empty()) {
         pol.entorno.push(("CARGO_HOME".into(), h.to_string()));

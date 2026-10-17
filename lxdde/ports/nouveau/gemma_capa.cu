@@ -1258,3 +1258,304 @@ extern "C" __global__ void mo_down_grp(const float *act, const unsigned long lon
         }
     }
 }
+
+/* ------------------------------------------------------------------------------------------------------------
+ * Atención por trozos de KV para formas generales (Gemma 4: hd 256 con 2 cabezas por grupo; hd 512 con 16). Misma idea
+ * que `mo_attn_split`: un CTA por (trozo de GA_CH posiciones, cabeza KV, token); K y V se leen una vez para todas las
+ * cabezas del grupo. Plantilla: HD = dimensión de cabeza, GP = cabezas por grupo (potencia de dos >= las reales).
+ * `parcial` y `ml` se indexan por ((t*kvh + g)*S + s)*GP + j.
+ * ---------------------------------------------------------------------------------------------------------- */
+#define GA_CH 128
+
+/* Reduce GP valores entre los 32 hilos del warp (suma) repartiéndolos: al final cada hilo tiene la suma completa de UNA
+ * cabeza, `*cab` (los hilos que comparten cabeza tienen el mismo valor). */
+template <int GP>
+__device__ __forceinline__ float ga_reduce(float *v, int lane, int *cab)
+{
+    int h = 0;
+    int cnt = GP;
+    int bit = 16;
+#pragma unroll
+    for (int st = 0; st < 5; st++) {
+        if (cnt > 1) {
+            int mitad = cnt >> 1;
+            bool alto = (lane & bit) != 0;
+#pragma unroll
+            for (int i = 0; i < GP / 2; i++) {
+                if (i < mitad) {
+                    float envio = alto ? v[i] : v[i + mitad];
+                    float recibo = __shfl_xor_sync(0xffffffffu, envio, bit);
+                    v[i] = (alto ? v[i + mitad] : v[i]) + recibo;
+                }
+            }
+            h += alto ? mitad : 0;
+            cnt = mitad;
+        } else {
+            v[0] += __shfl_xor_sync(0xffffffffu, v[0], bit);
+        }
+        bit >>= 1;
+    }
+    *cab = h;
+    return v[0];
+}
+
+template <int HD, int GP>
+__device__ __forceinline__ void ga_split_body(const float *q, const __half *dk, const __half *dv, float *parcial, float *ml,
+                                              int heads, int kvh, int kv_dim, int seq_antes, int ventana, float escala, int S,
+                                              const int *dyn)
+{
+    __shared__ __align__(16) float qs[GP][HD];
+    __shared__ __align__(16) float sc[GP][GA_CH + 4];
+    if (dyn != 0) {
+        seq_antes = dyn[1];
+    }
+    int s = (int)blockIdx.x;
+    int g = (int)blockIdx.y;
+    int t = (int)blockIdx.z;
+    int tid = (int)threadIdx.x;
+    int warp = tid >> 5;
+    int lane = tid & 31;
+    int G = heads / kvh;
+    int total = seq_antes + t + 1;
+    int t_ini = (ventana > 0 && total > ventana) ? total - ventana : 0;
+    int a = t_ini + s * GA_CH;
+    int b = a + GA_CH < total ? a + GA_CH : total;
+    long base_o = ((long)t * kvh + g) * S + s;
+    if (a >= total) {
+        if (tid < G) {
+            ml[(base_o * GP + tid) * 2] = -3.0e38f;
+            ml[(base_o * GP + tid) * 2 + 1] = 0.0f;
+        }
+        return;
+    }
+    for (int i = tid; i < GP * HD; i += 256) {
+        int j = i / HD;
+        qs[j][i % HD] = j < G ? q[((long)t * heads + g * G + j) * HD + (i % HD)] * escala : 0.0f;
+    }
+    __syncthreads();
+    /* Pasada 1: un warp por posición; los 32 hilos reparten las HD dimensiones (4 por vuelta y hilo). */
+    for (int p = a + warp; p < b; p += 8) {
+        const __half *kr = dk + (long)p * kv_dim + (long)g * HD;
+        float v[GP];
+#pragma unroll
+        for (int j = 0; j < GP; j++) {
+            v[j] = 0.0f;
+        }
+#pragma unroll
+        for (int c = 0; c < HD / 128; c++) {
+            uint2 raw = *(const uint2 *)(kr + c * 128 + lane * 4);
+            float2 k01 = __half22float2(*(const __half2 *)&raw.x);
+            float2 k23 = __half22float2(*(const __half2 *)&raw.y);
+#pragma unroll
+            for (int j = 0; j < GP; j++) {
+                float4 qq = *(const float4 *)&qs[j][c * 128 + lane * 4];
+                v[j] += k01.x * qq.x + k01.y * qq.y + k23.x * qq.z + k23.y * qq.w;
+            }
+        }
+        int cab;
+        float r = ga_reduce<GP>(v, lane, &cab);
+        /* los hilos con el mismo `cab` tienen el mismo valor: escribe el de menor índice */
+        int mascara = (GP >= 32 ? 0 : (32 / GP) - 1); /* bits bajos del lane que no distinguen cabeza */
+        if ((lane & mascara) == 0 && cab < GP) {
+            sc[cab][p - a] = r;
+        }
+    }
+    __syncthreads();
+    /* Máximo, exponenciales y suma por cabeza: cada warp recorre las cabezas w, w + 8, … */
+    for (int j = warp; j < GP; j += 8) {
+        if (j < G) {
+            float m = -3.0e38f;
+            for (int i = lane; i < b - a; i += 32) {
+                m = fmaxf(m, sc[j][i]);
+            }
+            m = gm_warp_max(m);
+            m = __shfl_sync(0xffffffffu, m, 0);
+            float l = 0.0f;
+            for (int i = lane; i < GA_CH + 4; i += 32) {
+                float e = i < b - a ? expf(sc[j][i] - m) : 0.0f;
+                sc[j][i] = e;
+                l += e;
+            }
+            l = gm_warp_sum(l);
+            if (lane == 0) {
+                ml[(base_o * GP + j) * 2] = m;
+                ml[(base_o * GP + j) * 2 + 1] = l;
+            }
+        }
+    }
+    __syncthreads();
+    /* Pasada 2: P.V sin normalizar. Hilo `tid`: dimensiones tid, tid + 256, … de todas las cabezas. */
+    constexpr int DPT = HD / 256 > 0 ? HD / 256 : 1;
+    if (HD >= 256) {
+        float o[GP][DPT];
+#pragma unroll
+        for (int j = 0; j < GP; j++) {
+#pragma unroll
+            for (int k = 0; k < DPT; k++) {
+                o[j][k] = 0.0f;
+            }
+        }
+        for (int p = a; p < b; p += 4) {
+            float vv[4][DPT];
+#pragma unroll
+            for (int u = 0; u < 4; u++) {
+#pragma unroll
+                for (int k = 0; k < DPT; k++) {
+                    vv[u][k] = (p + u < b) ? __half2float(dv[(long)(p + u) * kv_dim + (long)g * HD + tid + k * 256]) : 0.0f;
+                }
+            }
+#pragma unroll
+            for (int j = 0; j < GP; j++) {
+                float4 w = *(const float4 *)&sc[j][p - a];
+#pragma unroll
+                for (int k = 0; k < DPT; k++) {
+                    o[j][k] += w.x * vv[0][k] + w.y * vv[1][k] + w.z * vv[2][k] + w.w * vv[3][k];
+                }
+            }
+        }
+#pragma unroll
+        for (int j = 0; j < GP; j++) {
+            if (j < G) {
+#pragma unroll
+                for (int k = 0; k < DPT; k++) {
+                    parcial[(base_o * GP + j) * HD + tid + k * 256] = o[j][k];
+                }
+            }
+        }
+    }
+}
+
+extern "C" __global__ void ga_split_256_2(const float *q, const __half *dk, const __half *dv, float *parcial, float *ml, int heads,
+                                          int kvh, int kv_dim, int seq_antes, int ventana, float escala, int S, const int *dyn)
+{
+    ga_split_body<256, 2>(q, dk, dv, parcial, ml, heads, kvh, kv_dim, seq_antes, ventana, escala, S, dyn);
+}
+
+extern "C" __global__ void ga_split_512_16(const float *q, const __half *dk, const __half *dv, float *parcial, float *ml, int heads,
+                                           int kvh, int kv_dim, int seq_antes, int ventana, float escala, int S, const int *dyn)
+{
+    ga_split_body<512, 16>(q, dk, dv, parcial, ml, heads, kvh, kv_dim, seq_antes, ventana, escala, S, dyn);
+}
+
+/* out[t][g*G + j][d] = Σ_s e^(m_s - M) · acc_s / Σ_s e^(m_s - M) · l_s. grid = (heads, n); blockDim = hd (<= 512); S <= 512. */
+extern "C" __global__ void ga_combine(const float *parcial, const float *ml, float *out, int heads, int kvh, int hd, int S, int gp)
+{
+    __shared__ float mm[512];
+    __shared__ float ll[512];
+    __shared__ float ww[512];
+    int h = (int)blockIdx.x;
+    int t = (int)blockIdx.y;
+    int d = (int)threadIdx.x;
+    int G = heads / kvh;
+    int g = h / G;
+    int j = h % G;
+    long base = ((long)t * kvh + g) * S;
+    for (int s = d; s < S; s += (int)blockDim.x) {
+        long o = (base + s) * gp + j;
+        mm[s] = ml[o * 2];
+        ll[s] = ml[o * 2 + 1];
+    }
+    __syncthreads();
+    if (d < 32) {
+        float M = -3.0e38f;
+        for (int s = d; s < S; s += 32) {
+            M = fmaxf(M, mm[s]);
+        }
+        M = gm_warp_max(M);
+        M = __shfl_sync(0xffffffffu, M, 0);
+        float den = 0.0f;
+        for (int s = d; s < S; s += 32) {
+            float w = mm[s] > -1.0e38f ? expf(mm[s] - M) : 0.0f;
+            ww[s] = w;
+            den += w * ll[s];
+        }
+        den = gm_warp_sum(den);
+        if (d == 0) {
+            ll[0] = den;
+        }
+    }
+    __syncthreads();
+    float den = ll[0];
+    float acc = 0.0f;
+#pragma unroll 8
+    for (int s = 0; s < S; s++) {
+        long o = (base + s) * gp + j;
+        acc += ww[s] * parcial[o * hd + d];
+    }
+    out[((long)t * heads + h) * hd + d] = den > 0.0f ? acc / den : 0.0f;
+}
+
+/* ------------------------------------------------------------------------------------------------------------
+ * `down` de los expertos en Q4_K (Qwen3-Coder-30B-A3B alterna Q8_0 y Q4_K por capa; `ffn` múltiplo de 256).
+ *   mo_down_q4k       un token por slot (decodificación); grid = (ceil(h / 32), slots).
+ *   mo_down_grp_q4k   por experto con varios tokens (prefill); grid = (ceil(h / 16), n_exp); shared dinámica = TT * (ffn/32*XPAD) floats.
+ * ---------------------------------------------------------------------------------------------------------- */
+extern "C" __global__ void mo_down_q4k(const float *act, const unsigned long long *pd, const int *idx, float *y, int h, int ffn)
+{
+    __shared__ __align__(16) float xs[XS_FLOATS];
+    int slot = (int)blockIdx.y;
+    for (int i = (int)threadIdx.x; i < ffn; i += (int)blockDim.x) {
+        xs[(i >> 5) * XPAD + (i & 31)] = act[(long)slot * ffn + i];
+    }
+    __syncthreads();
+    int warp = (int)threadIdx.x >> 5;
+    int lane = (int)threadIdx.x & 31;
+    int fila = ((int)blockIdx.x * 8 + warp) * Q4K_R;
+    if (fila >= h) {
+        return;
+    }
+    int nv = h - fila < Q4K_R ? h - fila : Q4K_R;
+    long rb = (long)(ffn >> 8) * Q4K_BLOCK_BYTES;
+    float acc[Q4K_R];
+    q4k_rows_dot<Q4K_R>((const unsigned char *)pd[idx[slot]] + (long)fila * rb, rb, 1, nv, xs, ffn, lane, acc);
+#pragma unroll
+    for (int r = 0; r < Q4K_R; r++) {
+        float s = gm_warp_sum(acc[r]);
+        if (lane == 0 && r < nv) {
+            y[(long)slot * h + fila + r] = s;
+        }
+    }
+}
+
+extern "C" __global__ void mo_down_grp_q4k(const float *act, const unsigned long long *pd, const int *start, const int *ord,
+                                           float *y, int h, int ffn)
+{
+    extern __shared__ __align__(16) float xs_dyn[];
+    int e = (int)blockIdx.y;
+    int cnt = start[e + 1] - start[e];
+    if (cnt == 0) {
+        return;
+    }
+    int xt = (ffn >> 5) * XPAD;
+    int tid = (int)threadIdx.x;
+    int warp = tid >> 5;
+    int lane = tid & 31;
+    int fila = ((int)blockIdx.x * 8 + warp) * GR;
+    int nv = h - fila;
+    nv = nv < 0 ? 0 : (nv > GR ? GR : nv);
+    long rb = (long)(ffn >> 8) * Q4K_BLOCK_BYTES;
+    const unsigned char *w = (const unsigned char *)pd[e] + (long)fila * rb;
+    for (int c0 = 0; c0 < cnt; c0 += TT) {
+        int ntok = cnt - c0 < TT ? cnt - c0 : TT;
+        __syncthreads();
+        for (int k = 0; k < ntok; k++) {
+            const float4 *src = (const float4 *)(act + (long)ord[start[e] + c0 + k] * ffn);
+            for (int j = tid; j < (ffn >> 2); j += 256) {
+                *(float4 *)&xs_dyn[k * xt + (j >> 3) * XPAD + (j & 7) * 4] = src[j];
+            }
+        }
+        __syncthreads();
+        float acc[GR][TT];
+        q4k_rows_toks<GR>(w, rb, nv, xs_dyn, xt, ntok, ffn, lane, acc);
+#pragma unroll
+        for (int r = 0; r < GR; r++) {
+#pragma unroll
+            for (int k = 0; k < TT; k++) {
+                float s = gm_warp_sum(acc[r][k]);
+                if (lane == 0 && k < ntok && r < nv) {
+                    y[(long)ord[start[e] + c0 + k] * h + fila + r] = s;
+                }
+            }
+        }
+    }
+}

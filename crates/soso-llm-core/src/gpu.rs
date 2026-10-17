@@ -21,6 +21,9 @@ pub struct GpuStats {
     pub total_ns: u64,
     pub bytes_up: u64,
     pub bytes_down: u64,
+    /// Expertos MoE servidos desde el pool de VRAM / traídos desde RAM (capas «en flujo»).
+    pub flujo_aciertos: u64,
+    pub flujo_fallos: u64,
     pub ewma_ns: [f64; N_TRAMOS],
     pub samples: [u64; N_TRAMOS],
 }
@@ -83,6 +86,39 @@ pub struct GemmaCapa<'a> {
     pub expulsadas: usize,
 }
 
+/// Memoria que necesita un modelo MoE en la GPU, para decidir **qué capas llevan sus expertos residentes** y cuáles los
+/// traen por demanda («flujo»). Todos los tamaños son bytes en VRAM.
+#[derive(Clone, Copy, Debug)]
+pub struct MoePlan {
+    pub n_layers: usize,
+    pub n_exp: usize,
+    /// Pesos de atención de todas las capas.
+    pub attn_total: usize,
+    /// Los tres tensores de los `n_exp` expertos de una capa (con el `down` más grande).
+    pub expertos_capa: usize,
+    /// KV de todas las capas.
+    pub kv_total: usize,
+    /// Resto fijo: cabeza de logits, etc.
+    pub fijo: usize,
+    /// Bytes de gate, up y down (el mayor) de UN experto.
+    pub bytes_experto: [usize; 3],
+}
+
+/// Cómo se ejecuta una capa MoE en el dispositivo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModoMoe {
+    /// Todos sus expertos viven en VRAM.
+    Residente,
+    /// Atención y router en VRAM; los expertos que elige el router se traen desde RAM a un pool con LRU.
+    Flujo,
+}
+
+/// Fuente de los expertos de una capa para el modo [`ModoMoe::Flujo`].
+pub trait ProveedorExpertos {
+    /// Entrega los tres tensores del experto `e` —`destino(0, dtype, gate)`, `destino(1, …, up)`, `destino(2, …, down)`—.
+    fn experto(&mut self, e: usize, destino: &mut dyn FnMut(usize, u8, &[u8]) -> Result<(), ()>) -> Result<(), ()>;
+}
+
 /// Lo que de una capa MoE es pequeño y fijo: se envía una sola vez (la primera llamada de la capa).
 pub struct MoeNormas<'a> {
     pub attn_norm: &'a [f32],
@@ -132,6 +168,12 @@ pub struct MoeCapa<'a> {
     pub prefijo: &'a str,
     /// `Some` sólo si el despacho aún no tiene las normas de esta capa (`moe_lista` = false).
     pub normas: Option<MoeNormas<'a>>,
+    /// Fuente de los expertos por si la capa va «en flujo» (el despacho decide; si es residente no se usa).
+    pub flujo: Option<&'a mut dyn ProveedorExpertos>,
+    /// `ffn_down` de los expertos de esta capa en Q4_K (si no, Q8_0). Sólo lo usa el modo «en flujo»; en residente lo da el dtype subido.
+    pub down_q4k: bool,
+    /// Bytes de gate, up y down (el mayor) de un experto: el tamaño de los huecos del pool.
+    pub bytes_experto: [usize; 3],
     pub expulsadas: usize,
 }
 
@@ -199,6 +241,28 @@ pub trait GpuDispatch {
     fn moe_volcar(&mut self, hidden: &mut [f32]) -> Result<(), ()> {
         let _ = hidden;
         Ok(())
+    }
+
+    /// Modo de la capa MoE `layer`: la primera vez planifica la VRAM con `plan`. Por defecto, todo residente.
+    fn moe_modo(&mut self, layer: u32, plan: &MoePlan) -> ModoMoe {
+        let _ = (layer, plan);
+        ModoMoe::Residente
+    }
+
+    /// ¿Hay capas MoE «en flujo»? (Entonces conviene procesar el prefill en bloques grandes: cada capa en flujo se lee una vez por bloque.)
+    fn moe_flujo_activo(&self) -> bool {
+        false
+    }
+
+    /// ¿Caben `pesos` bytes de pesos y `kv` bytes de KV en lo que queda de VRAM? (Se pregunta antes de subir una capa MoE.)
+    fn moe_cabe(&self, pesos: usize, kv: usize) -> bool {
+        let _ = (pesos, kv);
+        true
+    }
+
+    /// Da la capa MoE por no apta para la GPU (no cabe, dtypes…): no se vuelve a intentar.
+    fn moe_descartar(&mut self, layer: u32) {
+        let _ = layer;
     }
 
     /// Ejecuta una capa MoE entera en el dispositivo; `Ok(false)` si no puede (la CPU la hace).

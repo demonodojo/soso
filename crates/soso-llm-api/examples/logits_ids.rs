@@ -107,6 +107,10 @@ fn main() {
             g.vram_usada() >> 20,
             st.total_ns as f64 / 1e6
         );
+        let (t_cp, mib, t_gpu) = g.flujo_diagnostico();
+        if mib > 0.0 {
+            eprintln!("  flujo: {t_cp:.0} ms copiando {mib:.0} MiB ({:.1} GB/s), {t_gpu:.0} ms de GPU antes del router", mib / 1024.0 / (t_cp / 1000.0).max(1e-9));
+        }
         let p = g.perfil_capa();
         let total: f64 = p.iter().map(|(_, ms)| ms).sum::<f64>().max(1e-9);
         for (n, ms) in p {
