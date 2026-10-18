@@ -67,6 +67,10 @@ pub struct Config {
     /// se la ejecuta: su resultado no puede cambiar si no se edita nada entre medias (campaña 12: Gemma repetía 24 veces un `cargo test` ya en verde y agotaba las herramientas sin
     /// dar el trabajo por hecho). Con dos repeticiones más sin cambiar de conducta se da el intento por terminado. `0` lo apaga.
     pub repetidas_ok_max: usize,
+    /// Tope de mensajes de la conversación. El servidor valida `MAX_MENSAJES` = 64 y devuelve 400 al pasarse: con 60 herramientas por
+    /// intento la conversación llegaba a 71 y 5 de 10 tareas de la campaña 23 morían con «messages: 71 supera el máximo de 64».
+    /// Al acercarse se pliegan los intercambios (llamada + resultados) más antiguos. `None` lo apaga.
+    pub mensajes_max: Option<usize>,
 }
 
 impl Config {
@@ -89,6 +93,7 @@ impl Config {
             exigir_pruebas: false,
             avisos_sin_pruebas: 1,
             repetidas_ok_max: 3,
+            mensajes_max: Some(60),
         }
     }
 }
@@ -172,6 +177,9 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
     // Última llamada ejecutada, si falló, y cuántas veces seguidas se ha repetido igual.
     let mut ultima: Option<(String, String, bool)> = None;
     let mut seguidas = 0usize;
+    // Veces que cada llamada ha FALLADO desde la última edición que salió bien, seguidas o no: el modelo alternaba dos llamadas que
+    // fallaban igual (A, B, A, B…) y la guarda de «la misma que acaba de fallar» nunca saltaba (campaña 27, R31: 60 turnos así).
+    let mut fallidas: alloc::collections::BTreeMap<(String, String), usize> = alloc::collections::BTreeMap::new();
     let mut atascado = false;
     let mut vistas: Vec<(String, String)> = Vec::new();
     let mut racha_ok = 0usize;
@@ -182,8 +190,25 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
             break;
         }
         let plazo = cfg.plazo_turno_ms.min(cfg.plazo_total_ms - gastado);
+        if let Some(max) = cfg.mensajes_max {
+            let n = limitar_mensajes(&mut mensajes, max);
+            if n > 0 {
+                vistas.clear();
+                fallidas.clear();
+                racha_ok = 0;
+                informe.recortadas += n;
+            }
+        }
         if let Some(limite) = cfg.contexto_tokens {
-            informe.recortadas += recortar_contexto(&mut mensajes, limite, cfg.chars_por_token);
+            let n = recortar_contexto(&mut mensajes, limite, cfg.chars_por_token);
+            if n > 0 {
+                // El resultado de lo ya hecho se ha recortado y el propio mensaje invita a «volver a pedirlo»: repetir la llamada
+                // deja de ser inútil, así que no se cuenta como repetición.
+                vistas.clear();
+                fallidas.clear();
+                racha_ok = 0;
+            }
+            informe.recortadas += n;
         }
         let peticion = json!({
             "model": cfg.modelo, "messages": mensajes, "tools": herramientas::definiciones(pol),
@@ -271,12 +296,13 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
                     let repite = ultima.as_ref().is_some_and(|(n, c, fallo)| *fallo && *n == clave.0 && *c == clave.1);
                     // Llamada que no edita y que ya se ejecutó con éxito desde la última edición: su resultado no puede cambiar.
                     // Cuenta aunque no sea consecutiva (Gemma alternaba dos `cargo test` casi iguales); una llamada nueva reinicia la racha.
-                    let edita = matches!(nombre, "reemplazar_texto" | "insertar");
+                    let edita = matches!(nombre, "reemplazar_texto" | "reemplazar_lineas" | "insertar");
                     let repite_ok = !edita && vistas.iter().any(|v| *v == clave);
                     if !edita {
                         if repite_ok { racha_ok += 1 } else { racha_ok = 0 }
                     }
                     seguidas = if repite { seguidas + 1 } else { 1 };
+                    let veces_fallo = fallidas.get(&clave).copied().unwrap_or(0);
                     let mut bloqueada_ok = false;
                     let mut bloqueada = false;
                     let r = if cfg.repetidas_ok_max > 0 && repite_ok && racha_ok >= cfg.repetidas_ok_max {
@@ -287,10 +313,10 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
                             atascado = true;
                         }
                         Respuesta { texto: aviso_de_repeticion_ok(nombre, racha_ok + 1), error: true }
-                    } else if cfg.repetidas_max > 0 && repite && seguidas >= cfg.repetidas_max {
+                    } else if cfg.repetidas_max > 0 && ((repite && seguidas >= cfg.repetidas_max) || veces_fallo >= cfg.repetidas_max) {
                         bloqueada = true;
                         informe.repetidas += 1;
-                        Respuesta { texto: aviso_de_repeticion(nombre, seguidas), error: true }
+                        Respuesta { texto: aviso_de_repeticion(nombre, seguidas.max(veces_fallo + 1)), error: true }
                     } else {
                         let mut r = ejecutar(e, pol, nombre, &a);
                         if repite && r.error {
@@ -300,6 +326,7 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
                     };
                     // Una llamada bloqueada por repetirse con éxito sigue contando como «salió bien»: así se cuenta hasta cerrar.
                     if edita && !r.error {
+                        fallidas.clear();
                         vistas.clear();
                         racha_ok = 0;
                     } else if !edita && !r.error && !bloqueada_ok && !vistas.contains(&clave) {
@@ -310,9 +337,12 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
                     if bloqueada {
                         informe.llamadas = informe.llamadas.saturating_sub(1);
                         informe.bloqueadas += 1;
-                        if informe.bloqueadas >= 15 {
+                        if informe.bloqueadas >= 8 {
                             atascado = true;
                         }
+                    }
+                    if r.error && !bloqueada {
+                        *fallidas.entry(clave.clone()).or_insert(0) += 1;
                     }
                     ultima = Some((clave.0, clave.1, r.error && !bloqueada_ok));
                     r
@@ -344,7 +374,7 @@ PROTOCOLO (obligatorio):\n\
 PASOS:\n\
 1. Llama a `read` con `TASK.md` (raíz del checkout): contiene el objetivo, el archivo que puedes tocar y las comprobaciones.\n\
 2. Localiza el código. Si el archivo es corto (menos de 150 líneas) lee entero; si es largo, **no lo recorras por tramos**: llama primero a `grep` con el nombre de la función o un texto que aparezca en ella y después a `read` sólo del tramo que rodea la línea (`offset` y `limit`).\n\
-3. Para **cambiar** algo que ya existe, llama a `reemplazar_texto` con `filePath`, `buscar` (un fragmento corto de lo que leíste; los espacios no importan) y `nuevo`. Para **añadir** código nuevo (una función, una rama), llama a `insertar` con `filePath`, `linea` (el número que te mostró `read`; se inserta después de esa línea) y `texto`. Siempre bloques completos: con su `{` y su `}`. Cambio mínimo: no toques otros archivos. Si una herramienta dice que no lo encuentra, que aparece varias veces o que desequilibra las llaves, corrige y repite.\n\
+3. Para **cambiar** algo que ya existe, llama a `reemplazar_texto` con `filePath`, `buscar` (un fragmento corto de lo que leíste; los espacios no importan) y `nuevo`. Para **añadir** código nuevo (una función, una rama), llama a `insertar` con `filePath`, `linea` (el número que te mostró `read`; se inserta después de esa línea) y `texto`. Siempre bloques completos: con su `{` y su `}`. Cambio mínimo: no toques otros archivos. Si `reemplazar_texto` no encuentra el fragmento, cambia ese tramo por números de línea con `reemplazar_lineas` (`desde`, `hasta`, `nuevo`): no hay que copiar nada. Si una herramienta dice que aparece varias veces o que desequilibra las llaves, corrige y repite.\n\
 4. Llama a `bash` con las comprobaciones de TASK.md (`cargo test …`) y lee el resultado.\n\
 5. Antes de terminar, **relee TASK.md punto por punto**: cada comportamiento que describe tiene que estar cubierto por tu cambio, no sólo el caso que ya ves fallar. Si falta alguno, impleméntalo y vuelve a comprobar. Una tarea sin ningún archivo editado no está terminada.\n\
 6. Informe final en texto corto: qué cambiaste, qué comprobaciones corrieron y su salida resumida, y lo que no pudiste hacer. No inventes resultados.";
@@ -361,7 +391,7 @@ PASOS:\n\
 1. Llama a `read` con `TASK.md` (raíz del checkout): contiene el objetivo, el archivo que puedes tocar y las comprobaciones.\n\
 2. Localiza el código. Si el archivo es corto (menos de 150 líneas) lee entero; si es largo, **no lo recorras por tramos**: llama primero a `grep` con el nombre de la función o un texto que aparezca en ella y después a `read` sólo del tramo que rodea la línea (`offset` y `limit`).\n\
 3. **Escribe primero tus pruebas.** De la sección «Qué se pide» de TASK.md saca TODOS los comportamientos y casos límite: cada viñeta, cada valor raro, cada «en caso de empate», «nunca», «si todos…». Añade al final del MISMO archivo que puedes tocar (llama a `read` cerca del final para ver el número de la última línea y usa `insertar` con ese número) un módulo `#[cfg(test)] mod pruebas_agente { use super::*; … }` con **una prueba `#[test]` por caso**, con valores concretos y la salida exacta que pide el enunciado. Ejecútalas con `bash` (`cargo test …` con el filtro `pruebas_agente`) y comprueba que las que describen el fallo de hoy **fallan**.\n\
-4. Para **cambiar** algo que ya existe, llama a `reemplazar_texto` con `filePath`, `buscar` (un fragmento corto de lo que leíste; los espacios no importan) y `nuevo`. Para **añadir** código nuevo, llama a `insertar` con `filePath`, `linea` y `texto`. Siempre bloques completos: con su `{` y su `}`. Cambio mínimo en el código; no toques otros archivos. Si una herramienta dice que no lo encuentra, que aparece varias veces o que desequilibra las llaves, corrige y repite.\n\
+4. Para **cambiar** algo que ya existe, llama a `reemplazar_texto` con `filePath`, `buscar` (un fragmento corto de lo que leíste; los espacios no importan) y `nuevo`. Para **añadir** código nuevo, llama a `insertar` con `filePath`, `linea` y `texto`. Siempre bloques completos: con su `{` y su `}`. Cambio mínimo en el código; no toques otros archivos. Si `reemplazar_texto` no encuentra el fragmento, cambia ese tramo por números de línea con `reemplazar_lineas` (`desde`, `hasta`, `nuevo`): no hay que copiar nada. Si una herramienta dice que aparece varias veces o que desequilibra las llaves, corrige y repite.\n\
 5. Ejecuta con `bash` las comprobaciones de TASK.md **y** tus pruebas: todas en verde. Si alguna falla, corrige el CÓDIGO (no borres la prueba salvo que contradiga el enunciado).\n\
 6. Antes de terminar, repasa el enunciado punto por punto: ¿hay una prueba tuya por cada uno? Si falta alguno, añádelo, ejecútalo y corrige.\n\
 7. Informe final en texto corto: qué cambiaste, qué pruebas escribiste, qué comprobaciones corrieron y su salida resumida, y lo que no pudiste hacer. No inventes resultados.";
@@ -405,7 +435,7 @@ fn aviso_de_empuje(mensajes: &[Value], texto: &str) -> Option<String> {
             let nombre = nombres.iter().rev().find(|(i, _)| i == id).map(|(_, n)| n.as_str()).unwrap_or("");
             let c = m["content"].as_str().unwrap_or("");
             match nombre {
-                "reemplazar_texto" | "insertar" if c.starts_with("Hecho") => {
+                "reemplazar_texto" | "reemplazar_lineas" | "insertar" if c.starts_with("Hecho") => {
                     sin_comprobar = true;
                     ultima_fallo = false;
                 }
@@ -446,7 +476,7 @@ fn hubo_prueba_propia(mensajes: &[Value]) -> bool {
                     Some(v) => v.to_string(),
                     None => String::new(),
                 };
-                if matches!(nombre, "insertar" | "reemplazar_texto") && args.contains("#[test]") {
+                if matches!(nombre, "insertar" | "reemplazar_texto" | "reemplazar_lineas") && args.contains("#[test]") {
                     candidatas.push(l["id"].as_str().unwrap_or("").to_string());
                 }
             }
@@ -471,7 +501,7 @@ fn hubo_edicion(mensajes: &[Value]) -> bool {
         } else if m["role"] == "tool" {
             let id = m["tool_call_id"].as_str().unwrap_or("");
             let nombre = nombres.iter().rev().find(|(i, _)| i == id).map(|(_, n)| n.as_str()).unwrap_or("");
-            if matches!(nombre, "reemplazar_texto" | "insertar") && m["content"].as_str().unwrap_or("").starts_with("Hecho") {
+            if matches!(nombre, "reemplazar_texto" | "reemplazar_lineas" | "insertar") && m["content"].as_str().unwrap_or("").starts_with("Hecho") {
                 return true;
             }
         }
@@ -488,6 +518,7 @@ fn aviso_de_repeticion_ok(herramienta: &str, veces: usize) -> String {
 fn aviso_de_repeticion(herramienta: &str, veces: usize) -> String {
     let consejo = match herramienta {
         "reemplazar_texto" => "Vuelve a leer el tramo exacto con `read` (con `offset` y `limit`) y copia en `buscar` UNA sola línea completa y corta, sin los números de línea que muestra `read`. Para añadir código nuevo usa `insertar` con el número de línea.",
+        "reemplazar_lineas" => "Comprueba el rango con `read` (con `offset` y `limit`): `desde` y `hasta` son números de línea, ambos incluidos, y `nuevo` debe traer bloques completos con sus llaves.",
         "insertar" => "Lee con `read` el tramo alrededor y comprueba el número de línea; inserta bloques completos (con su `{` y su `}`).",
         "bash" => "Lee el error de la salida anterior: la orden no va a cambiar de resultado si no cambias antes el archivo con `reemplazar_texto` o `insertar`.",
         "read" | "grep" | "glob" => "Ya tienes esa información en la conversación; úsala para dar el siguiente paso (editar o comprobar).",
@@ -499,6 +530,80 @@ fn aviso_de_repeticion(herramienta: &str, veces: usize) -> String {
 /// Tokens que ocupa la conversación, por exceso (una cadena de código o castellano da ~3,5 caracteres por token).
 fn tokens_estimados(mensajes: &[Value], chars_por_token: f32) -> usize {
     (mensajes.iter().map(|m| m.to_string().len()).sum::<usize>() as f32 / chars_por_token) as usize
+}
+
+/// Marca del historial de lo ya hecho que se anota en la tarea al plegar intercambios antiguos.
+const MARCA_HISTORIAL: &str = "\n\n[Historial de lo que ya hiciste (los mensajes antiguos se han plegado para no pasar del límite; los cambios SIGUEN aplicados en los archivos, no los repitas):";
+
+/// Una línea de historial por llamada plegada: herramienta, archivo/rango/orden y cómo acabó.
+fn linea_historial(llamada: &Value, resultado: &str) -> String {
+    let nombre = llamada.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or("?");
+    let args: Value = match llamada.pointer("/function/arguments") {
+        Some(Value::String(s)) => serde_json::from_str(s).unwrap_or(Value::Null),
+        Some(v) => v.clone(),
+        None => Value::Null,
+    };
+    let texto = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let num = |k: &str| args.get(k).and_then(|v| v.as_u64());
+    let corto = |t: &str, n: usize| {
+        let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+        if t.chars().count() > n { format!("{}…", t.chars().take(n).collect::<String>()) } else { t }
+    };
+    let donde = match nombre {
+        "reemplazar_lineas" => format!("{} líneas {}–{}", texto("filePath"), num("desde").unwrap_or(0), num("hasta").unwrap_or(0)),
+        "reemplazar_texto" => format!("{} «{}»", texto("filePath"), corto(texto("buscar"), 50)),
+        "insertar" => format!("{} línea {}", texto("filePath"), num("linea").map_or("?".to_string(), |n| n.to_string())),
+        "bash" => corto(texto("command"), 70),
+        "read" => format!("{} desde {}", texto("filePath"), num("offset").unwrap_or(1)),
+        "grep" | "glob" => format!("«{}»", corto(texto("pattern"), 50)),
+        _ => String::new(),
+    };
+    let fin = resultado.lines().next().unwrap_or("");
+    format!("- {nombre} {donde} → {}", corto(fin, 70))
+}
+
+/// Mantiene la conversación en `max` mensajes plegando los intercambios más antiguos: una respuesta del asistente con sus llamadas y
+/// los resultados que la siguen (siempre completos, para que ningún resultado quede huérfano). El sistema, la tarea y los últimos
+/// mensajes no se tocan. Lo plegado no se pierde sin más: queda una línea por llamada en la tarea, para que el modelo sepa qué ya
+/// hizo (con un simple recorte, en la campaña 27 olvidaba sus ediciones y las repetía hasta agotar los turnos). Devuelve cuántos
+/// intercambios se pliegan.
+fn limitar_mensajes(mensajes: &mut Vec<Value>, max: usize) -> usize {
+    const HISTORIAL_MAX: usize = 40;
+    let mut nuevas: Vec<String> = Vec::new();
+    let mut quitados = 0;
+    while mensajes.len() > max {
+        let Some(i) = (2..mensajes.len()).find(|&i| mensajes[i]["role"] == "assistant") else { break };
+        let mut fin = i + 1;
+        while fin < mensajes.len() && mensajes[fin]["role"] == "tool" {
+            fin += 1;
+        }
+        if mensajes.len() - fin < 4 {
+            break;
+        }
+        if let Some(llamadas) = mensajes[i]["tool_calls"].as_array() {
+            for ll in llamadas {
+                let id = ll.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let res = mensajes[i + 1..fin].iter().find(|m| m["tool_call_id"] == id).and_then(|m| m["content"].as_str()).unwrap_or("");
+                nuevas.push(linea_historial(ll, res));
+            }
+        }
+        mensajes.drain(i..fin);
+        quitados += 1;
+    }
+    if quitados > 0 && mensajes.len() > 1 {
+        if let Some(t) = mensajes[1]["content"].as_str() {
+            let (cuerpo, previo) = match t.split_once(MARCA_HISTORIAL) {
+                Some((c, h)) => (c.to_string(), h.trim_end_matches(']').lines().filter(|l| l.starts_with("- ")).map(|l| l.to_string()).collect::<Vec<_>>()),
+                None => (t.to_string(), Vec::new()),
+            };
+            let mut todas = previo;
+            todas.extend(nuevas);
+            let exceso = todas.len().saturating_sub(HISTORIAL_MAX);
+            let lista = todas[exceso..].join("\n");
+            mensajes[1]["content"] = Value::String(format!("{cuerpo}{MARCA_HISTORIAL}\n{lista}]"));
+        }
+    }
+    quitados
 }
 
 /// Recorta las salidas de herramienta **antiguas** cuando la conversación pasa del 70 % de la ventana (y, si aún sobra,

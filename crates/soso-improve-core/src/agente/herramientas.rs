@@ -128,6 +128,15 @@ pub fn definiciones(pol: &Politica) -> Value {
                 "ediciones": {"type": "array", "description": "Varios cambios en el mismo archivo en UNA llamada (todo o nada); en vez de buscar/nuevo", "items": {"type": "object", "properties": {"buscar": {"type": "string"}, "nuevo": {"type": "string"}, "linea": {"type": "integer"}}, "required": ["buscar", "nuevo"]}}},
                 "required": ["filePath"]}}},
         {"type": "function", "function": {
+            "name": "reemplazar_lineas",
+            "description": "Sustituye un RANGO de líneas (desde..hasta, ambas incluidas, según los números de `read`) por `nuevo`. No hay que copiar el texto antiguo, así que no puede fallar por un fragmento mal copiado: úsala para reescribir una función o un bloque entero, o cuando `reemplazar_texto` no encuentra el fragmento. `nuevo` vacío borra esas líneas. Devuelve cómo queda el tramo con la numeración NUEVA (los números de debajo cambian si metes más o menos líneas).",
+            "parameters": {"type": "object", "properties": {
+                "filePath": {"type": "string", "description": "Ruta del archivo, relativa a la raíz del checkout"},
+                "desde": {"type": "integer", "description": "Primera línea a sustituir"},
+                "hasta": {"type": "integer", "description": "Última línea a sustituir (incluida)"},
+                "nuevo": {"type": "string", "description": "Texto que ocupa su lugar, con su sangría y sus llaves completas"}},
+                "required": ["filePath", "desde", "hasta", "nuevo"]}}},
+        {"type": "function", "function": {
             "name": "insertar",
             "description": "Inserta texto NUEVO (por ejemplo una función entera) después de una línea. `linea` es el número de línea que te mostró `read` (0 = al principio del archivo; **-1 = al final del archivo**, lo más cómodo para añadir un módulo de pruebas o una función nueva). Úsala para AÑADIR código; para cambiar un fragmento existente usa reemplazar_texto. El texto debe traer sus llaves completas.",
             "parameters": {"type": "object", "properties": {
@@ -139,7 +148,7 @@ pub fn definiciones(pol: &Politica) -> Value {
                 "required": ["filePath", "texto"]}}},
         {"type": "function", "function": {
             "name": "bash",
-            "description": "Ejecuta UNA orden (sin shell: sin ; & > < $ ni comodines; se admite una sola tubería final `| head -N`, `| tail -N` o `| grep TEXTO`, y `2>&1`). Los argumentos de `cargo test` se reordenan solos: `--lib`/`--doc` antes de `--`, y el filtro de nombre va como `cargo test -p crate nombre`. Permitidas: cargo test, cargo check, cargo build, cargo fmt, git status, git diff, git log.",
+            "description": "Ejecuta UNA orden (sin shell: sin ; & > < $ ni comodines; se admite una sola tubería final `| head -N`, `| tail -N` o `| grep TEXTO`, y `2>&1`). Los argumentos de `cargo test` se reordenan solos: `--lib`/`--doc` antes de `--`, y el filtro de nombre va como `cargo test -p crate nombre`. Permitidas: cargo test, cargo check, cargo build, cargo fmt, git status, git diff, git log. Se admite el prefijo `cd DIR && orden` (dentro del checkout), y `find`, `ls`, `cat`, `grep` se resuelven con las herramientas glob/read/grep (mejor úsalas directamente).",
             "parameters": {"type": "object", "properties": {
                 "command": {"type": "string", "description": "La orden, p. ej. cargo test -p soso-http"}},
                 "required": ["command"]}}}
@@ -166,10 +175,11 @@ pub fn ejecutar<E: Entorno>(e: &mut E, pol: &Politica, nombre: &str, args: &Valu
         "glob" => listar_glob(e, pol, args),
         "reemplazar_texto" => reemplazar(e, pol, args),
         "insertar" => insertar(e, pol, args),
+        "reemplazar_lineas" => reemplazar_lineas(e, pol, args),
         "bash" => orden(e, pol, args),
         "forja" if pol.forja.is_some() => forja(e, pol, args),
         otro => Ok(Respuesta::mal(format!(
-            "La herramienta «{otro}» no existe. Las disponibles son: read, grep, glob, reemplazar_texto, insertar, bash{}.", if pol.forja.is_some() { " y forja" } else { "" }
+            "La herramienta «{otro}» no existe. Las disponibles son: read, grep, glob, reemplazar_texto, reemplazar_lineas, insertar, bash{}.", if pol.forja.is_some() { " y forja" } else { "" }
         ))),
     };
     match r {
@@ -190,6 +200,8 @@ fn alias(clave: &str) -> &'static [&'static str] {
         "texto" => &["text", "code", "contenido", "content", "insert", "new_text"],
         "command" => &["cmd", "comando"],
         "linea" => &["line", "línea", "line_number"],
+        "desde" => &["from", "start", "start_line", "inicio", "primera", "desde_linea"],
+        "hasta" => &["to", "end", "end_line", "fin", "ultima", "última", "hasta_linea"],
         _ => &[],
     }
 }
@@ -957,11 +969,11 @@ fn aplicar_edicion(rel: &str, texto: &str, buscar: &str, nuevo: &str, linea_hint
         // ACTUAL entero (no sólo cinco líneas) para que lo copie tal cual.
         let pista = if buscar.lines().filter(|l| !l.trim().is_empty()).count() >= 3 {
             tramo_parecido(&texto, buscar)
-                .map(|(a, b, t)| format!("\nEl archivo ha cambiado desde que lo leíste (tus ediciones anteriores lo modificaron). Así está AHORA el tramo más parecido (líneas {a}–{b}):\n{t}\nCopia `buscar` de AHÍ (una o dos líneas bastan) o usa `insertar` con el número de línea."))
+                .map(|(a, b, t)| format!("\nEl archivo ha cambiado desde que lo leíste (tus ediciones anteriores lo modificaron). Así está AHORA el tramo más parecido (líneas {a}–{b}):\n{t}\nCopia `buscar` de AHÍ (una o dos líneas bastan), o cambia ese tramo por números de línea con `reemplazar_lineas` (desde, hasta, nuevo), que no necesita copiar nada."))
                 .unwrap_or_default()
         } else {
             linea_parecida(&texto, buscar)
-                .map(|p| format!("\nLa línea más parecida del archivo es:\n{p}\nCopia de ahí UNA línea completa y corta."))
+                .map(|p| format!("\nLa línea más parecida del archivo es:\n{p}\nCopia de ahí UNA línea completa y corta, o usa `reemplazar_lineas` con el rango de líneas."))
                 .unwrap_or_default()
         };
         return Ok(Err(format!(
@@ -979,6 +991,18 @@ fn aplicar_edicion(rel: &str, texto: &str, buscar: &str, nuevo: &str, linea_hint
     }
     let linea_de = |b: usize| texto[..pos[en_chars(b)].0].matches('\n').count() + 1;
     let elegido = if apariciones.len() == 1 {
+        // `linea` lejos de la única aparición: el modelo cree que edita OTRA línea. Aplicarla en silencio cambiaba una que no quería
+        // (campaña 27: pedía la 143 y se cambiaba la 107, y el modelo alternaba entre las dos sin entender qué pasaba).
+        let donde = linea_de(primero_b);
+        if let Some(h) = linea_hint {
+            if h.abs_diff(donde) > 10 + buscar.lines().count() {
+                return Ok(Err(format!(
+                    "`buscar` sólo aparece en la línea {donde} de {}, no cerca de la {h} que indicas ({}). No he cambiado nada. Si quieres esa línea {donde}, repite con `linea`: {donde}; si querías otra, lee ese tramo con `read` y copia su texto.",
+                    mostrar(rel),
+                    texto.lines().nth(donde - 1).unwrap_or("").trim()
+                )));
+            }
+        }
         primero_b
     } else if let Some(h) = linea_hint {
         *apariciones.iter().min_by_key(|b| linea_de(**b).abs_diff(h)).unwrap()
@@ -998,10 +1022,35 @@ fn aplicar_edicion(rel: &str, texto: &str, buscar: &str, nuevo: &str, linea_hint
             lista.join("\n")
         )));
     };
+    // Edición «añadir tras/antes de buscar» ya aplicada: `nuevo` contiene `buscar` más líneas extra y el archivo YA tiene exactamente eso
+    // en esa posición. Repetirla duplicaría lo añadido cada vez, y devolvía «Hecho» (campaña 28: 30 veces el mismo guardia en R31).
+    let nuevo_plano: String = nuevo.chars().filter(|c| !c.is_whitespace()).collect();
+    // Lo añadido ha de ser sustancioso (≥ 12 caracteres sin espacios): un `}` suelto que casualmente sigue en el archivo no cuenta.
+    if nuevo_plano.len() >= aguja.len() + 12 {
+        let ya_despues = plano[elegido..].starts_with(&nuevo_plano);
+        let ya_antes = plano[..elegido + aguja.len()].ends_with(&nuevo_plano);
+        if ya_despues || ya_antes {
+            return Ok(Err(format!(
+                "Ese cambio YA está aplicado en la línea {}: {} ya contiene `buscar` junto con lo que añades. Repetirlo lo DUPLICARÍA, así que no he cambiado nada. Pasa al siguiente paso: ejecuta las comprobaciones con `bash`, o edita otra parte.",
+                linea_de(elegido),
+                mostrar(rel)
+            )));
+        }
+    }
     let i0 = en_chars(elegido);
     let (ini, fin) = (pos[i0].0, pos[i0 + n_aguja - 1].1);
+    // El fragmento se localiza sin espacios, así que `ini` cae en el primer carácter visible. Si `nuevo` trae su propia sangría
+    // (`    fn x`) y se pegara ahí, la línea quedaría con la sangría doble: se retrocede al principio de la línea y se sustituye también.
+    let inicio_linea = texto[..ini].rfind('\n').map_or(0, |p| p + 1);
+    let ini = if inicio_linea < ini && texto[inicio_linea..ini].chars().all(|c| c == ' ' || c == '\t') && nuevo.starts_with([' ', '\t']) { inicio_linea } else { ini };
     let antes = texto[ini..fin].to_string();
     let linea = texto[..ini].matches('\n').count() + 1;
+    // Un atributo o comentario de documentación que `nuevo` repite y que ya está justo encima se descarta (`#[derive(..)]` duplicado).
+    let nuevo = {
+        let previa = texto[..inicio_linea].trim_end_matches('\n').rsplit('\n').next().unwrap_or("").trim();
+        let (primera, resto) = nuevo.split_once('\n').unwrap_or((nuevo, ""));
+        if !resto.is_empty() && !previa.is_empty() && primera.trim() == previa && (previa.starts_with("#[") || previa.starts_with("///")) { resto } else { nuevo }
+    };
     let mut nuevo_texto = String::with_capacity(texto.len() + nuevo.len());
     nuevo_texto.push_str(&texto[..ini]);
     nuevo_texto.push_str(nuevo);
@@ -1041,6 +1090,15 @@ fn reemplazar<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<
             }
         }
     }
+    if actual == texto {
+        // Una edición que deja el archivo idéntico NO es «Hecho»: el modelo la repetía sin parar (campaña 27: 27 veces seguidas la misma
+        // línea) creyendo que avanzaba, y cada «Hecho» reiniciaba las guardas de repetición.
+        return Ok(Respuesta::mal(format!(
+            "Esa edición no cambia nada: {} ya contiene exactamente ese texto (línea {}). No la repitas. Si querías otra cosa, mira el estado real con `read` (con `offset` y `limit`); si el cambio ya está hecho, ejecuta las comprobaciones con `bash`.",
+            mostrar(&rel),
+            hechas.first().map_or(0, |h| h.0)
+        )));
+    }
     if let Some(m) = desequilibrio(&rel, &texto, &actual) {
         return Ok(Respuesta::mal(m));
     }
@@ -1062,6 +1120,65 @@ fn reemplazar<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<
         })
         .collect();
     Ok(Respuesta::ok(format!("Hecho: {total} ediciones en {}.\n{}", mostrar(&rel), resumen.join("\n"))))
+}
+
+fn reemplazar_lineas<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<Respuesta> {
+    let (abs, rel) = resolver(pol, cadena(args, "filePath")?)?;
+    let desde = entero(args, "desde").ok_or_else(|| Error::uso("falta «desde» (entero: primera línea a sustituir)"))?;
+    let hasta = entero(args, "hasta").ok_or_else(|| Error::uso("falta «hasta» (entero: última línea a sustituir, incluida)"))?;
+    let nuevo = cadena(args, "nuevo")?;
+    let datos = e.leer(&abs).map_err(|_| no_existe(e, pol, &rel))?;
+    let texto = String::from_utf8(datos).map_err(|_| Error::uso(format!("«{}» no es UTF-8", mostrar(&rel))))?;
+    let mut lineas: Vec<&str> = texto.split('\n').collect();
+    let terminaba_en_salto = lineas.last() == Some(&"");
+    if terminaba_en_salto {
+        lineas.pop();
+    }
+    let total = lineas.len();
+    if desde == 0 || desde > hasta || hasta > total {
+        return Ok(Respuesta::mal(format!(
+            "Rango inválido {desde}–{hasta}: {} tiene {total} línea(s) y hace falta 1 ≤ desde ≤ hasta ≤ {total}. Mira los números con `read` (con `offset` y `limit`).",
+            mostrar(&rel)
+        )));
+    }
+    let sustituidas: Vec<&str> = lineas[desde - 1..hasta].to_vec();
+    let nuevas: Vec<&str> = if nuevo.is_empty() { Vec::new() } else { nuevo.trim_end_matches('\n').split('\n').collect() };
+    let mut resultado: Vec<&str> = Vec::with_capacity(total + nuevas.len());
+    resultado.extend_from_slice(&lineas[..desde - 1]);
+    resultado.extend_from_slice(&nuevas);
+    resultado.extend_from_slice(&lineas[hasta..]);
+    let mut nuevo_texto = resultado.join("\n");
+    if terminaba_en_salto {
+        nuevo_texto.push('\n');
+    }
+    if nuevo_texto == texto {
+        return Ok(Respuesta::mal(format!(
+            "Esa sustitución no cambia nada: las líneas {desde}–{hasta} de {} ya son exactamente ese texto. No la repitas; comprueba con `bash` o edita otra parte.",
+            mostrar(&rel)
+        )));
+    }
+    if let Some(m) = desequilibrio(&rel, &texto, &nuevo_texto) {
+        return Ok(Respuesta::mal(m));
+    }
+    let modo = e.metadatos(&abs).map(|m| m.modo).unwrap_or(0o644);
+    e.escribir(&abs, nuevo_texto.as_bytes(), modo)?;
+    // Lo que se ha quitado (para que un rango mal elegido se note) y cómo queda, con la numeración nueva.
+    let corto = |l: &str| if l.chars().count() > 100 { format!("{}…", l.chars().take(100).collect::<String>()) } else { l.to_string() };
+    let mut quitado: Vec<String> = sustituidas.iter().take(3).map(|l| format!("  {}", corto(l))).collect();
+    if sustituidas.len() > 3 {
+        quitado.push(format!("  … ({} líneas más)", sustituidas.len() - 3));
+    }
+    let ini = desde.saturating_sub(3).max(1);
+    let fin = (desde + nuevas.len() + 2).min(resultado.len()).min(ini + 40);
+    let ventana: Vec<String> = (ini..=fin).filter(|i| *i <= resultado.len()).map(|i| format!("{i}: {}", resultado[i - 1])).collect();
+    Ok(Respuesta::ok(format!(
+        "Hecho en {}: líneas {desde}–{hasta} ({} línea(s)) sustituidas por {} línea(s).\nSe quitó:\n{}\nAsí queda ahora (numeración nueva):\n{}",
+        mostrar(&rel),
+        sustituidas.len(),
+        nuevas.len(),
+        quitado.join("\n"),
+        ventana.join("\n")
+    )))
 }
 
 // ---------------------------------------------------------------- insertar
@@ -1276,6 +1393,11 @@ fn desequilibrio(rel: &str, antes: &str, despues: &str) -> Option<String> {
 /// sea shell (N-010: un operador que se ignora en silencio hace que el modelo vea una respuesta
 /// plausible de media orden).
 fn trocear(linea: &str) -> core::result::Result<Vec<String>, String> {
+    trocear_con(linea, false)
+}
+
+/// Igual que `trocear`; con `comodines` admite `* ? ( )` sin comillas (los de `find -name *.rs`, que aquí no se expanden).
+fn trocear_con(linea: &str, comodines: bool) -> core::result::Result<Vec<String>, String> {
     let mut args: Vec<String> = Vec::new();
     let mut actual = String::new();
     let mut hay = false;
@@ -1299,6 +1421,10 @@ fn trocear(linea: &str) -> core::result::Result<Vec<String>, String> {
                         args.push(core::mem::take(&mut actual));
                         hay = false;
                     }
+                }
+                '*' | '?' | '(' | ')' if comodines => {
+                    actual.push(c);
+                    hay = true;
                 }
                 ';' | '&' | '|' | '<' | '>' | '$' | '`' | '(' | ')' | '*' | '?' => {
                     return Err(format!(
@@ -1371,7 +1497,7 @@ fn normalizar_cargo_test(argv: &[String]) -> Option<(Vec<String>, String)> {
         if OPCIONES_CARGO.contains(&a) {
             antes.push(a.to_string());
             notas.push(format!("`{a}` es de cargo: lo he puesto antes de `--`"));
-        } else if matches!(clave, "--test" | "--filter" | "--scope") {
+        } else if matches!(clave, "--test" | "--filter" | "--scope" | "--test-filter" | "--test_filter" | "--name" | "--args" | "--test-name") {
             let nombre = valor.or_else(|| resto.get(j + 1).filter(|n| !n.starts_with('-')).map(|n| (*n).clone()).inspect(|_| j += 1));
             match nombre {
                 Some(n) => {
@@ -1589,9 +1715,250 @@ fn compactar_cargo(texto: &str) -> String {
     r
 }
 
+/// `cd DIR && orden`: el modelo se acostumbra a entrar en el directorio del crate. Se ejecuta `orden` con ese directorio de trabajo
+/// (dentro del checkout) en vez de rechazarla. Devuelve la orden sin el `cd`, el directorio absoluto y el relativo.
+fn quitar_cd<E: Entorno>(e: &E, pol: &Politica, linea: &str) -> Resultado<Option<(String, String, String)>> {
+    let t = linea.trim_start();
+    let Some(resto) = t.strip_prefix("cd ") else { return Ok(None) };
+    let Some((dir, orden)) = resto.split_once("&&") else { return Ok(None) };
+    let dir = dir.trim().trim_matches(|c| c == '"' || c == '\'');
+    if dir.is_empty() || orden.trim().is_empty() {
+        return Ok(None);
+    }
+    let (abs, rel) = resolver(pol, dir)?;
+    match e.metadatos(&abs) {
+        Ok(m) if m.tipo == Tipo::Directorio => Ok(Some((orden.trim().to_string(), abs, rel))),
+        _ => Err(no_existe(e, pol, &rel)),
+    }
+}
+
+fn unir_ruta(base: &str, p: &str) -> String {
+    let p = p.trim_start_matches("./");
+    if p.starts_with('/') || base.is_empty() {
+        return if p.is_empty() { ".".to_string() } else { p.to_string() };
+    }
+    if p.is_empty() || p == "." { base.to_string() } else { format!("{base}/{p}") }
+}
+
+/// `*` y `?` frente a una ruta completa (el `*` cruza `/`, como en `find -path`).
+fn comodin(pat: &[u8], texto: &[u8]) -> bool {
+    match pat.split_first() {
+        None => texto.is_empty(),
+        Some((b'*', resto)) => (0..=texto.len()).any(|i| comodin(resto, &texto[i..])),
+        Some((b'?', resto)) => !texto.is_empty() && comodin(resto, &texto[1..]),
+        Some((c, resto)) => texto.first() == Some(c) && comodin(resto, &texto[1..]),
+    }
+}
+
+/// Órdenes de shell de lectura (`find`, `ls`, `cat`, `grep`, `rg`) que un modelo escribe por costumbre: en vez de rechazarlas se
+/// resuelven con las herramientas propias (`glob`, `read`, `grep`). Lo que no se sabe traducir se explica con la herramienta que sirve.
+fn emular<E: Entorno>(e: &mut E, pol: &Politica, principal: &str, base: &str) -> Resultado<Option<Respuesta>> {
+    let laxa = principal.replace("\\;", " __FIN__ ").replace(" {} +", " {} __FIN__ ");
+    let argv = match trocear_con(&laxa, true) {
+        Ok(a) if !a.is_empty() => a,
+        _ => return Ok(None),
+    };
+    let nota = |o: &str, h: &str| format!("Nota: `{o}` no existe aquí (no hay shell); lo he resuelto con {h}.\n");
+    match argv[0].as_str() {
+        "ls" => {
+            let ruta = argv[1..].iter().find(|a| !a.starts_with('-')).map_or(".", |s| s.as_str());
+            let r = leer(e, pol, &json!({"filePath": unir_ruta(base, ruta)}))?;
+            Ok(Some(Respuesta { texto: format!("{}{}", nota("ls", "`read` (un directorio se lista)"), r.texto), error: r.error }))
+        }
+        "cat" => {
+            let rutas: Vec<&String> = argv[1..].iter().filter(|a| !a.starts_with('-')).collect();
+            if rutas.len() != 1 {
+                return Ok(Some(Respuesta::mal("`cat` lee un archivo por llamada: usa `read` con `filePath` (y `offset`/`limit` para un tramo).".to_string())));
+            }
+            let r = leer(e, pol, &json!({"filePath": unir_ruta(base, rutas[0])}))?;
+            Ok(Some(Respuesta { texto: format!("{}{}", nota("cat", "`read`"), r.texto), error: r.error }))
+        }
+        "grep" | "rg" | "ack" => {
+            let (mut ins, mut solo_archivos) = (false, false);
+            let mut ctx: Option<usize> = None;
+            let (mut include, mut patron): (Option<String>, Option<String>) = (None, None);
+            let mut rutas: Vec<String> = Vec::new();
+            let mut it = argv[1..].iter().peekable();
+            while let Some(a) = it.next() {
+                if let Some(v) = a.strip_prefix("--include=") {
+                    include = Some(v.to_string());
+                } else if a == "--include" || a == "-g" || a == "--glob" {
+                    include = it.next().cloned();
+                } else if a.starts_with("--") {
+                    // --color, --exclude…, --line-number: sin efecto aquí
+                } else if a == "-e" {
+                    patron = it.next().cloned();
+                } else if matches!(a.as_str(), "-A" | "-B" | "-C" | "-m") {
+                    let n = it.next().and_then(|v| v.parse::<usize>().ok());
+                    if a != "-m" {
+                        ctx = n;
+                    }
+                } else if a.len() > 1 && a.starts_with('-') && a[1..].chars().all(|c| c.is_ascii_alphabetic()) {
+                    for c in a[1..].chars() {
+                        match c {
+                            'i' => ins = true,
+                            'l' => solo_archivos = true,
+                            _ => {}
+                        }
+                    }
+                } else if a.len() > 2 && (a.starts_with("-A") || a.starts_with("-B") || a.starts_with("-C")) && a[2..].chars().all(|c| c.is_ascii_digit()) {
+                    ctx = a[2..].parse().ok();
+                } else if patron.is_none() {
+                    patron = Some(a.clone());
+                } else {
+                    rutas.push(a.clone());
+                }
+            }
+            let Some(patron) = patron else { return Ok(Some(Respuesta::mal("falta el texto a buscar: usa la herramienta `grep` con `pattern`.".to_string()))) };
+            let patron = patron.replace("\\|", "|");
+            let mut a = json!({"pattern": patron, "path": unir_ruta(base, rutas.first().map_or(".", |s| s.as_str())), "ignorar_mayusculas": ins});
+            if let Some(i) = include {
+                a["include"] = json!(i);
+            }
+            if let Some(c) = ctx {
+                a["contexto"] = json!(c);
+            }
+            let r = buscar(e, pol, &a)?;
+            let texto = if solo_archivos && !r.error {
+                let mut f: Vec<&str> = Vec::new();
+                for l in r.texto.lines() {
+                    if let Some((ruta, resto)) = l.split_once(':') {
+                        if resto.split(':').next().is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())) && !f.contains(&ruta) {
+                            f.push(ruta);
+                        }
+                    }
+                }
+                if f.is_empty() { r.texto.clone() } else { f.join("\n") }
+            } else {
+                r.texto
+            };
+            let extra = if rutas.len() > 1 { " (sólo he buscado en la primera ruta; usa `path` por llamada)" } else { "" };
+            Ok(Some(Respuesta { texto: format!("{}{texto}", nota(&argv[0], &format!("la herramienta `grep`{extra}"))), error: r.error }))
+        }
+        "find" => {
+            let mut i = 1;
+            let mut ruta = ".";
+            if argv.get(1).is_some_and(|a| !a.starts_with('-') && a != "(") {
+                ruta = argv[1].as_str();
+                i = 2;
+            }
+            // Predicados en grupos: `-o` separa alternativas; dentro de un grupo, todos deben cumplirse (el AND implícito de `find`).
+            let mut grupos: Vec<Vec<(bool, String, bool)>> = alloc::vec![Vec::new()]; // (es_ruta, patrón, ignora mayúsculas)
+            let mut exec: Option<Vec<String>> = None;
+            while i < argv.len() {
+                let a = argv[i].as_str();
+                match a {
+                    "-name" | "-iname" | "-path" | "-ipath" | "-wholename" => {
+                        let Some(v) = argv.get(i + 1) else { return Ok(None) };
+                        grupos.last_mut().unwrap().push((!a.ends_with("name"), v.clone(), a.starts_with("-i")));
+                        i += 1;
+                    }
+                    "-type" => {
+                        if argv.get(i + 1).map(|s| s.as_str()) != Some("f") {
+                            return Ok(Some(Respuesta::mal("`find -type d` no está disponible: para ver un directorio usa `read` con su ruta, o `glob`.".to_string())));
+                        }
+                        i += 1;
+                    }
+                    "-maxdepth" | "-mindepth" => i += 1,
+                    "-o" | "-or" => grupos.push(Vec::new()),
+                    "-a" | "-and" | "-print" | "(" | ")" | "\\(" | "\\)" => {}
+                    "-exec" => {
+                        let fin = argv[i + 1..].iter().position(|x| x == "__FIN__").map_or(argv.len(), |p| i + 1 + p);
+                        exec = Some(argv[i + 1..fin].to_vec());
+                        i = fin;
+                    }
+                    otro => {
+                        return Ok(Some(Respuesta::mal(format!(
+                            "`find {otro}` no está disponible. Para listar archivos usa `glob` (p. ej. `crates/**/*.rs`); para buscar texto, `grep`."
+                        ))))
+                    }
+                }
+                i += 1;
+            }
+            // `-exec grep -l TEXTO {} \;`: sólo los archivos que contienen el texto.
+            let mut contenido: Option<(Vec<String>, bool)> = None;
+            if let Some(x) = &exec {
+                if x.first().map(|s| s.as_str()) != Some("grep") {
+                    return Ok(Some(Respuesta::mal("`find -exec` sólo se admite con `grep -l TEXTO {} \\;`. Para otra cosa usa `glob`, `grep` o `read`.".to_string())));
+                }
+                let (mut ins, mut pat) = (false, None);
+                for t in &x[1..] {
+                    if t == "{}" {
+                        continue;
+                    }
+                    if t.len() > 1 && t.starts_with('-') {
+                        ins |= t.contains('i');
+                    } else if pat.is_none() {
+                        pat = Some(t.replace("\\|", "|"));
+                    }
+                }
+                let Some(p) = pat else { return Ok(None) };
+                contenido = Some((p.split('|').map(|a| if ins { a.to_lowercase() } else { a.to_string() }).collect(), ins));
+            }
+            let (abs, rel) = resolver(pol, &unir_ruta(base, ruta))?;
+            let meta = e.metadatos(&abs).map_err(|_| no_existe(e, pol, &rel))?;
+            let mut todos: Vec<(String, String)> = Vec::new();
+            if meta.tipo == Tipo::Directorio {
+                recorrer(e, &abs, &rel, 0, &mut |a, r| todos.push((a.to_string(), r.to_string())))?;
+            } else {
+                todos.push((abs.clone(), rel.clone()));
+            }
+            let mut halladas: Vec<String> = Vec::new();
+            let mut total = 0usize;
+            for (a, r) in todos {
+                let nombre = r.rsplit('/').next().unwrap_or(&r).to_string();
+                let casa = |(es_ruta, p, i): &(bool, String, bool)| {
+                    let (p, n, c, c2) = if *i { (p.to_lowercase(), nombre.to_lowercase(), r.to_lowercase(), format!("./{}", r.to_lowercase())) } else { (p.clone(), nombre.clone(), r.clone(), format!("./{r}")) };
+                    if *es_ruta { comodin(p.as_bytes(), c.as_bytes()) || comodin(p.as_bytes(), c2.as_bytes()) } else { glob_segmento(p.as_bytes(), n.as_bytes()) }
+                };
+                if grupos.iter().any(|g| !g.is_empty()) && !grupos.iter().any(|g| !g.is_empty() && g.iter().all(casa)) {
+                    continue;
+                }
+                if let Some((alts, ins)) = &contenido {
+                    let Ok(d) = e.leer(&a) else { continue };
+                    let t = String::from_utf8_lossy(&d);
+                    let t = if *ins { t.to_lowercase() } else { t.into_owned() };
+                    if !alts.iter().any(|x| t.contains(x.as_str())) {
+                        continue;
+                    }
+                }
+                total += 1;
+                if halladas.len() < pol.resultados_max {
+                    halladas.push(r);
+                }
+            }
+            let mut t = nota("find", "`glob`/`grep`");
+            if halladas.is_empty() {
+                t.push_str("(sin resultados)");
+            } else {
+                t.push_str(&halladas.join("\n"));
+                if total > halladas.len() {
+                    t.push_str(&format!("\n(… {} más)", total - halladas.len()));
+                }
+            }
+            Ok(Some(Respuesta::ok(t)))
+        }
+        _ => Ok(None),
+    }
+}
+
 fn orden<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<Respuesta> {
     let linea = cadena(args, "command")?;
-    let (principal, filtro) = separar_filtro(linea);
+    let (linea, cwd, base, nota_cd) = match quitar_cd(e, pol, linea)? {
+        Some((resto, abs, rel)) => (resto, abs, rel.clone(), format!("Nota: he ejecutado la orden dentro de {} (`cd` sólo vale como prefijo `cd DIR && orden`).\n", mostrar(&rel))),
+        None => (linea.to_string(), pol.raiz.clone(), String::new(), String::new()),
+    };
+    let (principal, filtro) = separar_filtro(&linea);
+    if let Some(r) = emular(e, pol, &principal, &base)? {
+        let texto = match (&filtro, r.error) {
+            (Some(f), false) => match aplicar_filtro(f, &r.texto) {
+                Ok(t) => t,
+                Err(m) => return Ok(Respuesta::mal(m)),
+            },
+            _ => r.texto,
+        };
+        return Ok(Respuesta { texto: format!("{nota_cd}{texto}"), error: r.error });
+    }
     let mut argv = match trocear(&principal) {
         Ok(a) if !a.is_empty() => a,
         Ok(_) => return Err(Error::uso("la orden está vacía")),
@@ -1618,7 +1985,7 @@ fn orden<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<Respu
             return Ok(Respuesta::mal(m));
         }
     }
-    let mut o = Orden { argv, cwd: pol.raiz.clone(), stdin: Vec::new(), timeout_s: Some(pol.plazo_orden_s), entorno: pol.entorno.clone() };
+    let mut o = Orden { argv, cwd, stdin: Vec::new(), timeout_s: Some(pol.plazo_orden_s), entorno: pol.entorno.clone() };
     o.entorno.sort();
     let s = e.ejecutar(&o)?;
     let cabecera = match (s.codigo, &s.motivo) {
@@ -1626,6 +1993,7 @@ fn orden<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<Respu
         (None, Some(m)) => format!("no terminó: {m}"),
         (None, None) => "no terminó".to_string(),
     };
+    let con_filtro = filtro.is_some();
     let cuerpo = match filtro {
         Some(f) => match aplicar_filtro(&f, &s.texto()) {
             Ok(t) => format!("{t}\n[filtrado con `| {f}`; el exit code es el de la orden, no el del filtro]"),
@@ -1634,7 +2002,32 @@ fn orden<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<Respu
         None if o.argv.first().is_some_and(|a| a == "cargo") => compactar_cargo(&s.texto()),
         None => s.texto(),
     };
-    Ok(Respuesta { texto: format!("{nota}{cabecera}\n{cuerpo}"), error: s.codigo != Some(0) })
+    // `cargo test` que sale con 0 sin haber ejecutado NI UNA prueba (filtro que no encaja, o crate sin pruebas con esas features): el
+    // «exit code: 0» engaña, el modelo lo lee como «mis pruebas pasan». En las campañas fue el 15 % de los `cargo test`.
+    let aviso_cero = if o.argv.len() >= 2 && o.argv[0] == "cargo" && o.argv[1] == "test" && s.codigo == Some(0) && !con_filtro {
+        sin_pruebas_ejecutadas(&s.texto())
+    } else {
+        None
+    };
+    let cuerpo = match aviso_cero {
+        Some(a) => format!("{cuerpo}\n{a}"),
+        None => cuerpo,
+    };
+    Ok(Respuesta { texto: format!("{nota_cd}{nota}{cabecera}\n{cuerpo}"), error: s.codigo != Some(0) })
+}
+
+/// Si la salida de `cargo test` sólo contiene bloques `running 0 tests` (y al menos uno), el aviso para el modelo.
+fn sin_pruebas_ejecutadas(texto: &str) -> Option<String> {
+    let mut bloques = 0usize;
+    for l in texto.lines() {
+        let Some(r) = l.trim().strip_prefix("running ") else { continue };
+        let n: usize = r.split_whitespace().next()?.parse().ok()?;
+        if n > 0 {
+            return None;
+        }
+        bloques += 1;
+    }
+    (bloques > 0).then(|| "OJO: no se ha ejecutado NINGUNA prueba (0 tests), así que este «exit code: 0» no demuestra nada. O el filtro de nombre no coincide con ninguna prueba, o ese crate no tiene pruebas con esas opciones (¿falta `--features std`?). Comprueba los nombres con `cargo test -p CRATE --features std -- --list`.".to_string())
 }
 
 // ---------------------------------------------------------------- forja

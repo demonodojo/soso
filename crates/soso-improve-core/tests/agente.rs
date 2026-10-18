@@ -236,7 +236,7 @@ fn el_bucle_lee_edita_prueba_y_termina() {
     let ult: Value = serde_json::from_str(&m.1[3]).unwrap();
     assert_eq!(ult["temperature"], 0.0);
     assert_eq!(ult["stream"], false);
-    assert_eq!(ult["tools"].as_array().unwrap().len(), 6);
+    assert_eq!(ult["tools"].as_array().unwrap().len(), 7);
 }
 
 #[test]
@@ -754,12 +754,15 @@ fn bash_admite_una_tuberia_final_con_head_tail_o_grep_y_quita_2_redirigido_a_1()
 #[test]
 fn una_orden_de_shell_no_permitida_dice_que_herramienta_usar() {
     let mut e = repo();
-    let (t, err) = bash(&mut e, "ls crates");
+    let (t, err) = bash(&mut e, "tree crates");
     assert!(err && t.contains("`glob`"), "{t}");
-    let (t, err) = bash(&mut e, "cat src/lib.rs");
+    let (t, err) = bash(&mut e, "sed -n 1,5p src/lib.rs");
     assert!(err && t.contains("`read`"), "{t}");
-    let (t, err) = bash(&mut e, "grep -rn foo .");
-    assert!(err && t.contains("herramienta `grep`"), "{t}");
+    let (t, err) = bash(&mut e, "awk 1 src/lib.rs");
+    assert!(err && t.contains("`read`"), "{t}");
+    // `ls`, `cat`, `grep` y `find` no se rechazan: se resuelven con las herramientas propias.
+    let (t, err) = bash(&mut e, "ls crates");
+    assert!(err && t.contains("no existe"), "{t}");
 }
 
 #[test]
@@ -876,4 +879,222 @@ fn las_llamadas_bloqueadas_por_el_guardian_no_gastan_presupuesto_de_herramientas
     assert!(inf.bloqueadas >= 1, "bloqueadas = {}", inf.bloqueadas);
     // 1 edición + las comprobaciones que SÍ se ejecutaron; las bloqueadas no cuentan.
     assert_eq!(inf.llamadas + inf.bloqueadas, 5, "llamadas {} bloqueadas {}", inf.llamadas, inf.bloqueadas);
+}
+
+fn contenido(e: &mut Mem, ruta: &str) -> String {
+    String::from_utf8(e.leer(ruta).unwrap()).unwrap()
+}
+
+#[test]
+fn reemplazar_texto_no_duplica_la_sangria_ni_el_atributo() {
+    let mut e = Mem::default().con("/w/src/a.rs", "#[derive(Clone)]\npub struct S;\n\nimpl S {\n    fn f() -> u8 {\n        1\n    }\n}\n");
+    // `nuevo` trae su sangría y `buscar` no: la línea no puede acabar con ocho espacios.
+    let (t, err) = llama(&mut e, "reemplazar_texto", json!({"filePath": "src/a.rs", "buscar": "fn f() -> u8 {", "nuevo": "    fn f() -> u16 {"}));
+    assert!(!err, "{t}");
+    assert!(contenido(&mut e, "/w/src/a.rs").contains("\n    fn f() -> u16 {\n"), "{}", contenido(&mut e, "/w/src/a.rs"));
+    // El modelo repite el atributo que ya está encima.
+    let (t, err) = llama(&mut e, "reemplazar_texto", json!({"filePath": "src/a.rs", "buscar": "pub struct S;", "nuevo": "#[derive(Clone)]\n#[derive(Debug)]\npub struct S;"}));
+    assert!(!err, "{t}");
+    let c = contenido(&mut e, "/w/src/a.rs");
+    assert_eq!(c.matches("#[derive(Clone)]").count(), 1, "{c}");
+    assert!(c.contains("#[derive(Debug)]\npub struct S;"), "{c}");
+}
+
+#[test]
+fn reemplazar_lineas_sustituye_un_rango_y_valida() {
+    let mut e = repo();
+    let (t, err) = llama(&mut e, "reemplazar_lineas", json!({"filePath": "src/lib.rs", "desde": 2, "hasta": 4, "nuevo": "    if k.is_empty() {\n        return;\n    }\n    hit();"}));
+    assert!(!err && t.starts_with("Hecho") && t.contains("2: ") && t.contains("Se quitó"), "{t}");
+    assert_eq!(contenido(&mut e, "/w/src/lib.rs"), "fn buscar(k: &str) {\n    if k.is_empty() {\n        return;\n    }\n    hit();\n}\n");
+    let (t, err) = llama(&mut e, "reemplazar_lineas", json!({"filePath": "src/lib.rs", "desde": 5, "hasta": 99, "nuevo": "x"}));
+    assert!(err && t.contains("Rango inválido"), "{t}");
+    // Un rango que dejaría llaves desequilibradas no se escribe.
+    let antes = contenido(&mut e, "/w/src/lib.rs");
+    let (t, err) = llama(&mut e, "reemplazar_lineas", json!({"filePath": "src/lib.rs", "desde": 6, "hasta": 6, "nuevo": ""}));
+    assert!(err && t.contains("No he escrito"), "{t}");
+    assert_eq!(contenido(&mut e, "/w/src/lib.rs"), antes);
+    // Borrar líneas con `nuevo` vacío.
+    let (t, err) = llama(&mut e, "reemplazar_lineas", json!({"filePath": "src/lib.rs", "desde": 5, "hasta": 5, "nuevo": ""}));
+    assert!(!err, "{t}");
+    assert!(!contenido(&mut e, "/w/src/lib.rs").contains("hit();"));
+}
+
+#[test]
+fn un_cargo_test_sin_ninguna_prueba_avisa_de_que_no_demuestra_nada() {
+    struct Cero(Mem);
+    impl Archivos for Cero {
+        fn leer(&self, r: &str) -> Resultado<Vec<u8>> { self.0.leer(r) }
+        fn escribir(&mut self, r: &str, d: &[u8], m: u32) -> Resultado<()> { self.0.escribir(r, d, m) }
+        fn existe(&self, r: &str) -> bool { self.0.existe(r) }
+        fn listar(&self, r: &str) -> Resultado<Vec<Entrada>> { self.0.listar(r) }
+        fn metadatos(&self, r: &str) -> Resultado<Entrada> { self.0.metadatos(r) }
+        fn crear_directorio(&mut self, r: &str) -> Resultado<()> { self.0.crear_directorio(r) }
+        fn borrar(&mut self, r: &str) -> Resultado<()> { self.0.borrar(r) }
+    }
+    impl Procesos for Cero {
+        fn ejecutar(&self, o: &Orden) -> Resultado<Salida> {
+            let n = if o.argv.iter().any(|a| a == "vacio") { 0 } else { 3 };
+            let t = format!("running {n} tests\n\ntest result: ok. {n} passed; 0 failed\n\nrunning 0 tests\n");
+            Ok(Salida { codigo: Some(0), stdout: t.into_bytes(), stderr: vec![], motivo: None })
+        }
+    }
+    let mut e = Cero(repo());
+    let sh = |e: &mut Cero, c: &str| { let r = ejecutar(e, &Politica::nueva(R), "bash", &json!({"command": c})); (r.texto, r.error) };
+    let (t, err) = sh(&mut e, "cargo test -p x vacio");
+    assert!(!err && t.contains("NINGUNA prueba") && t.contains("--list"), "{t}");
+    let (t, _) = sh(&mut e, "cargo test -p x");
+    assert!(!t.contains("NINGUNA"), "{t}");
+}
+
+#[test]
+fn cargo_test_con_test_filter_o_args_usa_el_valor_como_filtro() {
+    let mut e = repo();
+    bash(&mut e, "cargo test -p x --lib -- --test-filter pruebas_agente");
+    assert_eq!(e.ordenes.borrow().last().unwrap(), &["cargo", "test", "-p", "x", "--lib", "--", "pruebas_agente"].map(String::from).to_vec());
+    bash(&mut e, "cargo test -p x -- --args=pruebas_agente");
+    assert_eq!(e.ordenes.borrow().last().unwrap(), &["cargo", "test", "-p", "x", "--", "pruebas_agente"].map(String::from).to_vec());
+}
+
+#[test]
+fn las_ordenes_de_shell_de_lectura_se_resuelven_con_las_herramientas_propias() {
+    let mut e = repo().con("/w/crates/b/src/lib.rs", "pub struct MemDev;\n").con("/w/crates/b/Cargo.toml", "[package]\n");
+    let (t, err) = bash(&mut e, "find . -name \"*.rs\" -exec grep -l \"MemDev\" {} \\;");
+    assert!(!err && t.contains("crates/b/src/lib.rs") && !t.contains("src/otro.rs"), "{t}");
+    let (t, _) = bash(&mut e, "find . -name lib.rs -o -name otro.rs | head -5");
+    assert!(t.contains("src/otro.rs") && t.contains("crates/b/src/lib.rs"), "{t}");
+    let (t, _) = bash(&mut e, "find . -path \"*/b/*\" -name \"*.rs\"");
+    assert!(t.contains("crates/b/src/lib.rs") && !t.contains("src/otro.rs"), "{t}");
+    let (t, err) = bash(&mut e, "find . -type d");
+    assert!(err && t.contains("glob"), "{t}");
+    let (t, _) = bash(&mut e, "ls crates/b/");
+    assert!(t.contains("Cargo.toml") && t.contains("src"), "{t}");
+    let (t, _) = bash(&mut e, "cat README.md");
+    assert!(t.contains("hola"), "{t}");
+    let (t, _) = bash(&mut e, "grep -rn \"fn otro\" --include=*.rs .");
+    assert!(t.contains("src/otro.rs:1:"), "{t}");
+    let (t, _) = bash(&mut e, "grep -rl \"MemDev\\|otro\" .");
+    assert!(t.contains("crates/b/src/lib.rs") && t.contains("src/otro.rs") && !t.contains(":1:"), "{t}");
+}
+
+#[test]
+fn cd_como_prefijo_cambia_el_directorio_de_trabajo() {
+    struct Cwd(Mem, std::cell::RefCell<Vec<String>>);
+    impl Archivos for Cwd {
+        fn leer(&self, r: &str) -> Resultado<Vec<u8>> { self.0.leer(r) }
+        fn escribir(&mut self, r: &str, d: &[u8], m: u32) -> Resultado<()> { self.0.escribir(r, d, m) }
+        fn existe(&self, r: &str) -> bool { self.0.existe(r) }
+        fn listar(&self, r: &str) -> Resultado<Vec<Entrada>> { self.0.listar(r) }
+        fn metadatos(&self, r: &str) -> Resultado<Entrada> { self.0.metadatos(r) }
+        fn crear_directorio(&mut self, r: &str) -> Resultado<()> { self.0.crear_directorio(r) }
+        fn borrar(&mut self, r: &str) -> Resultado<()> { self.0.borrar(r) }
+    }
+    impl Procesos for Cwd {
+        fn ejecutar(&self, o: &Orden) -> Resultado<Salida> {
+            self.1.borrow_mut().push(format!("{} @ {}", o.argv.join(" "), o.cwd));
+            Ok(Salida { codigo: Some(0), stdout: b"test result: ok. 1 passed".to_vec(), stderr: vec![], motivo: None })
+        }
+    }
+    let mut e = Cwd(repo().con("/w/crates/b/src/lib.rs", "x\n"), Default::default());
+    let sh = |e: &mut Cwd, c: &str| { let r = ejecutar(e, &Politica::nueva(R), "bash", &json!({"command": c})); (r.texto, r.error) };
+    let (t, err) = sh(&mut e, "cd crates/b && cargo test --features std");
+    assert!(!err && t.contains("dentro de crates/b"), "{t}");
+    assert_eq!(e.1.borrow().last().unwrap(), "cargo test --features std @ /w/crates/b");
+    let (t, err) = sh(&mut e, "cd ../.. && cargo test");
+    assert!(err && t.contains("sale del checkout"), "{t}");
+    let (t, err) = sh(&mut e, "cd crates/zzz && cargo test");
+    assert!(err, "{t}");
+}
+
+#[test]
+fn una_conversacion_larga_no_pasa_del_tope_de_mensajes_del_servidor() {
+    let mut e = repo();
+    let mut guion: Vec<Value> = (0..45).map(|i| llamada("read", json!({"filePath": "src/lib.rs", "offset": i + 1}))).collect();
+    guion.push(json!({"role": "assistant", "content": "listo"}));
+    let mut cfg = cfg_base();
+    cfg.repetidas_max = 0;
+    cfg.repetidas_ok_max = 0;
+    cfg.max_turnos = 60;
+    let mut m = Guion(guion, vec![]);
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg, "tarea", &mut |_, _| {});
+    assert_eq!(inf.fin, Fin::Terminado, "{:?}", inf.error);
+    for p in &m.1 {
+        let v: Value = serde_json::from_str(p).unwrap();
+        assert!(v["messages"].as_array().unwrap().len() <= 60, "{} mensajes", v["messages"].as_array().unwrap().len());
+    }
+    let ult: Value = serde_json::from_str(m.1.last().unwrap()).unwrap();
+    assert!(ult["messages"][1]["content"].as_str().unwrap().contains("Historial de lo que ya hiciste") && ult["messages"][1]["content"].as_str().unwrap().contains("- read src/lib.rs desde"));
+    // Ningún resultado queda sin su llamada.
+    let ms = ult["messages"].as_array().unwrap();
+    for (i, x) in ms.iter().enumerate() {
+        if x["role"] == "tool" {
+            let mut j = i;
+            while ms[j]["role"] == "tool" { j -= 1; }
+            assert_eq!(ms[j]["role"], "assistant");
+        }
+    }
+}
+
+#[test]
+fn una_edicion_que_no_cambia_nada_es_un_error_y_no_un_hecho() {
+    let mut e = repo();
+    let antes = contenido(&mut e, "/w/src/lib.rs");
+    let (t, err) = llama(&mut e, "reemplazar_texto", json!({"filePath": "src/lib.rs", "buscar": "hit();", "nuevo": "hit();"}));
+    assert!(err && t.contains("no cambia nada"), "{t}");
+    let (t, err) = llama(&mut e, "reemplazar_lineas", json!({"filePath": "src/lib.rs", "desde": 3, "hasta": 3, "nuevo": "        hit();"}));
+    assert!(err && t.contains("no cambia nada"), "{t}");
+    assert_eq!(contenido(&mut e, "/w/src/lib.rs"), antes);
+}
+
+#[test]
+fn una_linea_lejos_de_la_unica_aparicion_no_edita_otra_linea_en_silencio() {
+    let mut cuerpo = String::from("let a = 1;\n");
+    for i in 0..30 {
+        cuerpo.push_str(&format!("let x{i} = {i};\n"));
+    }
+    cuerpo.push_str("let b = 2;\n");
+    let mut e = Mem::default().con("/w/src/z.rs", &cuerpo);
+    let (t, err) = llama(&mut e, "reemplazar_texto", json!({"filePath": "src/z.rs", "buscar": "let a = 1;", "nuevo": "let a = 9;", "linea": 32}));
+    assert!(err && t.contains("sólo aparece en la línea 1") && t.contains("No he cambiado nada"), "{t}");
+    assert_eq!(contenido(&mut e, "/w/src/z.rs"), cuerpo);
+    // Una `linea` aproximada (desfase pequeño) sigue valiendo.
+    let (t, err) = llama(&mut e, "reemplazar_texto", json!({"filePath": "src/z.rs", "buscar": "let a = 1;", "nuevo": "let a = 9;", "linea": 4}));
+    assert!(!err, "{t}");
+}
+
+#[test]
+fn anadir_tras_una_linea_dos_veces_no_duplica_lo_anadido() {
+    let mut e = Mem::default().con("/w/src/g.rs", "fn f(d: &[u8]) {\n    let a = d[0];\n    let b = d[1];\n}\n");
+    let args = json!({"filePath": "src/g.rs", "buscar": "let a = d[0];", "nuevo": "let a = d[0];\nif d.len() < 2 {\n    return;\n}"});
+    let (t, err) = llama(&mut e, "reemplazar_texto", args.clone());
+    assert!(!err, "{t}");
+    let una_vez = contenido(&mut e, "/w/src/g.rs");
+    let (t, err) = llama(&mut e, "reemplazar_texto", args);
+    assert!(err && t.contains("YA está aplicado") && t.contains("DUPLICARÍA"), "{t}");
+    assert_eq!(contenido(&mut e, "/w/src/g.rs"), una_vez);
+    // Lo mismo para añadir ANTES de la línea.
+    let args = json!({"filePath": "src/g.rs", "buscar": "let b = d[1];", "nuevo": "let zeta_valor = 0usize;\nlet b = d[1];"});
+    let (_, err) = llama(&mut e, "reemplazar_texto", args.clone());
+    assert!(!err);
+    let (t, err) = llama(&mut e, "reemplazar_texto", args);
+    assert!(err && t.contains("YA está aplicado"), "{t}");
+}
+
+#[test]
+fn dos_llamadas_que_fallan_alternandose_tambien_se_bloquean_y_cierran_el_intento() {
+    let mut e = repo();
+    let a = json!({"filePath": "src/lib.rs", "buscar": "no existe uno", "nuevo": "x"});
+    let b = json!({"filePath": "src/lib.rs", "buscar": "no existe dos", "nuevo": "y"});
+    let mut guion: Vec<Value> = Vec::new();
+    for _ in 0..30 {
+        guion.push(llamada("reemplazar_texto", a.clone()));
+        guion.push(llamada("reemplazar_texto", b.clone()));
+    }
+    guion.push(json!({"role": "assistant", "content": "listo"}));
+    let mut cfg = cfg_base();
+    cfg.max_turnos = 80;
+    let mut m = Guion(guion, vec![]);
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg, "t", &mut |_, _| {});
+    assert_eq!(inf.fin, Fin::Terminado, "debe cerrarse por atasco, no agotar los turnos");
+    assert!(inf.bloqueadas >= 8 && inf.repetidas > 0, "{} bloqueadas", inf.bloqueadas);
+    assert!(inf.turnos < 30, "{} turnos", inf.turnos);
 }
