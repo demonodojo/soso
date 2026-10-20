@@ -419,6 +419,120 @@ Referencia: Gemma con el agente v2 sobre este banco, un intento: 2/10 (campaña 
 
 **Operativa aprendida:** el 30B sólo es utilizable con ≥ ~14 GB de RAM libres para la caché de páginas; con el escritorio cargado cae a ~1 GB/s de lectura, y a las 11:40 del 2026-10-16 el OOM killer mató Cursor mientras corría. El vigilante de la campaña ahora para el servidor si baja de 1,5 GB disponibles.
 
+## Campañas 22–29 — «pruebas propias», interfaz de herramientas y tope de mensajes (banco R31–R40, 2026-10-17/18)
+
+**Qué se probó.** Gemma 4 12B por soso (GPU del host), el mismo banco R31–R40 (`campaign-12.json`: 60 herramientas por intento y, aunque se pidieran 60, **40 turnos efectivos**: ver el defecto del arnés más abajo), una sola ronda salvo la 29. Dos palancas: (1) un prompt que obliga a **escribir primero pruebas propias** por cada caso límite del enunciado (`SISTEMA_AGENTE=pruebas`) y (2) **arreglos de la interfaz de herramientas** (agente v5–v11), hallados mirando las conversaciones de las tareas que fallaban.
+
+| campaña | agente / prompt | resultado | validez |
+|---|---|---|---|
+| 22 | v4, pruebas propias, 30 herramientas, 3 rondas | ≈0, presupuesto agotado, se paró | válida pero inútil: 30 herramientas no bastan para escribir pruebas y arreglar |
+| 23–26 | v4/v7, 60 herramientas | — | **inválidas**: el servidor valida `MAX_MENSAJES` = 64 y devolvía 400 («messages: 71 supera el máximo de 64») en 5 de 10 tareas |
+| 27 | v10, pruebas propias | **1/10** (R40) | válida: 3 `LimitePasos` (R31, R32, R38), 2 «no cambió nada» (R35, R36), 4 rechazadas |
+| 28 | v10, prompt estándar | **3/10** (R32, R36, R40) | válida: 0 errores de entorno ni `LimitePasos` |
+| 29 | v11, prompt estándar, 3 rondas (T=0,7 desde la 2.ª) | **3/10** a la primera (R32, R36, R40) y **3/10** con rondas | válida: R35 agota los turnos en las rondas 2 y 3 (lecturas grandes y lentas) |
+
+Evidencia ligera en [`resultados-campanas/campana-27-*` y `campana-28-*`](resultados-campanas/README.md). Las carpetas completas de las tandas descartadas siguen en local con sufijo (`-tope-64-mensajes`, `-sin-historial`, `-edicion-nula`, `-alternancia`, `-bucles`, `-parcial`).
+
+**Defectos del agente y de las herramientas que falseaban las campañas** (todos con test; ninguno era del modelo):
+- **Tope de 64 mensajes del servidor.** Con 60 herramientas la conversación pasaba de 64. `Config::mensajes_max = 60` pliega los intercambios más antiguos. Plegar sin más hacía que el modelo olvidara sus ediciones y las repitiera hasta agotar los turnos (campaña 27, primer intento), así que cada llamada plegada deja **una línea de historial** en la tarea.
+- **Ediciones sin efecto que devolvían «Hecho»** (27 veces la misma línea en R31): ahora son error. Igual `buscar` + líneas añadidas que ya están (R31 de la campaña 28 duplicó el mismo guardia ~30 veces), y una `linea` lejos de la única aparición de `buscar`, que editaba otra línea en silencio.
+- **Guarda de repetición ciega a los fallos alternados** (A, B, A, B…): agotaba los turnos (40 efectivos). Ahora cuenta los fallos por llamada desde la última edición correcta; con 8 llamadas bloqueadas el intento se cierra y pasa al validador.
+- **Turnos recortados a 40 en silencio (dos defectos, binarios v12 y v18).** Primero: el modo `tarea` **no leía `--max-turnos`** (sólo lo leía el subcomando `agente`), así que todas las campañas hasta el binario v17 corrieron con los 40 turnos por defecto aunque se pidieran 60, 80, 120 o 150 (el registro de R31 dice `"pasos": 40` con `LimitePasos`); se vio al lanzar el equipo con 120. Segundo: `ejecutar_intento` construía `Limites` con `max_pasos` = 40 por defecto, y `ejecutar_agente` hace `max_turnos = min(--max-turnos, 40)`. Todas las campañas con `MAX_TURNOS=60` o 150 corrieron en realidad con 40 turnos: por eso los intentos de modelos que piensan acababan en `LimitePasos` con 38–39 herramientas (los turnos se van en respuestas vacías y reintentos de formato, no en llamadas). Arreglado en `runner.rs`: `max_pasos = max(--max-turnos, 40)`. Las comparaciones entre las campañas 22–30 siguen valiendo (todas con 40), pero los `LimitePasos` del LFM no prueban que no resuelva esas tareas.
+- **`grep` v2** (espacios, mayúsculas, `.*` y `|`, sugerencias de nombres, definiciones primero, resumen por archivo), **`reemplazar_lineas`** (sustituir un rango sin copiar texto), sangría doble y atributo duplicado en `reemplazar_texto`, aviso de **`cargo test` con 0 pruebas** (el 15 % de los `cargo test` salía «exit 0» sin ejecutar nada), más alias de filtro de `cargo test` y emulación de `find`/`ls`/`cat`/`grep` y `cd DIR && orden` en `bash`.
+
+**Lo que se ve.**
+- **No se puede afirmar que suba el pass@1.** En este banco, una ronda: agente v2 (campaña 9) 2/10; v3 (campaña 12) 1, 2 y 3 de 10; v10 (campaña 28) 3/10. Está dentro del ruido de ±1–2 tareas ya medido. Lo que sí cambia es que **desaparecen los resultados falseados** por el agente: sin ello, las cifras anteriores podían estar subestimadas, y no sé cuánto.
+- **Las rondas con T=0,7 no añadieron nada en la campaña 29** (3/10 a la primera y 3/10 con tres rondas), cuando en la campaña 12 sumaban entre +1 y +4. Con el agente corregido, los fallos que quedan son los de las tareas de casos límite (R31, R33, R34, R37, R38, R39 rechazadas en las tres rondas): muestrear más no los resuelve. La ganancia por reintentos medida antes puede haber venido en parte de arreglar intentos que fallaban por defectos del agente.
+- **El prompt de «pruebas propias» empeora a Gemma** (1/10 frente a 3/10 con el mismo binario; ya casi 0 en la 22). La hipótesis de la ficha T29 («que el modelo trabaje la especificación») no se cumple con este modelo: escribe pruebas que no compilan y se queda iterando sobre ellas.
+- **Las tareas atascadas lo siguen estando** (R31, R33, R34, R37, R38, R39 con tres familias de modelos): los fallos son los casos límite de la prueba reservada.
+- **Un intento que agota los turnos cuenta como error y no se valida,** aunque deje un cambio correcto en disco. Es decisión de protocolo, no se ha cambiado.
+
+**Avisos.** El banco R31–R40 **ya no es ciego**: las correcciones salen de leer las conversaciones de R31, R32, R34 y R38. Binarios: v10 (campaña 28), v11 (umbral de 8 bloqueadas; sólo probado con tests y en la campaña 29). Las campañas 27 y 28 se midieron con el v10, antes del cambio de umbral.
+
+## Campañas 30–32 — LFM2.5-24B-A2B (Liquid AI) por llama.cpp (banco R31–R40, 2026-10-18)
+
+**Qué se probó.** Un modelo nuevo: **LFM2.5-24B-A2B**, MoE de 24 B con ≈2,3–2,45 B activos y 40 capas híbridas (30 de convolución corta, 10 de atención; 64 expertos, top-4), que **siempre razona** antes de responder. Cuantización Q4_0 QAD (13,6 GB) servida por **llama.cpp** (commit `5aeac37`, compilado con CUDA para sm_120 en un contenedor, binarios y librerías en `target/lfm-work/out/bin/`), porque soso no tiene la arquitectura y portarla era el paso caro. Mismo banco, agente v11/v12 y prompt estándar que la campaña 28.
+
+| campaña | cambio | resultado |
+|---|---|---|
+| 30 | v11, una ronda, `MAX_TOKENS=8192` | **2/10** (R36, R40); 3 `LimitePasos` (R35, R37, R39) |
+| 31 | repetición de R35, R37 y R39 con `--max-turnos 150` | sin efecto: el arnés lo recortaba a 40 (ver el defecto en «Campañas 22–29») |
+| 32 | repetición de las tres con `--max-turnos 120` (que en realidad eran 40) | R37 y R39 **rechazadas**; R35 vuelve a agotar los turnos: la diferencia con la 30 es variación entre ejecuciones, no más turnos |
+
+**Lo que se ve.**
+- **Más rápido, no mejor.** Prefill ≈1500 tok/s y decodificación ≈65–80 tok/s frente a ≈350 y ≈31 de Gemma por soso; cada intento tarda 5–15 minutos. Aun así **no resuelve más tareas** (2/10 frente a 3/10 de Gemma en las campañas 28 y 29). Es lo mismo que con Qwen3-Coder-30B: un modelo mayor o más rápido no mueve este banco.
+- **El pensamiento se come los turnos.** Algunas respuestas llegan al tope de 8192 tokens razonando y salen vacías, y el agente las cuenta como turno: R35 agota los 40 turnos con 40 herramientas. Las campañas 30 y 32 no probaron «más turnos» (el flag no se leía): R37 y R39 pasan de `LimitePasos` a rechazadas sólo por variación entre ejecuciones. Habría que repetir con turnos reales.
+- **Fallos del modelo, no de las herramientas.** En R31 escribió una corrección, vio fallar un test y reemplazó el rango entero por el código original: el candidato quedó sin cambios. Las llamadas a herramientas salen bien formadas.
+
+**Conclusión.** No se justifica portar el LFM a soso por ahora: cabe esperar el mismo 2–3/10 con tres familias de modelos en este banco. Lo que podría cambiar el resultado es un banco nuevo o un uso distinto del razonamiento (presupuesto de pensamiento, o no contarlo como turno), no otro modelo.
+
+**Avisos.** El banco R31–R40 ya no es ciego. Una ronda por tarea: el ruido de ±1–2 tareas impide distinguir 2 de 3. El LFM se sirvió por llama.cpp, no por soso.
+
+## Campañas 33–35 — que el agente revise lo que ha hecho (banco R31–R40, 2026-10-18/19)
+
+**Qué se probó.** Dar al agente una forma de **evaluar y revisar su propio trabajo** antes de terminar, con Gemma 4 12B por soso y una ronda. Se añadió la herramienta `revisar` (diff de lo editado respecto al estado inicial de cada archivo, más la sección «Qué se pide» de `TASK.md`) y dos modos de imponerla (`agente/revision.rs`):
+
+| campaña | modo | resultado |
+|---|---|---|
+| 33 | `REVISAR_FINAL=1`: el agente ve su diff y los requisitos y se revisa a sí mismo (40 turnos) | **1/10** (R40) |
+| 34 | `REVISOR=1`, 40 turnos | descartada: R31 y R32 agotan los 40 turnos revisando y corrigiendo |
+| 35 | `REVISOR=1`, 80 turnos pedidos (**40 efectivos**): una petición aparte al mismo modelo, sin la conversación y sin herramientas, lista hasta cinco fallos con una entrada concreta y el agente la recibe | **2/10** (R36, R40); R31 y R32 `LimitePasos` |
+
+Referencia sin revisión: 3/10 en las campañas 28 y 29 (misma configuración, 40 turnos).
+
+**Lo que se ve.**
+- **Autorrevisión = confirmación.** El agente contesta «he revisado y todo está cubierto» sin cambiar nada (R36 y R40 en la 33); R36 falla aun así la prueba reservada. El sesgo viene de revisar dentro de la misma conversación.
+- **El revisor independiente sí encuentra huecos plausibles** (por ejemplo, un contador de modelos mal validado contra los bytes disponibles), **pero Gemma 12B los parchea mal**: sus ediciones rompen la compilación y gasta decenas de turnos arreglando su propio arreglo. Tareas que sin revisor se rechazaban en ~100 s (R31, R32) pasan a agotar los turnos.
+- **No sube el pass@1:** 1/10 y 2/10 frente a 3/10, dentro del ruido de ±1–2 pero sin ninguna señal a favor. Con este modelo, revisar más no equivale a acertar más.
+
+**Defecto de herramienta hallado por el camino** (arreglado, con test): cuando `reemplazar_lineas` rechazaba un rango por llaves desequilibradas, el mensaje no decía dónde acababa el bloque, y el modelo repetía la misma llamada ~13 veces. Ahora añade «el bloque que empieza en la línea N termina en la M».
+
+**Conclusión.** La capacidad de corregir un parche complejo es el límite, no la información: ni ver su diff ni un revisor aparte la suplen. Sería más prometedor un revisor más fuerte que el agente (otro modelo) o una evaluación objetiva (pruebas que el agente pueda ejecutar), y ambas exigen un banco nuevo para medirse. Opciones activables: `--revisar-final` y `--revisor` (por defecto apagadas).
+
+**Avisos.** Misma prueba de una ronda sobre el banco R31–R40 (ya no ciego). El revisor es el mismo Gemma 12B, no un modelo distinto. La campaña 34 con 40 turnos se conserva en local con sufijo `-40turnos-parcial`.
+
+## Campañas 36–38 — equipo planificador + programador + revisor (banco R31–R40, 2026-10-19)
+
+**Qué se probó.** El agente de siempre como **programador**, precedido por un **planificador** de sólo lectura (`read`, `grep`, `glob`) que entrega un plan, y seguido por un **revisor independiente** (petición aparte con `TASK.md` y el diff acumulado). Si la última comprobación del programador falla o el revisor señala fallos, el planificador replantea la corrección con el diff y los problemas, y el programador vuelve a empezar con una conversación nueva; hasta `--ciclos` (3) o hasta que todo pase (`agente/orquestador.rs`, `--multiagente`, `MULTIAGENTE=1`). Gemma 4 12B por soso, `campaign-13.json` (120 herramientas y 2 h por intento en total), una ronda.
+
+| campaña | binario | qué pasó |
+|---|---|---|
+| 36 | v16 | R31 `LimitePasos` por una **oscilación**: el modelo alternaba la misma línea entre dos versiones (cada edición «Hecho»); se añadió un detector (huella de contenido por archivo, aviso y cierre a la tercera) |
+| 37 | v17 | R31 `LimitePasos` con `"pasos": 40` aunque se pedían 120: **el modo `tarea` no leía `--max-turnos`** |
+| 38 | v18 | con 120 turnos reales: R31 71 min, 114 herramientas, `LimitePasos`; R32 5 min «el candidato no cambió nada». Se paró tras dos tareas |
+
+**Lo que se ve.**
+- **El planificador no planifica bien con este modelo.** Su «plan» de R32 es un monólogo con «*Corrección:*» y «*Estrategia:*» a mitad de texto; el programador lo recibe, relee el mismo tramo de `fs.rs` y las guardas cierran el intento sin cambios. En R31, el planificador del ciclo siguiente planifica sobre un `rel_path` «dummy» que había metido el propio programador antes.
+- **Coste:** 71 min por una tarea difícil; las diez habrían sido más de 10 h.
+- **No hay cifra de pass@1** (dos tareas). Es una señal mala, no un veredicto.
+
+**Defecto del arnés que invalida lecturas anteriores.** Hasta el binario v17 el modo `tarea` ignoraba `--max-turnos`: todas las campañas corrieron con los 40 turnos por defecto aunque se pidieran 60, 80, 120 o 150 (ver el bullet «Turnos recortados» en «Campañas 22–29»). Las comparaciones entre campañas siguen valiendo (todas con 40), pero «con más turnos» **nunca se probó**: las campañas 32 (LFM) y 35 (revisor, «80 turnos») deben leerse con 40.
+
+**Pendiente con turnos reales:** repetir el revisor solo (`--revisor`, 80 turnos) y las tres tareas del LFM (R35, R37, R39). Un planificador más capaz que el programador (otro modelo) es lo que haría falta para que el equipo tenga sentido.
+
+## Campañas 39–45 — herramientas de edición, puertas antes de terminar y análisis de rechazos (banco R31–R40, 2026-10-19)
+
+**Qué cambió** (Gemma 4 12B, 40 turnos, 1 ronda; binarios v19–v31):
+- Comprobación de **sintaxis** (rustfmt por stdin) en cada edición, rechazo de `mod pruebas_agente` duplicado, de cambios casi solo comentarios y de monólogos de dudas en comentarios, restauración de los espacios originales.
+- Puertas al terminar: pruebas propias obligatorias (y ejecutadas), `comprobar_al_terminar` (órdenes de «Qué tiene que pasar»), alertas de pánico con **Clippy** (`indexing_slicing`, `arithmetic_side_effects`) sobre la función tocada, `validar_al_agotar`, **poda** de pruebas propias en rojo o que no compilan, redirección ante lecturas en bucle.
+- Protocolo: tras cada campaña se analiza cada rechazo con `tests/self-improvement/campana/analizar.py` (verifica la copia contra las pruebas reservadas; actualiza mtime y usa `target/analisis-target`).
+
+| campaña | pass@1 |
+|---|---|
+| 39 / 40 / 41 / 42 / 43 | 1 / 1 / 0 / 1 / 1 |
+| 45 (v31) | 1 (R40) |
+| 46 (v32) | 2 (R39, R40) |
+
+**Campaña 45.** Nueve rechazos: siete por requisito o caso límite sin cubrir (R31, R33, R34, R36, R37, R38, R39), R32 por una función a medio escribir tras un monólogo de dudas dentro del código y bucles de `read` sobre un símbolo inexistente, y R35 por una interfaz (`TensorInfo::iter`) que la prueba reservada espera. R39: Clippy avisó una sola vez, el agente arregló la multiplicación y dejó `off + BLOCK_SIZE` sin proteger.
+
+**Recuperación tras caída.** Con la inyección a los 75 s el agente ya había editado y la copia adoptada (medio trabajo) se rechazaba; el «segundo intento» no se abre porque la ejecución queda terminal. Se quitó ese bloque de `correr.sh` y la inyección pasa a los 30 s (`campaign-14.json`): el intento rearranca de cero y R33 recuperó (`recuperada: true`, intento 1 completo).
+
+**Cambios tras el análisis (v32):** el aviso de Clippy se repite hasta 3 veces mientras queden líneas marcadas, e indica el patrón `checked_add` para `off..off + N` y que se corrijan todas las líneas; rechazo de ≥4 comentarios de duda/monólogo.
+
+**Campaña 46 (v32): 2/10.** R39 pasa (el aviso de Clippy repetido le hizo cubrir `off + BLOCK_SIZE`). R32 acabó otra vez con **solo un módulo `pruebas_agente` vacío** (comentarios) y el código sin tocar: la edición «contaba» como edición y el atasco se cerró en vez de redirigirse. R37 mezcla «sin `:`» con «`:` y puerto vacío» (debe ser error). R36 deja pasar las versiones 7+ del manifiesto. Los demás son requisitos omitidos. **Cambio (v33):** un atasco con ediciones que son solo comentarios o un módulo de pruebas vacío se redirige igual que un atasco sin ediciones (`sin_codigo_nuevo`).
+
+**Lectura honesta.** Entre 0 y 3 de 10 en todas, dentro del ruido (±1–2). Las puertas evitan fallos de forma, pero lo que se rechaza ya es lógica o requisitos omitidos: el límite es el modelo.
+
 ---
 
 **Nota sobre la evidencia de las campañas 6–13:** las carpetas `tests/self-improvement/campana/ejecucion-9` a `ejecucion-17-*` están en el `.gitignore` (sólo locales). Sus resúmenes, registros por tarea, comprobaciones de la base final e incidencias están versionados en [`resultados-campanas/`](resultados-campanas/README.md).

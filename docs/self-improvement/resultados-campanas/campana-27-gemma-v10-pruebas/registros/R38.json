@@ -1,0 +1,15 @@
+{
+ "id": "R38",
+ "ronda": 1,
+ "resultado": "error",
+ "intentos": 1,
+ "segundos": 1240,
+ "nota": "error: entorno: el intento no termin\u00f3: LimitePasos",
+ "fallo": "protocolo",
+ "herramientas": 36,
+ "tokens": 552636,
+ "inyeccion": {
+  "que": "agente matado (kill -9) y coordinador reiniciado",
+  "recuperada": false
+ }
+}

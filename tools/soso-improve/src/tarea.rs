@@ -251,12 +251,35 @@ fn continuar(op: &Opciones) -> Result<i32, Error> {
     std::fs::create_dir_all(&trabajo).map_err(|e| Error::entorno(format!("no pude crear {trabajo}: {e}")))?;
     let puerto: u16 = op.uno("puerto").and_then(|p| p.parse().ok()).unwrap_or(17299);
     // `--sistema pruebas`: el agente debe escribir pruebas propias para cada caso límite del enunciado (campaña 14).
-    let con_pruebas = op.uno("sistema") == Some("pruebas");
+    // Por defecto el programador escribe SIEMPRE pruebas propias (y se le avisa si termina sin ellas o sin haberlas ejecutado en verde);
+    // `--sistema estandar` lo desactiva (las campañas 28–40 sin pruebas propias).
+    let con_pruebas = op.uno("sistema") != Some("estandar");
     let mut cfg = Config::nueva(op.uno("modelo").filter(|s| !s.is_empty()).unwrap_or("soso-coder"), if con_pruebas { SISTEMA_PRUEBAS } else { SISTEMA });
     cfg.exigir_pruebas = con_pruebas;
+    // `--revisar-final`: antes de dar el trabajo por terminado se le enseña su diff y los requisitos de TASK.md (una vez).
+    cfg.revision = op.bandera("revisar-final") || op.bandera("revisor");
+    cfg.revisor = op.bandera("revisor");
+    // `--multiagente [--ciclos N]`: planificador de sólo lectura + programador + revisor independiente en bucle (agente/orquestador.rs).
+    cfg.multiagente = op.bandera("multiagente");
+    // Un intento que agota turnos o herramientas habiendo editado se valida igualmente (`--sin-validar-al-agotar` lo desactiva).
+    cfg.validar_al_agotar = !op.bandera("sin-validar-al-agotar");
+    // Al cerrar, las pruebas propias que sigan en rojo se eliminan (`--sin-podar` lo desactiva).
+    cfg.podar_pruebas_rojas = !op.bandera("sin-podar");
+    // Antes de dar el trabajo por terminado, el arnés ejecuta las comprobaciones de TASK.md (`--sin-comprobar-final` lo desactiva).
+    cfg.comprobar_al_terminar = !op.bandera("sin-comprobar-final");
+    // Si la tarea habla de pánico o desbordamiento, Clippy marca antes de terminar las líneas del agente que pueden entrar en pánico o desbordar.
+    cfg.alertas_panico = !op.bandera("sin-alertas-panico");
+    if let Some(n) = op.uno("ciclos").and_then(|v| v.parse().ok()) {
+        cfg.ciclos_max = n;
+    }
     // El tokenizador manda: con Mellum son ~1,5 caracteres por token y el recorte de contexto necesita saberlo.
     if let Some(c) = std::env::var("SOSO_AGENTE_CHARS_POR_TOKEN").ok().and_then(|v| v.parse::<f32>().ok()).filter(|v| *v >= 0.5) {
         cfg.chars_por_token = c;
+    }
+    // `--max-turnos`: el modo `tarea` NO lo leía (sólo lo leía el subcomando `agente`), así que todas las campañas corrieron con los 40 por defecto
+    // aunque se pidieran 60, 80 o 150.
+    if let Some(n) = op.uno("max-turnos").and_then(|v| v.parse().ok()) {
+        cfg.max_turnos = n;
     }
     if let Some(n) = op.uno("max-tokens").and_then(|v| v.parse().ok()) {
         cfg.max_tokens = n;
@@ -266,6 +289,10 @@ fn continuar(op: &Opciones) -> Result<i32, Error> {
         cfg.temperatura = t;
     }
     let mut pol = PolAgente::nueva(&copia);
+    // Sintaxis comprobada con rustfmt ANTES de escribir cada edición de un `.rs` (si rustfmt no existe, se ignora). `SOSO_SIN_SINTAXIS=1` lo apaga.
+    if std::env::var("SOSO_SIN_SINTAXIS").ok().as_deref() != Some("1") {
+        pol.comprobar_sintaxis = Some(soso_improve_core::agente::herramientas::orden_sintaxis_rustfmt());
+    }
     if let Some(h) = op.uno("cargo-home").filter(|s| !s.is_empty()) {
         pol.entorno.push(("CARGO_HOME".into(), h.to_string()));
     }

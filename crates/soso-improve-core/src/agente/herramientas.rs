@@ -34,6 +34,10 @@ pub struct Politica {
     pub entorno: Vec<(String, String)>,
     /// Build remoto (Forja): si está, el agente dispone de la herramienta `forja`.
     pub forja: Option<Forja>,
+    /// Orden que comprueba la SINTAXIS de un archivo Rust por la entrada estándar (p. ej. `rustfmt --edition 2021 --check`). Se aplica al texto
+    /// que quedaría ANTES de escribirlo: si da un `error:`, la edición se rechaza con el mensaje del compilador. `None` lo desactiva; si el
+    /// programa no existe en el entorno, se ignora en silencio.
+    pub comprobar_sintaxis: Option<Vec<String>>,
 }
 
 /// Cómo se llama a Forja. El **token no pasa por el modelo**: lo pone el adaptador al lanzar la orden.
@@ -55,6 +59,7 @@ impl Politica {
                 &["cargo", "check"],
                 &["cargo", "build"],
                 &["cargo", "fmt"],
+                &["cargo", "clippy"],
                 &["git", "status"],
                 &["git", "diff"],
                 &["git", "log"],
@@ -68,6 +73,7 @@ impl Politica {
             resultados_max: 100,
             entorno: Vec::new(),
             forja: None,
+            comprobar_sintaxis: None,
         }
     }
 }
@@ -98,7 +104,9 @@ pub fn definiciones(pol: &Politica) -> Value {
             "parameters": {"type": "object", "properties": {
                 "filePath": {"type": "string", "description": "Ruta del archivo o directorio, relativa a la raíz del checkout"},
                 "offset": {"type": "integer", "description": "Primera línea a leer (1 = la primera)"},
-                "limit": {"type": "integer", "description": "Número de líneas a leer"}},
+                "limit": {"type": "integer", "description": "Número de líneas a leer"},
+                "simbolo": {"type": "string", "description": "En vez de offset/limit: nombre de una función, tipo o módulo de un archivo Rust; devuelve su código entero con números de línea"},
+                "esquema": {"type": "boolean", "description": "Lista las funciones, tipos y módulos del archivo con su rango de líneas (útil antes de editar)"}},
                 "required": ["filePath"]}}},
         {"type": "function", "function": {
             "name": "grep",
@@ -125,8 +133,18 @@ pub fn definiciones(pol: &Politica) -> Value {
                 "buscar": {"type": "string", "description": "Fragmento a sustituir (sin importar los espacios)"},
                 "nuevo": {"type": "string", "description": "Texto que lo sustituye"},
                 "linea": {"type": "integer", "description": "Si `buscar` aparece varias veces: número de línea de la aparición que quieres cambiar"},
+                "confirmar_borrado": {"type": "boolean", "description": "Sólo si la herramienta avisa de que la edición borraría código que `nuevo` no conserva y de verdad quieres borrarlo"},
                 "ediciones": {"type": "array", "description": "Varios cambios en el mismo archivo en UNA llamada (todo o nada); en vez de buscar/nuevo", "items": {"type": "object", "properties": {"buscar": {"type": "string"}, "nuevo": {"type": "string"}, "linea": {"type": "integer"}}, "required": ["buscar", "nuevo"]}}},
                 "required": ["filePath"]}}},
+        {"type": "function", "function": {
+            "name": "reemplazar_funcion",
+            "description": "Sustituye una función, tipo o módulo de un archivo Rust ENTERO por `nuevo`, identificándolo por su nombre: no hay que dar números de línea ni copiar el código antiguo. `nuevo` debe ser la definición completa (firma, cuerpo y su última llave). Es la forma más segura de reescribir una función; usa `read` con `esquema` para ver los nombres.",
+            "parameters": {"type": "object", "properties": {
+                "filePath": {"type": "string", "description": "Ruta del archivo, relativa a la raíz del checkout"},
+                "nombre": {"type": "string", "description": "Nombre de la función, tipo o módulo (p. ej. resolve)"},
+                "nuevo": {"type": "string", "description": "La definición completa que lo sustituye, con su sangría"},
+                "linea": {"type": "integer", "description": "Sólo si el nombre aparece varias veces: una línea dentro del que quieres cambiar"}},
+                "required": ["filePath", "nombre", "nuevo"]}}},
         {"type": "function", "function": {
             "name": "reemplazar_lineas",
             "description": "Sustituye un RANGO de líneas (desde..hasta, ambas incluidas, según los números de `read`) por `nuevo`. No hay que copiar el texto antiguo, así que no puede fallar por un fragmento mal copiado: úsala para reescribir una función o un bloque entero, o cuando `reemplazar_texto` no encuentra el fragmento. `nuevo` vacío borra esas líneas. Devuelve cómo queda el tramo con la numeración NUEVA (los números de debajo cambian si metes más o menos líneas).",
@@ -134,7 +152,8 @@ pub fn definiciones(pol: &Politica) -> Value {
                 "filePath": {"type": "string", "description": "Ruta del archivo, relativa a la raíz del checkout"},
                 "desde": {"type": "integer", "description": "Primera línea a sustituir"},
                 "hasta": {"type": "integer", "description": "Última línea a sustituir (incluida)"},
-                "nuevo": {"type": "string", "description": "Texto que ocupa su lugar, con su sangría y sus llaves completas"}},
+                "nuevo": {"type": "string", "description": "Texto que ocupa su lugar, con su sangría y sus llaves completas"},
+                "confirmar_borrado": {"type": "boolean", "description": "Sólo si la herramienta avisa de que la edición borraría código que `nuevo` no conserva y de verdad quieres borrarlo"}},
                 "required": ["filePath", "desde", "hasta", "nuevo"]}}},
         {"type": "function", "function": {
             "name": "insertar",
@@ -147,8 +166,12 @@ pub fn definiciones(pol: &Politica) -> Value {
                 "texto": {"type": "string", "description": "Texto a insertar, con su sangría"}},
                 "required": ["filePath", "texto"]}}},
         {"type": "function", "function": {
+            "name": "revisar",
+            "description": "Te enseña TUS cambios (el diff de cada archivo que has editado respecto a como estaba al empezar) junto con la lista de lo que pide TASK.md. Úsala antes de dar el trabajo por terminado para comprobar, punto por punto, que no se te ha olvidado ningún caso. No lleva argumentos.",
+            "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {
             "name": "bash",
-            "description": "Ejecuta UNA orden (sin shell: sin ; & > < $ ni comodines; se admite una sola tubería final `| head -N`, `| tail -N` o `| grep TEXTO`, y `2>&1`). Los argumentos de `cargo test` se reordenan solos: `--lib`/`--doc` antes de `--`, y el filtro de nombre va como `cargo test -p crate nombre`. Permitidas: cargo test, cargo check, cargo build, cargo fmt, git status, git diff, git log. Se admite el prefijo `cd DIR && orden` (dentro del checkout), y `find`, `ls`, `cat`, `grep` se resuelven con las herramientas glob/read/grep (mejor úsalas directamente).",
+            "description": "Ejecuta UNA orden (sin shell: sin ; & > < $ ni comodines; se admite una sola tubería final `| head -N`, `| tail -N` o `| grep TEXTO`, y `2>&1`). Los argumentos de `cargo test` se reordenan solos: `--lib`/`--doc` antes de `--`, y el filtro de nombre va como `cargo test -p crate nombre`. Permitidas: cargo test, cargo check, cargo build, cargo fmt, cargo clippy (con `-- -W clippy::indexing_slicing -W clippy::arithmetic_side_effects` marca los accesos y cuentas que pueden entrar en pánico o desbordar), git status, git diff, git log. Se admite el prefijo `cd DIR && orden` (dentro del checkout), y `find`, `ls`, `cat`, `grep` se resuelven con las herramientas glob/read/grep (mejor úsalas directamente).",
             "parameters": {"type": "object", "properties": {
                 "command": {"type": "string", "description": "La orden, p. ej. cargo test -p soso-http"}},
                 "required": ["command"]}}}
@@ -166,6 +189,311 @@ pub fn definiciones(pol: &Politica) -> Value {
     v
 }
 
+/// Las definiciones que puede usar un agente de sólo lectura (el planificador).
+pub fn solo_lectura(defs: Value) -> Value {
+    let v: Vec<Value> = defs.as_array().cloned().unwrap_or_default().into_iter().filter(|d| matches!(d.pointer("/function/name").and_then(|n| n.as_str()), Some("read" | "grep" | "glob"))).collect();
+    Value::Array(v)
+}
+
+/// Las órdenes `cargo …` de la sección «Qué tiene que pasar» de `TASK.md` (entre comillas invertidas).
+fn comandos_de_la_tarea<E: Entorno>(e: &mut E, pol: &Politica) -> Vec<String> {
+    let Ok(datos) = e.leer(&format!("{}/TASK.md", pol.raiz.trim_end_matches('/'))) else { return Vec::new() };
+    let texto = String::from_utf8_lossy(&datos);
+    let mut dentro = false;
+    let mut v: Vec<String> = Vec::new();
+    for l in texto.lines() {
+        if l.starts_with("## ") {
+            dentro = l.to_lowercase().contains("qué tiene que pasar") || l.to_lowercase().contains("que tiene que pasar");
+            continue;
+        }
+        if !dentro {
+            continue;
+        }
+        let mut resto = l;
+        while let Some(i) = resto.find('`') {
+            let Some(j) = resto[i + 1..].find('`') else { break };
+            let c = resto[i + 1..i + 1 + j].trim();
+            if c.starts_with("cargo ") && !v.iter().any(|x| x == c) {
+                v.push(c.to_string());
+            }
+            resto = &resto[i + 1 + j + 1..];
+        }
+    }
+    v
+}
+
+/// Ejecuta las comprobaciones de la tarea (las de `TASK.md`) y devuelve el informe de la primera que falle, o `None` si todas pasan o la
+/// tarea no declara ninguna.
+pub fn comprobar_tarea<E: Entorno>(e: &mut E, pol: &Politica) -> Option<String> {
+    for c in comandos_de_la_tarea(e, pol) {
+        let r = ejecutar(e, pol, "bash", &json!({"command": c}));
+        if r.error || !r.texto.contains("exit code: 0") {
+            // Una prueba PROPIA del agente que falla rompe también la comprobación de la tarea (campaña 41, R40: su `pruebas_agente::test_…` roja).
+            let aviso = if r.texto.contains("pruebas_agente::") {
+                "\n\n(Entre lo que falla hay una prueba tuya de `pruebas_agente`: o la corrijes, si el código está mal, o, si contradice el enunciado o no consigues que pase, la ELIMINAS: una prueba tuya en rojo hace fallar la comprobación entera.)"
+            } else {
+                ""
+            };
+            return Some(format!("$ {c}\n{}{aviso}", r.texto));
+        }
+    }
+    None
+}
+
+/// Texto de `TASK.md` (vacío si no existe).
+fn leer_task<E: Entorno>(e: &mut E, pol: &Politica) -> String {
+    e.leer(&format!("{}/TASK.md", pol.raiz.trim_end_matches('/'))).map(|d| String::from_utf8_lossy(&d).into_owned()).unwrap_or_default()
+}
+
+/// ¿Pide la tarea que no haya pánico o desbordamiento? Entonces vale la pena pasar los lints de Clippy que los detectan.
+fn tarea_pide_sin_panico(task: &str) -> bool {
+    let t = task.to_lowercase();
+    ["pánico", "panico", "panic", "desbord", "overflow", "sin entrar en pánico"].iter().any(|k| t.contains(k))
+}
+
+/// Orden de Clippy para la comprobación de la tarea: la primera `cargo test …` de «Qué tiene que pasar» convertida en `cargo clippy …` con los
+/// lints que no vienen activados por defecto y que marcan cada acceso o aritmética que puede entrar en pánico o desbordar.
+fn orden_clippy(cmd: &str) -> Option<String> {
+    let t: Vec<&str> = cmd.split_whitespace().collect();
+    if t.len() < 3 || t[0] != "cargo" || t[1] != "test" {
+        return None;
+    }
+    let mut v: Vec<String> = alloc::vec!["cargo".into(), "clippy".into(), "--message-format".into(), "short".into()];
+    let mut i = 2;
+    while i < t.len() {
+        match t[i] {
+            "-q" | "--quiet" | "--lib" | "--doc" | "--tests" | "--no-run" => {}
+            "-p" | "--package" | "--features" | "-F" => {
+                v.push(t[i].to_string());
+                if let Some(x) = t.get(i + 1) {
+                    v.push((*x).to_string());
+                }
+                i += 1;
+            }
+            "--" => break,
+            o if o.starts_with('-') => {}
+            _ => {}
+        }
+        i += 1;
+    }
+    v.extend(["--".to_string(), "-W".into(), "clippy::indexing_slicing".into(), "-W".into(), "clippy::arithmetic_side_effects".into()]);
+    Some(v.join(" "))
+}
+
+/// Avisos de Clippy (indexado y aritmética que pueden entrar en pánico o desbordar) que caen en líneas que el agente ha añadido o cambiado.
+/// `None` si la tarea no habla de pánico o desbordamiento, si no hay orden de comprobación o si no hay nada en sus líneas.
+pub fn alertas_de_panico<E: Entorno>(e: &mut E, pol: &Politica, anadidas: &alloc::collections::BTreeMap<String, alloc::collections::BTreeSet<usize>>) -> Option<String> {
+    let task = leer_task(e, pol);
+    if !tarea_pide_sin_panico(&task) || anadidas.is_empty() {
+        return None;
+    }
+    let cmd = comandos_de_la_tarea(e, pol).into_iter().next()?;
+    let orden = orden_clippy(&cmd)?;
+    let argv: Vec<String> = orden.split_whitespace().map(|s| s.to_string()).collect();
+    let o = Orden { argv, cwd: pol.raiz.clone(), stdin: Vec::new(), timeout_s: Some(pol.plazo_orden_s), entorno: pol.entorno.clone() };
+    let s = e.ejecutar(&o).ok()?;
+    s.codigo?;
+    // Un acceso sin comprobar suele estar en una línea que el agente NO tocó pero que está en la función que sí tocó (R39 de la campaña 43: arregló el
+    // producto `block * BLOCK_SIZE` y dejó sin comprobar la suma `off + BLOCK_SIZE`, dos líneas más abajo): los avisos valen para toda la función.
+    let mut ampliadas = anadidas.clone();
+    for (rel, set) in ampliadas.iter_mut() {
+        let Ok(datos) = e.leer(&format!("{}/{}", pol.raiz.trim_end_matches('/'), rel)) else { continue };
+        let texto = String::from_utf8_lossy(&datos).into_owned();
+        let lineas: Vec<&str> = texto.lines().collect();
+        let originales: alloc::collections::BTreeSet<usize> = set.clone();
+        for x in elementos(&lineas).iter().filter(|x| x.clase == "fn") {
+            if originales.iter().any(|l| x.ini <= *l && *l <= x.fin) {
+                set.extend(x.ini..=x.fin);
+            }
+        }
+    }
+    let mut avisos: Vec<String> = Vec::new();
+    for l in s.texto().lines() {
+        // formato corto: `ruta:linea:col: warning: mensaje`
+        let mut partes = l.splitn(4, ':');
+        let (Some(ruta), Some(n), Some(_col), Some(resto)) = (partes.next(), partes.next(), partes.next(), partes.next()) else { continue };
+        let Ok(n) = n.trim().parse::<usize>() else { continue };
+        // Sólo los dos lints pedidos (no, por ejemplo, `result_unit_err` de una firma que el agente reformateó).
+        if !resto.contains("warning") || !(resto.contains("may panic") || resto.contains("side-effects")) {
+            continue;
+        }
+        let ruta = ruta.trim_start_matches("./");
+        let Some((rel, lineas)) = ampliadas.iter().find(|(r, _)| ruta.ends_with(r.as_str()) || r.ends_with(ruta)) else { continue };
+        if lineas.contains(&n) {
+            let msg = resto.trim().trim_start_matches("warning:").trim();
+            avisos.push(format!("  {rel}:{n}: {msg}"));
+        }
+    }
+    avisos.sort();
+    avisos.dedup();
+    if avisos.is_empty() {
+        return None;
+    }
+    let mas = if avisos.len() > 12 { format!("\n  … y {} más", avisos.len() - 12) } else { String::new() };
+    Some(format!("{}{mas}", avisos.iter().take(12).cloned().collect::<Vec<_>>().join("\n")))
+}
+
+/// Número de puntos («- …» sin sangría) de la sección «Qué se pide» de `TASK.md`.
+pub fn puntos_de_la_tarea<E: Entorno>(e: &mut E, pol: &Politica) -> usize {
+    let task = leer_task(e, pol);
+    let mut dentro = false;
+    let mut n = 0;
+    for l in task.lines() {
+        if l.starts_with("## ") {
+            dentro = l.to_lowercase().contains("qué se pide") || l.to_lowercase().contains("que se pide");
+            continue;
+        }
+        if dentro && l.starts_with("- ") {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// Un cambio que es casi todo comentarios no implementa nada (R32 de la campaña 39: un monólogo de `// Wait, …` en lugar del código).
+fn casi_solo_comentarios(rel: &str, nuevo: &str) -> Option<String> {
+    if !rel.ends_with(".rs") {
+        return None;
+    }
+    let utiles: Vec<&str> = nuevo.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let coment = utiles.iter().filter(|l| l.starts_with("//")).count();
+    if coment < 8 || coment * 2 <= utiles.len() {
+        // Un monólogo de dudas dentro del código (R32 de la campaña 45: «Espera, si el FS no tiene `parent`, ¿cómo…?») es pensar en voz alta, no un comentario.
+        let dudas = utiles.iter().filter(|l| l.starts_with("//") && (l.contains('?') || ["Espera", "Wait", "Hmm", "Releyendo", "Revisemos", "Quizás"].iter().any(|k| l.contains(k)))).count();
+        if dudas >= 4 {
+            return Some(format!(
+                "No he escrito el cambio: {dudas} comentarios son dudas o monólogo («Espera…», «¿cómo…?») y no código. Resuelve las dudas ANTES de escribir, leyendo con `read`/`grep` lo que te falte (p. ej. cómo se guarda el padre de un directorio), y escribe sólo el código final con a lo sumo un comentario breve."
+            ));
+        }
+        return None;
+    }
+    Some(format!(
+        "No he escrito el cambio: {coment} de las {} líneas de `nuevo` son comentarios y casi no hay código, así que no implementa nada. Piensa en tu cabeza (o decide primero qué hace falta leyendo el código con `read`) y escribe sólo el CÓDIGO, con a lo sumo un comentario breve.",
+        utiles.len()
+    ))
+}
+
+/// Ubicaciones (`ruta`, línea) de los ERRORES de compilación (no de los avisos) de una salida de `cargo`.
+fn errores_de_compilacion(texto: &str) -> Vec<(String, usize)> {
+    let mut v = Vec::new();
+    let mut en_error = false;
+    for l in texto.lines() {
+        let t = l.trim_start();
+        if l.starts_with("error") {
+            en_error = true;
+        } else if l.starts_with("warning") {
+            en_error = false;
+        }
+        if en_error {
+            if let Some(r) = t.strip_prefix("--> ") {
+                let mut partes = r.trim().rsplitn(3, ':');
+                let (_col, lin, ruta) = (partes.next(), partes.next(), partes.next());
+                if let (Some(lin), Some(ruta)) = (lin.and_then(|n| n.parse::<usize>().ok()), ruta) {
+                    v.push((ruta.trim_start_matches("./").to_string(), lin));
+                }
+            }
+        }
+    }
+    v
+}
+
+/// Ejecuta las comprobaciones de la tarea y elimina del código del agente las pruebas PROPIAS que rompen la comprobación: las funciones `#[test]`
+/// de `mod pruebas_agente` que fallan, las que no compilan, y el módulo entero si el error de compilación cae dentro de él pero fuera de una prueba.
+/// También las funciones `#[test]` que el agente añadió fuera del módulo cuando son las que no compilan. Nunca toca código de producción ni lo que
+/// ya existía. Devuelve los nombres quitados.
+pub fn podar_pruebas_rojas<E: Entorno>(
+    e: &mut E,
+    pol: &Politica,
+    archivos: &[String],
+    anadidas: &alloc::collections::BTreeMap<String, alloc::collections::BTreeSet<usize>>,
+) -> Vec<String> {
+    let mut quitadas: Vec<String> = Vec::new();
+    for _ronda in 0..2 {
+        let Some(rojo) = comprobar_tarea(e, pol) else { break };
+        let nombres: Vec<String> = super::nombres_de_pruebas_rojas(&rojo)
+            .into_iter()
+            .filter(|n| n.contains("pruebas_agente::"))
+            .map(|n| n.rsplit("::").next().unwrap_or(&n).to_string())
+            .collect();
+        let errores = errores_de_compilacion(&rojo);
+        if nombres.is_empty() && errores.is_empty() {
+            break;
+        }
+        let mut hubo = false;
+        for abs in archivos {
+            if !abs.ends_with(".rs") {
+                continue;
+            }
+            let rel = abs.strip_prefix(pol.raiz.trim_end_matches('/')).unwrap_or(abs).trim_start_matches('/').to_string();
+            let Ok(datos) = e.leer(abs) else { continue };
+            let Ok(texto) = String::from_utf8(datos) else { continue };
+            let lineas: Vec<&str> = texto.lines().collect();
+            let els = elementos(&lineas);
+            let errores_aqui: Vec<usize> = errores.iter().filter(|(r, _)| r.ends_with(&rel) || rel.ends_with(r.as_str())).map(|(_, l)| *l).collect();
+            let modulos: Vec<(usize, usize)> = els.iter().filter(|x| x.clase == "mod" && x.nombre == "pruebas_agente").map(|x| (x.ini, x.fin)).collect();
+            let nuevas_aqui = anadidas.get(&rel);
+            let es_test = |x: &Elemento| x.clase == "fn" && x.ini > 1 && (x.ini.saturating_sub(3)..x.ini).any(|k| k >= 1 && lineas[k - 1].trim() == "#[test]");
+            let sin_atributos = |ini: usize| {
+                let mut i = ini;
+                while i > 1 && lineas[i - 2].trim_start().starts_with("#[") {
+                    i -= 1;
+                }
+                i
+            };
+            let mut rangos: Vec<(usize, usize, String)> = Vec::new();
+            // Un error de compilación dentro del módulo de pruebas que no esté en una prueba concreta se lleva el módulo entero.
+            let mut quitar_modulo = false;
+            for &l in &errores_aqui {
+                if let Some((mi, mf)) = modulos.iter().find(|(a, b)| *a <= l && l <= *b) {
+                    let dentro_de_prueba = els.iter().any(|x| es_test(x) && x.ini <= l && l <= x.fin && *mi < x.ini && x.fin <= *mf);
+                    if !dentro_de_prueba {
+                        quitar_modulo = true;
+                    }
+                }
+            }
+            if quitar_modulo {
+                for (mi, mf) in &modulos {
+                    rangos.push((sin_atributos(*mi), *mf, "pruebas_agente".to_string()));
+                }
+            } else {
+                for x in els.iter().filter(|x| es_test(x)) {
+                    let en_modulo = modulos.iter().any(|(a, b)| *a < x.ini && x.fin <= *b);
+                    let rota_en_ejecucion = en_modulo && nombres.contains(&x.nombre);
+                    let rota_al_compilar = errores_aqui.iter().any(|l| x.ini <= *l && *l <= x.fin)
+                        && (en_modulo || nuevas_aqui.is_some_and(|n| (x.ini..=x.fin).all(|k| n.contains(&k))));
+                    if rota_en_ejecucion || rota_al_compilar {
+                        rangos.push((sin_atributos(x.ini), x.fin, x.nombre.clone()));
+                    }
+                }
+            }
+            if rangos.is_empty() {
+                continue;
+            }
+            rangos.sort_by(|a, b| b.0.cmp(&a.0));
+            let mut nuevo: Vec<&str> = lineas.clone();
+            for (ini, fin, _) in &rangos {
+                nuevo.drain(ini - 1..*fin);
+            }
+            let mut nuevo_texto = nuevo.join("\n");
+            if texto.ends_with('\n') {
+                nuevo_texto.push('\n');
+            }
+            if desequilibrio(abs, &texto, &nuevo_texto).is_some() {
+                continue;
+            }
+            let modo = e.metadatos(abs).map(|m| m.modo).unwrap_or(0o644);
+            if e.escribir(abs, nuevo_texto.as_bytes(), modo).is_ok() {
+                quitadas.extend(rangos.into_iter().map(|(_, _, n)| n));
+                hubo = true;
+            }
+        }
+        if !hubo {
+            break;
+        }
+    }
+    quitadas
+}
+
 /// Ejecuta una herramienta por nombre. Un nombre desconocido o argumentos mal formados son una
 /// respuesta para el modelo, no un error del agente.
 pub fn ejecutar<E: Entorno>(e: &mut E, pol: &Politica, nombre: &str, args: &Value) -> Respuesta {
@@ -176,10 +504,11 @@ pub fn ejecutar<E: Entorno>(e: &mut E, pol: &Politica, nombre: &str, args: &Valu
         "reemplazar_texto" => reemplazar(e, pol, args),
         "insertar" => insertar(e, pol, args),
         "reemplazar_lineas" => reemplazar_lineas(e, pol, args),
+        "reemplazar_funcion" => reemplazar_funcion(e, pol, args),
         "bash" => orden(e, pol, args),
         "forja" if pol.forja.is_some() => forja(e, pol, args),
         otro => Ok(Respuesta::mal(format!(
-            "La herramienta «{otro}» no existe. Las disponibles son: read, grep, glob, reemplazar_texto, reemplazar_lineas, insertar, bash{}.", if pol.forja.is_some() { " y forja" } else { "" }
+            "La herramienta «{otro}» no existe. Las disponibles son: read, grep, glob, reemplazar_texto, reemplazar_lineas, reemplazar_funcion, insertar, revisar, bash{}.", if pol.forja.is_some() { " y forja" } else { "" }
         ))),
     };
     match r {
@@ -200,6 +529,7 @@ fn alias(clave: &str) -> &'static [&'static str] {
         "texto" => &["text", "code", "contenido", "content", "insert", "new_text"],
         "command" => &["cmd", "comando"],
         "linea" => &["line", "línea", "line_number"],
+        "nombre" => &["name", "funcion", "función", "function", "simbolo", "symbol"],
         "desde" => &["from", "start", "start_line", "inicio", "primera", "desde_linea"],
         "hasta" => &["to", "end", "end_line", "fin", "ultima", "última", "hasta_linea"],
         _ => &[],
@@ -327,6 +657,16 @@ const LECTURA_MIN: usize = 80;
 const ARCHIVO_MAX: u64 = 4 * 1024 * 1024;
 
 fn leer<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<Respuesta> {
+    if let Some(sim) = args.get("simbolo").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
+        return leer_simbolo(e, pol, args, sim);
+    }
+    if valor(args, "esquema").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let (abs, rel) = resolver(pol, cadena(args, "filePath")?)?;
+        let datos = e.leer(&abs).map_err(|_| no_existe(e, pol, &rel))?;
+        let texto = String::from_utf8_lossy(&datos).into_owned();
+        let lineas: Vec<&str> = texto.lines().collect();
+        return Ok(Respuesta::ok(esquema_texto(&rel, &lineas)));
+    }
     let (abs, rel) = resolver(pol, cadena(args, "filePath")?)?;
     let meta = e.metadatos(&abs).map_err(|_| no_existe(e, pol, &rel))?;
     if meta.tipo == Tipo::Directorio {
@@ -1051,9 +1391,12 @@ fn aplicar_edicion(rel: &str, texto: &str, buscar: &str, nuevo: &str, linea_hint
         let (primera, resto) = nuevo.split_once('\n').unwrap_or((nuevo, ""));
         if !resto.is_empty() && !previa.is_empty() && primera.trim() == previa && (previa.starts_with("#[") || previa.starts_with("///")) { resto } else { nuevo }
     };
+    let viejas_l: Vec<&str> = antes.split('\n').collect();
+    let nuevas_l: Vec<&str> = nuevo.split('\n').collect();
+    let nuevo = restaurar_espacios(&viejas_l, &nuevas_l).join("\n");
     let mut nuevo_texto = String::with_capacity(texto.len() + nuevo.len());
     nuevo_texto.push_str(&texto[..ini]);
-    nuevo_texto.push_str(nuevo);
+    nuevo_texto.push_str(&nuevo);
     nuevo_texto.push_str(&texto[fin..]);
     Ok(Ok(Cambio { nuevo_texto, linea, antes }))
 }
@@ -1081,6 +1424,11 @@ fn reemplazar<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<
     for (k, (b, n, l)) in ediciones.iter().enumerate() {
         match aplicar_edicion(&rel, &actual, b, n, *l)? {
             Ok(c) => {
+                let viejas: Vec<&str> = c.antes.lines().collect();
+                let nuevas_l: Vec<&str> = n.lines().collect();
+                if let Some(m) = borrado_colateral(&rel, &viejas, &nuevas_l, args.get("confirmar_borrado").and_then(|v| v.as_bool()).unwrap_or(false)) {
+                    return Ok(Respuesta::mal(m));
+                }
                 hechas.push((c.linea, c.antes, n.clone()));
                 actual = c.nuevo_texto;
             }
@@ -1102,11 +1450,22 @@ fn reemplazar<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<
     if let Some(m) = desequilibrio(&rel, &texto, &actual) {
         return Ok(Respuesta::mal(m));
     }
+    if let Some(m) = casi_solo_comentarios(&rel, &ediciones.iter().map(|e| e.1.as_str()).collect::<Vec<_>>().join("\n")) {
+        return Ok(Respuesta::mal(m));
+    }
+    if let Some(m) = modulo_de_pruebas_duplicado(&rel, &texto, &actual) {
+        return Ok(Respuesta::mal(m));
+    }
+    if let Some(m) = error_de_sintaxis(e, pol, &rel, &texto, &actual) {
+        return Ok(Respuesta::mal(m));
+    }
     let modo = e.metadatos(&abs).map(|m| m.modo).unwrap_or(0o644);
     e.escribir(&abs, actual.as_bytes(), modo)?;
     if total == 1 {
         let (linea, antes, nuevo) = &hechas[0];
-        return Ok(Respuesta::ok(format!("Hecho en {}, línea {linea}.\nAntes:\n{antes}\nDespués:\n{nuevo}", mostrar(&rel))));
+        let n_nuevo = nuevo.lines().count().max(1);
+        let ventana = ventana_numerada(&actual, linea.saturating_sub(2).max(1), linea + n_nuevo + 2);
+        return Ok(Respuesta::ok(format!("Hecho en {}, línea {linea}.\nAntes:\n{antes}\nDespués:\n{nuevo}\nAsí queda ahora (numeración nueva):\n{ventana}", mostrar(&rel))));
     }
     let resumen: Vec<String> = hechas
         .iter()
@@ -1120,6 +1479,124 @@ fn reemplazar<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<
         })
         .collect();
     Ok(Respuesta::ok(format!("Hecho: {total} ediciones en {}.\n{}", mostrar(&rel), resumen.join("\n"))))
+}
+
+/// Última línea (1-based) del bloque que empieza en `desde`: la primera donde, contando desde `desde`, las llaves, paréntesis y
+/// corchetes vuelven a quedar equilibrados tras haber abierto alguno. Sirve de pista cuando `reemplazar_lineas` se queda corto o se
+/// pasa del final de una función (campaña 33, R32: 13 intentos con `hasta` = 222 cuando la función acababa en la 224).
+fn fin_de_bloque(lineas: &[&str], desde: usize) -> Option<usize> {
+    let (mut acc, mut abierto) = ([0i64; 3], false);
+    for (i, l) in lineas.iter().enumerate().skip(desde.saturating_sub(1)) {
+        let d = equilibrio_rs(l);
+        for k in 0..3 {
+            acc[k] += d[k];
+        }
+        abierto |= d.iter().any(|x| *x > 0);
+        if abierto && acc == [0, 0, 0] {
+            return Some(i + 1);
+        }
+    }
+    None
+}
+
+/// Líneas «de código» (no sólo llaves, paréntesis o comentarios) de `viejas` que ya no aparecen en `nuevas` (comparación sin sangría).
+fn lineas_perdidas(viejas: &[&str], nuevas: &[&str]) -> Vec<String> {
+    let conservadas: alloc::collections::BTreeSet<&str> = nuevas.iter().map(|l| l.trim()).collect();
+    viejas
+        .iter()
+        .map(|l| l.trim())
+        .filter(|t| !t.is_empty() && !t.starts_with("//") && t.chars().any(|c| c.is_alphanumeric()) && !conservadas.contains(t))
+        .map(|t| t.to_string())
+        .collect()
+}
+
+/// Edición que BORRA bastante código que `nuevo` no conserva (R35 de la campaña 39: al añadir una comprobación se llevó por delante el cálculo
+/// del alineamiento de un parser y no se notó). Se pide confirmación una vez con `confirmar_borrado: true`; si el borrado es intencionado, se repite.
+fn borrado_colateral(archivo: &str, viejas: &[&str], nuevas: &[&str], confirmado: bool) -> Option<String> {
+    if confirmado || viejas.len() < nuevas.len() + 4 {
+        return None;
+    }
+    let perdidas = lineas_perdidas(viejas, nuevas);
+    if perdidas.len() < 4 {
+        return None;
+    }
+    let ejemplos: Vec<String> = perdidas.iter().take(6).map(|l| format!("  {}", if l.chars().count() > 100 { format!("{}…", l.chars().take(100).collect::<String>()) } else { l.clone() })).collect();
+    Some(format!(
+        "No he escrito el cambio: BORRARÍA {} líneas de código de {} que `nuevo` no conserva ({} reemplazadas por {}), por ejemplo:\n{}\nSi las querías borrar, repite la misma llamada con `confirmar_borrado`: true. Si sólo querías cambiar o añadir algo, incluye en `nuevo` las líneas que deben seguir ahí (o reduce el rango).",
+        perdidas.len(),
+        mostrar(archivo),
+        viejas.len(),
+        nuevas.len(),
+        ejemplos.join("\n")
+    ))
+}
+
+/// Los modelos reescriben las líneas que no cambian con los espacios comprimidos (`data:&[u8]`, `Qwen3.8:hidden`, hasta dentro de una cadena
+/// `"hola mundo"` → `"holamundo"`): la herramienta es insensible a los espacios al BUSCAR y, al sustituir, los dejaba así. Aquí se alinean las
+/// líneas nuevas con las viejas ignorando TODOS los espacios y, donde coinciden y tienen la misma sangría, se conserva el texto ORIGINAL.
+fn restaurar_espacios(viejas: &[&str], nuevas: &[&str]) -> Vec<String> {
+    let clave = |l: &str| -> String { l.chars().filter(|c| !c.is_whitespace()).collect() };
+    let sangria = |l: &str| l.len() - l.trim_start().len();
+    let (kv, kn): (Vec<String>, Vec<String>) = (viejas.iter().map(|l| clave(l)).collect(), nuevas.iter().map(|l| clave(l)).collect());
+    let (n, m) = (kv.len(), kn.len());
+    if n == 0 || m == 0 || n.saturating_mul(m) > 4_000_000 {
+        return nuevas.iter().map(|l| l.to_string()).collect();
+    }
+    let w = m + 1;
+    let mut t: Vec<u16> = alloc::vec![0; (n + 1) * w];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            t[i * w + j] = if kv[i] == kn[j] { t[(i + 1) * w + j + 1].saturating_add(1) } else { t[(i + 1) * w + j].max(t[i * w + j + 1]) };
+        }
+    }
+    let mut sal: Vec<String> = Vec::with_capacity(m);
+    let (mut i, mut j) = (0, 0);
+    while j < m {
+        if i < n && kv[i] == kn[j] && !kn[j].is_empty() {
+            let misma_sangria = sangria(viejas[i]) == sangria(nuevas[j]) && viejas[i].chars().take(sangria(viejas[i])).eq(nuevas[j].chars().take(sangria(nuevas[j])));
+            sal.push(if misma_sangria { viejas[i].to_string() } else { nuevas[j].to_string() });
+            i += 1;
+            j += 1;
+        } else if i < n && t[(i + 1) * w + j] >= t[i * w + j + 1] {
+            i += 1;
+        } else {
+            sal.push(nuevas[j].to_string());
+            j += 1;
+        }
+    }
+    sal
+}
+
+/// Primera línea (1-based) del bloque cuyo cierre está en `hasta`: hacia atrás, la primera `desde` tal que las líneas `desde..=hasta`
+/// quedan equilibradas y la línea `desde` abre algo. Para cuando el modelo empieza el rango DENTRO de un bloque.
+fn inicio_de_bloque(lineas: &[&str], hasta: usize) -> Option<usize> {
+    let mut acc = [0i64; 3];
+    let mut i = hasta;
+    let limite = hasta.saturating_sub(400);
+    while i > limite && i >= 1 {
+        let d = equilibrio_rs(lineas[i - 1]);
+        for k in 0..3 {
+            acc[k] += d[k];
+        }
+        if acc == [0, 0, 0] && d.iter().any(|x| *x > 0) {
+            return Some(i);
+        }
+        i -= 1;
+    }
+    None
+}
+
+fn unir_lineas(lineas: &[&str], desde: usize, hasta: usize, nuevas: &[&str], con_salto: bool) -> String {
+    let restauradas = restaurar_espacios(&lineas[desde - 1..hasta], nuevas);
+    let mut r: Vec<&str> = Vec::with_capacity(lineas.len() + nuevas.len());
+    r.extend_from_slice(&lineas[..desde - 1]);
+    r.extend(restauradas.iter().map(|l| l.as_str()));
+    r.extend_from_slice(&lineas[hasta..]);
+    let mut t = r.join("\n");
+    if con_salto {
+        t.push('\n');
+    }
+    t
 }
 
 fn reemplazar_lineas<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<Respuesta> {
@@ -1141,25 +1618,85 @@ fn reemplazar_lineas<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Res
             mostrar(&rel)
         )));
     }
-    let sustituidas: Vec<&str> = lineas[desde - 1..hasta].to_vec();
     let nuevas: Vec<&str> = if nuevo.is_empty() { Vec::new() } else { nuevo.trim_end_matches('\n').split('\n').collect() };
-    let mut resultado: Vec<&str> = Vec::with_capacity(total + nuevas.len());
-    resultado.extend_from_slice(&lineas[..desde - 1]);
-    resultado.extend_from_slice(&nuevas);
-    resultado.extend_from_slice(&lineas[hasta..]);
-    let mut nuevo_texto = resultado.join("\n");
-    if terminaba_en_salto {
-        nuevo_texto.push('\n');
-    }
+    let (mut desde, mut hasta) = (desde, hasta);
+    let mut nuevo_texto = unir_lineas(&lineas, desde, hasta, &nuevas, terminaba_en_salto);
     if nuevo_texto == texto {
         return Ok(Respuesta::mal(format!(
             "Esa sustitución no cambia nada: las líneas {desde}–{hasta} de {} ya son exactamente ese texto. No la repitas; comprueba con `bash` o edita otra parte.",
             mostrar(&rel)
         )));
     }
-    if let Some(m) = desequilibrio(&rel, &texto, &nuevo_texto) {
+    let mut ajuste = String::new();
+    if let Some(mut m) = desequilibrio(&rel, &texto, &nuevo_texto) {
+        // El 85 % de estos rechazos (campañas 28–38: 79 de 93) traían un `nuevo` equilibrado y un RANGO que corta un bloque: se queda
+        // corto (borra aperturas y deja sus cierres) o empieza dentro. Si ampliar el rango al bloque entero deja el archivo equilibrado,
+        // se aplica así y se le dice, en vez de devolverle el error veinte veces.
+        // Sólo si `nuevo` es un bloque completo (equilibrado y con alguna apertura): borrar o recortar líneas sueltas es otra intención y
+        // ampliar el rango se llevaría por delante código que el modelo no quería tocar.
+        let es_bloque = {
+            let b = equilibrio_rs(&nuevas.join("\n"));
+            b == [0, 0, 0] && nuevas.iter().any(|l| l.contains('{') || l.contains('('))
+        };
+        let mut candidatos: Vec<(usize, usize)> = Vec::new();
+        if !es_bloque {
+            // nada que ampliar
+        } else if let Some(fin) = fin_de_bloque(&lineas, desde) {
+            if fin > hasta {
+                candidatos.push((desde, fin));
+            }
+        }
+        if let Some(ini) = inicio_de_bloque(&lineas, hasta).filter(|_| es_bloque) {
+            if ini < desde {
+                candidatos.push((ini, hasta));
+            }
+        }
+        let mut resuelto = false;
+        for (d2, h2) in candidatos {
+            if (h2 - d2) > (hasta - desde) + 80 {
+                continue;
+            }
+            let t2 = unir_lineas(&lineas, d2, h2, &nuevas, terminaba_en_salto);
+            if desequilibrio(&rel, &texto, &t2).is_none() && t2 != texto {
+                ajuste = format!("AJUSTE: tu rango {desde}–{hasta} cortaba un bloque y dejaba las llaves desequilibradas; lo he ampliado a {d2}–{h2} (el bloque entero) para que `nuevo` lo sustituya completo. Si no querías tocar esas líneas, vuelve a leer el tramo y repite con otro rango.\n");
+                desde = d2;
+                hasta = h2;
+                nuevo_texto = t2;
+                resuelto = true;
+                break;
+            }
+        }
+        if !resuelto {
+            // El rango ya abarca un bloque entero (o no hay forma de cuadrarlo): el desequilibrio viene de `nuevo`. Se le enseña el balance de cada parte.
+            let b_old = equilibrio_rs(&lineas[desde - 1..hasta].join("\n"));
+            let b_new = equilibrio_rs(&nuevas.join("\n"));
+            m.push_str(&format!(
+                " Balance de las líneas que reemplazas ({desde}–{hasta}): llaves {:+}, paréntesis {:+}, corchetes {:+}; balance de tu `nuevo`: llaves {:+}, paréntesis {:+}, corchetes {:+}. Para que quede equilibrado deben ser iguales.",
+                b_old[2], b_old[0], b_old[1], b_new[2], b_new[0], b_new[1]
+            ));
+            if let Some(fin) = fin_de_bloque(&lineas, desde) {
+                if fin != hasta {
+                    m.push_str(&format!(" Pista: el bloque que empieza en la línea {desde} termina en la {fin}."));
+                }
+            }
+            return Ok(Respuesta::mal(m));
+        }
+    }
+    // Con un AJUSTE de rango `nuevo` ya es un bloque completo que sustituye al bloque entero: reescribir una función no es un borrado colateral.
+    let confirmado = ajuste.contains("AJUSTE") || args.get("confirmar_borrado").and_then(|v| v.as_bool()).unwrap_or(false);
+    if let Some(m) = borrado_colateral(&rel, &lineas[desde - 1..hasta], &nuevas, confirmado) {
         return Ok(Respuesta::mal(m));
     }
+    if let Some(m) = casi_solo_comentarios(&rel, nuevo) {
+        return Ok(Respuesta::mal(m));
+    }
+    if let Some(m) = modulo_de_pruebas_duplicado(&rel, &texto, &nuevo_texto) {
+        return Ok(Respuesta::mal(m));
+    }
+    if let Some(m) = error_de_sintaxis(e, pol, &rel, &texto, &nuevo_texto) {
+        return Ok(Respuesta::mal(m));
+    }
+    let sustituidas: Vec<&str> = lineas[desde - 1..hasta].to_vec();
     let modo = e.metadatos(&abs).map(|m| m.modo).unwrap_or(0o644);
     e.escribir(&abs, nuevo_texto.as_bytes(), modo)?;
     // Lo que se ha quitado (para que un rango mal elegido se note) y cómo queda, con la numeración nueva.
@@ -1168,17 +1705,322 @@ fn reemplazar_lineas<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Res
     if sustituidas.len() > 3 {
         quitado.push(format!("  … ({} líneas más)", sustituidas.len() - 3));
     }
-    let ini = desde.saturating_sub(3).max(1);
-    let fin = (desde + nuevas.len() + 2).min(resultado.len()).min(ini + 40);
-    let ventana: Vec<String> = (ini..=fin).filter(|i| *i <= resultado.len()).map(|i| format!("{i}: {}", resultado[i - 1])).collect();
+    let resultado_n = nuevo_texto.lines().count();
+    let ventana = ventana_numerada(&nuevo_texto, desde.saturating_sub(3).max(1), (desde + nuevas.len() + 2).min(resultado_n));
     Ok(Respuesta::ok(format!(
-        "Hecho en {}: líneas {desde}–{hasta} ({} línea(s)) sustituidas por {} línea(s).\nSe quitó:\n{}\nAsí queda ahora (numeración nueva):\n{}",
+        "Hecho en {}: líneas {desde}–{hasta} ({} línea(s)) sustituidas por {} línea(s).\n{ajuste}Se quitó:\n{}\nAsí queda ahora (numeración nueva):\n{}",
         mostrar(&rel),
         sustituidas.len(),
         nuevas.len(),
         quitado.join("\n"),
-        ventana.join("\n")
+        ventana
     )))
+}
+
+/// Las líneas `desde..=hasta` (1-based) de `texto`, numeradas como `read`; hasta 40.
+fn ventana_numerada(texto: &str, desde: usize, hasta: usize) -> String {
+    let ls: Vec<&str> = texto.lines().collect();
+    let hasta = hasta.min(ls.len()).min(desde + 40);
+    (desde..=hasta).filter(|i| *i >= 1 && *i <= ls.len()).map(|i| format!("{i}: {}", ls[i - 1])).collect::<Vec<_>>().join("\n")
+}
+
+// ---------------------------------------------------------------- estructura de un archivo Rust (esquema, símbolo, reemplazar_funcion)
+
+/// Un elemento de primer nivel o anidado (`fn`, `struct`, `enum`, `trait`, `impl`, `mod`, `type`, `const`, `static`) con su rango de líneas.
+struct Elemento {
+    ini: usize,
+    fin: usize,
+    clase: &'static str,
+    nombre: String,
+    firma: String,
+}
+
+const CLASES: [&str; 9] = ["fn", "struct", "enum", "trait", "impl", "mod", "type", "const", "static"];
+
+/// ¿Empieza aquí un elemento? Devuelve su clase, su nombre (para `impl`, la cabecera sin `impl`) y la línea sin comentarios.
+fn cabecera_de_elemento(linea: &str) -> Option<(&'static str, String)> {
+    let mut t = linea.trim_start();
+    if t.starts_with("//") || t.starts_with('#') {
+        return None;
+    }
+    // Modificadores que preceden a la clase.
+    loop {
+        let antes = t;
+        for m in ["pub(crate) ", "pub(super) ", "pub ", "async ", "unsafe ", "default ", "extern \"C\" ", "extern "] {
+            if let Some(r) = t.strip_prefix(m) {
+                t = r;
+            }
+        }
+        if t.starts_with("pub(") {
+            if let Some(i) = t.find(')') {
+                t = t[i + 1..].trim_start();
+            }
+        }
+        if t == antes {
+            break;
+        }
+    }
+    // `const fn` y `unsafe impl`: `const` seguido de `fn` es una función.
+    let t = if let Some(r) = t.strip_prefix("const ") { if r.starts_with("fn ") { r } else { t } } else { t };
+    for clase in CLASES {
+        if let Some(r) = t.strip_prefix(clase) {
+            if !r.starts_with(' ') && !r.starts_with('<') {
+                continue;
+            }
+            let r = r.trim_start();
+            let nombre: String = if clase == "impl" {
+                r.split('{').next().unwrap_or("").trim().to_string()
+            } else {
+                r.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect()
+            };
+            if nombre.is_empty() {
+                return None;
+            }
+            return Some((clase, nombre));
+        }
+    }
+    None
+}
+
+/// Última línea (1-based) del elemento que empieza en `ini`: la que cierra su `{ }`, o la que acaba en `;` si no tiene cuerpo.
+fn fin_de_elemento(lineas: &[&str], ini: usize) -> Option<usize> {
+    let (mut acc, mut llave) = ([0i64; 3], false);
+    for (i, l) in lineas.iter().enumerate().skip(ini - 1) {
+        let d = equilibrio_rs(l);
+        for k in 0..3 {
+            acc[k] += d[k];
+        }
+        // `fn f() {}` en una sola línea tiene balance 0 pero SÍ tiene cuerpo: basta con que la línea abra una llave.
+        if l.split("//").next().unwrap_or("").contains('{') {
+            llave = true;
+        }
+        if acc == [0, 0, 0] {
+            if llave {
+                return Some(i + 1);
+            }
+            let codigo = l.split("//").next().unwrap_or("").trim_end();
+            if codigo.ends_with(';') {
+                return Some(i + 1);
+            }
+        }
+        if i + 1 - ini > 1500 {
+            break;
+        }
+    }
+    None
+}
+
+fn elementos(lineas: &[&str]) -> Vec<Elemento> {
+    let mut v = Vec::new();
+    for (i, l) in lineas.iter().enumerate() {
+        if let Some((clase, nombre)) = cabecera_de_elemento(l) {
+            if let Some(fin) = fin_de_elemento(lineas, i + 1) {
+                let firma: String = l.trim().chars().take(110).collect();
+                v.push(Elemento { ini: i + 1, fin, clase, nombre, firma });
+            }
+        }
+    }
+    v
+}
+
+fn esquema_texto(rel: &str, lineas: &[&str]) -> String {
+    let els = elementos(lineas);
+    if els.is_empty() {
+        return format!("<path>{}</path>\n<type>schema</type>\n(no he encontrado funciones, tipos ni módulos en este archivo)", mostrar(rel));
+    }
+    let mut t = format!("<path>{}</path>\n<type>schema</type>\n<items>\n", mostrar(rel));
+    for x in els.iter().take(200) {
+        let sangria = lineas[x.ini - 1].len() - lineas[x.ini - 1].trim_start().len();
+        t.push_str(&format!("{}{}–{}  {}\n", " ".repeat(sangria.min(12)), x.ini, x.fin, x.firma));
+    }
+    if els.len() > 200 {
+        t.push_str(&format!("(… y {} más)\n", els.len() - 200));
+    }
+    t.push_str("</items>\nCon `read` y `simbolo` lees uno entero; con `reemplazar_funcion` sustituyes uno por su nombre, sin números de línea.");
+    t
+}
+
+/// Elementos de `lineas` que se llaman `nombre` (o, para `impl`, cuya cabecera lo contiene).
+fn buscar_elementos<'a>(els: &'a [Elemento], nombre: &str) -> Vec<&'a Elemento> {
+    let n = nombre.trim().trim_start_matches("fn ").trim();
+    // `Tipo::método` (como lo escribe un modelo): el método que está DENTRO de un `impl` de ese tipo.
+    if let Some((tipo, metodo)) = n.rsplit_once("::") {
+        let tipo = tipo.rsplit("::").next().unwrap_or(tipo);
+        let dentro: Vec<&Elemento> = els
+            .iter()
+            .filter(|x| x.nombre == metodo && x.clase == "fn")
+            .filter(|f| els.iter().any(|i| i.clase == "impl" && i.nombre.split_whitespace().last().is_some_and(|u| u.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_') == tipo) && i.ini < f.ini && f.fin <= i.fin))
+            .collect();
+        if !dentro.is_empty() {
+            return dentro;
+        }
+        return els.iter().filter(|x| x.nombre == metodo).collect();
+    }
+    els.iter().filter(|x| x.nombre == n || (x.clase == "impl" && x.nombre.contains(n))).collect()
+}
+
+fn parecidos(els: &[Elemento], nombre: &str) -> Vec<String> {
+    let q = nombre.to_lowercase();
+    let mut c: Vec<(usize, String)> = els
+        .iter()
+        .filter(|x| x.clase != "impl")
+        .map(|x| (distancia(&q, &x.nombre.to_lowercase()) + if x.nombre.to_lowercase().contains(&q) { 0 } else { 3 }, format!("`{}` ({} {}–{})", x.nombre, x.clase, x.ini, x.fin)))
+        .collect();
+    c.sort();
+    c.dedup_by(|a, b| a.1 == b.1);
+    c.into_iter().take(5).map(|(_, t)| t).collect()
+}
+
+fn leer_simbolo<E: Entorno>(e: &mut E, pol: &Politica, args: &Value, simbolo: &str) -> Resultado<Respuesta> {
+    let (abs, rel) = resolver(pol, cadena(args, "filePath")?)?;
+    let datos = e.leer(&abs).map_err(|_| no_existe(e, pol, &rel))?;
+    let texto = String::from_utf8_lossy(&datos).into_owned();
+    let lineas: Vec<&str> = texto.lines().collect();
+    let els = elementos(&lineas);
+    let hallados = buscar_elementos(&els, simbolo);
+    match hallados.as_slice() {
+        [] => {
+            let p = parecidos(&els, simbolo);
+            let ayuda = if p.is_empty() { String::new() } else { format!(" Nombres parecidos: {}.", p.join(", ")) };
+            Ok(Respuesta::mal(format!("No hay ninguna función, tipo ni módulo llamado «{simbolo}» en {}.{ayuda} `read` con `esquema` los lista todos.", mostrar(&rel))))
+        }
+        [x] => {
+            let fin = x.fin.min(x.ini + 250);
+            let cuerpo = ventana_numerada(&texto, x.ini, fin);
+            let mas = if x.fin > fin { format!("\n(… sigue hasta la línea {}; usa `offset` para el resto)", x.fin) } else { String::new() };
+            Ok(Respuesta::ok(format!("<path>{}</path>\n<symbol>{} {}</symbol> (líneas {}–{})\n<content>\n{cuerpo}{mas}\n</content>", mostrar(&rel), x.clase, x.nombre, x.ini, x.fin)))
+        }
+        varios => {
+            let lista: Vec<String> = varios.iter().map(|x| format!("  {} {}–{}: {}   → read offset={} limit={}", x.clase, x.ini, x.fin, x.firma, x.ini, (x.fin - x.ini + 1).min(250))).collect();
+            Ok(Respuesta::mal(format!("«{simbolo}» aparece {} veces en {}:\n{}\nElige una y llama a `read` con ese `offset` y `limit` (los de arriba). Para un método concreto de un tipo escribe `Tipo::método`.", varios.len(), mostrar(&rel), lista.join("\n"))))
+        }
+    }
+}
+
+/// Sustituye un elemento (función, tipo, módulo) por su nombre: el rango lo calcula la herramienta, no el modelo.
+fn reemplazar_funcion<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<Respuesta> {
+    let (abs, rel) = resolver(pol, cadena(args, "filePath")?)?;
+    let nombre = cadena(args, "nombre")?;
+    let nuevo = cadena(args, "nuevo")?;
+    let linea = entero(args, "linea");
+    let datos = e.leer(&abs).map_err(|_| no_existe(e, pol, &rel))?;
+    let texto = String::from_utf8(datos).map_err(|_| Error::uso(format!("«{}» no es UTF-8", mostrar(&rel))))?;
+    let lineas: Vec<&str> = texto.lines().collect();
+    let els = elementos(&lineas);
+    let hallados = buscar_elementos(&els, nombre);
+    let x = match (hallados.as_slice(), linea) {
+        ([], _) => {
+            let p = parecidos(&els, nombre);
+            let ayuda = if p.is_empty() { String::new() } else { format!(" Nombres parecidos: {}.", p.join(", ")) };
+            return Ok(Respuesta::mal(format!("No hay ninguna función, tipo ni módulo llamado «{nombre}» en {}.{ayuda} Si es código nuevo, usa `insertar`.", mostrar(&rel))));
+        }
+        ([x], _) => *x,
+        (varios, Some(l)) => match varios.iter().find(|x| x.ini <= l && l <= x.fin) {
+            Some(x) => *x,
+            None => return Ok(Respuesta::mal(format!("Ningún «{nombre}» contiene la línea {l}. Hay: {}.", varios.iter().map(|x| format!("{}–{}", x.ini, x.fin)).collect::<Vec<_>>().join(", ")))),
+        },
+        (varios, None) => {
+            let lista: Vec<String> = varios.iter().map(|x| format!("  {} {}–{}: {}", x.clase, x.ini, x.fin, x.firma)).collect();
+            return Ok(Respuesta::mal(format!("«{nombre}» aparece {} veces en {}:\n{}\nIndica en `linea` una línea de la que quieres cambiar.", varios.len(), mostrar(&rel), lista.join("\n"))));
+        }
+    };
+    // Si `nuevo` repite los atributos o la documentación que ya están justo encima del elemento, se descartan (quedarían duplicados).
+    let mut encima: Vec<&str> = Vec::new();
+    let mut k = x.ini - 1;
+    while k >= 1 {
+        let t = lineas[k - 1].trim_start();
+        if t.starts_with("#[") || t.starts_with("///") {
+            encima.insert(0, lineas[k - 1].trim());
+            k -= 1;
+        } else {
+            break;
+        }
+    }
+    let mut nuevo_ls: Vec<&str> = nuevo.trim_end_matches('\n').split('\n').collect();
+    let mut quitadas = 0;
+    while quitadas < encima.len() && nuevo_ls.len() > 1 && nuevo_ls[0].trim() == encima[quitadas] {
+        nuevo_ls.remove(0);
+        quitadas += 1;
+    }
+    let args2 = json!({"filePath": rel, "desde": x.ini, "hasta": x.fin, "nuevo": nuevo_ls.join("\n"), "confirmar_borrado": true});
+    let mut r = reemplazar_lineas(e, pol, &args2)?;
+    if !r.error {
+        r.texto = format!("{}\n(Era {} «{}», líneas {}–{}: se ha sustituido por completo.)", r.texto, x.clase, x.nombre, x.ini, x.fin);
+    }
+    Ok(r)
+}
+
+// ---------------------------------------------------------------- sintaxis (rustfmt por stdin)
+
+/// Orden por defecto del comprobador de sintaxis del host.
+pub fn orden_sintaxis_rustfmt() -> Vec<String> {
+    ["rustfmt", "--edition", "2021", "--check"].iter().map(|s| s.to_string()).collect()
+}
+
+/// De la salida de `rustfmt --check`: las líneas de un error de sintaxis (`error: expected …` con su `-->` y el recorte de código), o `None`
+/// si no hay ninguno. Un archivo que sólo está mal formateado da un `Diff in …`, no un `error:`, y no cuenta.
+fn error_de_rustfmt(salida: &str) -> Option<String> {
+    let ignorables = ["left behind trailing whitespace", "exceeded maximum width", "line formatted", "internal error"];
+    let lineas: Vec<&str> = salida.lines().collect();
+    let ini = lineas.iter().position(|l| (l.starts_with("error:") || l.starts_with("error[")) && !ignorables.iter().any(|i| l.contains(i)))?;
+    let mut t: Vec<String> = Vec::new();
+    for l in &lineas[ini..] {
+        if l.starts_with("Diff in") {
+            break;
+        }
+        t.push((*l).to_string());
+        if t.len() >= 14 {
+            break;
+        }
+    }
+    Some(t.join("\n"))
+}
+
+fn ejecutar_comprobador<E: Entorno>(e: &mut E, pol: &Politica, argv: &[String], texto: &str) -> Option<String> {
+    let o = Orden { argv: argv.to_vec(), cwd: pol.raiz.clone(), stdin: texto.as_bytes().to_vec(), timeout_s: Some(30), entorno: pol.entorno.clone() };
+    let s = e.ejecutar(&o).ok()?;
+    if s.codigo.is_none() {
+        return None; // no terminó (¿no existe el programa?): sin comprobación
+    }
+    error_de_rustfmt(&s.texto())
+}
+
+/// Dos `mod pruebas_agente` en el mismo archivo no compilan (E0428): el modelo añadía su módulo de pruebas al final sin ver que ya lo tenía.
+fn modulo_de_pruebas_duplicado(rel: &str, antes: &str, despues: &str) -> Option<String> {
+    let cuenta = |t: &str| t.matches("mod pruebas_agente").count();
+    if !rel.ends_with(".rs") || cuenta(despues) < 2 || cuenta(antes) >= cuenta(despues) {
+        return None;
+    }
+    Some(format!(
+        "No he escrito el cambio: dejaría DOS `mod pruebas_agente` en {} y no compilaría. Ya tienes uno: añade tus funciones `#[test]` DENTRO de él (`read` con `simbolo`: pruebas_agente te lo enseña; inserta antes de su llave final) o sustitúyelo entero con `reemplazar_funcion` (`nombre`: pruebas_agente).",
+        mostrar(rel)
+    ))
+}
+
+/// ¿Dejaría `despues` el archivo con un error de sintaxis? Sólo `.rs` y sólo si la política trae un comprobador. Si el original ya estaba
+/// roto no se le echa la culpa a esta edición. Devuelve el mensaje para el modelo.
+fn error_de_sintaxis<E: Entorno>(e: &mut E, pol: &Politica, rel: &str, antes: &str, despues: &str) -> Option<String> {
+    let argv = pol.comprobar_sintaxis.clone()?;
+    if !rel.ends_with(".rs") {
+        return None;
+    }
+    let err = ejecutar_comprobador(e, pol, &argv, despues)?;
+    if ejecutar_comprobador(e, pol, &argv, antes).is_some() {
+        return None;
+    }
+    // El modelo no sabe leer «línea 60 de <stdin>»: se le enseña el archivo tal como quedaría alrededor de esa línea (campaña 41, R31: repetía el mismo
+    // `reemplazar_lineas` roto una docena de veces sin ver que, tras su texto, seguía el código original del bloque que reescribía).
+    let ventana = err
+        .split("<stdin>:")
+        .nth(1)
+        .and_then(|r| r.split(':').next())
+        .and_then(|n| n.trim().parse::<usize>().ok())
+        .map(|n| format!("\nEl archivo tal como quedaría, alrededor de la línea {n}:\n{}\n(Si tras tu texto sigue código ANTIGUO del mismo bloque, tu rango se quedó corto: amplía `hasta` hasta el final de lo que reescribes, o usa `reemplazar_funcion`.)", ventana_numerada(despues, n.saturating_sub(5).max(1), n + 4)))
+        .unwrap_or_default();
+    Some(format!(
+        "No he escrito el cambio: con él {} tendría un error de SINTAXIS (lo dice rustfmt; los números de línea son los del archivo tal como quedaría):\n{err}{ventana}\nCorrige el texto de tu cambio (¿falta un `;`, una coma, un paréntesis o una palabra?) y repite.",
+        mostrar(rel)
+    ))
 }
 
 // ---------------------------------------------------------------- insertar
@@ -1248,11 +2090,21 @@ fn insertar<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<Re
     if let Some(m) = desequilibrio(&rel, &texto, &nuevo_texto) {
         return Ok(Respuesta::mal(m));
     }
+    if let Some(m) = casi_solo_comentarios(&rel, nuevo) {
+        return Ok(Respuesta::mal(m));
+    }
+    if let Some(m) = modulo_de_pruebas_duplicado(&rel, &texto, &nuevo_texto) {
+        return Ok(Respuesta::mal(m));
+    }
+    if let Some(m) = error_de_sintaxis(e, pol, &rel, &texto, &nuevo_texto) {
+        return Ok(Respuesta::mal(m));
+    }
     let modo = e.metadatos(&abs).map(|m| m.modo).unwrap_or(0o644);
     e.escribir(&abs, nuevo_texto.as_bytes(), modo)?;
+    let n_ins = nuevo.trim_end_matches('\n').matches('\n').count() + 1;
+    let ventana = ventana_numerada(&nuevo_texto, linea.saturating_sub(1).max(1), linea + n_ins + 2);
     Ok(Respuesta::ok(format!(
-        "Hecho: {} línea(s) insertadas en {} después de la línea {linea}.\nInsertado:\n{nuevo}",
-        nuevo.trim_end_matches('\n').matches('\n').count() + 1,
+        "Hecho: {n_ins} línea(s) insertadas en {} después de la línea {linea}.\nInsertado:\n{nuevo}\nAsí queda ahora (numeración nueva):\n{ventana}",
         mostrar(&rel)
     )))
 }

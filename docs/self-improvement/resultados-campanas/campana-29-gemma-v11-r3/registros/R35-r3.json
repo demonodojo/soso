@@ -1,0 +1,11 @@
+{
+ "id": "R35",
+ "ronda": 3,
+ "resultado": "error",
+ "intentos": 1,
+ "segundos": 2253,
+ "nota": "error: entorno: el intento no termin\u00f3: LimitePasos",
+ "fallo": "protocolo",
+ "herramientas": 40,
+ "tokens": 853226
+}

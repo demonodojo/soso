@@ -204,7 +204,7 @@ const CLAVES: &[&str] = &[
     "respuesta", "modelo", "original", "fixtures", "json", "desde", "n", "solo", "timeout",
     "revision", "origen", "sin-herramientas", "con-referencia", "puerto", "token",
     "repeticiones", "plazo-ms", "semilla", "caso", "contexto", "modelo-dir",
-    "tarea", "sistema", "sesion", "reanudar", "sembrar", "copia", "estado", "run", "exigencias", "trabajo", "referencias", "campana", "publicar-base", "paquete-hash", "continuar", "adoptar-copia", "campana-json", "registros", "base-final", "notas", "problema", "solucion", "rutas", "pruebas", "evidencia", "fallido", "id", "presupuesto", "reservado-prefijos", "max-turnos", "max-tokens", "cargo-home",
+    "tarea", "sistema", "sesion", "reanudar", "sembrar", "copia", "estado", "run", "exigencias", "trabajo", "referencias", "campana", "publicar-base", "paquete-hash", "continuar", "adoptar-copia", "revisar-final", "revisor", "sin-comprobar-final", "sin-alertas-panico", "sin-validar-al-agotar", "sin-podar", "multiagente", "ciclos", "campana-json", "registros", "base-final", "notas", "problema", "solucion", "rutas", "pruebas", "evidencia", "fallido", "id", "presupuesto", "reservado-prefijos", "max-turnos", "max-tokens", "cargo-home",
 ];
 
 pub fn despachar(orden: &str, args: &[String]) -> Result<i32, Error> {

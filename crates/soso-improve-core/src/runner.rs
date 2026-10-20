@@ -277,6 +277,7 @@ pub fn ejecutar_agente<E: Entorno, M: Modelo, R: Reloj>(
     let inf = agente::correr(e, &mut m, reloj, pol, &cfg, tarea, &mut |_, _| {});
     let fin = match inf.fin {
         agente::Fin::Terminado => Fin::Completo,
+        agente::Fin::SinTurnos | agente::Fin::SinLlamadas if cfg.validar_al_agotar && agente::hubo_edicion(&inf.mensajes) => Fin::Completo,
         agente::Fin::SinTurnos => Fin::LimitePasos,
         agente::Fin::SinTiempo => Fin::Plazo,
         agente::Fin::SinLlamadas => Fin::LimiteHerramientas,
@@ -373,7 +374,9 @@ pub fn ejecutar_intento<E: Entorno + Durable, M: Modelo, R: Reloj>(
     state::guardar(e, dir_estado, &m, Some(&hash))?;
     hash = state::cargar(&*e, dir_estado, run_id)?.map(|(_, h)| h).unwrap_or_default();
 
-    let mut lim = Limites { max_herramientas: r.spec.limites.herramientas_max as usize, ..Limites::default() };
+    // Los pasos (turnos del agente) los fija `--max-turnos`: con el valor por defecto de `Limites` (40) un `--max-turnos 60` o 150 quedaba
+    // recortado en silencio a 40 por el `min` de `ejecutar_agente` y los intentos acababan en `LimitePasos` con 38 herramientas.
+    let mut lim = Limites { max_herramientas: r.spec.limites.herramientas_max as usize, max_pasos: cfg.max_turnos.max(Limites::default().max_pasos), ..Limites::default() };
     if let Some(s) = r.spec.limites.segundos_max {
         lim.plazo_ms = s.saturating_mul(1000);
     }

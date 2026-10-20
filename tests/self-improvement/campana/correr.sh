@@ -2,6 +2,7 @@
 # T29: campaña de diez tareas, secuencial desde la base aceptada. Uso: correr.sh DIR_SALIDA [TAREAS...]
 # TEMP_REINTENTO=T (por defecto 0,7): temperatura de las rondas de reintento (k>1); la ronda 1 va siempre a T=0.
 # SISTEMA_AGENTE=pruebas: prompt que exige pruebas propias por caso límite (y un aviso si termina sin ninguna).
+# REVISAR_FINAL=1: revisión impuesta antes de terminar (ver agente/revision.rs).
 # MAX_TURNOS=N (por defecto 30): turnos del agente (con 60 herramientas por tarea hay que subirlo).
 # ROUNDS=N (por defecto 1): si una tarea no se acepta, se repite hasta N rondas desde la misma base con un aviso genérico de
 # rechazo en el enunciado (sin datos de la prueba reservada). El registro de la ronda k>1 se llama Rxx-rk.json.
@@ -62,7 +63,13 @@ P
   $BIN tarea copiar --estado $W/estado --run $RUN --captura $W/captura --destino $W/copia > $W/copiar.txt 2>&1
   ARGS="--estado $W/estado --run $RUN --captura $W/captura --copia $W/copia --exigencias $W/exigencias.json --trabajo $W/validador --referencias $OUT/refs --campana campana-$T --publicar-base --modelo $MODELO --puerto $PORT --max-tokens $MAXTOK --max-turnos ${MAX_TURNOS:-30} --cargo-home $HOME/.cargo"
   # SISTEMA_AGENTE=pruebas: el agente debe escribir pruebas propias para cada caso límite (campaña 14).
-  [ "${SISTEMA_AGENTE:-}" = pruebas ] && ARGS="$ARGS --sistema pruebas"
+  [ "${SISTEMA_AGENTE:-}" = estandar ] && ARGS="$ARGS --sistema estandar"   # por defecto el agente escribe pruebas propias
+  # REVISAR_FINAL=1: antes de terminar se le muestra su diff y los requisitos de TASK.md (una vez).
+  [ "${REVISAR_FINAL:-}" = 1 ] && ARGS="$ARGS --revisar-final"
+  # REVISOR=1: la revisión la hace una petición aparte (revisor independiente) y sólo se le pasan los fallos que señale.
+  [ "${REVISOR:-}" = 1 ] && ARGS="$ARGS --revisor"
+  # MULTIAGENTE=1 [CICLOS=N]: planificador + programador + revisor en bucle (agente/orquestador.rs).
+  [ "${MULTIAGENTE:-}" = 1 ] && ARGS="$ARGS --multiagente --ciclos ${CICLOS:-3}"
   # Rondas de reintento: temperatura > 0 (a T=0 la misma petición da la misma respuesta). TEMP_REINTENTO=0 la deja en T=0.
   [ $RONDA -gt 1 ] && ARGS="$ARGS --temperatura ${TEMP_REINTENTO:-0.7}"
   INYECTADA=0

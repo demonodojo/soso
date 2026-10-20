@@ -1,0 +1,11 @@
+{
+ "id": "R32",
+ "ronda": 1,
+ "resultado": "bloqueada",
+ "intentos": 1,
+ "segundos": 63,
+ "nota": "el candidato no cambi\u00f3 nada",
+ "fallo": "protocolo",
+ "herramientas": 12,
+ "tokens": 123566
+}

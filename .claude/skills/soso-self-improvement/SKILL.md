@@ -204,6 +204,24 @@ cargo run -q -p soso-improve -- capturar --repo . --out target/self-improvement/
 `cargo xtask check` / `test` al **promover una base**, no por cada ficha de
 tipos. QEMU no acredita una entrega solo de seguimiento o de `no_std` host.
 
+## Campañas con modelos locales (lecciones de las campañas 22–29)
+
+Detalle en [campana.md](../../../docs/self-improvement/campana.md) («Campañas 22–29»). Lo que ahorra tiempo:
+
+- **Ante cero aceptadas, `LimitePasos` o errores raros, abre la conversación de la primera tarea** (`ejecucion-N/R31/estado/*.conversacion.json`) **antes de culpar al modelo.** Cinco de las seis tandas «malas» eran defectos del agente: tope de 64 mensajes del servidor (`MAX_MENSAJES`; `Config::mensajes_max = 60` pliega y deja un historial de una línea por llamada), ediciones sin efecto que devolvían «Hecho», guardas de repetición que no veían fallos alternados.
+- **`--max-turnos` se recortaba a 40 en silencio hasta el binario v12** (`runner.rs`, `Limites`): con binarios anteriores `MAX_TURNOS=60/150` no valía; compruébalo si ves `LimitePasos` con ~38 herramientas.
+- **`--max-turnos` no se leía en el modo `tarea` hasta el binario v18**: las campañas anteriores corrieron con 40 turnos aunque se pidieran más; comprueba `"pasos"` en `estado/*eventos.json`.
+- **Equipo planificador+programador+revisor** (`--multiagente`): con Gemma 12B el planificador no da un plan limpio y cada tarea tarda más de una hora; apagado.
+- **Revisión de lo hecho** (`revisar`, `--revisar-final`, `--revisor`; `agente/revision.rs`): con Gemma 12B no sube el pass@1 (autorrevisión 1/10, revisor independiente 2/10, sin revisión 3/10). El agente se autoconfirma y, con revisor aparte, parchea mal y agota turnos. Apagadas por defecto.
+- **El prompt de «pruebas propias» (`SISTEMA_AGENTE=pruebas`) empeora a Gemma** (1/10 frente a 3/10). No es el valor por defecto.
+- **Mejorar las herramientas no movió el pass@1** (ruido ±1–2 tareas de 10): no seguir afinándolas sin banco nuevo. El banco R31–R40 ya no es ciego.
+- **No cambies el binario del agente con la campaña en marcha** (cada tarea lanza el binario de ese momento) ni lances dos campañas a la vez (GPU y puertos compartidos); renombra con sufijo las carpetas de tandas descartadas en vez de borrarlas.
+- **Arranque (GPU del host):** servidor `systemd-run --user --unit=serve-gemma --setenv=SOSO_CUDA=1 --setenv=HILOS=16 --setenv=SOSO_LLM_API_KEY=clave-host target/mellum-work/serve_host-cuda --model-dir target/gemma4-12b-model --profile target/gemma-work/perfil.json --port 7442`; campaña con `correr.sh` y `ROUNDS`, `TEMP_REINTENTO=0.7`, `MAX_TURNOS=60`, `SOSO_IMPROVE_BIN`, `CAMPANA_JSON=tests/self-improvement/campaign-12.json`. Vigilante con parada si hay < 1,5 GB de RAM disponibles, < 3 GB de disco, 90 min sin progreso o el servidor cae.
+
+## Tras cada campaña: analizar los rechazos (obligatorio)
+
+Antes de lanzar la siguiente: `python3 tests/self-improvement/campana/analizar.py DIR_CAMPAÑA --bin target/gemma-work/target-vN/debug/soso-improve` genera `ANALISIS.md` con, por tarea no aceptada, el diff de lo cambiado, las pruebas reservadas que fallan y su mensaje, y las estadísticas de ediciones. Lee cada diff contra «Qué se pide», clasifica la causa (requisito no atendido o a medias, no compila, borrado de código ajeno, lógica mal ubicada, no implementó nada) e **implementa sin pedir confirmación** la mejora genérica que la evitaría (instrucción permanente del usuario); cuenta qué implementaste y qué descartaste y por qué. Guarda el resumen en `docs/self-improvement/resultados-campanas/campana-N/analisis.md`. Cargo recompila por la FECHA de los fuentes, no por su contenido: el script actualiza la fecha de lo editado y usa su propio `CARGO_TARGET_DIR`; no lo cambies a mano o saldrán pruebas fallando de más.
+
 ## Entrega al siguiente agente
 
 Plan/ID, estado (catálogo = ficha = fila), evidencia, bloqueo, siguiente ficha

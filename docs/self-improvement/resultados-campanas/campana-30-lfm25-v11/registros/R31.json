@@ -1,0 +1,11 @@
+{
+ "id": "R31",
+ "ronda": 1,
+ "resultado": "bloqueada",
+ "intentos": 1,
+ "segundos": 730,
+ "nota": "el candidato no cambi\u00f3 nada",
+ "fallo": "protocolo",
+ "herramientas": 18,
+ "tokens": 202404
+}

@@ -1,0 +1,15 @@
+{
+ "id": "R33",
+ "ronda": 1,
+ "resultado": "rechazada",
+ "intentos": 1,
+ "segundos": 1117,
+ "nota": "",
+ "fallo": "programacion",
+ "herramientas": 23,
+ "tokens": 613323,
+ "inyeccion": {
+  "que": "agente matado (kill -9) y coordinador reiniciado",
+  "recuperada": true
+ }
+}

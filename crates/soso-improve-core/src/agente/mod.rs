@@ -7,6 +7,8 @@
 pub mod herramientas;
 pub mod http;
 pub mod prueba;
+pub mod orquestador;
+pub mod revision;
 pub mod sesion;
 
 use alloc::format;
@@ -63,6 +65,28 @@ pub struct Config {
     /// avisa hasta `avisos_sin_pruebas` veces: el agente debe convertir cada caso límite del enunciado en una prueba suya.
     pub exigir_pruebas: bool,
     pub avisos_sin_pruebas: usize,
+    /// Con `exigir_pruebas`: veces que se le avisa de que sus pruebas no se han ejecutado EN VERDE tras su último cambio.
+    pub avisos_sin_ejecutar: usize,
+    /// Antes de dar por terminado un trabajo con ediciones, el propio arnés ejecuta las comprobaciones de «Qué tiene que pasar» de `TASK.md`
+    /// (las órdenes `cargo …` entre comillas invertidas) y, si fallan, se las devuelve al modelo (hasta `avisos_comprobacion` veces). Caza el
+    /// código que no compila o rompe las pruebas visibles aunque el modelo no lo haya comprobado (R38 de la campaña 39: llamaba a dos funciones
+    /// que nunca definió y terminó sin ejecutar nada).
+    pub comprobar_al_terminar: bool,
+    pub avisos_comprobacion: usize,
+    /// Un intento que agota los turnos o las herramientas tras haber EDITADO se da por completo para que lo evalúe el validador independiente
+    /// (campañas 41–42: R31 y R33 se quedaban en `LimitePasos` con el cambio a medias en disco, y un error no se valida). Sin ediciones sigue
+    /// siendo un límite superado.
+    pub validar_al_agotar: bool,
+    /// Al cerrar el intento, las pruebas propias (`pruebas_agente::…`) que sigan en rojo se eliminan del archivo: la comprobación de la tarea ejecuta TODAS
+    /// las pruebas del crate, y una prueba del propio agente en rojo (campaña 42: R33, R36, R37 y R38) hacía fallar el conjunto aunque el código cumpliera
+    /// el enunciado. Lo que se mide es el código, no la calidad de sus pruebas de andamiaje.
+    pub podar_pruebas_rojas: bool,
+    /// Si la tarea habla de pánico o desbordamiento, antes de terminar se pasa Clippy (`indexing_slicing`, `arithmetic_side_effects`) y se le enseñan
+    /// los avisos que caen en líneas que el agente ha añadido o cambiado (hasta `avisos_panico` veces).
+    pub alertas_panico: bool,
+    pub avisos_panico: usize,
+    /// Con `exigir_pruebas`: veces que se le avisa de que ha escrito menos pruebas que puntos tiene «Qué se pide».
+    pub avisos_pocas_pruebas: usize,
     /// A la `n`-ésima llamada **repetida** de una que ya salió bien desde la última edición (aunque no sea la inmediata anterior) no
     /// se la ejecuta: su resultado no puede cambiar si no se edita nada entre medias (campaña 12: Gemma repetía 24 veces un `cargo test` ya en verde y agotaba las herramientas sin
     /// dar el trabajo por hecho). Con dos repeticiones más sin cambiar de conducta se da el intento por terminado. `0` lo apaga.
@@ -71,6 +95,19 @@ pub struct Config {
     /// intento la conversación llegaba a 71 y 5 de 10 tareas de la campaña 23 morían con «messages: 71 supera el máximo de 64».
     /// Al acercarse se pliegan los intercambios (llamada + resultados) más antiguos. `None` lo apaga.
     pub mensajes_max: Option<usize>,
+    /// Si `true`, antes de dar por terminado un trabajo en el que hubo ediciones se le muestra al modelo la revisión (`revision::texto`:
+    /// su diff y los requisitos de `TASK.md`) hasta `avisos_revision` veces, para que contraste cada punto con lo que hizo.
+    pub revision: bool,
+    pub avisos_revision: usize,
+    /// Con `revision`, la revisión la hace una petición aparte al modelo (revisor independiente, sin la conversación del agente) y sólo
+    /// se le pasa al agente lo que el revisor señale; si no encuentra fallos, el agente termina sin más avisos.
+    pub revisor: bool,
+    /// Equipo de tres roles (`orquestador`): un planificador de sólo lectura prepara el plan, el programador lo ejecuta, un revisor
+    /// independiente señala fallos y el planificador replantea la corrección, hasta `ciclos_max` ciclos o hasta que todo pase.
+    pub multiagente: bool,
+    pub ciclos_max: usize,
+    /// Sólo `read`, `grep` y `glob` (el planificador no edita ni ejecuta).
+    pub solo_lectura: bool,
 }
 
 impl Config {
@@ -91,9 +128,23 @@ impl Config {
             chars_por_token: 3.0,
             avisos_sin_editar: 2,
             exigir_pruebas: false,
-            avisos_sin_pruebas: 1,
+            avisos_sin_pruebas: 2,
+            avisos_sin_ejecutar: 2,
+            comprobar_al_terminar: false,
+            avisos_comprobacion: 2,
+            validar_al_agotar: false,
+            podar_pruebas_rojas: false,
+            alertas_panico: false,
+            avisos_panico: 3,
+            avisos_pocas_pruebas: 1,
             repetidas_ok_max: 3,
             mensajes_max: Some(60),
+            revision: false,
+            avisos_revision: 1,
+            revisor: false,
+            multiagente: false,
+            ciclos_max: 3,
+            solo_lectura: false,
         }
     }
 }
@@ -131,8 +182,24 @@ pub struct Informe {
     pub sin_editar: usize,
     /// Avisos de «escribe tus propias pruebas» enviados (ver `Config::exigir_pruebas`).
     pub sin_pruebas: usize,
+    /// Avisos de «ejecuta tus pruebas en verde» enviados (ver `Config::avisos_sin_ejecutar`).
+    pub sin_ejecutar: usize,
+    /// Comprobaciones de la tarea que el arnés ejecutó al final y que fallaron (ver `Config::comprobar_al_terminar`).
+    pub comprobaciones_rojas: usize,
+    /// Avisos de Clippy sobre líneas del agente enviados (ver `Config::alertas_panico`).
+    pub alertas_panico: usize,
+    /// Avisos de «menos pruebas que puntos» enviados.
+    pub pocas_pruebas: usize,
+    /// Veces que, tras releer lo mismo sin editar, se le redirigió a escribir en vez de cerrar el intento.
+    pub redirecciones: usize,
+    /// Pruebas propias en rojo que se eliminaron al cerrar (ver `Config::podar_pruebas_rojas`).
+    pub podadas: Vec<String>,
     /// Llamadas que el guardián de repeticiones no ejecutó (no cuentan como llamadas a herramientas).
     pub bloqueadas: usize,
+    /// Revisiones impuestas al modelo antes de terminar (ver `Config::revision`).
+    pub revisiones: usize,
+    /// Ciclos planificar → programar → revisar que se han recorrido (ver `Config::multiagente`).
+    pub ciclos: usize,
     /// Conversación completa (formato de la API), para auditar.
     pub mensajes: Vec<Value>,
 }
@@ -148,6 +215,9 @@ pub fn correr<E: Entorno, M: Modelo, R: Reloj>(
     tarea: &str,
     al_turno: &mut dyn FnMut(&mut E, &[Value]),
 ) -> Informe {
+    if cfg.multiagente {
+        return orquestador::correr(e, modelo, reloj, pol, cfg, tarea, al_turno);
+    }
     let mensajes: Vec<Value> = alloc::vec![
         json!({"role": "system", "content": cfg.sistema}),
         json!({"role": "user", "content": tarea}),
@@ -164,22 +234,49 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
     reloj: &R,
     pol: &Politica,
     cfg: &Config,
+    mensajes: Vec<Value>,
+    al_turno: &mut dyn FnMut(&mut E, &[Value]),
+) -> Informe {
+    let mut originales = alloc::collections::BTreeMap::new();
+    correr_con_originales(e, modelo, reloj, pol, cfg, mensajes, &mut originales, al_turno)
+}
+
+/// Como `correr_desde`, pero los archivos originales (antes de la primera edición) se llevan fuera: el orquestador los comparte entre
+/// los ciclos del programador para que el revisor vea el diff acumulado respecto al inicio de la tarea.
+pub fn correr_con_originales<E: Entorno, M: Modelo, R: Reloj>(
+    e: &mut E,
+    modelo: &mut M,
+    reloj: &R,
+    pol: &Politica,
+    cfg: &Config,
     mut mensajes: Vec<Value>,
+    originales: &mut alloc::collections::BTreeMap<String, Option<String>>,
     al_turno: &mut dyn FnMut(&mut E, &[Value]),
 ) -> Informe {
     sesion::normalizar(&mut mensajes);
     if sesion::terminada(&mensajes) {
         let r = mensajes.last().and_then(|m| m["content"].as_str()).unwrap_or("").to_string();
-        return Informe { fin: Fin::Terminado, turnos: 0, llamadas: 0, respuesta_final: r, error: None, empujones: 0, formato: 0, repetidas: 0, recortadas: 0, sin_editar: 0, sin_pruebas: 0, bloqueadas: 0, mensajes };
+        return Informe { fin: Fin::Terminado, turnos: 0, llamadas: 0, respuesta_final: r, error: None, empujones: 0, formato: 0, repetidas: 0, recortadas: 0, sin_editar: 0, sin_pruebas: 0, sin_ejecutar: 0, comprobaciones_rojas: 0, alertas_panico: 0, pocas_pruebas: 0, redirecciones: 0, podadas: Vec::new(), bloqueadas: 0, revisiones: 0, ciclos: 0, mensajes };
     }
     let t0 = reloj.ahora_ms();
-    let mut informe = Informe { fin: Fin::SinTurnos, turnos: 0, llamadas: 0, respuesta_final: String::new(), error: None, empujones: 0, formato: 0, repetidas: 0, recortadas: 0, sin_editar: 0, sin_pruebas: 0, bloqueadas: 0, mensajes: Vec::new() };
+    let mut informe = Informe { fin: Fin::SinTurnos, turnos: 0, llamadas: 0, respuesta_final: String::new(), error: None, empujones: 0, formato: 0, repetidas: 0, recortadas: 0, sin_editar: 0, sin_pruebas: 0, sin_ejecutar: 0, comprobaciones_rojas: 0, alertas_panico: 0, pocas_pruebas: 0, redirecciones: 0, podadas: Vec::new(), bloqueadas: 0, revisiones: 0, ciclos: 0, mensajes: Vec::new() };
     // Última llamada ejecutada, si falló, y cuántas veces seguidas se ha repetido igual.
     let mut ultima: Option<(String, String, bool)> = None;
     let mut seguidas = 0usize;
     // Veces que cada llamada ha FALLADO desde la última edición que salió bien, seguidas o no: el modelo alternaba dos llamadas que
     // fallaban igual (A, B, A, B…) y la guarda de «la misma que acaba de fallar» nunca saltaba (campaña 27, R31: 60 turnos así).
     let mut fallidas: alloc::collections::BTreeMap<(String, String), usize> = alloc::collections::BTreeMap::new();
+    // Huellas de los contenidos por los que ha pasado cada archivo editado (el original primero) y cuántas veces una edición ha devuelto
+    // un archivo a un estado anterior: el modelo alternaba A→B→A→B (cada edición «Hecho») hasta agotar los turnos (campaña 36, R31).
+    let mut estados: alloc::collections::BTreeMap<String, Vec<u64>> = alloc::collections::BTreeMap::new();
+    let mut oscilaciones = 0usize;
+    // Respuestas mal formadas SEGUIDAS: a T=0 el modelo repite la misma respuesta rota (campaña 41, R38: `call_5` tres veces idéntica), así que los
+    // reintentos suben la temperatura.
+    let mut formato_seguidos = 0usize;
+    // Pruebas rojas de la última ejecución y cuántas veces seguidas han sido EXACTAMENTE las mismas: reescribir otra función sin que cambie el
+    // resultado (campaña 42, R31: 15 `reemplazar_funcion` con las mismas pruebas propias en rojo) indica que la causa está en otro sitio o en la propia prueba.
+    let mut rojos_previos: alloc::collections::BTreeSet<String> = alloc::collections::BTreeSet::new();
+    let mut rojos_seguidos = 0usize;
     let mut atascado = false;
     let mut vistas: Vec<(String, String)> = Vec::new();
     let mut racha_ok = 0usize;
@@ -211,21 +308,30 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
             informe.recortadas += n;
         }
         let peticion = json!({
-            "model": cfg.modelo, "messages": mensajes, "tools": herramientas::definiciones(pol),
-            "temperature": cfg.temperatura, "max_tokens": cfg.max_tokens, "stream": false,
+            "model": cfg.modelo, "messages": mensajes, "tools": if cfg.solo_lectura { herramientas::solo_lectura(herramientas::definiciones(pol)) } else { herramientas::definiciones(pol) },
+            "temperature": if formato_seguidos > 0 { cfg.temperatura.max((0.3 + 0.2 * formato_seguidos as f64).min(1.0)) } else { cfg.temperatura }, "max_tokens": cfg.max_tokens, "stream": false,
         })
         .to_string();
         informe.turnos += 1;
         let cuerpo = match modelo.completar(&peticion, plazo) {
-            Ok(c) => c,
+            Ok(c) => {
+                formato_seguidos = 0;
+                c
+            }
             Err(err) if err.to_string().contains("Some(400)") && informe.formato < cfg.errores_de_formato => {
                 // El servidor descartó una respuesta mal formada: no entra en el historial. Se le dice al modelo qué
                 // estuvo mal (el motivo viene del propio servidor) y se le deja corregirse.
                 informe.formato += 1;
+                formato_seguidos += 1;
                 let t = err.to_string();
                 let motivo = t.split("\"message\":\"").nth(1).and_then(|r| r.split('"').next()).unwrap_or("formato inválido");
+                let consejo = if formato_seguidos >= 2 {
+                    " Si el JSON se te rompe, haz la llamada MÁS CORTA: una sola cosa por llamada y, si escribes código, pocas líneas cada vez (por ejemplo una prueba por `insertar`); escapa las comillas dobles dentro del texto (\\\") y los saltos de línea (\\n)."
+                } else {
+                    ""
+                };
                 mensajes.push(json!({"role": "user", "content": format!(
-                    "Tu última respuesta no fue una llamada válida a una herramienta ({motivo}). Hazla de nuevo: una sola llamada, con los argumentos como un objeto JSON válido, y sin texto antes ni después."
+                    "Tu última respuesta no fue una llamada válida a una herramienta ({motivo}). Hazla de nuevo: una sola llamada, con los argumentos como un objeto JSON válido, y sin texto antes ni después.{consejo}"
                 )}));
                 al_turno(e, &mensajes);
                 continue;
@@ -269,6 +375,74 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
                 al_turno(e, &mensajes);
                 continue;
             }
+            if cfg.exigir_pruebas && informe.sin_ejecutar < cfg.avisos_sin_ejecutar && hubo_prueba_propia(&mensajes) && !pruebas_propias_en_verde(&mensajes) {
+                informe.sin_ejecutar += 1;
+                mensajes.push(json!({"role": "user", "content": AVISO_PRUEBAS_SIN_EJECUTAR}));
+                al_turno(e, &mensajes);
+                continue;
+            }
+            if cfg.exigir_pruebas && informe.pocas_pruebas < cfg.avisos_pocas_pruebas && hubo_prueba_propia(&mensajes) {
+                let puntos = herramientas::puntos_de_la_tarea(e, pol);
+                let escritas = pruebas_propias_escritas(&mensajes);
+                if puntos > 0 && escritas < puntos {
+                    informe.pocas_pruebas += 1;
+                    mensajes.push(json!({"role": "user", "content": format!(
+                        "«Qué se pide» de TASK.md tiene {puntos} puntos y has escrito {escritas} prueba(s) propia(s). Cada punto (y cada valor límite que menciona) necesita al menos una prueba tuya con valores concretos: vuelve a leer la lista, añade las pruebas que falten dentro de `mod pruebas_agente`, ejecútalas y corrige el código si alguna falla. Después escribe el informe final."
+                    )}));
+                    al_turno(e, &mensajes);
+                    continue;
+                }
+            }
+            if cfg.alertas_panico && informe.alertas_panico < cfg.avisos_panico && hubo_edicion(&mensajes) {
+                let anadidas = revision::lineas_anadidas(e, &pol.raiz, &originales);
+                if let Some(alertas) = herramientas::alertas_de_panico(e, pol, &anadidas) {
+                    informe.alertas_panico += 1;
+                    mensajes.push(json!({"role": "user", "content": format!(
+                        "La tarea pide que no haya pánico ni desbordamiento. Clippy (con los lints `indexing_slicing` y `arithmetic_side_effects`) marca estas líneas que has añadido o cambiado como capaces de entrar en pánico o desbordar:\n\n{alertas}\n\nComprueba cada una: usa `.get(..)` en vez de indexar, `checked_add`/`checked_mul` (o `saturating_*`) en las cuentas con valores que vienen de los datos, y una comprobación de longitud ANTES de leer. Ojo con las sumas de rangos como `off..off + N`: calcula `let fin = off.checked_add(N).ok_or(..)?;` y usa `get(off..fin)`. Corrige TODAS las líneas de la lista (no sólo la primera) y verás de nuevo los avisos que queden. Después ejecuta las comprobaciones y escribe el informe final."
+                    )}));
+                    al_turno(e, &mensajes);
+                    continue;
+                }
+            }
+            if cfg.comprobar_al_terminar && informe.comprobaciones_rojas < cfg.avisos_comprobacion && hubo_edicion(&mensajes) {
+                if let Some(rojo) = herramientas::comprobar_tarea(e, pol) {
+                    informe.comprobaciones_rojas += 1;
+                    mensajes.push(json!({"role": "user", "content": format!(
+                        "Antes de terminar he ejecutado yo la comprobación de la tarea sobre tu cambio y FALLA:\n\n{rojo}\n\nCorrige el código (lee el tramo que señala el error antes de editar), vuelve a ejecutar la comprobación y, cuando pase, escribe el informe final."
+                    )}));
+                    al_turno(e, &mensajes);
+                    continue;
+                }
+            }
+            if cfg.revision && informe.revisiones < cfg.avisos_revision && hubo_edicion(&mensajes) {
+                informe.revisiones += 1;
+                if cfg.revisor {
+                    let base = revision::contenido(e, &pol.raiz, &originales);
+                    let cuerpo = modelo.completar(&revision::peticion_revisor(&cfg.modelo, &base, cfg.max_tokens), plazo);
+                    if let Ok(c) = cuerpo {
+                        match revision::critica(&c) {
+                            Some(crit) => {
+                                mensajes.push(json!({"role": "user", "content": format!(
+                                    "Antes de dar el trabajo por terminado: un revisor independiente, que sólo ha visto los requisitos de TASK.md y tu diff, señala estos posibles fallos:\n\n{crit}\n\nPara cada punto: si es un fallo real, corrígelo y ejecuta las comprobaciones; si crees que ya está cubierto, indica en qué línea de tu diff. No repitas cambios que ya están hechos."
+                                )}));
+                                al_turno(e, &mensajes);
+                                continue;
+                            }
+                            // Sin fallos que señalar: el agente termina.
+                            None => {
+                                informe.fin = Fin::Terminado;
+                                informe.respuesta_final = texto;
+                                al_turno(e, &mensajes);
+                                break;
+                            }
+                        }
+                    }
+                }
+                let r = revision::texto(e, &pol.raiz, &originales);
+                mensajes.push(json!({"role": "user", "content": format!("Antes de dar el trabajo por terminado, revisa lo que has hecho.\n\n{r}")}));
+                al_turno(e, &mensajes);
+                continue;
+            }
             informe.fin = Fin::Terminado;
             informe.respuesta_final = texto;
             al_turno(e, &mensajes);
@@ -296,7 +470,7 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
                     let repite = ultima.as_ref().is_some_and(|(n, c, fallo)| *fallo && *n == clave.0 && *c == clave.1);
                     // Llamada que no edita y que ya se ejecutó con éxito desde la última edición: su resultado no puede cambiar.
                     // Cuenta aunque no sea consecutiva (Gemma alternaba dos `cargo test` casi iguales); una llamada nueva reinicia la racha.
-                    let edita = matches!(nombre, "reemplazar_texto" | "reemplazar_lineas" | "insertar");
+                    let edita = matches!(nombre, "reemplazar_texto" | "reemplazar_lineas" | "reemplazar_funcion" | "insertar");
                     let repite_ok = !edita && vistas.iter().any(|v| *v == clave);
                     if !edita {
                         if repite_ok { racha_ok += 1 } else { racha_ok = 0 }
@@ -318,7 +492,52 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
                         informe.repetidas += 1;
                         Respuesta { texto: aviso_de_repeticion(nombre, seguidas.max(veces_fallo + 1)), error: true }
                     } else {
-                        let mut r = ejecutar(e, pol, nombre, &a);
+                        let mut abs_edit: Option<String> = None;
+                        if edita {
+                            // Estado del archivo ANTES de su primera edición, para poder enseñarle después su propio diff.
+                            let ruta = ["filePath", "file_path", "filepath", "file", "path", "archivo", "ruta"].iter().find_map(|k| a.get(*k).and_then(|v| v.as_str()));
+                            if let Some(Ok((abs, _))) = ruta.map(|r| herramientas::resolver(pol, r)) {
+                                if !originales.contains_key(&abs) {
+                                    let antes = e.leer(&abs).ok().and_then(|d| String::from_utf8(d).ok());
+                                    originales.insert(abs.clone(), antes);
+                                }
+                                abs_edit = Some(abs);
+                            }
+                        }
+                        let mut r = if cfg.solo_lectura && !matches!(nombre, "read" | "grep" | "glob") {
+                            Respuesta { texto: format!("«{nombre}» no está disponible para ti: eres el planificador y sólo puedes leer (read, grep, glob). Entrega el plan como texto."), error: true }
+                        } else if nombre == "revisar" { Respuesta { texto: revision::texto(e, &pol.raiz, &originales), error: false } } else { ejecutar(e, pol, nombre, &a) };
+                        if nombre == "bash" {
+                            let rojos = nombres_de_pruebas_rojas(&r.texto);
+                            if !rojos.is_empty() && rojos == rojos_previos {
+                                rojos_seguidos += 1;
+                            } else {
+                                rojos_seguidos = if rojos.is_empty() { 0 } else { 1 };
+                            }
+                            if rojos_seguidos == 3 {
+                                let lista: Vec<&str> = rojos.iter().take(5).map(|x| x.as_str()).collect();
+                                r.texto.push_str(&format!("\n\nAVISO: es la tercera ejecución seguida con las MISMAS pruebas en rojo ({}). Si tus cambios no las mueven, el fallo está en otro sitio o la propia prueba está mal (el valor esperado). Antes de reescribir otra función, lee el mensaje de fallo de ESA prueba (`left`/`right`, o el panic) y razona qué línea concreta produce ese resultado; si la prueba contradice el enunciado, corrígela o elimínala.", lista.join(", ")));
+                            }
+                            rojos_previos = rojos;
+                        }
+                        if edita && !r.error {
+                            if let Some(abs) = &abs_edit {
+                                let h = huella(e.leer(abs).ok().as_deref());
+                                let ini = originales.get(abs).map(|o| huella(o.as_deref().map(|t| t.as_bytes()))).unwrap_or(0);
+                                let v = estados.entry(abs.clone()).or_insert_with(|| alloc::vec![ini]);
+                                // El último elemento es el estado anterior a esta edición (una edición idéntica ya es un error): si el nuevo coincide
+                                // con uno MÁS antiguo, la edición ha deshecho trabajo previo.
+                                let n = v.len();
+                                if n >= 2 && v[..n - 1].contains(&h) {
+                                    oscilaciones += 1;
+                                    r.texto.push_str("\n\nAVISO: este cambio devuelve el archivo a un estado en el que ya estuvo: has deshecho una edición anterior. Estás alternando entre dos versiones. Decide una, quédate con ella y pasa a otra cosa (otro punto de la tarea, o ejecuta las comprobaciones).");
+                                    if oscilaciones >= 3 {
+                                        atascado = true;
+                                    }
+                                }
+                                v.push(h);
+                            }
+                        }
                         if repite && r.error {
                             r.texto.push_str(&format!("\n\nAVISO: es la misma llamada que acabas de hacer y ha fallado igual ({seguidas} veces). No la repitas: cambia lo que envías (ver la pista de arriba) o usa otra herramienta."));
                         }
@@ -352,12 +571,31 @@ pub fn correr_desde<E: Entorno, M: Modelo, R: Reloj>(
             mensajes.push(json!({"role": "tool", "tool_call_id": id, "content": r.texto}));
         }
         al_turno(e, &mensajes);
+        if atascado && informe.redirecciones < 2 && (!hubo_edicion(&mensajes) || sin_codigo_nuevo(e, &pol.raiz, &originales)) {
+            // Releer lo mismo una y otra vez SIN haber editado nada (campaña 41: R32, R35 y R36 acabaron «sin cambios» tras seis lecturas idénticas): en
+            // vez de cerrar el intento se le dice qué hacer ahora, con las herramientas que ya tiene, y se le da otra oportunidad.
+            informe.redirecciones += 1;
+            atascado = false;
+            informe.bloqueadas = 0;
+            vistas.clear();
+            fallidas.clear();
+            racha_ok = 0;
+            let texto = if hubo_edicion(&mensajes) { REDIRECCION_SOLO_PRUEBAS } else { REDIRECCION_SIN_EDITAR };
+            mensajes.push(json!({"role": "user", "content": texto}));
+            al_turno(e, &mensajes);
+            continue;
+        }
         if atascado {
             // Repite sin cesar una llamada que ya salió bien: no hay nada más que averiguar. Se cierra el intento y decide el validador.
             informe.fin = Fin::Terminado;
-            informe.respuesta_final = String::from("(intento cerrado: el modelo repetía una llamada idéntica que ya había salido bien)");
+            informe.respuesta_final = String::from("(intento cerrado: el modelo repetía llamadas o alternaba ediciones sin avanzar)");
             break;
         }
+    }
+    if cfg.exigir_pruebas && cfg.podar_pruebas_rojas && hubo_edicion(&mensajes) && informe.fin != Fin::ErrorModelo {
+        let archivos: Vec<String> = originales.keys().cloned().collect();
+        let anadidas = revision::lineas_anadidas(e, &pol.raiz, &originales);
+        informe.podadas = herramientas::podar_pruebas_rojas(e, pol, &archivos, &anadidas);
     }
     informe.mensajes = mensajes;
     informe
@@ -374,7 +612,7 @@ PROTOCOLO (obligatorio):\n\
 PASOS:\n\
 1. Llama a `read` con `TASK.md` (raíz del checkout): contiene el objetivo, el archivo que puedes tocar y las comprobaciones.\n\
 2. Localiza el código. Si el archivo es corto (menos de 150 líneas) lee entero; si es largo, **no lo recorras por tramos**: llama primero a `grep` con el nombre de la función o un texto que aparezca en ella y después a `read` sólo del tramo que rodea la línea (`offset` y `limit`).\n\
-3. Para **cambiar** algo que ya existe, llama a `reemplazar_texto` con `filePath`, `buscar` (un fragmento corto de lo que leíste; los espacios no importan) y `nuevo`. Para **añadir** código nuevo (una función, una rama), llama a `insertar` con `filePath`, `linea` (el número que te mostró `read`; se inserta después de esa línea) y `texto`. Siempre bloques completos: con su `{` y su `}`. Cambio mínimo: no toques otros archivos. Si `reemplazar_texto` no encuentra el fragmento, cambia ese tramo por números de línea con `reemplazar_lineas` (`desde`, `hasta`, `nuevo`): no hay que copiar nada. Si una herramienta dice que aparece varias veces o que desequilibra las llaves, corrige y repite.\n\
+3. Para **cambiar** algo que ya existe, llama a `reemplazar_texto` con `filePath`, `buscar` (un fragmento corto de lo que leíste; los espacios no importan) y `nuevo`. Para **añadir** código nuevo (una función, una rama), llama a `insertar` con `filePath`, `linea` (el número que te mostró `read`; se inserta después de esa línea) y `texto`. Siempre bloques completos: con su `{` y su `}`. Cambio mínimo: no toques otros archivos. Para reescribir una función ENTERA usa `reemplazar_funcion` (`nombre`, `nuevo`): no hay números de línea ni nada que copiar (`read` con `esquema` lista las funciones; con `simbolo` lees una entera). Si `reemplazar_texto` no encuentra el fragmento, cambia ese tramo por números de línea con `reemplazar_lineas` (`desde`, `hasta`, `nuevo`). Si una herramienta dice que aparece varias veces o que desequilibra las llaves, corrige y repite.\n\
 4. Llama a `bash` con las comprobaciones de TASK.md (`cargo test …`) y lee el resultado.\n\
 5. Antes de terminar, **relee TASK.md punto por punto**: cada comportamiento que describe tiene que estar cubierto por tu cambio, no sólo el caso que ya ves fallar. Si falta alguno, impleméntalo y vuelve a comprobar. Una tarea sin ningún archivo editado no está terminada.\n\
 6. Informe final en texto corto: qué cambiaste, qué comprobaciones corrieron y su salida resumida, y lo que no pudiste hacer. No inventes resultados.";
@@ -390,8 +628,8 @@ PROTOCOLO (obligatorio):\n\
 PASOS:\n\
 1. Llama a `read` con `TASK.md` (raíz del checkout): contiene el objetivo, el archivo que puedes tocar y las comprobaciones.\n\
 2. Localiza el código. Si el archivo es corto (menos de 150 líneas) lee entero; si es largo, **no lo recorras por tramos**: llama primero a `grep` con el nombre de la función o un texto que aparezca en ella y después a `read` sólo del tramo que rodea la línea (`offset` y `limit`).\n\
-3. **Escribe primero tus pruebas.** De la sección «Qué se pide» de TASK.md saca TODOS los comportamientos y casos límite: cada viñeta, cada valor raro, cada «en caso de empate», «nunca», «si todos…». Añade al final del MISMO archivo que puedes tocar (llama a `read` cerca del final para ver el número de la última línea y usa `insertar` con ese número) un módulo `#[cfg(test)] mod pruebas_agente { use super::*; … }` con **una prueba `#[test]` por caso**, con valores concretos y la salida exacta que pide el enunciado. Ejecútalas con `bash` (`cargo test …` con el filtro `pruebas_agente`) y comprueba que las que describen el fallo de hoy **fallan**.\n\
-4. Para **cambiar** algo que ya existe, llama a `reemplazar_texto` con `filePath`, `buscar` (un fragmento corto de lo que leíste; los espacios no importan) y `nuevo`. Para **añadir** código nuevo, llama a `insertar` con `filePath`, `linea` y `texto`. Siempre bloques completos: con su `{` y su `}`. Cambio mínimo en el código; no toques otros archivos. Si `reemplazar_texto` no encuentra el fragmento, cambia ese tramo por números de línea con `reemplazar_lineas` (`desde`, `hasta`, `nuevo`): no hay que copiar nada. Si una herramienta dice que aparece varias veces o que desequilibra las llaves, corrige y repite.\n\
+3. **Escribe primero tus pruebas.** De la sección «Qué se pide» de TASK.md saca TODOS los comportamientos y casos límite: cada viñeta, cada valor raro, cada «en caso de empate», «nunca», «si todos…». Añade al final del MISMO archivo que puedes tocar (con `insertar` y `linea`: -1, que significa «al final del archivo»; no hace falta leer el final) un módulo `#[cfg(test)] mod pruebas_agente { use super::*; … }` con **una prueba `#[test]` por caso**, con valores concretos y la salida exacta que pide el enunciado. Ejecútalas con `bash` (`cargo test …` con el filtro `pruebas_agente`) y comprueba que las que describen el fallo de hoy **fallan**.\n\
+4. Para **cambiar** algo que ya existe, llama a `reemplazar_texto` con `filePath`, `buscar` (un fragmento corto de lo que leíste; los espacios no importan) y `nuevo`. Para **añadir** código nuevo, llama a `insertar` con `filePath`, `linea` y `texto`. Siempre bloques completos: con su `{` y su `}`. Cambio mínimo en el código; no toques otros archivos. Para reescribir una función ENTERA usa `reemplazar_funcion` (`nombre`, `nuevo`): no hay números de línea ni nada que copiar (`read` con `esquema` lista las funciones; con `simbolo` lees una entera). Si `reemplazar_texto` no encuentra el fragmento, cambia ese tramo por números de línea con `reemplazar_lineas` (`desde`, `hasta`, `nuevo`). Si una herramienta dice que aparece varias veces o que desequilibra las llaves, corrige y repite.\n\
 5. Ejecuta con `bash` las comprobaciones de TASK.md **y** tus pruebas: todas en verde. Si alguna falla, corrige el CÓDIGO (no borres la prueba salvo que contradiga el enunciado).\n\
 6. Antes de terminar, repasa el enunciado punto por punto: ¿hay una prueba tuya por cada uno? Si falta alguno, añádelo, ejecútalo y corrige.\n\
 7. Informe final en texto corto: qué cambiaste, qué pruebas escribiste, qué comprobaciones corrieron y su salida resumida, y lo que no pudiste hacer. No inventes resultados.";
@@ -435,7 +673,7 @@ fn aviso_de_empuje(mensajes: &[Value], texto: &str) -> Option<String> {
             let nombre = nombres.iter().rev().find(|(i, _)| i == id).map(|(_, n)| n.as_str()).unwrap_or("");
             let c = m["content"].as_str().unwrap_or("");
             match nombre {
-                "reemplazar_texto" | "reemplazar_lineas" | "insertar" if c.starts_with("Hecho") => {
+                "reemplazar_texto" | "reemplazar_lineas" | "reemplazar_funcion" | "insertar" if c.starts_with("Hecho") => {
                     sin_comprobar = true;
                     ultima_fallo = false;
                 }
@@ -459,10 +697,108 @@ fn aviso_de_empuje(mensajes: &[Value], texto: &str) -> Option<String> {
 }
 
 /// Lo que se le dice al modelo que intenta terminar sin haber cambiado nada.
+const REDIRECCION_SOLO_PRUEBAS: &str = "Llevas varias llamadas bloqueadas y lo único que has escrito son comentarios o un módulo de pruebas vacío: el CÓDIGO de la tarea sigue sin cambiar. Haz ahora, sin volver a leer lo mismo: cambia la función que pide la tarea con `reemplazar_funcion` (`nombre` = la función, `nuevo` = su definición completa) o con `reemplazar_texto`, y después ejecuta las comprobaciones. Si dudas de un detalle, haz el cambio mínimo: el compilador o las pruebas te dirán qué falta.";
+
+/// ¿Lo añadido hasta ahora son sólo comentarios, líneas en blanco o el módulo `pruebas_agente` (ningún código de la tarea)?
+fn sin_codigo_nuevo<E: Entorno>(e: &mut E, raiz: &str, originales: &alloc::collections::BTreeMap<String, Option<String>>) -> bool {
+    let anadidas = revision::lineas_anadidas(e, raiz, originales);
+    for (rel, set) in &anadidas {
+        let Ok(datos) = e.leer(&format!("{}/{}", raiz.trim_end_matches('/'), rel)) else { continue };
+        let texto = String::from_utf8_lossy(&datos).into_owned();
+        let lineas: Vec<&str> = texto.lines().collect();
+        let pruebas = lineas.iter().position(|l| l.trim_start().starts_with("mod pruebas_agente")).map(|i| i.saturating_sub(1)).unwrap_or(usize::MAX);
+        for n in set {
+            let i = n - 1;
+            let t = lineas.get(i).map(|l| l.trim()).unwrap_or("");
+            if i < pruebas && !t.is_empty() && !t.starts_with("//") {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+const REDIRECCION_SIN_EDITAR: &str = "Llevas varias lecturas idénticas y NINGUNA edición: ya has leído lo suficiente. Haz ahora, sin volver a leer lo mismo: (1) si la tarea te pide pruebas propias, añade tu módulo `#[cfg(test)] mod pruebas_agente { use super::*; … }` con `insertar` (`linea`: -1 = al final del archivo) con una prueba por punto de «Qué se pide»; (2) cambia el código con `reemplazar_funcion` (`nombre` de la función, `nuevo` = su definición completa) o con `reemplazar_texto`. Si dudas de un detalle, haz el cambio mínimo y ejecuta las comprobaciones: el error del compilador te lo dirá.";
+
 const AVISO_SIN_EDITAR: &str = "No has modificado ningún archivo, y esta tarea exige un cambio en el código. Vuelve a leer TASK.md: busca el comportamiento que hoy falla, localízalo en el archivo que puedes tocar y corrígelo con `reemplazar_texto` o `insertar`. Después ejecuta las comprobaciones. No termines sin haber editado.";
 
 /// Lo que se le dice al modelo que quiere terminar sin haber escrito ninguna prueba propia.
 const AVISO_SIN_PRUEBAS: &str = "No has escrito ninguna prueba propia. Vuelve a leer la sección «Qué se pide» de TASK.md y haz una lista de cada comportamiento y caso límite que menciona (cada viñeta, cada valor raro, cada empate, cada «nunca» y cada «si todos…»). Añade al final del MISMO archivo que puedes tocar un módulo `#[cfg(test)] mod pruebas_agente { use super::*; … }` con una prueba `#[test]` por caso, con valores concretos; ejecútalas con `bash` y corrige el código hasta que todas pasen. Después escribe el informe final.";
+
+const AVISO_PRUEBAS_SIN_EJECUTAR: &str = "Has escrito pruebas propias, pero tras tu ÚLTIMO cambio no las has ejecutado en verde. Ejecútalas ahora con `bash` (`cargo test -p CRATE --features std -- pruebas_agente`, con el CRATE y las opciones que uses para las comprobaciones de TASK.md): tienen que ejecutarse (si el filtro no coincide con ninguna, el resultado no demuestra nada) y pasar. Si alguna falla, corrige el CÓDIGO. Después escribe el informe final.";
+
+/// Nombres de las pruebas que `cargo test` da por falladas (`test x::y ... FAILED` o `x --- FAILED`).
+pub(crate) fn nombres_de_pruebas_rojas(texto: &str) -> alloc::collections::BTreeSet<String> {
+    let mut v = alloc::collections::BTreeSet::new();
+    for l in texto.lines() {
+        let t = l.trim();
+        if let Some(r) = t.strip_prefix("test ") {
+            if let Some(n) = r.strip_suffix(" ... FAILED") {
+                v.insert(n.trim().to_string());
+            }
+        } else if let Some(n) = t.strip_suffix(" --- FAILED") {
+            v.insert(n.trim().to_string());
+        }
+    }
+    v
+}
+
+/// Cuántas pruebas `#[test]` ha escrito el modelo con ediciones que salieron bien.
+fn pruebas_propias_escritas(mensajes: &[Value]) -> usize {
+    let mut candidatas: Vec<(String, usize)> = Vec::new();
+    let mut total = 0;
+    for m in mensajes {
+        if m["role"] == "assistant" {
+            for l in m["tool_calls"].as_array().map(|v| v.as_slice()).unwrap_or(&[]) {
+                let nombre = l.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or("");
+                let args = match l.pointer("/function/arguments") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(v) => v.to_string(),
+                    None => String::new(),
+                };
+                if matches!(nombre, "insertar" | "reemplazar_texto" | "reemplazar_lineas" | "reemplazar_funcion") {
+                    candidatas.push((l["id"].as_str().unwrap_or("").to_string(), args.matches("#[test]").count()));
+                }
+            }
+        } else if m["role"] == "tool" {
+            let id = m["tool_call_id"].as_str().unwrap_or("");
+            if let Some((_, n)) = candidatas.iter().find(|(c, _)| c == id) {
+                if m["content"].as_str().unwrap_or("").starts_with("Hecho") {
+                    total += n;
+                }
+            }
+        }
+    }
+    total
+}
+
+/// ¿Hay, tras la última edición que salió bien, un `cargo test` con el filtro `pruebas_agente` que acabó con exit code 0 y sí ejecutó pruebas?
+fn pruebas_propias_en_verde(mensajes: &[Value]) -> bool {
+    let mut llamadas: Vec<(String, String, String)> = Vec::new(); // id, nombre, argumentos
+    let mut verde = false;
+    for m in mensajes {
+        if m["role"] == "assistant" {
+            for l in m["tool_calls"].as_array().map(|v| v.as_slice()).unwrap_or(&[]) {
+                let args = match l.pointer("/function/arguments") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(v) => v.to_string(),
+                    None => String::new(),
+                };
+                llamadas.push((l["id"].as_str().unwrap_or("").to_string(), l.pointer("/function/name").and_then(|v| v.as_str()).unwrap_or("").to_string(), args));
+            }
+        } else if m["role"] == "tool" {
+            let id = m["tool_call_id"].as_str().unwrap_or("");
+            let c = m["content"].as_str().unwrap_or("");
+            let Some((_, nombre, args)) = llamadas.iter().rev().find(|(i, _, _)| i == id) else { continue };
+            match nombre.as_str() {
+                "reemplazar_texto" | "reemplazar_lineas" | "reemplazar_funcion" | "insertar" if c.starts_with("Hecho") => verde = false,
+                "bash" if args.contains("pruebas_agente") && c.contains("exit code: 0") && !c.contains("NINGUNA prueba") => verde = true,
+                _ => {}
+            }
+        }
+    }
+    verde
+}
 
 /// ¿Ha insertado el modelo alguna prueba propia (`#[test]`) con éxito?
 fn hubo_prueba_propia(mensajes: &[Value]) -> bool {
@@ -476,7 +812,7 @@ fn hubo_prueba_propia(mensajes: &[Value]) -> bool {
                     Some(v) => v.to_string(),
                     None => String::new(),
                 };
-                if matches!(nombre, "insertar" | "reemplazar_texto" | "reemplazar_lineas") && args.contains("#[test]") {
+                if matches!(nombre, "insertar" | "reemplazar_texto" | "reemplazar_lineas" | "reemplazar_funcion") && args.contains("#[test]") {
                     candidatas.push(l["id"].as_str().unwrap_or("").to_string());
                 }
             }
@@ -491,7 +827,7 @@ fn hubo_prueba_propia(mensajes: &[Value]) -> bool {
 }
 
 /// ¿Ha logrado el modelo editar algún archivo (`reemplazar_texto` o `insertar` con resultado «Hecho…»)?
-fn hubo_edicion(mensajes: &[Value]) -> bool {
+pub fn hubo_edicion(mensajes: &[Value]) -> bool {
     let mut nombres: Vec<(String, String)> = Vec::new();
     for m in mensajes {
         if m["role"] == "assistant" {
@@ -501,7 +837,7 @@ fn hubo_edicion(mensajes: &[Value]) -> bool {
         } else if m["role"] == "tool" {
             let id = m["tool_call_id"].as_str().unwrap_or("");
             let nombre = nombres.iter().rev().find(|(i, _)| i == id).map(|(_, n)| n.as_str()).unwrap_or("");
-            if matches!(nombre, "reemplazar_texto" | "reemplazar_lineas" | "insertar") && m["content"].as_str().unwrap_or("").starts_with("Hecho") {
+            if matches!(nombre, "reemplazar_texto" | "reemplazar_lineas" | "reemplazar_funcion" | "insertar") && m["content"].as_str().unwrap_or("").starts_with("Hecho") {
                 return true;
             }
         }
@@ -510,6 +846,21 @@ fn hubo_edicion(mensajes: &[Value]) -> bool {
 }
 
 /// Qué decirle al modelo que repite una llamada que ya salió bien (su resultado no puede cambiar).
+/// Huella (FNV-1a) del contenido de un archivo; `None` (no existe) tiene la suya.
+fn huella(datos: Option<&[u8]>) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    match datos {
+        None => h ^= 0xff,
+        Some(d) => {
+            for b in d {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+        }
+    }
+    h
+}
+
 fn aviso_de_repeticion_ok(herramienta: &str, veces: usize) -> String {
     format!("No he ejecutado esta llamada de `{herramienta}`: es idéntica a la anterior ({} veces seguidas) y como no has cambiado nada entre medias daría el mismo resultado. Si las comprobaciones de la tarea ya pasan y has cubierto lo que pide TASK.md, escribe ahora el informe final (texto, sin llamada). Si falta algo, edita con `reemplazar_texto` o `insertar` antes de volver a comprobar.", veces - 1)
 }
@@ -518,6 +869,7 @@ fn aviso_de_repeticion_ok(herramienta: &str, veces: usize) -> String {
 fn aviso_de_repeticion(herramienta: &str, veces: usize) -> String {
     let consejo = match herramienta {
         "reemplazar_texto" => "Vuelve a leer el tramo exacto con `read` (con `offset` y `limit`) y copia en `buscar` UNA sola línea completa y corta, sin los números de línea que muestra `read`. Para añadir código nuevo usa `insertar` con el número de línea.",
+        "reemplazar_funcion" => "Mira los nombres con `read` y `esquema`; `nuevo` debe ser la definición COMPLETA (firma, cuerpo y su última llave) y equilibrada.",
         "reemplazar_lineas" => "Comprueba el rango con `read` (con `offset` y `limit`): `desde` y `hasta` son números de línea, ambos incluidos, y `nuevo` debe traer bloques completos con sus llaves.",
         "insertar" => "Lee con `read` el tramo alrededor y comprueba el número de línea; inserta bloques completos (con su `{` y su `}`).",
         "bash" => "Lee el error de la salida anterior: la orden no va a cambiar de resultado si no cambias antes el archivo con `reemplazar_texto` o `insertar`.",
@@ -550,6 +902,7 @@ fn linea_historial(llamada: &Value, resultado: &str) -> String {
         if t.chars().count() > n { format!("{}…", t.chars().take(n).collect::<String>()) } else { t }
     };
     let donde = match nombre {
+        "reemplazar_funcion" => format!("{} función «{}»", texto("filePath"), corto(texto("nombre"), 50)),
         "reemplazar_lineas" => format!("{} líneas {}–{}", texto("filePath"), num("desde").unwrap_or(0), num("hasta").unwrap_or(0)),
         "reemplazar_texto" => format!("{} «{}»", texto("filePath"), corto(texto("buscar"), 50)),
         "insertar" => format!("{} línea {}", texto("filePath"), num("linea").map_or("?".to_string(), |n| n.to_string())),

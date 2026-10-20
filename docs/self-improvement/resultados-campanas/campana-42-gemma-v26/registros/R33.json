@@ -1,0 +1,15 @@
+{
+ "id": "R33",
+ "ronda": 1,
+ "resultado": "error",
+ "intentos": 1,
+ "segundos": 2165,
+ "nota": "error: entorno: el intento no termin\u00f3: LimitePasos",
+ "fallo": "protocolo",
+ "herramientas": 36,
+ "tokens": 812942,
+ "inyeccion": {
+  "que": "agente matado (kill -9) y coordinador reiniciado",
+  "recuperada": false
+ }
+}
