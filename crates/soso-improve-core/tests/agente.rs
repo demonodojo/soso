@@ -508,6 +508,24 @@ fn una_respuesta_mal_formada_rechazada_con_400_se_devuelve_al_modelo_con_el_moti
 }
 
 #[test]
+fn llama_server_500_por_json_de_herramienta_cortado_se_devuelve_al_modelo_con_el_consejo_de_acortar() {
+    struct Mal500(Vec<Option<Value>>, Vec<String>);
+    impl Modelo for Mal500 {
+        fn completar(&mut self, p: &str, _t: u64) -> Resultado<String> {
+            self.1.push(p.to_string());
+            match self.0.remove(0) {
+                None => Err(Error::entorno("el servidor contestó Some(500): {\"error\":{\"code\":500,\"message\":\"Failed to parse tool call arguments as JSON: [json.exception.parse_error.101] parse error at line 1, column 9301: syntax error while parsing value - invalid string: missing closing quote\",\"type\":\"server_error\"}}")),
+                Some(m) => Ok(json!({"choices": [{"message": m}]}).to_string()),
+            }
+        }
+    }
+    let mut m = Mal500(vec![None, Some(llamada("read", json!({"filePath": "README.md"}))), Some(json!({"role": "assistant", "content": "fin"}))], vec![]);
+    let inf = correr(&mut repo(), &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg_base(), "t", &mut |_, _| {});
+    assert_eq!((inf.fin, inf.formato), (Fin::Terminado, 1), "{:?}", inf.error);
+    assert!(m.1[1].contains("Failed to parse tool call") && m.1[1].contains("MÁS CORTA"), "el consejo de acortar llega a la primera: {}", m.1[1]);
+}
+
+#[test]
 fn una_llamada_identica_que_ya_fallo_no_se_repite_veinte_veces() {
     let mut e = repo();
     let mala = || llamada("reemplazar_texto", json!({"filePath": "src/lib.rs", "buscar": "esto no existe en el archivo", "nuevo": "x"}));
@@ -1078,6 +1096,127 @@ fn anadir_tras_una_linea_dos_veces_no_duplica_lo_anadido() {
     assert!(!err);
     let (t, err) = llama(&mut e, "reemplazar_texto", args);
     assert!(err && t.contains("YA está aplicado"), "{t}");
+}
+
+#[test]
+fn una_edicion_plegada_sigue_contando_como_edicion() {
+    let mut e = repo();
+    let mut guion: Vec<Value> = vec![llamada("reemplazar_texto", json!({"filePath": "src/lib.rs", "buscar": "hit();", "nuevo": "hit();\n        hit();"}))];
+    for i in 0..40 {
+        guion.push(llamada("grep", json!({"pattern": format!("zzz{i}")})));
+    }
+    guion.push(json!({"role": "assistant", "content": "listo"}));
+    let mut cfg = cfg_base();
+    cfg.max_turnos = 80;
+    cfg.mensajes_max = Some(12);
+    let mut m = Guion(guion, vec![]);
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg, "t", &mut |_, _| {});
+    let primera = inf.mensajes[1]["content"].as_str().unwrap_or("");
+    assert!(primera.contains("→ Hecho"), "el historial debe conservar la edición: {primera}");
+    assert!(soso_improve_core::agente::hubo_edicion(&inf.mensajes));
+}
+
+#[test]
+fn las_ediciones_sin_efecto_seguidas_suben_la_temperatura_y_una_edicion_buena_la_baja() {
+    let mut e = repo();
+    let igual = json!({"filePath": "src/lib.rs", "buscar": "hit();", "nuevo": "hit();"});
+    let mut guion: Vec<Value> = (0..4).map(|_| llamada("reemplazar_texto", igual.clone())).collect();
+    guion.push(llamada("reemplazar_texto", json!({"filePath": "src/lib.rs", "buscar": "hit();", "nuevo": "hit();\n        hit();"})));
+    guion.push(json!({"role": "assistant", "content": "listo"}));
+    let mut cfg = cfg_base();
+    cfg.max_turnos = 20;
+    let mut m = Guion(guion, vec![]);
+    let _ = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg, "t", &mut |_, _| {});
+    let temps: Vec<f64> = m.1.iter().map(|p| serde_json::from_str::<Value>(p).unwrap()["temperature"].as_f64().unwrap()).collect();
+    assert_eq!(temps[0], 0.0);
+    assert_eq!(temps[1], 0.0, "con una sola edición sin efecto aún no sube");
+    assert!(temps[2] > 0.0 && temps[3] > temps[2], "{temps:?}");
+    assert_eq!(temps[5], 0.0, "tras una edición buena vuelve a 0: {temps:?}");
+}
+
+#[test]
+fn los_prompts_dicen_donde_va_una_comprobacion_de_entrada() {
+    for p in [soso_improve_core::agente::SISTEMA, soso_improve_core::agente::SISTEMA_PRUEBAS] {
+        assert!(p.contains("va al PRINCIPIO de la función"), "{p}");
+    }
+}
+
+/// Entorno que contesta a todo con un error de compilación por falta del preludio de `std` (crate `no_std`).
+struct ConErrorNoStd(Mem);
+impl Archivos for ConErrorNoStd {
+    fn leer(&self, r: &str) -> Resultado<Vec<u8>> { self.0.leer(r) }
+    fn escribir(&mut self, r: &str, d: &[u8], m: u32) -> Resultado<()> { self.0.escribir(r, d, m) }
+    fn existe(&self, r: &str) -> bool { self.0.existe(r) }
+    fn listar(&self, r: &str) -> Resultado<Vec<Entrada>> { self.0.listar(r) }
+    fn metadatos(&self, r: &str) -> Resultado<Entrada> { self.0.metadatos(r) }
+    fn crear_directorio(&mut self, r: &str) -> Resultado<()> { self.0.crear_directorio(r) }
+    fn borrar(&mut self, r: &str) -> Resultado<()> { self.0.borrar(r) }
+}
+impl Procesos for ConErrorNoStd {
+    fn ejecutar(&self, o: &Orden) -> Resultado<Salida> {
+        self.0.ordenes.borrow_mut().push(o.argv.clone());
+        Ok(Salida { codigo: Some(101), stdout: b"error: cannot find macro `vec` in this scope\n --> src/lib.rs:9:5\n".to_vec(), stderr: vec![], motivo: None })
+    }
+}
+
+#[test]
+fn un_error_por_falta_de_vec_en_un_crate_no_std_trae_la_pista_de_alloc() {
+    let mut e = ConErrorNoStd(repo());
+    let r = ejecutar(&mut e, &Politica::nueva(R), "bash", &json!({"command": "cargo test -q -p x"}));
+    assert!(r.error && r.texto.contains("es `no_std`") && r.texto.contains("extern crate alloc"), "{}", r.texto);
+}
+
+#[test]
+fn una_edicion_fuera_de_lo_que_la_tarea_deja_tocar_se_rechaza_con_la_lista_de_permitidos() {
+    let task = "# T\n\n## Qué puedes tocar\n\n- `src/lib.rs`\n\nCualquier otra ruta queda fuera.\n\n## Qué tiene que pasar\n\n- `cargo test`\n";
+    let mut e = repo().con("/w/TASK.md", task);
+    for (n, a) in [
+        ("reemplazar_texto", json!({"filePath": "src/otro.rs", "buscar": "fn otro() {}", "nuevo": "fn otro() { 1; }"})),
+        ("insertar", json!({"filePath": "tests/roundtrip.rs", "linea": 1, "texto": "fn x() {}"})),
+        ("reemplazar_funcion", json!({"filePath": "src/otro.rs", "nombre": "otro", "nuevo": "fn otro() { 2; }"})),
+    ] {
+        let (t, err) = llama(&mut e, n, a);
+        assert!(err && t.contains("fuera de lo que esta tarea deja tocar") && t.contains("`src/lib.rs`"), "{n}: {t}");
+    }
+    // El archivo permitido sí se edita, y otra herramienta de lectura sobre cualquier ruta no se toca.
+    let (t, err) = llama(&mut e, "reemplazar_texto", json!({"filePath": "src/lib.rs", "buscar": "hit();", "nuevo": "hit();\n        hit();"}));
+    assert!(!err, "{t}");
+    let (_, err) = llama(&mut e, "read", json!({"filePath": "src/otro.rs"}));
+    assert!(!err);
+    // Sin sección «Qué puedes tocar» no hay restricción.
+    let mut libre = repo();
+    let (_, err) = llama(&mut libre, "reemplazar_texto", json!({"filePath": "src/otro.rs", "buscar": "fn otro() {}", "nuevo": "fn otro() { 1; }"}));
+    assert!(!err);
+}
+
+#[test]
+fn quitar_o_cambiar_la_firma_de_un_item_publico_se_avisa_antes_de_terminar_y_cambiar_el_cuerpo_no() {
+    let fuente = "pub fn a(x: u32) -> u32 {\n    x\n}\n\npub fn b() {\n    hit();\n}\n";
+    let mut cfg = cfg_base();
+    cfg.proteger_api = true;
+    // 1) Cambia el tipo de retorno de `a` y borra `b`: aviso con los dos.
+    let mut e = repo().con("/w/src/lib.rs", fuente);
+    let mut m = Guion(vec![
+        llamada("reemplazar_texto", json!({"filePath": "src/lib.rs", "buscar": "pub fn a(x: u32) -> u32 {", "nuevo": "pub fn a(x: u32) -> Option<u32> {"})),
+        llamada("reemplazar_texto", json!({"filePath": "src/lib.rs", "buscar": "pub fn b() {\n    hit();\n}", "nuevo": "fn b() {\n    hit();\n}"})),
+        json!({"role": "assistant", "content": "listo"}),
+        llamada("bash", json!({"command": "cargo test -q"})),
+        json!({"role": "assistant", "content": "listo"}),
+        json!({"role": "assistant", "content": "listo otra vez"}),
+    ], vec![]);
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg, "t", &mut |_, _| {});
+    let aviso = inf.mensajes.iter().find(|x| x["role"] == "user" && x["content"].as_str().unwrap_or("").contains("ítems PÚBLICOS")).unwrap_or_else(|| panic!("falta el aviso: {:?}", inf.mensajes.iter().map(|x| x["content"].as_str().unwrap_or("").chars().take(150).collect::<String>()).collect::<Vec<_>>()));
+    let t = aviso["content"].as_str().unwrap();
+    assert!(t.contains("`pub fn a(x: u32) -> u32`") && t.contains("`pub fn b()`"), "{t}");
+    // 2) Cambiar sólo el cuerpo (y añadir un ítem público nuevo) no avisa.
+    let mut e = repo().con("/w/src/lib.rs", fuente);
+    let mut m = Guion(vec![
+        llamada("reemplazar_texto", json!({"filePath": "src/lib.rs", "buscar": "    x\n}", "nuevo": "    x + 1\n}\n\npub fn c() {}"})),
+        llamada("bash", json!({"command": "cargo test -q"})),
+        json!({"role": "assistant", "content": "listo"}),
+    ], vec![]);
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg, "t", &mut |_, _| {});
+    assert!(!inf.mensajes.iter().any(|x| x["role"] == "user" && x["content"].as_str().unwrap_or("").contains("ítems PÚBLICOS")));
 }
 
 #[test]

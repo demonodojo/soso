@@ -14,6 +14,8 @@ use crate::conversation::{
 };
 use crate::tokenizer::Tokenizer;
 
+use super::plantilla::{Plantilla, Salida};
+
 const IM_START: &str = "<|im_start|>";
 const IM_END: &str = "<|im_end|>";
 const SYSTEM_POR_DEFECTO: &str =
@@ -37,22 +39,23 @@ pub fn render_messages(
             motivo: String::from("el tokenizer no trae vocabulario"),
         });
     }
-    let texto = match profile.family.as_str() {
-        "qwen2" => render_qwen2(input, true)?,
-        "qwen3coder" => render_qwen3coder(input, true)?,
+    let plantilla = match profile.family.as_str() {
+        "qwen2" => render_qwen2_marcado(input, true)?,
+        "qwen3coder" => render_qwen3coder_marcado(input, true)?,
         // Sin pensamiento: el canal de razonamiento cuesta tokens y el agente no los usa.
-        "gemma4" => super::gemma4::render_gemma4(input, true, false)?,
+        "gemma4" => super::gemma4::render_gemma4_marcado(input, true, false)?,
         // Misma familia con el canal de razonamiento activo (`<|think|>`): el modelo piensa antes de contestar y el
         // parser descarta el pensamiento. Cuesta más tokens por turno.
-        "gemma4-pensar" => super::gemma4::render_gemma4(input, true, true)?,
-        "mellum" => render_mellum(input, true)?,
+        "gemma4-pensar" => super::gemma4::render_gemma4_marcado(input, true, true)?,
+        "mellum" => render_mellum_marcado(input, true)?,
         otro => {
             return Err(ChatError::FamiliaNoImplementada {
                 family: String::from(otro),
             });
         }
     };
-    Ok(tokenizer.encode(&texto))
+    // Los marcadores de control sólo cuentan donde los puso la plantilla: el contenido de terceros va como texto.
+    Ok(tokenizer.encode_marcado(&plantilla.texto, &plantilla.ajenos))
 }
 
 /// Mellum 2.1 (JetBrains): ChatML con herramientas en JSON como Qwen2.5, pero **sin** el sistema por defecto de Qwen,
@@ -61,7 +64,12 @@ pub fn render_messages(
 /// de usuario. Contrastado con `/apply-template` de llama.cpp (`tests/mellum_plantilla.rs`). El modelo escribe su
 /// razonamiento en `<think>…</think>` por su cuenta: el aviso de generación no lo fuerza.
 pub fn render_mellum(input: &ChatInput, add_generation_prompt: bool) -> Result<String, ChatError> {
-    let mut out = String::new();
+    render_mellum_marcado(input, add_generation_prompt).map(|p| p.texto)
+}
+
+/// Como [`render_mellum`], con los tramos de terceros marcados.
+pub fn render_mellum_marcado(input: &ChatInput, add_generation_prompt: bool) -> Result<Plantilla, ChatError> {
+    let mut out = Plantilla::new();
     let mensajes = &input.messages;
     let primero_sistema = mensajes.first().is_some_and(|m| m.role == Role::System);
     let resto: &[Message] = if primero_sistema { &mensajes[1..] } else { &mensajes[..] };
@@ -70,7 +78,7 @@ pub fn render_mellum(input: &ChatInput, add_generation_prompt: bool) -> Result<S
         out.push_str(IM_START);
         out.push_str("system\n");
         if primero_sistema {
-            out.push_str(sistema);
+            out.ajeno(sistema);
             out.push_str(TOOLS_CABECERA);
         } else {
             out.push_str(&TOOLS_CABECERA[2..]);
@@ -93,7 +101,7 @@ pub fn render_mellum(input: &ChatInput, add_generation_prompt: bool) -> Result<S
     } else if primero_sistema {
         out.push_str(IM_START);
         out.push_str("system\n");
-        out.push_str(sistema);
+        out.ajeno(sistema);
         out.push_str(IM_END);
         out.push('\n');
     }
@@ -107,7 +115,7 @@ pub fn render_mellum(input: &ChatInput, add_generation_prompt: bool) -> Result<S
                 out.push_str("user");
                 while i < resto.len() && resto[i].role == Role::Tool {
                     out.push_str("\n<tool_response>\n");
-                    out.push_str(resto[i].content.as_deref().unwrap_or(""));
+                    out.ajeno(resto[i].content.as_deref().unwrap_or(""));
                     out.push_str("\n</tool_response>");
                     i += 1;
                 }
@@ -119,7 +127,7 @@ pub fn render_mellum(input: &ChatInput, add_generation_prompt: bool) -> Result<S
                 out.push_str(IM_START);
                 out.push_str("assistant\n");
                 let texto = m.content.as_deref().unwrap_or("");
-                out.push_str(texto);
+                out.ajeno(texto);
                 for (n, c) in m.tool_calls.iter().enumerate() {
                     if n > 0 || !texto.is_empty() {
                         out.push('\n');
@@ -131,7 +139,7 @@ pub fn render_mellum(input: &ChatInput, add_generation_prompt: bool) -> Result<S
                     out.push_str("<tool_call>\n{\"name\": ");
                     out.push_str(&serde_json::to_string(&c.name).unwrap_or_default());
                     out.push_str(", \"arguments\": ");
-                    out.push_str(&args);
+                    out.ajeno(&args);
                     out.push_str("}\n</tool_call>");
                 }
                 out.push_str(IM_END);
@@ -141,7 +149,7 @@ pub fn render_mellum(input: &ChatInput, add_generation_prompt: bool) -> Result<S
                 out.push_str(IM_START);
                 out.push_str(m.role.como_texto());
                 out.push('\n');
-                out.push_str(m.content.as_deref().unwrap_or(""));
+                out.ajeno(m.content.as_deref().unwrap_or(""));
                 out.push_str(IM_END);
                 out.push('\n');
             }
@@ -157,7 +165,12 @@ pub fn render_mellum(input: &ChatInput, add_generation_prompt: bool) -> Result<S
 
 /// Texto ChatML Qwen2 alineado con la plantilla oficial de Hugging Face.
 pub fn render_qwen2(input: &ChatInput, add_generation_prompt: bool) -> Result<String, ChatError> {
-    let mut out = String::new();
+    render_qwen2_marcado(input, add_generation_prompt).map(|p| p.texto)
+}
+
+/// Como [`render_qwen2`], con los tramos de terceros marcados.
+pub fn render_qwen2_marcado(input: &ChatInput, add_generation_prompt: bool) -> Result<Plantilla, ChatError> {
+    let mut out = Plantilla::new();
     let messages = &input.messages;
     let tools = &input.tools;
 
@@ -165,7 +178,7 @@ pub fn render_qwen2(input: &ChatInput, add_generation_prompt: bool) -> Result<St
         out.push_str(IM_START);
         out.push_str("system\n");
         if messages.first().is_some_and(|m| m.role == Role::System) {
-            out.push_str(contenido(&messages[0]));
+            out.ajeno(contenido(&messages[0]));
         } else {
             out.push_str(SYSTEM_POR_DEFECTO);
         }
@@ -178,7 +191,7 @@ pub fn render_qwen2(input: &ChatInput, add_generation_prompt: bool) -> Result<St
         out.push_str(IM_END);
         out.push('\n');
     } else if messages.first().is_some_and(|m| m.role == Role::System) {
-        turno_simple(&mut out, "system", contenido(&messages[0]));
+        turno_ajeno(&mut out, "system", contenido(&messages[0]));
     } else {
         turno_simple(&mut out, "system", SYSTEM_POR_DEFECTO);
     }
@@ -186,12 +199,12 @@ pub fn render_qwen2(input: &ChatInput, add_generation_prompt: bool) -> Result<St
     for (i, message) in messages.iter().enumerate() {
         let primero = i == 0;
         match message.role {
-            Role::User => turno_simple(&mut out, "user", contenido(message)),
+            Role::User => turno_ajeno(&mut out, "user", contenido(message)),
             // El primer system ya fue cabecera (con o sin herramientas).
             Role::System if primero => {}
-            Role::System => turno_simple(&mut out, "system", contenido(message)),
+            Role::System => turno_ajeno(&mut out, "system", contenido(message)),
             Role::Assistant if message.tool_calls.is_empty() => {
-                turno_simple(&mut out, "assistant", contenido(message));
+                turno_ajeno(&mut out, "assistant", contenido(message));
             }
             Role::Assistant => turno_asistente_con_llamadas(&mut out, message)?,
             Role::Tool => {
@@ -204,7 +217,7 @@ pub fn render_qwen2(input: &ChatInput, add_generation_prompt: bool) -> Result<St
                     out.push_str("user");
                 }
                 out.push_str("\n<tool_response>\n");
-                out.push_str(contenido(message));
+                out.ajeno(contenido(message));
                 out.push_str("\n</tool_response>");
                 if !next_tool {
                     out.push_str(IM_END);
@@ -225,7 +238,7 @@ fn contenido(m: &Message) -> &str {
     m.content.as_deref().unwrap_or("")
 }
 
-fn turno_simple(out: &mut String, rol: &str, cuerpo: &str) {
+fn turno_simple(out: &mut Plantilla, rol: &str, cuerpo: &str) {
     out.push_str(IM_START);
     out.push_str(rol);
     out.push('\n');
@@ -234,13 +247,23 @@ fn turno_simple(out: &mut String, rol: &str, cuerpo: &str) {
     out.push('\n');
 }
 
-fn turno_asistente_con_llamadas(out: &mut String, message: &Message) -> Result<(), ChatError> {
+/// Turno cuyo cuerpo es de terceros.
+fn turno_ajeno(out: &mut Plantilla, rol: &str, cuerpo: &str) {
+    out.push_str(IM_START);
+    out.push_str(rol);
+    out.push('\n');
+    out.ajeno(cuerpo);
+    out.push_str(IM_END);
+    out.push('\n');
+}
+
+fn turno_asistente_con_llamadas(out: &mut Plantilla, message: &Message) -> Result<(), ChatError> {
     out.push_str(IM_START);
     out.push_str("assistant");
     if let Some(texto) = message.content.as_ref() {
         if !texto.is_empty() {
             out.push('\n');
-            out.push_str(texto);
+            out.ajeno(texto);
         }
     }
     for call in &message.tool_calls {
@@ -250,12 +273,9 @@ fn turno_asistente_con_llamadas(out: &mut String, message: &Message) -> Result<(
             }
         })?;
         out.push_str("\n<tool_call>\n");
-        out.push_str(&format!(
-            r#"{{"name": "{}", "arguments": {}}}"#,
-            call.name,
-            tojson_compact(&args)
-        ));
-        out.push_str("\n</tool_call>");
+        out.push_str(&format!(r#"{{"name": "{}", "arguments": "#, call.name));
+        out.ajeno(&tojson_compact(&args));
+        out.push_str("}\n</tool_call>");
     }
     out.push_str(IM_END);
     out.push('\n');
@@ -312,7 +332,12 @@ const Q3C_TOOLS_PIE: &str = "\n</tools>\n\nIf you choose to call a function ONLY
 /// Diferencia conocida: las claves de un objeto JSON salen en orden alfabético (serde_json sin
 /// `preserve_order`), mientras que Hugging Face conserva el de inserción.
 pub fn render_qwen3coder(input: &ChatInput, add_generation_prompt: bool) -> Result<String, ChatError> {
-    let mut out = String::new();
+    render_qwen3coder_marcado(input, add_generation_prompt).map(|p| p.texto)
+}
+
+/// Como [`render_qwen3coder`], con los tramos de terceros marcados.
+pub fn render_qwen3coder_marcado(input: &ChatInput, add_generation_prompt: bool) -> Result<Plantilla, ChatError> {
+    let mut out = Plantilla::new();
     let tools = &input.tools;
     let (sistema, resto): (Option<&str>, &[Message]) = match input.messages.first() {
         Some(m) if m.role == Role::System => (Some(contenido(m)), &input.messages[1..]),
@@ -321,7 +346,7 @@ pub fn render_qwen3coder(input: &ChatInput, add_generation_prompt: bool) -> Resu
     if let Some(s) = sistema {
         out.push_str(IM_START);
         out.push_str("system\n");
-        out.push_str(s);
+        out.ajeno(s);
     } else if !tools.is_empty() {
         out.push_str(IM_START);
         out.push_str("system\n");
@@ -377,7 +402,7 @@ pub fn render_qwen3coder(input: &ChatInput, add_generation_prompt: bool) -> Resu
                 let texto = contenido(message).trim();
                 if !texto.is_empty() {
                     out.push('\n');
-                    out.push_str(texto);
+                    out.ajeno(texto);
                     out.push('\n');
                 }
                 for call in &message.tool_calls {
@@ -395,8 +420,8 @@ pub fn render_qwen3coder(input: &ChatInput, add_generation_prompt: bool) -> Resu
                             out.push_str(nombre);
                             out.push_str(">\n");
                             match valor {
-                                Value::Object(_) | Value::Array(_) => out.push_str(&py_json(valor)),
-                                otro => out.push_str(&py_string(otro)),
+                                Value::Object(_) | Value::Array(_) => out.ajeno(&py_json(valor)),
+                                otro => out.ajeno(&py_string(otro)),
                             }
                             out.push_str("\n</parameter>\n");
                         }
@@ -413,7 +438,7 @@ pub fn render_qwen3coder(input: &ChatInput, add_generation_prompt: bool) -> Resu
                     out.push_str("user\n");
                 }
                 out.push_str("<tool_response>\n");
-                out.push_str(contenido(message));
+                out.ajeno(contenido(message));
                 out.push_str("\n</tool_response>\n");
                 let es_ultimo = i + 1 == resto.len();
                 let siguiente_no_es_tool = resto.get(i + 1).is_some_and(|m| m.role != Role::Tool);
@@ -422,7 +447,7 @@ pub fn render_qwen3coder(input: &ChatInput, add_generation_prompt: bool) -> Resu
                     out.push('\n');
                 }
             }
-            _ => turno_simple(&mut out, rol_texto(message.role), contenido(message)),
+            _ => turno_ajeno(&mut out, rol_texto(message.role), contenido(message)),
         }
     }
     if add_generation_prompt {
@@ -442,7 +467,7 @@ fn rol_texto(r: Role) -> &'static str {
 }
 
 /// `render_extra_keys` de la plantilla: las claves de `obj` que no están en `tratadas`.
-fn extra_keys(out: &mut String, obj: &Value, tratadas: &[&str]) {
+fn extra_keys<S: Salida>(out: &mut S, obj: &Value, tratadas: &[&str]) {
     let Some(mapa) = obj.as_object() else {
         return;
     };

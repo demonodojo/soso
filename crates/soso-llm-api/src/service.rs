@@ -10,6 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use sha2::{Digest, Sha256};
 use sosomodel::index::TensorIndex;
 use sosomodel::manifest::Manifest;
+use soso_llm_core::conversation::gramatica::restriccion_de_herramientas;
+use soso_llm_core::conversation::salida::interpretar_ids;
+use soso_llm_core::restriccion::TablaBytes;
 use soso_llm_core::conversation::{
     parse_assistant_output_familia, render_messages, ChatError, ModelProfile, ToolChoice,
 };
@@ -210,6 +213,8 @@ pub struct CpuBackend {
     source: RunSource,
     profile: ModelProfile,
     tokenizer: Tokenizer,
+    /// Bytes de cada token, para restringir las llamadas a herramienta por gramática (se calcula una vez).
+    tabla_bytes: Arc<TablaBytes>,
 }
 
 pub fn load_cpu_backend(model_dir: &str, profile: ModelProfile) -> Result<CpuBackend, LoadError> {
@@ -252,7 +257,9 @@ pub fn load_cpu_backend(model_dir: &str, profile: ModelProfile) -> Result<CpuBac
     let tokenizer = Tokenizer::parse(&tok_bytes)
         .map_err(|_| LoadError::Modelo(String::from("tokenizer.som inválido")))?;
 
-    let rt = Runtime::new(manifest, index.clone(), 0, 0);
+    let mut rt = Runtime::new(manifest, index.clone(), 0, 0);
+    // El reloj deja que la política del borrador mida lo que cuesta cada ronda (`especulativo`).
+    rt.reloj = Some(reloj_ms);
     rt.validate_shapes()
         .map_err(|_| LoadError::Modelo(String::from("shapes inválidas")))?;
 
@@ -263,6 +270,7 @@ pub fn load_cpu_backend(model_dir: &str, profile: ModelProfile) -> Result<CpuBac
         RunSource::Staged(ThreadStagedSource::new(base))
     };
 
+    let tabla_bytes = Arc::new(tokenizer.tabla_bytes());
     Ok(CpuBackend {
         rt,
         parallel: None,
@@ -270,7 +278,29 @@ pub fn load_cpu_backend(model_dir: &str, profile: ModelProfile) -> Result<CpuBac
         source,
         profile,
         tokenizer,
+        tabla_bytes,
     })
+}
+
+/// ¿Termina el prompt dentro de un razonamiento abierto (`<think>`, canal de Gemma)? El aviso de generación de
+/// algunas plantillas lo deja así, y lo que el modelo escriba hasta cerrarlo no es respuesta ni llamada.
+fn razonamiento_abierto(tok: &Tokenizer, prompt_ids: &[u32]) -> bool {
+    let cola = &prompt_ids[prompt_ids.len().saturating_sub(24)..];
+    let texto = tok.decode(cola);
+    let abierto = |abre: &str, cierra: &str| match (texto.rfind(abre), texto.rfind(cierra)) {
+        (Some(a), Some(c)) => a > c,
+        (Some(_), None) => true,
+        _ => false,
+    };
+    abierto("<think>", "</think>") || abierto("<|channel>", "<channel|>")
+}
+
+/// Milisegundos monotónicos desde el primer uso (el origen no importa: sólo se restan).
+fn reloj_ms() -> u64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static ORIGEN: OnceLock<Instant> = OnceLock::new();
+    ORIGEN.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
 impl ChatBackend for CpuBackend {
@@ -298,7 +328,16 @@ impl ChatBackend for CpuBackend {
         observer: &mut dyn GenerationObserver,
     ) -> Result<(Vec<u32>, GenerationReport), ()> {
         let stops = self.profile.stop_token_ids.clone();
-        let options = GenerationOptions::new(prepared.max_new_tokens as usize, stops);
+        // Con herramientas declaradas, la llamada que escriba el modelo sólo puede ser una bien formada de la
+        // familia (nombre declarado, claves del esquema, JSON/etiquetas cerradas). Fuera de una llamada el
+        // muestreo es el de siempre.
+        let restriccion = restriccion_de_herramientas(
+            &self.profile.family,
+            &prepared.input,
+            self.tabla_bytes.clone(),
+            razonamiento_abierto(&self.tokenizer, prompt_ids),
+        );
+        let options = GenerationOptions::new(prepared.max_new_tokens as usize, stops).con_restriccion(restriccion);
         let seed = prepared.seed.unwrap_or(42) as u64;
         let mut sampler = Sampler::new(
             prepared.temperature as f32,
@@ -315,6 +354,7 @@ impl ChatBackend for CpuBackend {
             observer,
             self.parallel.as_deref().map(|p| p as &dyn soso_llm_core::parallel::RowParallel),
             &mut gpu,
+            &mut None,
         )?;
         // `ChatBackend` devuelve sólo lo generado. El runtime devuelve la secuencia
         // entera (prompt + generación): sin recortarla el parser de llamadas leía el
@@ -500,17 +540,21 @@ impl<B: ChatBackend + Send> HostService<B> {
             return Err(ServiceError::Inferencia);
         }
 
-        let generated_text = {
+        let (generated_text, turn) = {
             let b = self.backend.lock().unwrap();
-            b.tokenizer().decode(&token_ids)
+            let texto = b.tokenizer().decode(&token_ids);
+            // Un marcador emitido como token no se confunde con el mismo texto escrito dentro de un argumento.
+            let turno = interpretar_ids(b.tokenizer(), &token_ids, |t| {
+                parse_assistant_output_familia(
+                    &prepared.input,
+                    t,
+                    prepared.input.siguiente_id_llamada(),
+                    &profile.family,
+                )
+            });
+            (texto, turno)
         };
-        let turn = parse_assistant_output_familia(
-            &prepared.input,
-            &generated_text,
-            prepared.input.siguiente_id_llamada(),
-            &profile.family,
-        )
-        .map_err(|e| {
+        let turn = turn.map_err(|e| {
             eprintln!(
                 "serve: salida rechazada ({e:?}): {:?}",
                 generated_text.chars().take(1500).collect::<String>()
@@ -567,17 +611,21 @@ impl<B: ChatBackend + Send> HostService<B> {
             return Ok(Vec::new());
         }
 
-        let generated_text = {
+        let (generated_text, turn) = {
             let b = self.backend.lock().unwrap();
-            b.tokenizer().decode(&token_ids)
+            let texto = b.tokenizer().decode(&token_ids);
+            // Un marcador emitido como token no se confunde con el mismo texto escrito dentro de un argumento.
+            let turno = interpretar_ids(b.tokenizer(), &token_ids, |t| {
+                parse_assistant_output_familia(
+                    &prepared.input,
+                    t,
+                    prepared.input.siguiente_id_llamada(),
+                    &profile.family,
+                )
+            });
+            (texto, turno)
         };
-        let turn = parse_assistant_output_familia(
-            &prepared.input,
-            &generated_text,
-            prepared.input.siguiente_id_llamada(),
-            &profile.family,
-        )
-        .map_err(|e| {
+        let turn = turn.map_err(|e| {
             eprintln!(
                 "serve: salida rechazada ({e:?}): {:?}",
                 generated_text.chars().take(1500).collect::<String>()
@@ -763,4 +811,25 @@ fn error_response(err: &ServiceError) -> Vec<u8> {
 /// Serializa un error de servicio como respuesta HTTP completa (tests).
 pub fn http_error_bytes(err: &ServiceError) -> Vec<u8> {
     error_response(err)
+}
+
+#[cfg(test)]
+mod tests_gramatica {
+    use super::*;
+
+    fn tokenizer() -> Tokenizer {
+        let ruta = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/self-improvement/reference/tokenizer.som");
+        Tokenizer::parse(&std::fs::read(ruta).expect("tokenizer.som")).expect("tokenizer válido")
+    }
+
+    #[test]
+    fn el_razonamiento_abierto_se_lee_de_la_cola_del_prompt() {
+        let tok = tokenizer();
+        let ids = |t: &str| tok.encode_trozo(t, false, false);
+        assert!(razonamiento_abierto(&tok, &ids("<|im_start|>assistant\n<think>\n")));
+        assert!(!razonamiento_abierto(&tok, &ids("<|im_start|>assistant\n<think>\nlisto\n</think>\n")));
+        assert!(!razonamiento_abierto(&tok, &ids("<|im_start|>assistant\n")));
+        assert!(!razonamiento_abierto(&tok, &[]));
+    }
 }

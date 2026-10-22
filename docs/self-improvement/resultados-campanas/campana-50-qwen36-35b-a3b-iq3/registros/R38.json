@@ -1,0 +1,15 @@
+{
+ "id": "R38",
+ "ronda": 1,
+ "resultado": "error",
+ "intentos": 1,
+ "segundos": 991,
+ "nota": "tarea: Bloqueado",
+ "fallo": "infraestructura",
+ "herramientas": 40,
+ "tokens": 863691,
+ "inyeccion": {
+  "que": "agente matado (kill -9) y coordinador reiniciado",
+  "recuperada": false
+ }
+}

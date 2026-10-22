@@ -71,6 +71,8 @@ P
   # MULTIAGENTE=1 [CICLOS=N]: planificador + programador + revisor en bucle (agente/orquestador.rs).
   [ "${MULTIAGENTE:-}" = 1 ] && ARGS="$ARGS --multiagente --ciclos ${CICLOS:-3}"
   # Rondas de reintento: temperatura > 0 (a T=0 la misma petición da la misma respuesta). TEMP_REINTENTO=0 la deja en T=0.
+  # TEMP_BASE=T: temperatura de TODAS las rondas (los modelos Qwen3.x recomiendan 0,6–0,7; a T=0 se atascan en bucles).
+  [ -n "${TEMP_BASE:-}" ] && ARGS="$ARGS --temperatura $TEMP_BASE"
   [ $RONDA -gt 1 ] && ARGS="$ARGS --temperatura ${TEMP_REINTENTO:-0.7}"
   INYECTADA=0
   if [ "$INJ_S" != "0" ]; then

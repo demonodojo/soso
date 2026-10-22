@@ -325,6 +325,24 @@ pub enum NicDev {
 }
 
 impl NicDev {
+    /// ¿Tiene enlace? Cable con carrier, WiFi autorizada. Lo que el driver no
+    /// sabe decir (virtio, el puerto lxdde del e1000e) cuenta como arriba.
+    pub fn carrier(&self) -> bool {
+        match self {
+            NicDev::Ninguno => false,
+            #[cfg(feature = "drv-virtio-net")]
+            NicDev::Virtio(_) => true,
+            #[cfg(feature = "drv-e1000e")]
+            NicDev::E1000e(_) => crate::drivers::e1000e::link_up(),
+            #[cfg(feature = "drv-rtl8169")]
+            NicDev::Rtl8169(_) => crate::drivers::rtl8169::link_up(),
+            #[cfg(feature = "lxdde")]
+            NicDev::LxE1000e(_) => true,
+            #[cfg(feature = "lxdde")]
+            NicDev::LxWifi(_) => crate::lxdde::wifi_authorized(),
+        }
+    }
+
     /// Fallback 10.0.2.x solo en NICs de QEMU (virtio/e1000e). El Realtek de placa
     /// espera DHCP de verdad, como el WiFi.
     pub fn fallback_slirp(&self) -> bool {

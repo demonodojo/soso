@@ -72,7 +72,7 @@ fn model_base(name: &str) -> String {
     format!("/models/{name}")
 }
 
-fn read_model_catalog(name: &str) -> Result<(Manifest, TensorIndex, u32, u32), u8> {
+pub(crate) fn read_model_catalog(name: &str) -> Result<(Manifest, TensorIndex, u32, u32), u8> {
     let base = model_base(name);
     let manifest_path = format!("{base}/manifest.som");
     let index_path = format!("{base}/index.som");
@@ -99,7 +99,7 @@ fn read_model_catalog(name: &str) -> Result<(Manifest, TensorIndex, u32, u32), u
     Ok((manifest, index, manifest_crc, index_crc))
 }
 
-fn load_model_from_catalog(
+pub(crate) fn load_model_from_catalog(
     name: &str,
     manifest: Manifest,
     index: TensorIndex,
@@ -192,6 +192,9 @@ pub struct Sesion {
     pub(crate) pool: Option<ThreadPool>,
     pub(crate) sys_gpu: Option<soso_gpu::SysGpu>,
     pub(crate) modelo: String,
+    /// Head en estrella (`serve --cluster` / askd `cluster=`).
+    pub(crate) cluster: Option<crate::distributed::PrelinkedHead>,
+    pub(crate) cluster_local_end: u32,
 }
 
 /// Apaga workers de inferencia antes de salir del proceso.
@@ -489,6 +492,8 @@ pub(crate) fn preparar_sesion_echo(
         pool,
         sys_gpu,
         modelo: String::from(name),
+        cluster: None,
+        cluster_local_end: 0,
     })
 }
 
@@ -508,6 +513,8 @@ impl Sesion {
 pub struct PropietarioSesion {
     pub sesion: Option<Sesion>,
     pub modelo: String,
+    /// `cluster|splits` efectivos; fuerza recarga si cambian en conf.
+    pub cluster_firma: String,
 }
 
 impl PropietarioSesion {
@@ -515,11 +522,18 @@ impl PropietarioSesion {
         Self {
             sesion: None,
             modelo: String::new(),
+            cluster_firma: String::new(),
         }
     }
 
     pub fn necesita_carga(&self, want: &str) -> bool {
-        self.sesion.as_ref().map(|s| s.modelo != want).unwrap_or(true)
+        self.necesita_carga_con_firma(want, "")
+    }
+
+    pub fn necesita_carga_con_firma(&self, want: &str, cluster_firma: &str) -> bool {
+        self.sesion.as_ref().map_or(true, |s| {
+            s.modelo != want || self.cluster_firma != cluster_firma
+        })
     }
 }
 
@@ -530,6 +544,87 @@ pub fn preparar_sesion_api(
     mem_plan: MemoryPlanConfig,
 ) -> Result<Sesion, u8> {
     preparar_sesion_echo(name, force_cpu, mem_plan, false, true, None)
+}
+
+/// Head en cluster (`serve --cluster`, askd `cluster=`): CPU, pool, enlaces ya asignados.
+pub(crate) fn preparar_sesion_cluster(
+    name: &str,
+    pipeline: &str,
+    splits: &str,
+    wire: u8,
+    cluster_port: u16,
+    echo_fd: Option<u64>,
+) -> Result<Sesion, u8> {
+    let askd = echo_fd.is_some();
+    let (manifest, index, manifest_crc, index_crc) = read_model_catalog(name)?;
+    let t0 = sys::uptime_ms();
+    if askd {
+        traza(true, "askd: enlazando nodos del cluster…");
+    } else {
+        println!("soso-llm: enlazando nodos del cluster…");
+    }
+    let (estrella, plan) = crate::distributed::montar_head_enlaces(
+        name,
+        manifest_crc,
+        index_crc,
+        manifest.hidden_dim,
+        manifest.num_layers,
+        &index,
+        pipeline,
+        splits,
+        wire,
+        cluster_port,
+    )?;
+    let head = plan.head_segment();
+    let mut bundle = load_model_from_catalog(
+        name,
+        manifest,
+        index,
+        manifest_crc,
+        index_crc,
+        PipelineRole::Head,
+        head.layer_start,
+        head.layer_end,
+        true,
+    )?;
+    bundle.rt.set_backend(Backend::Cpu);
+    let mem = read_mem_snapshot();
+    let planner = ResourcePlanner::with_config(
+        &bundle.rt.manifest,
+        &bundle.rt.index,
+        mem,
+        0,
+        false,
+        MemoryPlanConfig::default(),
+    );
+    bundle.rt.set_planner(planner);
+    let pool = ThreadPool::new();
+    if askd {
+        traza(
+            true,
+            &format!(
+                "askd: head cluster capas {}..{} — {} ms",
+                head.layer_start,
+                head.layer_end,
+                (sys::uptime_ms() - t0).max(0)
+            ),
+        );
+    } else {
+        println!(
+            "soso-llm: head cluster capas {}..{} ({} nodos remotos)",
+            head.layer_start,
+            head.layer_end,
+            plan.remote_count()
+        );
+    }
+    Ok(Sesion {
+        bundle,
+        pool: Some(pool),
+        sys_gpu: None,
+        modelo: String::from(name),
+        cluster: Some(estrella),
+        cluster_local_end: head.layer_end,
+    })
 }
 
 /// Perfil expuesto por `/v1/models` y validación de peticiones API (alias = nombre cargado).

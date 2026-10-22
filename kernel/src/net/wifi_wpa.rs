@@ -4,11 +4,14 @@
 //! [`soso_wpa2`], que se compila y se prueba en el host contra vectores y
 //! transcripciones; este módulo le da tramas y ejecuta lo que decide.
 //!
-//! Lee credenciales de `SOSOWIFI.TXT` (ESP live) o `/etc/wifi.conf`.
-//! Tras un `wifi connect` correcto las persiste en ambos para el próximo arranque.
+//! Lee las redes guardadas (hasta `MAX_REDES`) de `SOSOWIFI.TXT` (ESP live) o
+//! `/etc/wifi.conf`. Tras un `wifi connect` correcto la red pasa al frente de la
+//! lista y se persiste en ambos para el próximo arranque.
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use soso_red_core::{formatear_redes, parsear_redes, promover, RedWifi};
 use soso_wpa2::{Discard, State, Supplicant};
 
 /// Tiempo máximo sin avanzar el diálogo antes de darlo por perdido.
@@ -53,46 +56,60 @@ pub fn pbkdf2_psk(passphrase: &str, ssid: &str) -> [u8; 32] {
     soso_wpa2::pbkdf2_psk(passphrase, ssid)
 }
 
-fn read_wifi_config_text() -> Option<String> {
+/// Redes guardadas, la última usada primero: `SOSOWIFI.TXT` en la ESP del live
+/// y, sin ESP, `/etc/wifi.conf`. Con `avisar`, un `SOSOWIFI.TXT` sin ninguna
+/// red válida lo dice (en el live no se cae a `/etc/wifi.conf`: sosh pide la red).
+fn leer_redes(avisar: bool) -> Vec<RedWifi> {
     #[cfg(feature = "drv-live-disk")]
     if crate::drivers::live_disk::esp_available() {
         if let Some(raw) = crate::drivers::wificonf::read_text() {
-            let text = core::str::from_utf8(&raw).unwrap_or("");
-            if parse_wifi_conf(text).is_some() {
-                return Some(text.to_string());
+            let redes = parsear_redes(core::str::from_utf8(&raw).unwrap_or(""));
+            if redes.is_empty() && avisar {
+                crate::println!(
+                    "wifi: SOSOWIFI.TXT sin ssid= válido — elige red en sosh o escribe ssid=/psk="
+                );
             }
-            crate::println!(
-                "wifi: SOSOWIFI.TXT sin ssid= válido — elige red en sosh o escribe ssid=/psk="
-            );
-            return None;
+            return redes;
         }
     }
     let data = crate::vfs::resolve("/etc/wifi.conf")
         .ok()
-        .and_then(|ino| crate::vfs::read_file(ino).ok())?;
-    let text = core::str::from_utf8(&data).unwrap_or("");
-    if parse_wifi_conf(text).is_some() {
-        Some(text.to_string())
-    } else {
-        None
+        .and_then(|ino| crate::vfs::read_file(ino).ok());
+    match data {
+        Some(data) => parsear_redes(core::str::from_utf8(&data).unwrap_or("")),
+        None => Vec::new(),
     }
 }
 
-/// Autoconnect: scan, elige SSID de config, conecta (abierta o WPA2).
+/// Autoconnect: scan y conecta a la primera red guardada que se ve (abierta o
+/// WPA2); si esa no engancha, a la siguiente. Sin ninguna a la vista, o sin
+/// scan útil, prueba la primera de la lista.
 pub fn autoconnect() -> i32 {
-    let text = match read_wifi_config_text() {
-        Some(t) => t,
-        None => return -1,
-    };
-    let Some((ssid, psk)) = parse_wifi_conf(&text) else {
-        crate::println!("wifi-wpa: falta ssid= en configuración");
+    let redes = leer_redes(true);
+    if redes.is_empty() {
         return -1;
-    };
-    crate::lxdde::wifi_scan();
-    if let Some(pass) = psk {
-        return connect_wpa2(&ssid, &pass);
     }
-    connect_open(&ssid)
+    crate::lxdde::wifi_scan();
+    let visibles: Vec<String> = crate::lxdde::wifi_scan_results()
+        .into_iter()
+        .map(|(ssid, ..)| ssid)
+        .collect();
+    let mut candidatas: Vec<&RedWifi> = redes.iter().filter(|r| visibles.contains(&r.ssid)).collect();
+    if candidatas.is_empty() {
+        candidatas.push(&redes[0]);
+    }
+    let mut rc = -1;
+    for red in candidatas {
+        rc = match red.psk.as_deref() {
+            Some(pass) => connect_wpa2(&red.ssid, pass),
+            None => connect_open(&red.ssid),
+        };
+        if rc == 0 {
+            return 0;
+        }
+        crate::println!("wifi-wpa: no pude conectar a '{}'", red.ssid);
+    }
+    rc
 }
 
 /// Conecta a red abierta. Pasa por aquí (no directo al driver) para que una
@@ -353,14 +370,6 @@ fn motivo(d: Discard) -> &'static str {
     }
 }
 
-/// Serializa el formato que lee `parse_wifi_conf` / el autoconnect.
-pub fn format_wifi_conf(ssid: &str, psk: Option<&str>) -> String {
-    match psk {
-        Some(p) if !p.is_empty() => alloc::format!("ssid={ssid}\npsk={p}\n"),
-        _ => alloc::format!("ssid={ssid}\n"),
-    }
-}
-
 fn credenciales_validas(ssid: &str, psk: Option<&str>) -> bool {
     if ssid.is_empty() || ssid.contains('\n') || ssid.contains('\r') {
         return false;
@@ -388,14 +397,15 @@ fn write_etc_wifi_conf(text: &str) -> bool {
     }
 }
 
-/// Guarda SSID/clave para el autoconnect y DHCP del siguiente arranque.
+/// Guarda SSID/clave para el autoconnect y DHCP del siguiente arranque. La red
+/// pasa al frente de la lista (hasta 4) y las demás se conservan.
 /// ESP primero (`SOSOWIFI.TXT`); `/etc/wifi.conf` como respaldo e instalación.
 pub fn persist_credentials(ssid: &str, psk: Option<&str>) {
     if !credenciales_validas(ssid, psk) {
         crate::println!("wifi: no se guardan credenciales (SSID o clave inválidos)");
         return;
     }
-    let text = format_wifi_conf(ssid, psk);
+    let text = formatear_redes(&promover(leer_redes(false), RedWifi::new(ssid, psk)));
     let mut ok = false;
     #[cfg(feature = "drv-live-disk")]
     match crate::drivers::wificonf::write_text(&text) {
@@ -413,22 +423,4 @@ pub fn persist_credentials(ssid: &str, psk: Option<&str>) {
     if !ok {
         crate::println!("wifi: no se pudieron guardar las credenciales");
     }
-}
-
-/// Parsea `wifi.conf` desde buffer (tests / kshell).
-pub fn parse_wifi_conf(text: &str) -> Option<(String, Option<String>)> {
-    let mut ssid = None;
-    let mut psk = None;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(v) = line.strip_prefix("ssid=") {
-            ssid = Some(v.trim().to_string());
-        } else if let Some(v) = line.strip_prefix("psk=") {
-            psk = Some(v.trim().to_string());
-        }
-    }
-    ssid.map(|s| (s, psk))
 }

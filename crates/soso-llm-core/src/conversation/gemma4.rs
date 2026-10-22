@@ -17,6 +17,7 @@ use alloc::vec::Vec;
 
 use serde_json::{Map, Value};
 
+use super::plantilla::{Plantilla, Salida};
 use crate::conversation::{
     validate_assistant_turn, AssistantTurn, ChatError, ChatInput, Message, Role, ToolCall,
 };
@@ -43,7 +44,16 @@ enum Previo {
 
 /// Texto del prompt. `enable_thinking` pide al modelo que razone antes de contestar.
 pub fn render_gemma4(input: &ChatInput, add_generation_prompt: bool, enable_thinking: bool) -> Result<String, ChatError> {
-    let mut out = String::new();
+    render_gemma4_marcado(input, add_generation_prompt, enable_thinking).map(|p| p.texto)
+}
+
+/// Como [`render_gemma4`], con los tramos de terceros (mensajes, resultados, argumentos) marcados.
+pub fn render_gemma4_marcado(
+    input: &ChatInput,
+    add_generation_prompt: bool,
+    enable_thinking: bool,
+) -> Result<Plantilla, ChatError> {
+    let mut out = Plantilla::new();
     let mut previo = Previo::Nada;
     let mut mensajes: &[Message] = &input.messages;
 
@@ -56,7 +66,7 @@ pub fn render_gemma4(input: &ChatInput, add_generation_prompt: bool, enable_thin
         }
         if primero_sistema {
             if let Some(c) = &mensajes[0].content {
-                out.push_str(c.trim());
+                out.ajeno(c.trim());
             }
             mensajes = &mensajes[1..];
         }
@@ -128,7 +138,7 @@ pub fn render_gemma4(input: &ChatInput, add_generation_prompt: bool, enable_thin
                 match &seguiente.content {
                     Some(t) => {
                         out.push_str(COMILLA);
-                        out.push_str(t);
+                        out.ajeno(t);
                         out.push_str(COMILLA);
                     }
                     None => out.push_str("null"),
@@ -144,7 +154,7 @@ pub fn render_gemma4(input: &ChatInput, add_generation_prompt: bool, enable_thin
             Some(c) => c.trim().to_string(),
             None => String::new(),
         };
-        out.push_str(&contenido);
+        out.ajeno(&contenido);
         let hay_contenido = !contenido.trim().is_empty();
 
         let siguiente_no_herramienta = mensajes[i + 1..].iter().find(|x| x.role != Role::Tool).map(|x| x.role);
@@ -208,12 +218,12 @@ fn claves_ordenadas(m: &Map<String, Value>) -> Vec<&String> {
 }
 
 /// `format_argument` de la plantilla.
-fn argumento(v: &Value, escapar_claves: bool, out: &mut String) {
+fn argumento<S: Salida>(v: &Value, escapar_claves: bool, out: &mut S) {
     match v {
         Value::Null => out.push_str("null"),
         Value::String(s) => {
             out.push_str(COMILLA);
-            out.push_str(s);
+            out.ajeno(s);
             out.push_str(COMILLA);
         }
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),

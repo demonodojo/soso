@@ -1,0 +1,12 @@
+[package]
+name = "soso-red-core"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+description = "Formatos de configuración de red (red.conf, wifi.conf con varias redes): lógica pura del kernel, probada en host"
+
+[features]
+default = []
+std = []
+
+[dependencies]

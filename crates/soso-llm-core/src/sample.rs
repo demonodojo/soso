@@ -3,6 +3,8 @@
 
 use alloc::vec::Vec;
 
+use crate::restriccion::Restriccion;
+
 pub struct Sampler {
     pub temp: f32,
     pub top_p: f32,
@@ -91,6 +93,119 @@ impl Sampler {
             }
         }
         self.idx[k - 1]
+    }
+}
+
+/// Candidatos que se miran por logit descendente antes de barrer todo el vocabulario.
+const CANDIDATOS_RAPIDOS: usize = 256;
+/// Con temperatura: tokens permitidos que se reúnen (por probabilidad descendente) antes de elegir.
+const PERMITIDOS_NUCLEO: usize = 64;
+
+impl Sampler {
+    /// Como [`sample`](Self::sample), pero sólo entre los tokens que `r` permite.
+    ///
+    /// Si la restricción no está [`activa`](Restriccion::activa) es exactamente `sample`. Si no permite ningún
+    /// token (el autómata no tiene salida) se suelta con `abandonar` y se devuelve lo que habría salido sin
+    /// restricción.
+    ///
+    /// - Greedy: el argmax si cabe; si no, el mejor de los [`CANDIDATOS_RAPIDOS`] primeros por logit; si no,
+    ///   barrido completo por logit descendente.
+    /// - Con temperatura: núcleo top-p calculado sobre los primeros [`PERMITIDOS_NUCLEO`] tokens permitidos
+    ///   (por probabilidad descendente), renormalizado entre ellos.
+    pub fn sample_restringido(&mut self, logits: &[f32], r: &mut dyn Restriccion) -> u32 {
+        if !r.activa() {
+            return self.sample(logits);
+        }
+        let libre = if self.temp <= 0.0 || logits.len() < 2 { Self::argmax(logits) } else { 0 };
+        let elegido = if self.temp <= 0.0 || logits.len() < 2 {
+            Self::greedy_restringido(logits, &*r)
+        } else {
+            self.nucleo_restringido(logits, &*r)
+        };
+        match elegido {
+            Some(t) => t,
+            None => {
+                r.abandonar();
+                if self.temp <= 0.0 || logits.len() < 2 {
+                    libre
+                } else {
+                    self.sample(logits)
+                }
+            }
+        }
+    }
+
+    fn greedy_restringido(logits: &[f32], r: &dyn Restriccion) -> Option<u32> {
+        let a = Self::argmax(logits);
+        if r.permite(a) {
+            return Some(a);
+        }
+        let mut idx: Vec<u32> = (0..logits.len() as u32).collect();
+        let por_logit = |a: &u32, b: &u32| {
+            logits[*b as usize]
+                .partial_cmp(&logits[*a as usize])
+                .unwrap_or(core::cmp::Ordering::Equal)
+        };
+        let rapidos = CANDIDATOS_RAPIDOS.min(idx.len());
+        if rapidos < idx.len() {
+            idx.select_nth_unstable_by(rapidos - 1, por_logit);
+        }
+        idx[..rapidos].sort_unstable_by(por_logit);
+        if let Some(&t) = idx[..rapidos].iter().find(|&&t| r.permite(t)) {
+            return Some(t);
+        }
+        if rapidos == idx.len() {
+            return None;
+        }
+        idx[rapidos..].sort_unstable_by(por_logit);
+        idx[rapidos..].iter().copied().find(|&t| r.permite(t))
+    }
+
+    fn nucleo_restringido(&mut self, logits: &[f32], r: &dyn Restriccion) -> Option<u32> {
+        let n = logits.len();
+        let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let inv_t = 1.0 / self.temp;
+        self.probs.clear();
+        self.probs.extend(logits.iter().map(|&l| libm::expf((l - max) * inv_t)));
+        self.idx.clear();
+        self.idx.extend(0..n as u32);
+        let probs = &self.probs;
+        self.idx.sort_unstable_by(|&a, &b| {
+            probs[b as usize]
+                .partial_cmp(&probs[a as usize])
+                .unwrap_or(core::cmp::Ordering::Equal)
+        });
+        let mut permitidos: Vec<u32> = Vec::new();
+        for &t in &self.idx {
+            if r.permite(t) {
+                permitidos.push(t);
+                if permitidos.len() == PERMITIDOS_NUCLEO {
+                    break;
+                }
+            }
+        }
+        if permitidos.is_empty() {
+            return None;
+        }
+        let total: f32 = permitidos.iter().map(|&t| self.probs[t as usize]).sum();
+        let corte = self.top_p * total;
+        let mut masa = 0.0f32;
+        let mut k = 0;
+        for &t in &permitidos {
+            masa += self.probs[t as usize];
+            k += 1;
+            if masa >= corte {
+                break;
+            }
+        }
+        let mut x = self.next_f32() * masa;
+        for &t in &permitidos[..k] {
+            x -= self.probs[t as usize];
+            if x <= 0.0 {
+                return Some(t);
+            }
+        }
+        Some(permitidos[k - 1])
     }
 }
 

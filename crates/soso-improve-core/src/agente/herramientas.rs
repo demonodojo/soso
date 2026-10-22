@@ -245,6 +245,91 @@ fn leer_task<E: Entorno>(e: &mut E, pol: &Politica) -> String {
     e.leer(&format!("{}/TASK.md", pol.raiz.trim_end_matches('/'))).map(|d| String::from_utf8_lossy(&d).into_owned()).unwrap_or_default()
 }
 
+/// Rutas de la sección «Qué puedes tocar» de `TASK.md` (`- \`ruta\``); vacío si no hay sección (sin restricción).
+fn archivos_permitidos(task: &str) -> Vec<String> {
+    let mut dentro = false;
+    let mut v = Vec::new();
+    for l in task.lines() {
+        if l.starts_with("## ") {
+            dentro = l.to_lowercase().contains("qué puedes tocar") || l.to_lowercase().contains("que puedes tocar");
+            continue;
+        }
+        if dentro {
+            if let Some(r) = l.strip_prefix("- `").and_then(|r| r.split('`').next()) {
+                v.push(r.to_string());
+            }
+        }
+    }
+    v
+}
+
+/// Una edición fuera de lo que `TASK.md` deja tocar «Hecho» y luego se pierde: sólo se exportan esas rutas (campaña 51: R35 arregló `io.rs` en vez de
+/// `lib.rs`, y R32 y R36 editaron `tests/roundtrip.rs`; tres intentos rechazados sin que el agente se enterara).
+fn fuera_de_alcance<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Option<String> {
+    let p = cadena(args, "filePath").ok()?;
+    let (_, rel) = resolver(pol, p).ok()?;
+    let permitidos = archivos_permitidos(&leer_task(e, pol));
+    if permitidos.is_empty() || permitidos.iter().any(|a| a == &rel || (a.ends_with('/') && rel.starts_with(a.as_str()))) {
+        return None;
+    }
+    let lista = permitidos.iter().map(|a| format!("`{a}`")).collect::<Vec<_>>().join(", ");
+    Some(format!(
+        "No he aplicado el cambio: `{rel}` está fuera de lo que esta tarea deja tocar. TASK.md («Qué puedes tocar») sólo permite {lista}; un cambio en cualquier otra ruta NO se exporta y se pierde. Haz el cambio dentro de {lista}: si la corrección vive en otro archivo, resuélvela desde el permitido (por ejemplo, con una función propia ahí) y no edites pruebas existentes."
+    ))
+}
+
+/// Cabeceras (normalizadas) de los ítems `pub` de un fuente Rust: `pub fn f(a: u32) -> u32`, `pub struct S`, `pub const X: u32`…
+fn cabeceras_publicas(texto: &str) -> Vec<String> {
+    const INICIOS: [&str; 10] = ["pub fn ", "pub async fn ", "pub const fn ", "pub unsafe fn ", "pub struct ", "pub enum ", "pub trait ", "pub type ", "pub const ", "pub static "];
+    let lineas: Vec<&str> = texto.lines().collect();
+    let mut v = Vec::new();
+    let mut i = 0;
+    while i < lineas.len() {
+        let t = lineas[i].trim_start();
+        if INICIOS.iter().any(|p| t.starts_with(p)) {
+            let mut cab = String::new();
+            let mut j = i;
+            while j < lineas.len() && j < i + 8 {
+                cab.push(' ');
+                cab.push_str(lineas[j].trim());
+                if lineas[j].contains('{') || lineas[j].contains(';') {
+                    break;
+                }
+                j += 1;
+            }
+            let fin = cab.find(|c| c == '{' || c == ';').unwrap_or(cab.len());
+            let norm = cab[..fin].split_whitespace().collect::<Vec<_>>().join(" ").replace("( ", "(").replace(" )", ")").replace(",)", ")");
+            v.push(norm);
+        }
+        i += 1;
+    }
+    v
+}
+
+/// Ítems `pub` que existían antes de la primera edición y ya no están (borrados) o tienen otra firma, por archivo. `None` si no falta ninguno.
+pub fn api_publica_alterada<E: Entorno>(e: &mut E, originales: &alloc::collections::BTreeMap<String, Option<String>>) -> Option<String> {
+    let mut lineas: Vec<String> = Vec::new();
+    for (abs, antes) in originales {
+        let Some(antes) = antes else { continue };
+        if !abs.ends_with(".rs") {
+            continue;
+        }
+        let Some(ahora) = e.leer(abs).ok().and_then(|d| String::from_utf8(d).ok()) else { continue };
+        let nuevas = cabeceras_publicas(&ahora);
+        let rel = abs.rsplit("/crates/").next().map(|r| format!("crates/{r}")).unwrap_or_else(|| abs.clone());
+        for c in cabeceras_publicas(antes) {
+            if !nuevas.contains(&c) {
+                lineas.push(format!("  {rel}: `{c}`"));
+            }
+        }
+    }
+    if lineas.is_empty() {
+        return None;
+    }
+    let mas = if lineas.len() > 12 { format!("\n  … y {} más", lineas.len() - 12) } else { String::new() };
+    Some(format!("{}{mas}", lineas.iter().take(12).cloned().collect::<Vec<_>>().join("\n")))
+}
+
 /// ¿Pide la tarea que no haya pánico o desbordamiento? Entonces vale la pena pasar los lints de Clippy que los detectan.
 fn tarea_pide_sin_panico(task: &str) -> bool {
     let t = task.to_lowercase();
@@ -497,6 +582,11 @@ pub fn podar_pruebas_rojas<E: Entorno>(
 /// Ejecuta una herramienta por nombre. Un nombre desconocido o argumentos mal formados son una
 /// respuesta para el modelo, no un error del agente.
 pub fn ejecutar<E: Entorno>(e: &mut E, pol: &Politica, nombre: &str, args: &Value) -> Respuesta {
+    if matches!(nombre, "reemplazar_texto" | "insertar" | "reemplazar_lineas" | "reemplazar_funcion") {
+        if let Some(m) = fuera_de_alcance(e, pol, args) {
+            return Respuesta::mal(m);
+        }
+    }
     let r = match nombre {
         "read" => leer(e, pol, args),
         "grep" => buscar(e, pol, args),
@@ -2865,7 +2955,18 @@ fn orden<E: Entorno>(e: &mut E, pol: &Politica, args: &Value) -> Resultado<Respu
         Some(a) => format!("{cuerpo}\n{a}"),
         None => cuerpo,
     };
+    let cuerpo = match pista_no_std(&s.texto()) {
+        Some(p) => format!("{cuerpo}\n{p}"),
+        None => cuerpo,
+    };
     Ok(Respuesta { texto: format!("{nota_cd}{nota}{cabecera}\n{cuerpo}"), error: s.codigo != Some(0) })
+}
+
+/// Un crate `no_std` no trae `vec!`, `Vec`, `String` ni `format!` en el preludio: el módulo de pruebas del agente se quedaba con errores de compilación en
+/// ellos (R36 de la campaña 48: todo el intento peleando con `cannot find macro vec`, sin que sus pruebas llegaran a ejecutarse).
+fn pista_no_std(texto: &str) -> Option<String> {
+    let falta = ["cannot find macro `vec`", "cannot find macro `format`", "cannot find type `Vec`", "cannot find type `String`", "cannot find type `Box`", "failed to resolve: use of undeclared type `Vec`", "failed to resolve: use of undeclared type `String`"];
+    falta.iter().any(|f| texto.contains(f)).then(|| "Pista: este crate es `no_std` (sin `vec!`, `Vec`, `String`, `format!` en el preludio). Dentro de tu `mod pruebas_agente` añade `extern crate alloc; use alloc::{vec, vec::Vec, string::String, format};` o prueba con arrays y `&[..]`; y ejecuta las pruebas con `--features std` si el crate lo tiene.".to_string())
 }
 
 /// Si la salida de `cargo test` sólo contiene bloques `running 0 tests` (y al menos uno), el aviso para el modelo.

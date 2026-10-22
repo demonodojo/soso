@@ -15,7 +15,8 @@
 use sosomodel::index::{
     make_f32_entry, make_q4_k_entry, make_q8_0_entry, pack_shard, TensorIndex, SHARD_PAYLOAD_OFF,
 };
-use sosomodel::layout::{INDEX_FILE, MAGIC, MANIFEST_FILE, SHARDS_DIR};
+use sosomodel::layout::{INDEX_FILE, MAGIC, MANIFEST_FILE, SHARDS_DIR, TOKENIZER_FILE};
+use soso_llm_core::tokenizer::VocabTokenizer;
 use sosomodel::manifest::{AudioSpec, LayerPrefetch, Manifest, ModelKind, NormKind};
 use sosomodel::{align_up, Crc32cDigest, BLOCK_ALIGN};
 use std::fs;
@@ -23,6 +24,50 @@ use std::io::Write;
 use std::path::PathBuf;
 
 const CHUNK_ELEMS: usize = 1 << 20; // 4 MiB por pasada
+
+/// Plantilla mínima tipo Qwen2: basta `<|im_start|>` en el manifest para `perfil_api`.
+const TINY_CHAT_TEMPLATE: &str =
+    "<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n";
+
+fn es_tiny_chat(name: &str, moe: bool) -> bool {
+    name == "tiny" && !moe
+}
+
+fn piezas_tokenizer_tiny_chat() -> Vec<String> {
+    let mut pieces = vec![
+        String::from("<pad>"),
+        String::from("<bos>"),
+        String::from("<|im_start|>"),
+        String::from("<|im_end|>"),
+        String::from("<|endoftext|>"),
+    ];
+    for b in 0u8..=255 {
+        let ch = char::from(b);
+        if ch.is_ascii_graphic() || matches!(ch, ' ' | '\n' | '\t') {
+            let s = ch.to_string();
+            if !pieces.contains(&s) {
+                pieces.push(s);
+            }
+        }
+    }
+    pieces
+}
+
+fn write_tokenizer_tiny_chat(out: &std::path::Path) {
+    let pieces = piezas_tokenizer_tiny_chat();
+    assert!(
+        pieces.len() <= 256,
+        "tiny chat tokenizer cabe en vocab_size=256 (tiene {})",
+        pieces.len()
+    );
+    let eos = pieces
+        .iter()
+        .position(|p| p == "<|endoftext|>")
+        .expect("<|endoftext|>") as u32;
+    let bos = 1u32;
+    let som = VocabTokenizer::serialize(&pieces, bos, eos);
+    fs::write(out.join(TOKENIZER_FILE), som).expect("tokenizer.som");
+}
 
 /// Escribe un shard v2 (cabecera + payload alineado a 64 + padding a 4096)
 /// en streaming, con dos pasadas sobre el generador (CRC y escritura).
@@ -327,6 +372,12 @@ fn main() {
         std::process::exit(2);
     }
 
+    let tiny_chat = es_tiny_chat(&name, moe);
+    let chat_template = if tiny_chat {
+        String::from(TINY_CHAT_TEMPLATE)
+    } else {
+        String::new()
+    };
     let mut manifest = Manifest {
         name,
         vocab_size: vocab,
@@ -343,12 +394,11 @@ fn main() {
         moe_ffn_dim: if moe { moe_ffn } else { 0 },
         layers: Vec::new(),
         prefetch: Vec::new(),
-        // Sin plantilla de chat: estos modelos son pesos sintéticos para probar
-        // fontanería, no conversan, y van con el tokenizador byte-level.
-        chat_template: String::new(),
+        chat_template,
         model_kind: ModelKind::Decoder,
         audio: AudioSpec::default(),
         norm_kind: NormKind::Rms,
+        ext: sosomodel::manifest::ManifestExt::default(),
     };
     manifest.fill_layers_from_globals();
     if num_shared > 0 {
@@ -707,6 +757,9 @@ fn main() {
 
     fs::write(out.join(INDEX_FILE), index.serialize()).unwrap();
     fs::write(out.join(MANIFEST_FILE), manifest.serialize()).unwrap();
+    if tiny_chat {
+        write_tokenizer_tiny_chat(&out);
+    }
     println!(
         "mkmodel-soso: modelo en {} ({} tensores, {:.2} GiB de pesos)",
         out.display(),

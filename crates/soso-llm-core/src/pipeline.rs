@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 pub const MAGIC: u32 = 0x5053_4F53; // "SOSO" LE
-pub const VERSION: u8 = 3;
+pub const VERSION: u8 = 4;
 pub const HEADER_LEN: usize = 16;
 
 pub const MSG_HELLO: u8 = 1;
@@ -18,6 +18,12 @@ pub const MSG_ERROR: u8 = 7;
 pub const MSG_STEP_REPLY: u8 = 8;
 pub const MSG_PING: u8 = 9;
 pub const MSG_PONG: u8 = 10;
+pub const MSG_TRUNCATE: u8 = 11;
+pub const MSG_ASSIGN: u8 = 12;
+pub const MSG_CAPS: u8 = 13;
+
+pub const WIRE_F32: u8 = 0;
+pub const WIRE_F16: u8 = 1;
 
 pub const ROLE_HEAD: u8 = 1;
 pub const ROLE_NODE: u8 = 2;
@@ -115,6 +121,78 @@ impl PipelinePlan {
     pub fn remote_segment(&self, idx: usize) -> Option<PipelineSegment> {
         self.segments.get(idx + 1).copied()
     }
+
+    /// Reparte capas entre head + remotos según RAM libre (MB) de cada participante.
+    /// `caps[0]` es el head; el resto son nodos en orden de pipeline.
+    pub fn desde_capacidades(
+        caps: &[NodeCaps],
+        num_layers: u32,
+        bytes_por_capa: u64,
+    ) -> Result<Self, ()> {
+        let n = caps.len();
+        if n == 0 || n > MAX_PIPELINE_NODES + 1 || num_layers < n as u32 {
+            return Err(());
+        }
+        let pesos: Vec<u64> = caps
+            .iter()
+            .map(|c| c.ram_free_mb as u64 * c.workers.max(1) as u64)
+            .collect();
+        let total_peso: u64 = pesos.iter().copied().sum();
+        if total_peso == 0 {
+            return Err(());
+        }
+        let nl = num_layers as u64;
+        let mut capas: Vec<u32> = pesos
+            .iter()
+            .map(|p| ((*p * nl) / total_peso).max(1) as u32)
+            .collect();
+        let asignadas: u32 = capas.iter().copied().sum();
+        if asignadas > num_layers {
+            return Err(());
+        }
+        let mut resto = num_layers - asignadas;
+        let mut fracs: Vec<(usize, u64)> = pesos
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let exact = (*p * nl).saturating_mul(1000) / total_peso;
+                let floor = (*p * nl) / total_peso;
+                (i, exact.saturating_sub(floor * 1000))
+            })
+            .collect();
+        fracs.sort_by(|a, b| b.1.cmp(&a.1));
+        for (i, _) in fracs {
+            if resto == 0 {
+                break;
+            }
+            capas[i] += 1;
+            resto -= 1;
+        }
+        for (i, &c) in capas.iter().enumerate() {
+            let ram = caps[i].ram_free_mb as u64 * 1024 * 1024;
+            if c as u64 * bytes_por_capa > ram {
+                return Err(());
+            }
+        }
+        let mut splits = Vec::with_capacity(n - 1);
+        let mut prev = 0u32;
+        for &c in capas.iter().take(n - 1) {
+            prev = prev.saturating_add(c);
+            if prev >= num_layers {
+                return Err(());
+            }
+            splits.push(prev);
+        }
+        Self::from_splits(&splits, num_layers)
+    }
+}
+
+/// Capacidades anunciadas por head o nodo (`Caps`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NodeCaps {
+    pub ram_free_mb: u32,
+    pub workers: u32,
+    pub bw_score: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -128,6 +206,10 @@ pub struct HelloPayload {
     pub model_name: String,
     pub manifest_crc: u32,
     pub index_crc: u32,
+    /// Posición KV conservada tras la última sesión (failover).
+    pub kv_pos: u32,
+    /// Hash del prefijo de tokens hasta `kv_pos` (failover).
+    pub prefix_hash: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -143,14 +225,29 @@ pub struct BeginPayload {
 #[derive(Clone, Debug, PartialEq)]
 pub struct StepPayload {
     pub pos: u32,
-    pub want_token: u8,
+    pub prefix_hash: u32,
+    pub n_tokens: u32,
+    pub wire: u8,
     pub hidden: Vec<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct StepReplyPayload {
     pub pos: u32,
+    pub n_tokens: u32,
+    pub wire: u8,
     pub hidden: Vec<f32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TruncatePayload {
+    pub pos: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AssignPayload {
+    pub layer_start: u32,
+    pub layer_end: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,6 +278,9 @@ pub enum Message {
     Reset,
     Ping,
     Pong,
+    Truncate(TruncatePayload),
+    Assign(AssignPayload),
+    Caps(NodeCaps),
     Error(ErrorPayload),
 }
 
@@ -205,6 +305,15 @@ impl fmt::Display for CodecError {
             CodecError::InvalidUtf8 => write!(f, "utf-8 inválido"),
         }
     }
+}
+
+/// Hash del prefijo de ids de token (failover de sesión).
+pub fn prefix_hash_tokens(tokens: &[u32]) -> u32 {
+    let mut buf = Vec::with_capacity(tokens.len() * 4);
+    for t in tokens {
+        write_u32(&mut buf, *t);
+    }
+    crc32c(&buf)
 }
 
 pub fn crc32c(data: &[u8]) -> u32 {
@@ -299,7 +408,7 @@ fn read_name(data: &[u8], off: &mut usize) -> Result<String, CodecError> {
         .map_err(|_| CodecError::InvalidUtf8)
 }
 
-fn read_hidden(data: &[u8], off: &mut usize) -> Result<Vec<f32>, CodecError> {
+fn read_hidden_f32(data: &[u8], off: &mut usize) -> Result<Vec<f32>, CodecError> {
     let hidden_len = read_u32(data, off)? as usize;
     let mut hidden = Vec::with_capacity(hidden_len);
     for _ in 0..hidden_len {
@@ -308,10 +417,64 @@ fn read_hidden(data: &[u8], off: &mut usize) -> Result<Vec<f32>, CodecError> {
     Ok(hidden)
 }
 
-fn write_hidden(out: &mut Vec<u8>, hidden: &[f32]) {
+fn write_hidden_f32(out: &mut Vec<u8>, hidden: &[f32]) {
     write_u32(out, hidden.len() as u32);
     for v in hidden {
         write_f32(out, *v);
+    }
+}
+
+/// Lee un bloque `n_tokens × hidden_dim` en el formato de cable indicado.
+pub fn decode_hidden_wire(
+    data: &[u8],
+    off: &mut usize,
+    n_tokens: u32,
+    hidden_dim: u32,
+    wire: u8,
+) -> Result<Vec<f32>, CodecError> {
+    let n = n_tokens as usize;
+    let h = hidden_dim as usize;
+    let elems = n.checked_mul(h).ok_or(CodecError::Truncated)?;
+    let mut hidden = Vec::with_capacity(elems);
+    match wire {
+        WIRE_F32 => {
+            for _ in 0..elems {
+                hidden.push(read_f32(data, off)?);
+            }
+        }
+        WIRE_F16 => {
+            for _ in 0..elems {
+                if *off + 2 > data.len() {
+                    return Err(CodecError::Truncated);
+                }
+                let bits = u16::from_le_bytes(data[*off..*off + 2].try_into().unwrap());
+                *off += 2;
+                hidden.push(crate::f16::f16_to_f32(bits));
+            }
+        }
+        _ => return Err(CodecError::BadType),
+    }
+    Ok(hidden)
+}
+
+/// Escribe activaciones en el formato de cable.
+pub fn encode_hidden_wire(out: &mut Vec<u8>, hidden: &[f32], n_tokens: u32, hidden_dim: u32, wire: u8) {
+    write_u32(out, n_tokens);
+    write_u32(out, hidden_dim);
+    out.push(wire);
+    match wire {
+        WIRE_F32 => {
+            for v in hidden {
+                write_f32(out, *v);
+            }
+        }
+        WIRE_F16 => {
+            for v in hidden {
+                let bits = crate::f16::f32_to_f16(*v);
+                out.extend_from_slice(&bits.to_le_bytes());
+            }
+        }
+        _ => {}
     }
 }
 
@@ -327,6 +490,8 @@ pub fn encode_payload(msg: &Message) -> Vec<u8> {
             write_u32(&mut body, h.vocab_size);
             write_u32(&mut body, h.manifest_crc);
             write_u32(&mut body, h.index_crc);
+            write_u32(&mut body, h.kv_pos);
+            write_u32(&mut body, h.prefix_hash);
             write_name(&mut body, &h.model_name);
         }
         Message::Begin(b) => {
@@ -338,12 +503,22 @@ pub fn encode_payload(msg: &Message) -> Vec<u8> {
         }
         Message::Step(s) => {
             write_u32(&mut body, s.pos);
-            body.push(s.want_token);
-            write_hidden(&mut body, &s.hidden);
+            write_u32(&mut body, s.prefix_hash);
+            let hdim = if s.n_tokens > 0 {
+                (s.hidden.len() / s.n_tokens as usize) as u32
+            } else {
+                0
+            };
+            encode_hidden_wire(&mut body, &s.hidden, s.n_tokens, hdim, s.wire);
         }
         Message::StepReply(r) => {
             write_u32(&mut body, r.pos);
-            write_hidden(&mut body, &r.hidden);
+            let hdim = if r.n_tokens > 0 {
+                (r.hidden.len() / r.n_tokens as usize) as u32
+            } else {
+                0
+            };
+            encode_hidden_wire(&mut body, &r.hidden, r.n_tokens, hdim, r.wire);
         }
         Message::Ack(a) => write_u32(&mut body, a.pos),
         Message::Token(t) => {
@@ -352,6 +527,16 @@ pub fn encode_payload(msg: &Message) -> Vec<u8> {
         }
         Message::Reset => {}
         Message::Ping | Message::Pong => {}
+        Message::Truncate(t) => write_u32(&mut body, t.pos),
+        Message::Assign(a) => {
+            write_u32(&mut body, a.layer_start);
+            write_u32(&mut body, a.layer_end);
+        }
+        Message::Caps(c) => {
+            write_u32(&mut body, c.ram_free_mb);
+            write_u32(&mut body, c.workers);
+            write_u32(&mut body, c.bw_score);
+        }
         Message::Error(e) => {
             write_u16(&mut body, e.code);
             let bytes = e.message.as_bytes();
@@ -376,6 +561,9 @@ pub fn encode_message(seq: u32, msg: &Message) -> Vec<u8> {
         Message::StepReply(_) => MSG_STEP_REPLY,
         Message::Ping => MSG_PING,
         Message::Pong => MSG_PONG,
+        Message::Truncate(_) => MSG_TRUNCATE,
+        Message::Assign(_) => MSG_ASSIGN,
+        Message::Caps(_) => MSG_CAPS,
     };
     let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
     write_u32(&mut out, MAGIC);
@@ -421,6 +609,8 @@ pub fn decode_payload(msg_type: u8, payload: &[u8]) -> Result<Message, CodecErro
             let vocab_size = read_u32(payload, &mut off)?;
             let manifest_crc = read_u32(payload, &mut off)?;
             let index_crc = read_u32(payload, &mut off)?;
+            let kv_pos = read_u32(payload, &mut off)?;
+            let prefix_hash = read_u32(payload, &mut off)?;
             let model_name = read_name(payload, &mut off)?;
             Ok(Message::Hello(HelloPayload {
                 role,
@@ -432,6 +622,8 @@ pub fn decode_payload(msg_type: u8, payload: &[u8]) -> Result<Message, CodecErro
                 model_name,
                 manifest_crc,
                 index_crc,
+                kv_pos,
+                prefix_hash,
             }))
         }
         MSG_BEGIN => Ok(Message::Begin(BeginPayload {
@@ -443,19 +635,44 @@ pub fn decode_payload(msg_type: u8, payload: &[u8]) -> Result<Message, CodecErro
         })),
         MSG_STEP => {
             let pos = read_u32(payload, &mut off)?;
-            let want_token = read_u8(payload, &mut off)?;
-            let hidden = read_hidden(payload, &mut off)?;
+            let prefix_hash = read_u32(payload, &mut off)?;
+            let n_tokens = read_u32(payload, &mut off)?;
+            let hidden_dim = read_u32(payload, &mut off)?;
+            let wire = read_u8(payload, &mut off)?;
+            let hidden = decode_hidden_wire(payload, &mut off, n_tokens, hidden_dim, wire)?;
             Ok(Message::Step(StepPayload {
                 pos,
-                want_token,
+                prefix_hash,
+                n_tokens,
+                wire,
                 hidden,
             }))
         }
         MSG_STEP_REPLY => {
             let pos = read_u32(payload, &mut off)?;
-            let hidden = read_hidden(payload, &mut off)?;
-            Ok(Message::StepReply(StepReplyPayload { pos, hidden }))
+            let n_tokens = read_u32(payload, &mut off)?;
+            let hidden_dim = read_u32(payload, &mut off)?;
+            let wire = read_u8(payload, &mut off)?;
+            let hidden = decode_hidden_wire(payload, &mut off, n_tokens, hidden_dim, wire)?;
+            Ok(Message::StepReply(StepReplyPayload {
+                pos,
+                n_tokens,
+                wire,
+                hidden,
+            }))
         }
+        MSG_TRUNCATE => Ok(Message::Truncate(TruncatePayload {
+            pos: read_u32(payload, &mut off)?,
+        })),
+        MSG_ASSIGN => Ok(Message::Assign(AssignPayload {
+            layer_start: read_u32(payload, &mut off)?,
+            layer_end: read_u32(payload, &mut off)?,
+        })),
+        MSG_CAPS => Ok(Message::Caps(NodeCaps {
+            ram_free_mb: read_u32(payload, &mut off)?,
+            workers: read_u32(payload, &mut off)?,
+            bw_score: read_u32(payload, &mut off)?,
+        })),
         MSG_ACK => Ok(Message::Ack(AckPayload {
             pos: read_u32(payload, &mut off)?,
         })),
@@ -553,6 +770,29 @@ impl<T: Transport> FramedTransport<T> {
             }
             self.rx_buf.extend_from_slice(&tmp[..n]);
         }
+    }
+
+    /// Lee un mensaje ya en buffer o un fragmento disponible sin esperar.
+    pub fn try_recv(&mut self) -> Result<Option<Message>, ()> {
+        if self.rx_buf.len() >= HEADER_LEN {
+            if let Ok((_, _, payload_len)) = decode_header(&self.rx_buf) {
+                let total = HEADER_LEN + payload_len;
+                if self.rx_buf.len() >= total {
+                    let frame = self.rx_buf.drain(..total).collect::<Vec<_>>();
+                    let (_, msg) = decode_message(&frame).map_err(|_| ())?;
+                    return Ok(Some(msg));
+                }
+            } else {
+                return Err(());
+            }
+        }
+        let mut tmp = [0u8; 4096];
+        let n = self.inner.recv_some(&mut tmp).map_err(|_| ())?;
+        if n == 0 {
+            return Ok(None);
+        }
+        self.rx_buf.extend_from_slice(&tmp[..n]);
+        self.try_recv()
     }
 
     /// Espera un mensaje de aplicación; responde `PONG` a `PING` automáticamente.

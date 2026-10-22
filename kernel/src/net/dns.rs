@@ -209,16 +209,17 @@ fn min_instant(a: Instant, b: Instant) -> Instant {
     if a < b { a } else { b }
 }
 
-/// Servidores a los que preguntar: primero los que anunció el DHCP.
+/// Servidores a los que preguntar: los que anunció el DHCP o fijó `dns=` de
+/// `red.conf`. Los de respaldo (8.8.8.8 y el de QEMU) sólo entran si no hay
+/// ninguno: añadirlos siempre costaba el plazo entero de cada uno en las redes
+/// que no los contestan.
 ///
 /// Esto **sí** reserva, y puede: corre en el contexto de la syscall que
 /// resuelve un nombre, no en una interrupción.
 pub fn servidores(dhcp: &[Option<Ipv4Address>]) -> alloc::vec::Vec<Ipv4Address> {
     let mut v: alloc::vec::Vec<Ipv4Address> = dhcp.iter().flatten().copied().collect();
-    for respaldo in [FALLBACK_DNS, SLIRP_DNS] {
-        if !v.contains(&respaldo) {
-            v.push(respaldo);
-        }
+    if v.is_empty() {
+        v.extend([FALLBACK_DNS, SLIRP_DNS]);
     }
     v
 }

@@ -269,6 +269,7 @@ fn continuar(op: &Opciones) -> Result<i32, Error> {
     cfg.comprobar_al_terminar = !op.bandera("sin-comprobar-final");
     // Si la tarea habla de pánico o desbordamiento, Clippy marca antes de terminar las líneas del agente que pueden entrar en pánico o desbordar.
     cfg.alertas_panico = !op.bandera("sin-alertas-panico");
+    cfg.proteger_api = !op.bandera("sin-proteger-api");
     if let Some(n) = op.uno("ciclos").and_then(|v| v.parse().ok()) {
         cfg.ciclos_max = n;
     }

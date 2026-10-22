@@ -6,6 +6,7 @@ use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::ops::Range;
 use sosomodel::{pack_som, parse_som, Reader, CACHE_ALIGN};
 
 /// Id reservado para "no hay token" (bos/eos ausentes).
@@ -137,6 +138,37 @@ impl Tokenizer {
                 String::from_utf8_lossy(&bytes).into_owned()
             }
             Tokenizer::Vocab(v) => v.decode(tokens),
+        }
+    }
+
+    /// Codifica un prompt completo (con BOS) en el que los tramos `ajenos` (rangos de bytes de `text`) son
+    /// contenido de terceros: un marcador de control escrito dentro de ellos (`<|im_end|>`, `<turn|>`…) se
+    /// segmenta como texto y **no** se convierte en el token especial. Sólo los marcadores que escribe la
+    /// plantilla, fuera de esos tramos, lo son. Sin tramos ajenos equivale a [`encode`](Self::encode).
+    ///
+    /// Con segmentación por pieza más larga (vocabularios sin fusiones, sólo pruebas) los especiales no se
+    /// apartan antes y los tramos ajenos no cambian nada.
+    pub fn encode_marcado(&self, text: &str, ajenos: &[Range<usize>]) -> Vec<u32> {
+        match self {
+            Tokenizer::ByteLevel => text.bytes().map(|b| b as u32).collect(),
+            Tokenizer::Vocab(v) => v.encode_con_ajenos(text, true, true, ajenos),
+        }
+    }
+
+    /// Como [`decode`](Self::decode), con los tramos (rangos de bytes del texto devuelto) que vienen de
+    /// tokens especiales.
+    pub fn decode_marcado(&self, tokens: &[u32]) -> (String, Vec<Range<usize>>) {
+        match self {
+            Tokenizer::ByteLevel => (self.decode(tokens), Vec::new()),
+            Tokenizer::Vocab(v) => v.decode_marcado(tokens),
+        }
+    }
+
+    /// Texto de los tokens especiales declarados del vocabulario.
+    pub fn textos_especiales(&self) -> Vec<String> {
+        match self {
+            Tokenizer::ByteLevel => Vec::new(),
+            Tokenizer::Vocab(v) => v.especiales.iter().map(|&i| v.pieces[i as usize].clone()).collect(),
         }
     }
 
@@ -572,11 +604,20 @@ impl VocabTokenizer {
     /// Las apariciones se buscan **de una vez** y no una por trozo: repetir el
     /// barrido sobre el resto del texto por cada marcador encontrado hace el
     /// coste cuadrático, y aquí entran prompts de miles de tokens.
-    fn encode_bpe(&self, text: &str, out: &mut Vec<u32>) {
+    ///
+    /// Un marcador que toque un tramo `ajenos` (contenido que no escribió la
+    /// plantilla: mensajes, resultados de herramienta, argumentos) **no** se convierte en token especial: se
+    /// segmenta como texto corriente. La pre-tokenización sigue siendo la del texto entero (los trozos entre
+    /// marcadores se codifican igual que antes), así que sin marcadores ajenos el resultado es idéntico.
+    fn encode_bpe_marcado(&self, text: &str, ajenos: &[Range<usize>], out: &mut Vec<u32>) {
         let mut marcas: Vec<(usize, usize, u32)> = Vec::new();
         for id in &self.especiales {
             let pieza = &self.pieces[*id as usize];
             for (pos, _) in text.match_indices(pieza.as_str()) {
+                let fin = pos + pieza.len();
+                if ajenos.iter().any(|r| pos < r.end && fin > r.start) {
+                    continue;
+                }
                 marcas.push((pos, pieza.len(), *id));
             }
         }
@@ -600,12 +641,16 @@ impl VocabTokenizer {
     }
 
     fn encode(&self, text: &str, bos: bool, prefijo: bool) -> Vec<u32> {
+        self.encode_con_ajenos(text, bos, prefijo, &[])
+    }
+
+    fn encode_con_ajenos(&self, text: &str, bos: bool, prefijo: bool, ajenos: &[Range<usize>]) -> Vec<u32> {
         let mut out = Vec::new();
         if bos && self.bos != NO_TOKEN {
             out.push(self.bos);
         }
         if self.segmentacion != Segmentacion::PiezaMasLarga {
-            self.encode_bpe(text, &mut out);
+            self.encode_bpe_marcado(text, ajenos, &mut out);
             return out;
         }
         let replaced = if self.space_mark == SPACE_GPT2 {
@@ -698,6 +743,36 @@ impl VocabTokenizer {
             return text;
         }
         String::from(text.strip_prefix(' ').unwrap_or(&text))
+    }
+
+    /// Como `decode`, pero devuelve además los tramos (en bytes del texto devuelto) que salieron de un
+    /// **token especial**. Distingue `</think>` emitido como token de la misma cadena escrita con piezas
+    /// corrientes (p. ej. dentro del argumento de una llamada).
+    fn decode_marcado(&self, tokens: &[u32]) -> (String, Vec<Range<usize>>) {
+        let mut texto = String::new();
+        let mut marcados: Vec<Range<usize>> = Vec::new();
+        let mut bytes: Vec<u8> = Vec::new();
+        for &t in tokens {
+            if self.especiales.contains(&t) {
+                texto.push_str(&String::from_utf8_lossy(&bytes));
+                bytes.clear();
+                let mut pieza: Vec<u8> = Vec::new();
+                self.token_bytes(t, &mut pieza);
+                let ini = texto.len();
+                texto.push_str(&String::from_utf8_lossy(&pieza));
+                marcados.push(ini..texto.len());
+            } else {
+                self.token_bytes(t, &mut bytes);
+            }
+        }
+        texto.push_str(&String::from_utf8_lossy(&bytes));
+        if self.segmentacion != Segmentacion::BpeSpm && texto.starts_with(' ') {
+            texto.remove(0);
+            for r in &mut marcados {
+                *r = r.start - 1..r.end - 1;
+            }
+        }
+        (texto, marcados)
     }
 }
 

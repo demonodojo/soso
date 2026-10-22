@@ -85,6 +85,10 @@ pub struct Config {
     /// los avisos que caen en líneas que el agente ha añadido o cambiado (hasta `avisos_panico` veces).
     pub alertas_panico: bool,
     pub avisos_panico: usize,
+    /// Antes de terminar, si el agente ha quitado o cambiado la firma de algún ítem `pub` de los archivos que editó, se le avisa (hasta `avisos_api` veces):
+    /// las pruebas reservadas compilan contra la API original (campaña 53: R33 borró `resample_to_16k`; R34 y R38 cambiaron el tipo de retorno).
+    pub proteger_api: bool,
+    pub avisos_api: usize,
     /// Con `exigir_pruebas`: veces que se le avisa de que ha escrito menos pruebas que puntos tiene «Qué se pide».
     pub avisos_pocas_pruebas: usize,
     /// A la `n`-ésima llamada **repetida** de una que ya salió bien desde la última edición (aunque no sea la inmediata anterior) no
@@ -136,6 +140,8 @@ impl Config {
             podar_pruebas_rojas: false,
             alertas_panico: false,
             avisos_panico: 3,
+            proteger_api: false,
+            avisos_api: 1,
             avisos_pocas_pruebas: 1,
             repetidas_ok_max: 3,
             mensajes_max: Some(60),
@@ -273,6 +279,11 @@ pub fn correr_con_originales<E: Entorno, M: Modelo, R: Reloj>(
     // Respuestas mal formadas SEGUIDAS: a T=0 el modelo repite la misma respuesta rota (campaña 41, R38: `call_5` tres veces idéntica), así que los
     // reintentos suben la temperatura.
     let mut formato_seguidos = 0usize;
+    // Ediciones «sin efecto» (el modelo reenvía el código que ya está) y llamadas bloqueadas por repetirse, SEGUIDAS desde la última edición buena. A T=0
+    // el mismo contexto da la misma respuesta: en las campañas 45–47 el 35–40 % de las llamadas eran de este tipo (R34: 23 reenvíos idénticos de `sample`
+    // tras una prueba propia en rojo). Se sube la temperatura para que pueda salir otra cosa; la campaña 29 (rondas a T=0,7) tuvo 22 % → 16 % → 4 %.
+    let mut sin_efecto_seguidos = 0usize;
+    let mut api_avisos = 0usize;
     // Pruebas rojas de la última ejecución y cuántas veces seguidas han sido EXACTAMENTE las mismas: reescribir otra función sin que cambie el
     // resultado (campaña 42, R31: 15 `reemplazar_funcion` con las mismas pruebas propias en rojo) indica que la causa está en otro sitio o en la propia prueba.
     let mut rojos_previos: alloc::collections::BTreeSet<String> = alloc::collections::BTreeSet::new();
@@ -309,7 +320,7 @@ pub fn correr_con_originales<E: Entorno, M: Modelo, R: Reloj>(
         }
         let peticion = json!({
             "model": cfg.modelo, "messages": mensajes, "tools": if cfg.solo_lectura { herramientas::solo_lectura(herramientas::definiciones(pol)) } else { herramientas::definiciones(pol) },
-            "temperature": if formato_seguidos > 0 { cfg.temperatura.max((0.3 + 0.2 * formato_seguidos as f64).min(1.0)) } else { cfg.temperatura }, "max_tokens": cfg.max_tokens, "stream": false,
+            "temperature": if formato_seguidos > 0 { cfg.temperatura.max((0.3 + 0.2 * formato_seguidos as f64).min(1.0)) } else if sin_efecto_seguidos >= 2 { cfg.temperatura.max((0.1 + 0.2 * sin_efecto_seguidos as f64).min(0.9)) } else { cfg.temperatura }, "max_tokens": cfg.max_tokens, "stream": false,
         })
         .to_string();
         informe.turnos += 1;
@@ -318,14 +329,18 @@ pub fn correr_con_originales<E: Entorno, M: Modelo, R: Reloj>(
                 formato_seguidos = 0;
                 c
             }
-            Err(err) if err.to_string().contains("Some(400)") && informe.formato < cfg.errores_de_formato => {
+            // llama-server contesta 500 («Failed to parse tool call arguments as JSON») cuando la llamada llega cortada o con el JSON roto (campaña 50:
+            // R38 con Qwen3.6, un `insertar` de un módulo de pruebas entero cortado por `max_tokens`); el servidor propio contestaba 400.
+            Err(err) if (err.to_string().contains("Some(400)") || err.to_string().contains("Failed to parse tool call")) && informe.formato < cfg.errores_de_formato => {
                 // El servidor descartó una respuesta mal formada: no entra en el historial. Se le dice al modelo qué
                 // estuvo mal (el motivo viene del propio servidor) y se le deja corregirse.
                 informe.formato += 1;
                 formato_seguidos += 1;
                 let t = err.to_string();
                 let motivo = t.split("\"message\":\"").nth(1).and_then(|r| r.split('"').next()).unwrap_or("formato inválido");
-                let consejo = if formato_seguidos >= 2 {
+                let motivo: String = motivo.trim_end_matches('\\').chars().take(200).collect();
+                let cortada = t.contains("Failed to parse tool call") || t.contains("missing closing quote");
+                let consejo = if formato_seguidos >= 2 || cortada {
                     " Si el JSON se te rompe, haz la llamada MÁS CORTA: una sola cosa por llamada y, si escribes código, pocas líneas cada vez (por ejemplo una prueba por `insertar`); escapa las comillas dobles dentro del texto (\\\") y los saltos de línea (\\n)."
                 } else {
                     ""
@@ -399,6 +414,16 @@ pub fn correr_con_originales<E: Entorno, M: Modelo, R: Reloj>(
                     informe.alertas_panico += 1;
                     mensajes.push(json!({"role": "user", "content": format!(
                         "La tarea pide que no haya pánico ni desbordamiento. Clippy (con los lints `indexing_slicing` y `arithmetic_side_effects`) marca estas líneas que has añadido o cambiado como capaces de entrar en pánico o desbordar:\n\n{alertas}\n\nComprueba cada una: usa `.get(..)` en vez de indexar, `checked_add`/`checked_mul` (o `saturating_*`) en las cuentas con valores que vienen de los datos, y una comprobación de longitud ANTES de leer. Ojo con las sumas de rangos como `off..off + N`: calcula `let fin = off.checked_add(N).ok_or(..)?;` y usa `get(off..fin)`. Corrige TODAS las líneas de la lista (no sólo la primera) y verás de nuevo los avisos que queden. Después ejecuta las comprobaciones y escribe el informe final."
+                    )}));
+                    al_turno(e, &mensajes);
+                    continue;
+                }
+            }
+            if cfg.proteger_api && api_avisos < cfg.avisos_api && hubo_edicion(&mensajes) {
+                if let Some(lista) = herramientas::api_publica_alterada(e, &originales) {
+                    api_avisos += 1;
+                    mensajes.push(json!({"role": "user", "content": format!(
+                        "Has quitado o cambiado la firma de ítems PÚBLICOS que ya existían (las pruebas de la tarea compilan contra la API original, así que esto las rompe):\n\n{lista}\n\nRestáuralos tal como estaban (mismo nombre, mismos parámetros y mismo tipo de retorno) salvo que TASK.md pida expresamente cambiarlos, y haz tu cambio por dentro. Si reescribiste el archivo entero, comprueba que no has perdido ninguna función. Después ejecuta las comprobaciones y escribe el informe final."
                     )}));
                     al_turno(e, &mensajes);
                     continue;
@@ -545,6 +570,7 @@ pub fn correr_con_originales<E: Entorno, M: Modelo, R: Reloj>(
                     };
                     // Una llamada bloqueada por repetirse con éxito sigue contando como «salió bien»: así se cuenta hasta cerrar.
                     if edita && !r.error {
+                        sin_efecto_seguidos = 0;
                         fallidas.clear();
                         vistas.clear();
                         racha_ok = 0;
@@ -553,6 +579,9 @@ pub fn correr_con_originales<E: Entorno, M: Modelo, R: Reloj>(
                     }
                     // Una llamada que el guardián no llegó a ejecutar no gasta presupuesto de herramientas (el límite de turnos y el cierre
                     // por atasco siguen acotando el bucle).
+                    if bloqueada || r.texto.contains("no cambia nada") || r.texto.contains("YA está aplicado") {
+                        sin_efecto_seguidos += 1;
+                    }
                     if bloqueada {
                         informe.llamadas = informe.llamadas.saturating_sub(1);
                         informe.bloqueadas += 1;
@@ -611,7 +640,7 @@ PROTOCOLO (obligatorio):\n\
 - Sólo cuando hayas terminado todos los pasos respondes con texto, y entonces es el informe final.\n\n\
 PASOS:\n\
 1. Llama a `read` con `TASK.md` (raíz del checkout): contiene el objetivo, el archivo que puedes tocar y las comprobaciones.\n\
-2. Localiza el código. Si el archivo es corto (menos de 150 líneas) lee entero; si es largo, **no lo recorras por tramos**: llama primero a `grep` con el nombre de la función o un texto que aparezca en ella y después a `read` sólo del tramo que rodea la línea (`offset` y `limit`).\n\
+2. Localiza el código. Si el archivo es corto (menos de 150 líneas) lee entero; si es largo, **no lo recorras por tramos**: llama primero a `grep` con el nombre de la función o un texto que aparezca en ella y después a `read` sólo del tramo que rodea la línea (`offset` y `limit`). Antes de editar una función, léela ENTERA (`read` con `simbolo`), no sólo el tramo que te llamó la atención: una comprobación de entrada (versión, longitud, contador, rango, puerto) va al PRINCIPIO de la función, justo tras leer ese dato y antes de cualquier rama que lo use; si la pones dentro de un `else` o un `match` sólo vale para esa rama.\n\
 3. Para **cambiar** algo que ya existe, llama a `reemplazar_texto` con `filePath`, `buscar` (un fragmento corto de lo que leíste; los espacios no importan) y `nuevo`. Para **añadir** código nuevo (una función, una rama), llama a `insertar` con `filePath`, `linea` (el número que te mostró `read`; se inserta después de esa línea) y `texto`. Siempre bloques completos: con su `{` y su `}`. Cambio mínimo: no toques otros archivos. Para reescribir una función ENTERA usa `reemplazar_funcion` (`nombre`, `nuevo`): no hay números de línea ni nada que copiar (`read` con `esquema` lista las funciones; con `simbolo` lees una entera). Si `reemplazar_texto` no encuentra el fragmento, cambia ese tramo por números de línea con `reemplazar_lineas` (`desde`, `hasta`, `nuevo`). Si una herramienta dice que aparece varias veces o que desequilibra las llaves, corrige y repite.\n\
 4. Llama a `bash` con las comprobaciones de TASK.md (`cargo test …`) y lee el resultado.\n\
 5. Antes de terminar, **relee TASK.md punto por punto**: cada comportamiento que describe tiene que estar cubierto por tu cambio, no sólo el caso que ya ves fallar. Si falta alguno, impleméntalo y vuelve a comprobar. Una tarea sin ningún archivo editado no está terminada.\n\
@@ -627,7 +656,7 @@ PROTOCOLO (obligatorio):\n\
 - Sólo cuando hayas terminado todos los pasos respondes con texto, y entonces es el informe final.\n\n\
 PASOS:\n\
 1. Llama a `read` con `TASK.md` (raíz del checkout): contiene el objetivo, el archivo que puedes tocar y las comprobaciones.\n\
-2. Localiza el código. Si el archivo es corto (menos de 150 líneas) lee entero; si es largo, **no lo recorras por tramos**: llama primero a `grep` con el nombre de la función o un texto que aparezca en ella y después a `read` sólo del tramo que rodea la línea (`offset` y `limit`).\n\
+2. Localiza el código. Si el archivo es corto (menos de 150 líneas) lee entero; si es largo, **no lo recorras por tramos**: llama primero a `grep` con el nombre de la función o un texto que aparezca en ella y después a `read` sólo del tramo que rodea la línea (`offset` y `limit`). Antes de editar una función, léela ENTERA (`read` con `simbolo`), no sólo el tramo que te llamó la atención: una comprobación de entrada (versión, longitud, contador, rango, puerto) va al PRINCIPIO de la función, justo tras leer ese dato y antes de cualquier rama que lo use; si la pones dentro de un `else` o un `match` sólo vale para esa rama.\n\
 3. **Escribe primero tus pruebas.** De la sección «Qué se pide» de TASK.md saca TODOS los comportamientos y casos límite: cada viñeta, cada valor raro, cada «en caso de empate», «nunca», «si todos…». Añade al final del MISMO archivo que puedes tocar (con `insertar` y `linea`: -1, que significa «al final del archivo»; no hace falta leer el final) un módulo `#[cfg(test)] mod pruebas_agente { use super::*; … }` con **una prueba `#[test]` por caso**, con valores concretos y la salida exacta que pide el enunciado. Ejecútalas con `bash` (`cargo test …` con el filtro `pruebas_agente`) y comprueba que las que describen el fallo de hoy **fallan**.\n\
 4. Para **cambiar** algo que ya existe, llama a `reemplazar_texto` con `filePath`, `buscar` (un fragmento corto de lo que leíste; los espacios no importan) y `nuevo`. Para **añadir** código nuevo, llama a `insertar` con `filePath`, `linea` y `texto`. Siempre bloques completos: con su `{` y su `}`. Cambio mínimo en el código; no toques otros archivos. Para reescribir una función ENTERA usa `reemplazar_funcion` (`nombre`, `nuevo`): no hay números de línea ni nada que copiar (`read` con `esquema` lista las funciones; con `simbolo` lees una entera). Si `reemplazar_texto` no encuentra el fragmento, cambia ese tramo por números de línea con `reemplazar_lineas` (`desde`, `hasta`, `nuevo`). Si una herramienta dice que aparece varias veces o que desequilibra las llaves, corrige y repite.\n\
 5. Ejecuta con `bash` las comprobaciones de TASK.md **y** tus pruebas: todas en verde. Si alguna falla, corrige el CÓDIGO (no borres la prueba salvo que contradiga el enunciado).\n\
@@ -828,6 +857,13 @@ fn hubo_prueba_propia(mensajes: &[Value]) -> bool {
 
 /// ¿Ha logrado el modelo editar algún archivo (`reemplazar_texto` o `insertar` con resultado «Hecho…»)?
 pub fn hubo_edicion(mensajes: &[Value]) -> bool {
+    // Con los mensajes viejos plegados (`limitar_mensajes`) la respuesta «Hecho…» ya no está: sólo queda su línea del historial. Sin esto, una edición
+    // hecha antes del primer plegado «desaparecía» (R33 de la campaña 47: acabó en `LimitePasos` sin validar y sin podar, con la edición en disco).
+    if let Some(h) = mensajes.iter().filter_map(|m| m["content"].as_str()).find_map(|c| c.find(MARCA_HISTORIAL).map(|i| &c[i..])) {
+        if h.lines().any(|l| ["- insertar ", "- reemplazar_texto ", "- reemplazar_lineas ", "- reemplazar_funcion "].iter().any(|p| l.starts_with(p)) && l.contains("→ Hecho")) {
+            return true;
+        }
+    }
     let mut nombres: Vec<(String, String)> = Vec::new();
     for m in mensajes {
         if m["role"] == "assistant" {
@@ -951,8 +987,13 @@ fn limitar_mensajes(mensajes: &mut Vec<Value>, max: usize) -> usize {
             };
             let mut todas = previo;
             todas.extend(nuevas);
-            let exceso = todas.len().saturating_sub(HISTORIAL_MAX);
-            let lista = todas[exceso..].join("\n");
+            // Las ediciones que salieron bien no se olvidan nunca (hasta 20): son lo que `hubo_edicion` y el modelo necesitan saber que ya está hecho.
+            let es_edicion = |l: &String| ["- insertar ", "- reemplazar_texto ", "- reemplazar_lineas ", "- reemplazar_funcion "].iter().any(|p| l.starts_with(p)) && l.contains("→ Hecho");
+            let (ediciones, otras): (Vec<String>, Vec<String>) = todas.into_iter().partition(es_edicion);
+            let ediciones: Vec<String> = ediciones.into_iter().rev().take(20).rev().collect();
+            let hueco = HISTORIAL_MAX.saturating_sub(ediciones.len());
+            let exceso = otras.len().saturating_sub(hueco);
+            let lista = otras[exceso..].iter().chain(ediciones.iter()).cloned().collect::<Vec<_>>().join("\n");
             mensajes[1]["content"] = Value::String(format!("{cuerpo}{MARCA_HISTORIAL}\n{lista}]"));
         }
     }

@@ -245,6 +245,18 @@ ssid=MiRed
 psk=MiClaveWPA2
 ```
 
+**Varias redes:** cada línea `ssid=` abre una red nueva y el `psk=` que la sigue es suya (hasta **4**; las repetidas se ignoran):
+
+```ini
+ssid=Casa
+psk=ClaveDeCasa
+ssid=Oficina
+psk=ClaveDeOficina
+ssid=CafeAbierto
+```
+
+Al arrancar, soso escanea y prueba las redes guardadas en el orden en que aparecen en el scan; si ninguna se ve, intenta la primera de la lista. Cada `wifi connect` correcto sube esa red al primer puesto y descarta la más antigua si hay más de 4. `SOSOWIFI.TXT` y `/etc/wifi.conf` usan el mismo formato.
+
 Firmware en `/lib/firmware/iwlwifi-so-a0-gf-a0-89.ucode` y `.pnvm` (AX211),
 o `iwlwifi-cc-a0-77.ucode` (AX200, sin pnvm).
 
@@ -257,7 +269,9 @@ ssh -i target/soso_test_key soso@<ip>
 **Consola de emergencia (kernel-shell):**
 
 ```text
-ip                 # IPv4 (DHCP o fallback)
+ip                 # IPv4, origen y DNS (o por qué no hay)
+ip estatica 192.168.1.50/24 gw 192.168.1.1   # dirección fija (/etc/red.conf)
+ip dhcp            # volver a DHCP
 ping 192.168.68.1  # eco ICMP (opcional: `ping <host> n`)
 wifi scan          # listar redes
 wifi status        # estado del driver
@@ -278,7 +292,8 @@ cargo xtask flash-usb-live /dev/sdX --yes
 sudo ./scripts/l6-wifi-vfio-test.sh
 ```
 
-WiFi tiene prioridad sobre virtio-net si no hay Ethernet. En WiFi no hay fallback
+El cable con enlace tiene prioridad sobre la WiFi, salvo que elijas WiFi con
+`wifi connect` (`ip medio auto` deshace esa elección). En WiFi no hay fallback
 `10.0.2.x` (solo lease DHCP real).
 
 ### 3. Echo TCP (prueba de red)
@@ -572,14 +587,43 @@ Muestra offset, bytes en hex y representación ASCII.
 ip
 ```
 
-Muestra la IPv4 que obtuvo DHCP (o el fallback estático de QEMU), la pasarela y la MAC:
+Muestra la IPv4 (DHCP, fija o el respaldo de QEMU), la pasarela, la MAC, de dónde viene la dirección y los DNS que se usan:
 
 ```text
 ip: 192.168.68.132/24 gw 192.168.68.1
   mac 8c:b8:7e:12:34:56  wifi
+  dirección DHCP, quedan 41200 s de lease
+  dns 192.168.68.1, 8.8.8.8
 ```
 
-Si aún no hay lease: `ip: sin dirección (esperando DHCP)`. Sin NIC: `ip: sin adaptador de red`. En la kernel-shell de emergencia (`soso>`) el comando es el mismo.
+Cuando no hay dirección, la primera línea dice por qué:
+
+| Salida | Significado |
+|---|---|
+| `ip: sin dirección (ethernet sin enlace)` | El cable no tiene portadora (desenchufado o switch apagado) |
+| `ip: sin dirección (wifi sin enlace)` | La WiFi no está asociada |
+| `ip: sin dirección (wifi asociada, sin claves)` | Asociada, pero el 4-way WPA2 no ha terminado |
+| `ip: sin dirección (esperando DHCP)` | Hay enlace y el DHCP aún no ha contestado |
+| `ip: sin adaptador de red` | Ninguna NIC |
+
+Al desenchufar el cable, soso suelta la IPv4 en el momento (y pasa a WiFi si está autorizada); al volver a enchufarlo pide un lease nuevo.
+
+Configuración desde el propio comando:
+
+```sh
+ip estatica 192.168.1.50/24 gw 192.168.1.1 dns 192.168.1.1   # dirección fija
+ip estatica 10.0.0.5/16                                       # sin pasarela ni DNS
+ip dhcp                                                       # vuelve a DHCP
+ip medio auto                                                 # suelta la preferencia por WiFi
+```
+
+- `ip estatica` valida la orden (prefijo 1–32; la pasarela debe estar dentro de la red), la guarda en **`/etc/red.conf`** y la aplica. En el siguiente arranque se vuelve a usar sin pedir DHCP. Una dirección fija se mantiene aunque el cable se desenchufe.
+- `/etc/red.conf` es texto plano: `modo=estatica`, `addr=192.168.1.50/24`, y opcionalmente `gw=` y `dns=`. `modo=dhcp` (o sin fichero) usa DHCP.
+- `ip dhcp` escribe `modo=dhcp` y pide un lease nuevo.
+- Si la lista de DNS está vacía, soso pregunta a `8.8.8.8` y `10.0.2.3`. Con DNS de DHCP o de `red.conf`, solo se usan esos.
+- **Medio activo:** con cable con enlace y WiFi disponible, gana el cable. Un `wifi connect` explícito elige WiFi (`ip` lo muestra como `medio: wifi elegido con wifi connect`) y se mantiene hasta `ip medio auto`. Si se pierde la WiFi y el cable tiene enlace, la pila vuelve al cable.
+
+En la kernel-shell de emergencia (`soso>`) el comando es el mismo.
 
 Úsalo en placa para saber a qué IP conectar por SSH (`ssh -i target/soso_test_key soso@<ip>`).
 
@@ -1154,7 +1198,8 @@ Tras el arranque, el filesystem **sosofs** expone al menos:
 │   ├── actualiza.conf  # URL de releases para soso-update
 │   ├── llm.conf        # Modelo y límites de `ask` (ver ask-modelo)
 │   ├── voz.conf        # Modelo ASR, idioma, VAD
-│   ├── wifi.conf       # SSID y clave WiFi (alternativa a SOSOWIFI.TXT en ESP)
+│   ├── wifi.conf       # hasta 4 redes WiFi (alternativa a SOSOWIFI.TXT en ESP)
+│   ├── red.conf        # dirección fija (la crea `ip estatica`)
 │   ├── notifybug.conf  # repo y token PAT para notifybug (local, no OTA)
 │   ├── motd            # Mensaje de bienvenida
 │   ├── authorized_key  # Clave pública ed25519 autorizada (32 bytes)
@@ -1431,7 +1476,7 @@ soso es un sistema con alcance deliberadamente reducido en algunas áreas:
 | Usuarios | Monousuario; hasta 4 sesiones SSH simultáneas |
 | Shell | Sin variables ni historial; cwd, pipes y redirecciones |
 | Procesos | `spawn`, no `fork`; scheduler round-robin preemptivo |
-| Red | DHCP automático al arrancar; fallback a `10.0.2.15` en QEMU; sin IPv6 |
+| Red | DHCP automático al arrancar o dirección fija (`/etc/red.conf`); fallback a `10.0.2.15` en QEMU; hasta 4 redes WiFi guardadas; sin IPv6 |
 | SSH | Sin SFTP, port forwarding ni múltiples sesiones |
 | Web | Sin JavaScript ni CSS avanzado; modo gráfico básico |
 | Ficheros | Sin permisos Unix, hardlinks ni snapshots |
@@ -1688,9 +1733,23 @@ por TCP a todos los nodos remotos, ejecuta embedding y sus capas locales, y
 reenvía activaciones entre etapas. Cada nodo mantiene su KV cache y solo pagina
 en RAM los pesos de su rango.
 
-**Limitaciones:** configuración estática (IP/puerto/splits manual), sin
-descubrimiento automático. Con protocolo **v3** hay tolerancia a fallos
-(timeouts, keepalive, nodos persistentes, head standby).
+Protocolo **v4**: el **head muestrea** (temperatura, top-p, borrador PLD y
+gramática de tool calls como en local). Handshake: `Hello` → `Hello`+`Caps` →
+`Assign` → `Ack` → `Begin` → `Ack`. Los `Step`/`StepReply` llevan **bloques**
+de activaciones (con `prefix_hash` del contexto); `Truncate` alinea el KV tras
+borrador rechazado o prefijo reutilizado. Mensajes `Caps`/`Assign` para reparto
+y nodos `--auto`. En consola el nodo imprime `nodo escuchando`.
+
+**Configuración:** manual (`--pipeline`, `--splits`) o **`auto`** (sondeo TCP
+del /24 con `--cluster-port`, reparto `--splits auto` por RAM). Tolerancia a
+fallos: timeouts, keepalive, nodos persistentes, head `--standby`, journal de
+activaciones en el head para reconstruir un nodo.
+
+**API HTTP y askd:** el head puede quedar residente con enlaces abiertos. En
+`serve`, pasa `--cluster auto` o `ip:puerto,...` junto con `--splits` y opcional
+`--wire f16` / `--cluster-port` (default 9900). El ask integrado en `serve`
+reutiliza esa sesión. En askd autónomo, `/etc/llm.conf` admite `cluster=` y
+`splits=` (misma semántica que `--pipeline` / `--splits` del CLI).
 
 #### Dos nodos (compat v1)
 
@@ -1742,8 +1801,13 @@ soso-llm run tiny --pipeline 10.0.2.16:9901,10.0.2.15:9902 --splits 2,3 \
 | `--ping-idle-ms <ms>` | Máx. silencio del peer antes de abortar (default 15000) |
 | `--standby` | Head en espera: toma el cluster cuando los nodos quedan libres |
 | `--standby-retry-ms <ms>` | Pausa entre intentos de takeover (default 3000) |
+| `--pipeline auto` | Descubre nodos en escucha en el /24 local |
+| `--splits auto` | Reparte capas según `Caps` (RAM/workers) |
+| `--wire f16` | Activaciones en f16 en el cable (menos ancho de banda) |
+| `--auto` | Nodo sin rango fijo: espera `Assign` del head |
+| `--cluster-port <puerto>` | Puerto para `--pipeline auto` (default 9900) |
 
-#### Tolerancia a fallos (v3)
+#### Tolerancia a fallos (v4)
 
 - **Nodos colgados:** el head aborta la sesión si un remoto no responde dentro
   de `--step-timeout-ms` y envía error al resto.
@@ -1758,12 +1822,23 @@ soso-llm run tiny --pipeline 10.0.2.16:9901,10.0.2.15:9902 --splits 2,3 \
 - **Failover manual:** también puedes lanzar de nuevo `soso-llm run --pipeline ...`
   sin `--standby` cuando los nodos ya re-escuchan.
 
-Gates de prueba en QEMU:
+Gates de prueba en QEMU (desde el host de desarrollo; matan QEMU previo si
+quedó huérfano):
 
 ```sh
-cargo xtask test-distributed-llm      # 2 nodos
-cargo xtask test-distributed-llm-3    # 3 nodos en estrella
+cargo xtask test-distributed-llm        # 2 nodos (multicast, inferencia run)
+cargo xtask test-distributed-llm-3      # 3 nodos en estrella
+cargo xtask test-distributed-llm-auto   # nodo --auto + head con --splits auto
+cargo xtask test-distributed-llm-serve  # serve --cluster + HTTP (/health, /v1/models, chat)
 ```
+
+Los gates `-3`, `-auto` y el de 2 nodos enlazan las VMs por red multicast
+(`224.0.0.1:9009`) con IP estática por MAC. El gate `-serve` usa slirp en
+worker y head (SSH/API reenviados al host): el worker expone el nodo en el
+puerto del host **9901** y el head arranca `serve --cluster 10.0.2.2:9901`.
+El `tiny` de la imagen de pruebas incluye un `tokenizer.som` mínimo (familia
+qwen2) generado por `mkmodel-soso` para poder probar `POST /v1/chat/completions`.
+Para contratos HTTP más amplios sigue existiendo `cargo xtask test-llm-api`.
 
 ### Memoria, CPU y modelos grandes
 

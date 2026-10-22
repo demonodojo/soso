@@ -388,6 +388,38 @@ pub fn netinfo(out: &mut abi::NetInfo) -> i64 {
     )
 }
 
+/// Estado ampliado de la red: motivo de la dirección, lease, DNS.
+pub fn net_detalle(out: &mut abi::NetDetalle) -> i64 {
+    syscall4(
+        abi::SYS_NETCFG,
+        abi::NETCFG_ESTADO,
+        out as *mut abi::NetDetalle as u64,
+        0,
+        0,
+    )
+}
+
+/// `ip estatica`: `texto` es `<a.b.c.d/p> [gw <ip>] [dns <ip>]`.
+pub fn net_estatica(texto: &str) -> i64 {
+    syscall4(
+        abi::SYS_NETCFG,
+        abi::NETCFG_ESTATICA,
+        texto.as_ptr() as u64,
+        texto.len() as u64,
+        0,
+    )
+}
+
+/// `ip dhcp`.
+pub fn net_dhcp() -> i64 {
+    syscall4(abi::SYS_NETCFG, abi::NETCFG_DHCP, 0, 0, 0)
+}
+
+/// `ip medio auto`.
+pub fn net_medio_auto() -> i64 {
+    syscall4(abi::SYS_NETCFG, abi::NETCFG_MEDIO_AUTO, 0, 0, 0)
+}
+
 /// ICMP Echo a `addr`. `timeout_ms == 0` → 1000 ms. Devuelve RTT en ms o -errno.
 pub fn ping(addr: [u8; 4], timeout_ms: u64) -> i64 {
     syscall4(

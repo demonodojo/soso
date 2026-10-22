@@ -1,0 +1,15 @@
+{
+ "id": "R38",
+ "ronda": 1,
+ "resultado": "rechazada",
+ "intentos": 1,
+ "segundos": 1168,
+ "nota": "",
+ "fallo": "programacion",
+ "herramientas": 40,
+ "tokens": 976079,
+ "inyeccion": {
+  "que": "agente matado (kill -9) y coordinador reiniciado",
+  "recuperada": true
+ }
+}

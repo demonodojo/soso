@@ -1397,6 +1397,10 @@ name = "soso-notify-core"
 version = "0.1.0"
 
 [[package]]
+name = "soso-red-core"
+version = "0.1.0"
+
+[[package]]
 name = "soso-resize-core"
 version = "0.1.0"
 dependencies = [

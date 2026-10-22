@@ -46,6 +46,22 @@ impl Drop for TcpFd {
     }
 }
 
+impl TcpFd {
+    pub fn try_recv_some(&mut self, buf: &mut [u8]) -> Result<usize, ()> {
+        let n = sys::read_timeout(self.fd, buf, 0);
+        if n == -(soso_abi::EAGAIN as i64) {
+            return Ok(0);
+        }
+        if n < 0 {
+            return Err(());
+        }
+        if n == 0 {
+            return Err(());
+        }
+        Ok(n as usize)
+    }
+}
+
 impl Transport for TcpFd {
     fn send_all(&mut self, data: &[u8]) -> Result<(), ()> {
         sys::write_all(self.fd, data).map_err(|_| ())

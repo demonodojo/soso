@@ -251,7 +251,7 @@ fn exec(line: &str) {
                 }
             }
         }
-        "ip" => crate::net::print_info(),
+        "ip" => crate::net::ip_cmd(&args),
         "ping" => {
             let Some(dest) = args.first() else {
                 println!("uso: ping <ip|host> [n]");
@@ -348,7 +348,7 @@ fn exec(line: &str) {
                             };
                             if rc == 0 {
                                 crate::net::wifi_wpa::persist_credentials(ssid, psk.as_deref());
-                                crate::net::on_wifi_connected();
+                                crate::net::on_wifi_connected_explicito();
                             }
                             println!("wifi connect: rc={rc}");
                         }

@@ -78,7 +78,7 @@ Estado y matriz hardware: [`docs/ESTADO.md`](../../docs/ESTADO.md), [`docs/HW-MA
 | `cargo xtask lx-build iwlwifi` | Compilar driver Intel AX211/AX200 (WiFi + mac80211 mínimo) |
 | `./scripts/l6-iwl-fw-hostcheck.sh` | Parser TLV iwlwifi vs ucode del rootfs (sin NIC) |
 | `./scripts/l6-wifi-vfio-test.sh` | Passthrough VFIO WiFi AX211 a QEMU (prueba ALIVE) |
-| `cargo xtask test-distributed-llm` | Humo LLM repartido (2 QEMU); `-3` = tres nodos |
+| `cargo xtask test-distributed-llm` | Humo LLM repartido (2–3 QEMU multicast); `-auto` `--splits auto`; `-serve` `serve --cluster` + HTTP (health, models, chat) |
 | `cargo xtask install-disk /dev/nvmeXn1 --yes` | Dual-boot desde Linux: escribe live + entrada GRUB |
 | `cargo xtask sosomfs-check` | Comprobar imagen/árbol sosomfs en host |
 | `cargo xtask g1-check` | Checklist host G1 (IOMMU/VFIO, firmware, BAR0) |
@@ -292,6 +292,13 @@ SOSO_QEMU_ACCEL=tcg cargo xtask test
 
 # Paralelismo QEMU (default 4 con KVM, 2 en TCG; 1 = secuencial para depurar)
 SOSO_TEST_JOBS=1 cargo xtask test
+
+# LLM distribuido (serial temprano, OVMF por instancia, copias *-uefi.img):
+pkill -f qemu-system-x86_64 2>/dev/null || true
+cargo xtask test-distributed-llm
+cargo xtask test-distributed-llm-3
+cargo xtask test-distributed-llm-auto
+cargo xtask test-distributed-llm-serve   # slirp; host :9901 → nodo worker
 
 # USB/xHCI: 4 escenarios en paralelo (mismo SOSO_TEST_JOBS, imágenes copiadas)
 cargo xtask test-usb

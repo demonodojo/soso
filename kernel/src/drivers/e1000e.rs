@@ -215,31 +215,40 @@ fn read_link(bar: u64, ich: bool) -> (bool, u32, u16) {
     (lu || true, status, 0)
 }
 
-/// Sondeo periódico del enlace (I217/I219); devuelve true si pasó de DOWN a UP.
-pub fn poll_link() -> bool {
-    let Some(nic_m) = NIC.get() else {
-        return false;
-    };
+/// Último estado del enlace que vio el sondeo. Si la NIC está tomada no se
+/// sabe: se contesta «arriba», que es lo que no inventa una caída.
+pub fn link_up() -> bool {
+    NIC.get()
+        .and_then(|n| n.try_lock())
+        .map(|n| n.link_up)
+        .unwrap_or(true)
+}
+
+/// Sondeo periódico del enlace (I217/I219): `Some(true)` si pasó de DOWN a UP,
+/// `Some(false)` si pasó de UP a DOWN, `None` si no cambió.
+pub fn poll_link() -> Option<bool> {
+    let nic_m = NIC.get()?;
     let mut nic = nic_m.lock();
     if nic.qemu {
-        return false;
+        return None;
     }
     let now = crate::arch::pit::uptime_ms();
     let last = LAST_LINK_POLL.load(Ordering::Relaxed);
     if now.saturating_sub(last) < 1000 {
-        return false;
+        return None;
     }
     LAST_LINK_POLL.store(now, Ordering::Relaxed);
     let (up, status, bmsr) = read_link(nic.mmio, true);
     let was = nic.link_up;
     nic.link_up = up;
-    if up && !was {
+    if up != was {
         println!(
-            "e1000e: enlace UP status={status:#010x} bmsr={bmsr:#06x}"
+            "e1000e: enlace {} status={status:#010x} bmsr={bmsr:#06x}",
+            if up { "UP" } else { "DOWN" }
         );
-        return true;
+        return Some(up);
     }
-    false
+    None
 }
 
 /// Inicializa la NIC si hay un e1000e; devuelve la MAC.

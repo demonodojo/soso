@@ -16,8 +16,10 @@ use soso_llm_core::plan::MemoryPlanConfig;
 use soso_llm_core::sample::Sampler;
 
 use crate::net::{parse_sock_addr, TcpFd};
+use crate::distributed::{begin_turno_cluster, wire_from_str};
 use crate::session::{
-    preparar_sesion_echo, PropietarioSesion, PoliticaModelo, Sesion, resolver_modelo,
+    preparar_sesion_cluster, preparar_sesion_echo, PropietarioSesion, PoliticaModelo, Sesion,
+    resolver_modelo,
 };
 use crate::generar_tokens;
 
@@ -46,6 +48,9 @@ pub struct Conf {
     pub top_p: f32,
     pub seed: u64,
     pub plantilla: String,
+    /// `auto` o lista `ip:puerto,...` para inferencia en cluster (serve).
+    pub cluster: String,
+    pub splits: String,
 }
 
 pub const PLANTILLA_CRUDA: &str = "crudo";
@@ -81,6 +86,8 @@ impl Default for Conf {
             top_p: 0.9,
             seed: 42,
             plantilla: String::new(),
+            cluster: String::new(),
+            splits: String::new(),
         }
     }
 }
@@ -126,6 +133,10 @@ pub fn leer_conf() -> Conf {
             }
         } else if let Some(v) = linea.strip_prefix("plantilla=") {
             c.plantilla = chat::desescapar(v.trim_start());
+        } else if let Some(v) = linea.strip_prefix("cluster=") {
+            c.cluster = v.trim().to_string();
+        } else if let Some(v) = linea.strip_prefix("splits=") {
+            c.splits = v.trim().to_string();
         }
     }
     c
@@ -169,6 +180,16 @@ pub fn modelos() -> Vec<String> {
     }
     sys::close(fd as u64);
     out
+}
+
+const CLUSTER_PORT_DEFAULT: u16 = 9900;
+
+pub fn cluster_firma(conf: &Conf) -> String {
+    if conf.cluster.is_empty() {
+        String::new()
+    } else {
+        format!("{}|{}", conf.cluster.trim(), conf.splits.trim())
+    }
 }
 
 pub fn modelo_efectivo(conf: &Conf) -> Option<String> {
@@ -442,16 +463,29 @@ fn asegurar_modelo(
         libsoso::logln!("{msg}");
         socket_write_str(fd, &format!("{msg}\n"));
     }
-    if propietario.necesita_carga(&want) {
+    let firma = cluster_firma(conf);
+    if propietario.necesita_carga_con_firma(&want, &firma) {
         let t_carga = sys::uptime_ms();
         socket_write_str(fd, &format!("ask: cargando {want}...\n"));
         askd_trace(&format!("cargando {want} (catálogo + backend)"));
-        match preparar_sesion_echo(&want, false, MemoryPlanConfig::default(), false, false, Some(fd))
-        {
+        let prep = if conf.cluster.is_empty() {
+            preparar_sesion_echo(&want, false, MemoryPlanConfig::default(), false, false, Some(fd))
+        } else {
+            preparar_sesion_cluster(
+                &want,
+                &conf.cluster,
+                &conf.splits,
+                wire_from_str("f32"),
+                CLUSTER_PORT_DEFAULT,
+                Some(fd),
+            )
+        };
+        match prep {
             Ok(s) => {
                 askd_trace_ms(&format!("{want} listo"), t_carga);
                 propietario.sesion = Some(s);
                 propietario.modelo = want;
+                propietario.cluster_firma = firma;
                 if let Some(ses) = propietario.sesion.as_mut() {
                     ses.bundle.source.disable_worker();
                     if let Some(ref mut g) = ses.sys_gpu {
@@ -541,6 +575,12 @@ fn tratar_linea_askd(
     }
     let ses = propietario.sesion.as_mut().unwrap();
     ses.reset_peticion();
+    if ses.cluster.is_some() {
+        if begin_turno_cluster(ses, conf.max as u32, conf.temp, conf.top_p, conf.seed).is_err() {
+            socket_reply(fd, "ask: no pude iniciar sesión cluster\n");
+            return 1;
+        }
+    }
 
     let plantilla = chat::anteponer_sistema(plantilla_efectiva(conf, ses), SISTEMA);
     let tokens = chat::render(&plantilla, texto, &ses.bundle.tokenizer);

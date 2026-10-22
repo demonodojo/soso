@@ -1,6 +1,9 @@
 //! Informe de generación, observador y cancelación cooperativa (T08–T09, C2).
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
+
+use crate::restriccion::Restriccion;
 
 /// Por qué terminó el bucle de decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,10 +108,31 @@ pub struct GenerationReport {
 }
 
 /// Parámetros de la variante con informe.
-#[derive(Debug, Clone)]
 pub struct GenerationOptions {
     pub max_new: usize,
     pub stop_token_ids: Vec<u32>,
+    /// Limita qué tokens pueden salir (llamadas a herramienta bien formadas). `None`: sin restricción.
+    pub restriccion: Option<Box<dyn Restriccion>>,
+}
+
+impl Clone for GenerationOptions {
+    fn clone(&self) -> Self {
+        Self {
+            max_new: self.max_new,
+            stop_token_ids: self.stop_token_ids.clone(),
+            restriccion: self.restriccion.as_ref().map(|r| r.duplicar()),
+        }
+    }
+}
+
+impl core::fmt::Debug for GenerationOptions {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GenerationOptions")
+            .field("max_new", &self.max_new)
+            .field("stop_token_ids", &self.stop_token_ids)
+            .field("restriccion", &self.restriccion.is_some())
+            .finish()
+    }
 }
 
 impl GenerationOptions {
@@ -116,14 +140,17 @@ impl GenerationOptions {
         Self {
             max_new,
             stop_token_ids,
+            restriccion: None,
         }
     }
 
     pub fn from_eos(max_new: usize, eos: Option<u32>) -> Self {
-        Self {
-            max_new,
-            stop_token_ids: stops_from_eos(eos),
-        }
+        Self::new(max_new, stops_from_eos(eos))
+    }
+
+    pub fn con_restriccion(mut self, restriccion: Option<Box<dyn Restriccion>>) -> Self {
+        self.restriccion = restriccion;
+        self
     }
 }
 

@@ -943,26 +943,34 @@ fn log_link(nic: &Nic, phy: u8, bmsr: u16, up: bool) {
     );
 }
 
-/// Sondeo periódico del enlace; devuelve true si pasó de DOWN a UP.
-pub fn poll_link() -> bool {
-    let Some(nic_m) = NIC.get() else {
-        return false;
-    };
+/// Último estado del enlace que vio el sondeo. Si la NIC está tomada no se
+/// sabe: se contesta «arriba», que es lo que no inventa una caída.
+pub fn link_up() -> bool {
+    NIC.get()
+        .and_then(|n| n.try_lock())
+        .map(|n| n.link_up)
+        .unwrap_or(true)
+}
+
+/// Sondeo periódico del enlace: `Some(true)` si pasó de DOWN a UP,
+/// `Some(false)` si pasó de UP a DOWN, `None` si no cambió.
+pub fn poll_link() -> Option<bool> {
+    let nic_m = NIC.get()?;
     let now = crate::arch::pit::uptime_ms();
     let last = LAST_LINK_POLL.load(Ordering::Relaxed);
     if now.saturating_sub(last) < 1000 {
-        return false;
+        return None;
     }
     LAST_LINK_POLL.store(now, Ordering::Relaxed);
     let mut nic = nic_m.lock();
     let (up, phy, bmsr) = read_link(&mut nic);
     let was = nic.link_up;
     nic.link_up = up;
-    if up && !was {
+    if up != was {
         log_link(&nic, phy, bmsr, up);
-        return true;
+        return Some(up);
     }
-    false
+    None
 }
 
 fn rtl_irq() {

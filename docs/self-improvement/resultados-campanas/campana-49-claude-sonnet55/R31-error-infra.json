@@ -1,0 +1,11 @@
+{
+ "id": "R31",
+ "ronda": 1,
+ "resultado": "error",
+ "intentos": 1,
+ "segundos": 60,
+ "nota": "error: entorno: el intento no termin\u00f3: ErrorModelo entorno: el servidor contest\u00f3 Some(500): {\"error\": {\"message\": \"claude sali\u00f3 con 1: {\\\"duration_api_ms\\\":9541,\\\"stop_reason\\\":\\\"stop_sequence\\\",\\\"ses",
+ "fallo": "infraestructura",
+ "herramientas": 6,
+ "tokens": 129197
+}

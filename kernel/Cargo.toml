@@ -66,6 +66,7 @@ soso-update-core = { path = "../crates/soso-update-core", default-features = fal
 soso-abi = { path = "../crates/soso-abi" }
 soso-hw = { path = "../crates/soso-hw" }
 soso-wpa2 = { path = "../crates/soso-wpa2" }
+soso-red-core = { path = "../crates/soso-red-core" }
 xmas-elf = "0.10"
 smoltcp = { version = "0.13.1", default-features = false, features = [
     "medium-ethernet",

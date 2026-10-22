@@ -33,7 +33,7 @@ mkdir -p "$KD/crates" "$KD/vendor-propio" "$KD/kernel"
 cp -r "$ROOT/kernel/." "$KD/kernel/"
 rm -rf "$KD/kernel/target"
 for c in sosofs sosomfs sosomodel block-dev gptdisk soso-resize-core soso-log-core espfat-core \
-         soso-update-core soso-abi soso-hw soso-wpa2 xhci-nostd; do
+         soso-update-core soso-abi soso-hw soso-wpa2 soso-red-core xhci-nostd; do
   cp -r "$ROOT/crates/$c" "$KD/crates/$c"
   rm -rf "$KD/crates/$c/target"
 done

@@ -20,6 +20,7 @@ use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::socket::{dhcpv4, tcp};
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{DhcpRepr, EthernetAddress, IpAddress, IpCidr, Ipv4Address, Ipv4Cidr};
+use soso_red_core::RedEstatica;
 use spin::{Mutex, Once};
 
 #[cfg(feature = "drv-e1000e")]
@@ -52,13 +53,20 @@ struct NetStack {
     sockets: SocketSet<'static>,
     echo: Vec<SocketHandle>,
     ssh: Vec<SocketHandle>,
-    dhcp: SocketHandle,
+    /// `None` sólo con dirección fija: un socket DHCP vivo seguiría mandando
+    /// DISCOVER (ver [`parar_dhcp`]).
+    dhcp: Option<SocketHandle>,
     configured: bool,
     dhcp_enabled: bool,
     dhcp_started: Instant,
     dev: NicDev,
     mac: [u8; 6],
     backend: BackendKind,
+    /// Dirección de `/etc/red.conf`. `None` es DHCP.
+    estatica: Option<RedEstatica>,
+    /// El usuario eligió WiFi con `wifi connect`: el cable con enlace no la
+    /// sustituye hasta `ip medio auto` o hasta que la WiFi caiga.
+    pref_wifi: bool,
     /// Servidores DNS que anunció el DHCP. Sin esto había que adivinarlos, y
     /// lo que se adivinaba era el de QEMU.
     ///
@@ -75,46 +83,112 @@ struct NetStack {
 
 static NET: Once<Mutex<NetStack>> = Once::new();
 static LOCK_PERDIDO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// `/etc/red.conf` tal como estaba al arrancar. Se lee una vez en [`init`]: la
+/// pila se monta (y se rehace al aparecer una NIC) desde `poll`, que corre en
+/// el tick y no toca ficheros.
+static ESTATICA_ARRANQUE: Once<Option<RedEstatica>> = Once::new();
+
+/// Lee `/etc/red.conf`. Ausente o `modo=dhcp` es DHCP; un fichero que no vale
+/// se cuenta y se trata como DHCP, para no dejar la máquina sin red por un
+/// error de tecleo.
+fn leer_red_conf() -> Option<RedEstatica> {
+    let ino = crate::vfs::resolve(soso_red_core::RED_CONF).ok()?;
+    let datos = crate::vfs::read_file(ino).ok()?;
+    let texto = core::str::from_utf8(&datos).unwrap_or("");
+    match soso_red_core::parsear_red_conf(texto) {
+        Ok(estatica) => estatica,
+        Err(e) => {
+            println!("net: {} no vale ({}); uso DHCP", soso_red_core::RED_CONF, e.texto());
+            None
+        }
+    }
+}
+
+fn guardar_red_conf(texto: &str) -> bool {
+    if crate::fs::FS.get().is_none() {
+        return false;
+    }
+    let Ok(etc) = crate::vfs::resolve("/etc") else {
+        return false;
+    };
+    crate::vfs::create_file(etc, "red.conf", texto.as_bytes(), crate::time::wall_secs()).is_ok()
+}
 
 fn now() -> Instant {
     Instant::from_millis(pit::uptime_ms() as i64)
 }
 
-fn net_backend() -> Option<([u8; 6], NicDev, BackendKind)> {
-    #[cfg(feature = "lxdde")]
-    if crate::lxdde::wifi_present()
-        && crate::lxdde::wifi_alive()
-        && crate::lxdde::wifi_connected()
-    {
-        if let Some(mac) = crate::lxdde::wifi_mac() {
-            println!("net: backend lx-wifi (Intel AX211/AX200)");
-            return Some((mac, NicDev::LxWifi(device::LxWifiDev), BackendKind::Wifi));
-        }
-    }
+/// Ethernet nativa o lxdde presente, con o sin enlace, y el nombre para el log.
+/// Sin virtio: ése sólo existe en QEMU, donde no compite con ningún WiFi.
+/// Es muda; quien elige la NIC es quien lo cuenta.
+fn sondear_cable_nativo() -> Option<([u8; 6], NicDev, &'static str)> {
     #[cfg(feature = "lxdde")]
     if crate::lxdde::e1000e_present() {
         let mac = crate::lxdde::e1000e_mac()?;
-        println!("net: backend lx-e1000e");
-        return Some((mac, NicDev::LxE1000e(device::LxE1000Dev), BackendKind::Wired));
+        return Some((mac, NicDev::LxE1000e(device::LxE1000Dev), "lx-e1000e"));
     }
     #[cfg(feature = "drv-e1000e")]
     if e1000e::present() {
         let mac = e1000e::mac()?;
-        println!("net: backend e1000e");
-        return Some((mac, NicDev::E1000e(E1000Dev), BackendKind::Wired));
+        return Some((mac, NicDev::E1000e(E1000Dev), "e1000e"));
     }
     #[cfg(feature = "drv-rtl8169")]
     if rtl8169::present() {
         let mac = rtl8169::mac()?;
-        println!("net: backend rtl8169");
-        return Some((mac, NicDev::Rtl8169(device::Rtl8169Dev), BackendKind::Wired));
+        return Some((mac, NicDev::Rtl8169(device::Rtl8169Dev), "rtl8169"));
     }
+    None
+}
+
+/// MAC de la WiFi viva; con `asociada`, sólo si además está asociada.
+#[cfg(feature = "lxdde")]
+fn sondear_wifi(asociada: bool) -> Option<[u8; 6]> {
+    if crate::lxdde::wifi_present()
+        && crate::lxdde::wifi_alive()
+        && (!asociada || crate::lxdde::wifi_connected())
+    {
+        crate::lxdde::wifi_mac()
+    } else {
+        None
+    }
+}
+
+#[cfg(not(feature = "lxdde"))]
+fn sondear_wifi(_asociada: bool) -> Option<[u8; 6]> {
+    None
+}
+
+fn backend_wifi(mac: [u8; 6]) -> Option<([u8; 6], NicDev, BackendKind)> {
     #[cfg(feature = "lxdde")]
-    if crate::lxdde::wifi_present() && crate::lxdde::wifi_alive() {
-        if let Some(mac) = crate::lxdde::wifi_mac() {
-            println!("net: backend lx-wifi (Intel AX211/AX200)");
-            return Some((mac, NicDev::LxWifi(device::LxWifiDev), BackendKind::Wifi));
+    {
+        println!("net: backend lx-wifi (Intel AX211/AX200)");
+        Some((mac, NicDev::LxWifi(device::LxWifiDev), BackendKind::Wifi))
+    }
+    #[cfg(not(feature = "lxdde"))]
+    {
+        let _ = mac;
+        None
+    }
+}
+
+/// Orden: cable con enlace, WiFi asociada, cable sin enlace (el DHCP arranca
+/// al subirlo), WiFi viva y virtio. El cable con enlace gana a una WiFi que
+/// ya está asociada; la WiFi sólo gana por elección explícita
+/// (`NetStack::pref_wifi`), que no existe todavía cuando se monta la pila.
+fn net_backend() -> Option<([u8; 6], NicDev, BackendKind)> {
+    let cable = sondear_cable_nativo();
+    let cable_con_enlace = cable.as_ref().is_some_and(|(_, dev, _)| dev.carrier());
+    if !cable_con_enlace {
+        if let Some(mac) = sondear_wifi(true) {
+            return backend_wifi(mac);
         }
+    }
+    if let Some((mac, dev, nombre)) = cable {
+        println!("net: backend {nombre}");
+        return Some((mac, dev, BackendKind::Wired));
+    }
+    if let Some(mac) = sondear_wifi(false) {
+        return backend_wifi(mac);
     }
     #[cfg(feature = "drv-virtio-net")]
     if let Some(mac) = virtio_net::init() {
@@ -180,7 +254,7 @@ fn attach_stack(mac: [u8; 6], mut dev: NicDev, backend: BackendKind, dhcp_now: b
     let iface = Interface::new(config, &mut dev, now());
 
     let mut sockets = SocketSet::new(Vec::new());
-    let dhcp = sockets.add(dhcpv4::Socket::new());
+    let dhcp = Some(sockets.add(dhcpv4::Socket::new()));
     let echo = (0..ECHO_SOCKETS)
         .map(|_| {
             sockets.add(tcp::Socket::new(
@@ -207,6 +281,7 @@ fn attach_stack(mac: [u8; 6], mut dev: NicDev, backend: BackendKind, dhcp_now: b
         );
     }
     ssh::init();
+    let estatica = ESTATICA_ARRANQUE.get().copied().flatten();
     let dhcp_started = if dhcp_now { now() } else { Instant::from_millis(0) };
     NET.call_once(|| {
         Mutex::new(NetStack {
@@ -222,10 +297,17 @@ fn attach_stack(mac: [u8; 6], mut dev: NicDev, backend: BackendKind, dhcp_now: b
             dev,
             mac,
             backend,
+            estatica,
+            pref_wifi: false,
             dhcp_expires_at: None,
             user_tcp: tcp_user::TcpTable::new(),
         })
     });
+    // Sólo con enlace usable: una WiFi aún sin autorizar la recibirá en
+    // `on_wifi_connected`, y sin NIC no hay a qué ponérsela.
+    if let (Some(e), true, Some(net)) = (estatica, dhcp_now && backend != BackendKind::Ninguno, NET.get()) {
+        aplicar_estatica(&mut net.lock(), e);
+    }
 }
 
 fn dhcp_lease_expires(config: &dhcpv4::Config<'_>, now: Instant) -> Option<Instant> {
@@ -304,21 +386,91 @@ fn sustituir_nic(
     dhcp_now: bool,
 ) {
     let mut n = net.lock();
-    n.dev = dev;
-    n.mac = mac;
-    n.backend = backend;
-    n.iface
-        .set_hardware_addr(EthernetAddress(mac).into());
+    cambiar_dispositivo(&mut n, mac, dev, backend);
     n.configured = false;
-    n.dhcp_enabled = dhcp_now;
-    n.dhcp_started = now();
     clear_ipv4_config(&mut n.iface);
-    let dhcp = n.dhcp;
-    n.sockets.get_mut::<dhcpv4::Socket>(dhcp).reset();
+    match n.estatica {
+        Some(e) if dhcp_now => aplicar_estatica(&mut n, e),
+        _ => {
+            arrancar_dhcp(&mut n);
+            n.dhcp_enabled = dhcp_now;
+        }
+    }
     println!(
         "net: NIC encontrada tras arrancar sin ella (mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     );
+}
+
+/// Pone otro dispositivo bajo la pila. La IP no se toca: quien lo llama la
+/// reinicia con [`reiniciar_ip`] (o la suelta con [`soltar_ip`]).
+fn cambiar_dispositivo(n: &mut NetStack, mac: [u8; 6], dev: NicDev, backend: BackendKind) {
+    n.dev = dev;
+    n.mac = mac;
+    n.backend = backend;
+    n.iface.set_hardware_addr(EthernetAddress(mac).into());
+    NIC_REAL.store(true, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Empieza (o reempieza) la búsqueda de lease. El socket DHCP vuelve a existir
+/// si una dirección fija lo había retirado.
+fn arrancar_dhcp(n: &mut NetStack) {
+    match n.dhcp {
+        Some(h) => n.sockets.get_mut::<dhcpv4::Socket>(h).reset(),
+        None => n.dhcp = Some(n.sockets.add(dhcpv4::Socket::new())),
+    }
+    n.dhcp_enabled = true;
+    n.dhcp_started = now();
+}
+
+/// Con dirección fija nadie debe pedir lease: un socket DHCP vivo seguiría
+/// mandando DISCOVER a la red de quien eligió no usarlo.
+fn parar_dhcp(n: &mut NetStack) {
+    if let Some(h) = n.dhcp.take() {
+        n.sockets.remove(h);
+    }
+    n.dhcp_enabled = false;
+    n.dhcp_expires_at = None;
+}
+
+fn aplicar_estatica(n: &mut NetStack, e: RedEstatica) {
+    parar_dhcp(n);
+    let addr = Ipv4Address::from(e.addr);
+    set_ipv4_addr(&mut n.iface, Ipv4Cidr::new(addr, e.prefijo));
+    n.iface.routes_mut().remove_default_ipv4_route();
+    if let Some(gw) = e.gw {
+        let _ = n.iface.routes_mut().add_default_ipv4_route(Ipv4Address::from(gw));
+    }
+    n.dns = [None; 3];
+    n.dns[0] = e.dns.map(Ipv4Address::from);
+    n.configured = true;
+    println!("net: ip estática {addr}/{}", e.prefijo);
+}
+
+/// La IP de ahora ya no vale (otro medio, enlace nuevo): se suelta, se cierran
+/// los servicios que escuchaban en ella y se empieza de nuevo, con la dirección
+/// fija si la hay y con DHCP si no.
+fn reiniciar_ip(n: &mut NetStack) {
+    n.configured = false;
+    n.dhcp_expires_at = None;
+    clear_ipv4_config(&mut n.iface);
+    close_tcp_services(&mut n.sockets, &n.echo, &n.ssh);
+    match n.estatica {
+        Some(e) => aplicar_estatica(n, e),
+        None => arrancar_dhcp(n),
+    }
+}
+
+/// Sin enlace no hay IP: ni dirección ni DHCP hasta que vuelva.
+fn soltar_ip(n: &mut NetStack) {
+    n.configured = false;
+    n.dhcp_enabled = false;
+    n.dhcp_expires_at = None;
+    clear_ipv4_config(&mut n.iface);
+    close_tcp_services(&mut n.sockets, &n.echo, &n.ssh);
+    if let Some(h) = n.dhcp {
+        n.sockets.get_mut::<dhcpv4::Socket>(h).reset();
+    }
 }
 
 #[cfg(feature = "lxdde")]
@@ -333,9 +485,53 @@ fn wifi_link_up() -> bool {
     false
 }
 
-/// Tras subir el enlace Ethernet: reinicia DHCP.
-#[cfg(feature = "drv-rtl8169")]
+/// MAC de la WiFi si tiene enlace utilizable.
+#[cfg(feature = "lxdde")]
+fn wifi_autorizada() -> Option<[u8; 6]> {
+    if crate::lxdde::wifi_authorized() {
+        crate::lxdde::wifi_mac()
+    } else {
+        None
+    }
+}
+
+/// Tras subir el enlace Ethernet: reinicia la IP. Si la pila estaba en WiFi por
+/// elección de nadie (preferencia `auto`, sin dirección fija), el cable con
+/// enlace la recupera.
+#[cfg(any(feature = "drv-rtl8169", feature = "drv-e1000e"))]
 pub fn on_wired_link_up() {
+    let Some(net) = NET.get() else {
+        return;
+    };
+    let mut n = net.lock();
+    if n.backend == BackendKind::Wired {
+        reiniciar_ip(&mut n);
+        if n.estatica.is_some() {
+            println!("net: enlace ethernet UP — ip estática");
+        } else {
+            println!("net: enlace ethernet UP — solicitando DHCP…");
+        }
+        return;
+    }
+    if n.backend != BackendKind::Wifi || n.pref_wifi || n.estatica.is_some() {
+        return;
+    }
+    let Some((mac, dev, nombre)) = sondear_cable_nativo() else {
+        return;
+    };
+    if !dev.carrier() {
+        return;
+    }
+    cambiar_dispositivo(&mut n, mac, dev, BackendKind::Wired);
+    reiniciar_ip(&mut n);
+    println!("net: cable con enlace — vuelvo a ethernet ({nombre})");
+}
+
+/// Se soltó el cable: sin IP hasta que vuelva, igual que cuando cae el WiFi.
+/// Con dirección fija se conserva (lo que se eligió no depende del cable) y
+/// una WiFi ya autorizada recoge la red.
+#[cfg(any(feature = "drv-rtl8169", feature = "drv-e1000e"))]
+pub fn on_wired_link_down() {
     let Some(net) = NET.get() else {
         return;
     };
@@ -343,43 +539,61 @@ pub fn on_wired_link_up() {
     if n.backend != BackendKind::Wired {
         return;
     }
-    n.configured = false;
-    n.dhcp_enabled = true;
-    n.dhcp_started = now();
-    clear_ipv4_config(&mut n.iface);
-    let echo = n.echo.clone();
-    let ssh = n.ssh.clone();
-    let dhcp = n.dhcp;
-    close_tcp_services(&mut n.sockets, &echo, &ssh);
-    n.sockets.get_mut::<dhcpv4::Socket>(dhcp).reset();
-    println!("net: enlace ethernet UP — solicitando DHCP…");
+    if n.estatica.is_some() {
+        println!("net: enlace ethernet DOWN — conservo la ip estática");
+        return;
+    }
+    soltar_ip(&mut n);
+    println!("net: enlace ethernet DOWN — sin IP hasta que vuelva el cable");
+    #[cfg(feature = "lxdde")]
+    if let Some(mac) = wifi_autorizada() {
+        cambiar_dispositivo(&mut n, mac, NicDev::LxWifi(device::LxWifiDev), BackendKind::Wifi);
+        reiniciar_ip(&mut n);
+        println!("net: sin cable — uso la WiFi autorizada");
+    }
 }
 
 pub fn init() {
+    // Una sola vez y aquí: `poll` y `try_attach` corren en el tick y no leen
+    // ficheros. El sistema de ficheros ya está montado en este punto del arranque.
+    ESTATICA_ARRANQUE.call_once(leer_red_conf);
     attach_now();
 }
 
 /// Tras asociar WiFi: sustituye ethernet por LxWifi si hace falta y pide DHCP.
+/// Con el cable con enlace y sin elección del usuario, sigue en ethernet.
 #[cfg(feature = "lxdde")]
 pub fn on_wifi_connected() {
+    wifi_conectada(false);
+}
+
+/// `wifi connect` / `wifi setup`: el usuario pidió esta red, así que la WiFi
+/// manda aunque el cable tenga enlace, hasta `ip medio auto` o hasta que caiga.
+#[cfg(feature = "lxdde")]
+pub fn on_wifi_connected_explicito() {
+    wifi_conectada(true);
+}
+
+#[cfg(feature = "lxdde")]
+fn wifi_conectada(explicito: bool) {
     let Some(net) = NET.get() else {
         attach_now();
         return;
     };
     let mut n = net.lock();
+    if explicito {
+        n.pref_wifi = true;
+    }
     if crate::lxdde::wifi_authorized() {
         let Some(mac) = crate::lxdde::wifi_mac() else {
             return;
         };
+        if n.backend == BackendKind::Wired && !n.pref_wifi && n.dev.carrier() {
+            println!("net: wifi autorizada; sigo en ethernet (el cable tiene enlace)");
+            return;
+        }
         if n.backend != BackendKind::Wifi || n.mac != mac {
-            n.dev = NicDev::LxWifi(device::LxWifiDev);
-            n.mac = mac;
-            n.backend = BackendKind::Wifi;
-            n.iface
-                .set_hardware_addr(EthernetAddress(mac).into());
-            n.configured = false;
-            clear_ipv4_config(&mut n.iface);
-            NIC_REAL.store(true, core::sync::atomic::Ordering::Relaxed);
+            cambiar_dispositivo(&mut n, mac, NicDev::LxWifi(device::LxWifiDev), BackendKind::Wifi);
             println!("net: backend lx-wifi (Intel AX211/AX200)");
         }
     } else if n.backend != BackendKind::Wifi {
@@ -393,21 +607,20 @@ pub fn on_wifi_connected() {
             return;
         }
     }
-    n.configured = false;
-    n.dhcp_enabled = true;
-    n.dhcp_started = now();
-    clear_ipv4_config(&mut n.iface);
-    let echo = n.echo.clone();
-    let ssh = n.ssh.clone();
-    let dhcp = n.dhcp;
-    close_tcp_services(&mut n.sockets, &echo, &ssh);
-    n.sockets.get_mut::<dhcpv4::Socket>(dhcp).reset();
-    println!("net: wifi asociada — solicitando DHCP…");
+    reiniciar_ip(&mut n);
+    if n.estatica.is_some() {
+        println!("net: wifi asociada — ip estática");
+    } else {
+        println!("net: wifi asociada — solicitando DHCP…");
+    }
 }
 
 /// El enlace WiFi cayó: sin IP ni DHCP hasta que `wifi_wpa` reconecte y llame
-/// a [`on_wifi_connected`]; lo mismo que un `dhcp perdido`. Devuelve `false`
-/// si el candado estaba tomado (DNS lo retiene mientras espera): se reintenta.
+/// a [`on_wifi_connected`]; lo mismo que un `dhcp perdido`. Si el cable tiene
+/// enlace, la pila vuelve a él y la preferencia por WiFi se suelta: el
+/// reintento de `wifi_wpa` no debe quitarle otra vez la sesión. Con dirección
+/// fija se conserva. Devuelve `false` si el candado estaba tomado (DNS lo
+/// retiene mientras espera): se reintenta.
 #[cfg(feature = "lxdde")]
 pub fn on_wifi_lost() -> bool {
     let Some(net) = NET.get() else {
@@ -419,16 +632,20 @@ pub fn on_wifi_lost() -> bool {
     if n.backend != BackendKind::Wifi {
         return true;
     }
-    n.configured = false;
-    n.dhcp_enabled = false;
-    n.dhcp_expires_at = None;
-    clear_ipv4_config(&mut n.iface);
-    let echo = n.echo.clone();
-    let ssh = n.ssh.clone();
-    let dhcp = n.dhcp;
-    close_tcp_services(&mut n.sockets, &echo, &ssh);
-    n.sockets.get_mut::<dhcpv4::Socket>(dhcp).reset();
+    if n.estatica.is_some() {
+        println!("net: wifi caída — conservo la ip estática");
+        return true;
+    }
+    soltar_ip(&mut n);
     println!("net: wifi caída — sin IP hasta reconectar");
+    if let Some((mac, dev, nombre)) = sondear_cable_nativo()
+        && dev.carrier()
+    {
+        n.pref_wifi = false;
+        cambiar_dispositivo(&mut n, mac, dev, BackendKind::Wired);
+        reiniciar_ip(&mut n);
+        println!("net: cable con enlace — vuelvo a ethernet ({nombre})");
+    }
     true
 }
 
@@ -561,12 +778,16 @@ pub fn poll() {
     }
     try_attach();
     #[cfg(feature = "drv-rtl8169")]
-    if rtl8169::poll_link() {
-        on_wired_link_up();
+    match rtl8169::poll_link() {
+        Some(true) => on_wired_link_up(),
+        Some(false) => on_wired_link_down(),
+        None => {}
     }
     #[cfg(feature = "drv-e1000e")]
-    if e1000e::poll_link() {
-        on_wired_link_up();
+    match e1000e::poll_link() {
+        Some(true) => on_wired_link_up(),
+        Some(false) => on_wired_link_down(),
+        None => {}
     }
     if vigilar {
         crate::mm::heap::punto("poll-nicho");
@@ -598,19 +819,20 @@ pub fn poll() {
         dns,
         dhcp_expires_at,
         user_tcp,
+        ..
     } = &mut *n;
 
     iface.poll(now(), dev, sockets);
     if vigilar {
         crate::mm::heap::punto("poll-rx");
     }
-    if *dhcp_enabled {
+    if let (true, Some(dhcp)) = (*dhcp_enabled, *dhcp) {
         poll_dhcp(
             iface,
             sockets,
             echo,
             ssh,
-            *dhcp,
+            dhcp,
             configured,
             dns,
             dhcp_expires_at,
@@ -645,16 +867,17 @@ pub(crate) fn poll_locked(n: &mut NetStack) {
         dns,
         dhcp_expires_at,
         user_tcp,
+        ..
     } = n;
     let t = now();
     iface.poll(t, dev, sockets);
-    if *dhcp_enabled {
+    if let (true, Some(dhcp)) = (*dhcp_enabled, *dhcp) {
         poll_dhcp(
             iface,
             sockets,
             echo,
             ssh,
-            *dhcp,
+            dhcp,
             configured,
             dns,
             dhcp_expires_at,
@@ -1013,6 +1236,68 @@ pub fn info() -> soso_abi::NetInfo {
     out
 }
 
+/// Lo que `info` no cuenta: por qué hay o no dirección, de dónde viene, cuánto
+/// le queda al lease y a qué DNS se pregunta de verdad.
+pub fn detalle() -> soso_abi::NetDetalle {
+    let mut out = soso_abi::NetDetalle::default();
+    let Some(net) = NET.get() else {
+        return out;
+    };
+    let n = net.lock();
+    let enlace = n.backend != BackendKind::Ninguno && n.dev.carrier();
+    if enlace {
+        out.flags |= soso_abi::NETDET_ENLACE;
+    }
+    if n.estatica.is_some() {
+        out.flags |= soso_abi::NETDET_ESTATICA;
+    }
+    if n.pref_wifi {
+        out.flags |= soso_abi::NETDET_PREF_WIFI;
+    }
+    out.motivo = if n.backend == BackendKind::Ninguno {
+        soso_abi::NET_MOTIVO_SIN_ADAPTADOR
+    } else if n.configured {
+        if n.estatica.is_some() {
+            soso_abi::NET_MOTIVO_ESTATICA
+        } else if n.dhcp_expires_at.is_some() {
+            soso_abi::NET_MOTIVO_DHCP
+        } else {
+            soso_abi::NET_MOTIVO_RESPALDO
+        }
+    } else if !enlace && n.backend == BackendKind::Wifi {
+        soso_abi::NET_MOTIVO_WIFI_SIN_AUTORIZAR
+    } else if !enlace {
+        soso_abi::NET_MOTIVO_SIN_ENLACE
+    } else {
+        soso_abi::NET_MOTIVO_ESPERANDO_DHCP
+    };
+    if n.configured
+        && n.estatica.is_none()
+        && let Some(fin) = n.dhcp_expires_at
+    {
+        let resto_ms = (fin.total_millis() - now().total_millis()).max(0);
+        out.flags |= soso_abi::NETDET_LEASE;
+        out.lease_secs = u32::try_from(resto_ms / 1000).unwrap_or(u32::MAX);
+    }
+    for (hueco, servidor) in out.dns.iter_mut().zip(dns::servidores(&n.dns)) {
+        *hueco = servidor.octets();
+        out.dns_n += 1;
+    }
+    out
+}
+
+/// Texto de `ip` para una pila con dirección (misma redacción en `/bin/ip`).
+fn origen_texto(det: &soso_abi::NetDetalle) -> alloc::string::String {
+    match det.motivo {
+        soso_abi::NET_MOTIVO_ESTATICA => "fija (/etc/red.conf)".into(),
+        soso_abi::NET_MOTIVO_RESPALDO => "de respaldo (sin DHCP)".into(),
+        _ if det.flags & soso_abi::NETDET_LEASE != 0 => {
+            alloc::format!("DHCP, quedan {} s de lease", det.lease_secs)
+        }
+        _ => "DHCP".into(),
+    }
+}
+
 /// Texto del comando `ip` (kshell). El binario de userspace imprime lo mismo.
 pub fn print_info() {
     let info = info();
@@ -1020,12 +1305,19 @@ pub fn print_info() {
         println!("ip: sin adaptador de red");
         return;
     }
+    let det = detalle();
     let medio = match info.backend {
         soso_abi::NET_BACKEND_WIFI => "wifi",
         _ => "ethernet",
     };
     if info.flags & soso_abi::NET_FLAG_CONFIGURED == 0 {
-        println!("ip: sin dirección (esperando DHCP)");
+        match det.motivo {
+            soso_abi::NET_MOTIVO_SIN_ENLACE => println!("ip: sin dirección ({medio} sin enlace)"),
+            soso_abi::NET_MOTIVO_WIFI_SIN_AUTORIZAR => {
+                println!("ip: sin dirección (wifi asociada, sin claves)")
+            }
+            _ => println!("ip: sin dirección (esperando DHCP)"),
+        }
     } else if info.gateway != [0, 0, 0, 0] {
         println!(
             "ip: {}.{}.{}.{}/{} gw {}.{}.{}.{}",
@@ -1049,6 +1341,108 @@ pub fn print_info() {
         "  mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}  {medio}",
         info.mac[0], info.mac[1], info.mac[2], info.mac[3], info.mac[4], info.mac[5]
     );
+    if info.flags & soso_abi::NET_FLAG_CONFIGURED != 0 {
+        println!("  dirección {}", origen_texto(&det));
+        if det.dns_n > 0 {
+            let mut linea = alloc::string::String::from("  dns");
+            for (i, d) in det.dns.iter().take(det.dns_n as usize).enumerate() {
+                let coma = if i > 0 { "," } else { "" };
+                linea.push_str(&alloc::format!("{coma} {}.{}.{}.{}", d[0], d[1], d[2], d[3]));
+            }
+            println!("{linea}");
+        }
+    }
+    if det.flags & soso_abi::NETDET_PREF_WIFI != 0 {
+        println!("  medio: wifi elegido con wifi connect (`ip medio auto` lo suelta)");
+    }
+}
+
+/// ¿Se puede poner la IP ya? Cable siempre (el DHCP arranca al subir el
+/// enlace); WiFi sólo autorizada.
+fn enlace_usable(n: &NetStack) -> bool {
+    n.backend == BackendKind::Wired || (n.backend == BackendKind::Wifi && wifi_link_up())
+}
+
+/// `ip estatica <a.b.c.d/p> [gw <ip>] [dns <ip>]`: guarda `/etc/red.conf` y
+/// aplica la dirección. `-EINVAL` si la orden no vale; `-EIO` si no se pudo
+/// guardar (entonces no se aplica nada: lo que se ve es lo que arrancará).
+pub fn configurar_estatica(texto: &str) -> Result<(), i64> {
+    let e = soso_red_core::parsear_orden(texto).map_err(|_| -soso_abi::EINVAL)?;
+    if !guardar_red_conf(&soso_red_core::formatear_red_conf(&e)) {
+        return Err(-soso_abi::EIO);
+    }
+    let net = NET.get().ok_or(-soso_abi::EIO)?;
+    let mut n = net.lock();
+    n.estatica = Some(e);
+    if enlace_usable(&n) {
+        reiniciar_ip(&mut n);
+    }
+    Ok(())
+}
+
+/// `ip dhcp`: deja `/etc/red.conf` en `modo=dhcp` y vuelve a pedir lease.
+pub fn configurar_dhcp() -> Result<(), i64> {
+    if !guardar_red_conf(soso_red_core::RED_CONF_DHCP) {
+        return Err(-soso_abi::EIO);
+    }
+    let net = NET.get().ok_or(-soso_abi::EIO)?;
+    let mut n = net.lock();
+    n.estatica = None;
+    n.dns = [None; 3];
+    if enlace_usable(&n) {
+        reiniciar_ip(&mut n);
+    } else {
+        // El socket DHCP vuelve a existir; arrancará con el enlace.
+        arrancar_dhcp(&mut n);
+        n.dhcp_enabled = false;
+    }
+    Ok(())
+}
+
+/// `ip medio auto`: suelta la preferencia por WiFi. Si el cable tiene enlace y
+/// no hay dirección fija, la pila vuelve a él en el acto.
+pub fn medio_auto() -> Result<(), i64> {
+    let net = NET.get().ok_or(-soso_abi::EIO)?;
+    let mut n = net.lock();
+    n.pref_wifi = false;
+    if n.backend == BackendKind::Wifi
+        && n.estatica.is_none()
+        && let Some((mac, dev, nombre)) = sondear_cable_nativo()
+        && dev.carrier()
+    {
+        cambiar_dispositivo(&mut n, mac, dev, BackendKind::Wired);
+        reiniciar_ip(&mut n);
+        println!("net: cable con enlace — vuelvo a ethernet ({nombre})");
+    }
+    Ok(())
+}
+
+/// Comando `ip` de la kernel-shell. El binario de userspace habla lo mismo por
+/// `SYS_NETCFG`.
+pub fn ip_cmd(args: &[&str]) {
+    match args {
+        [] => print_info(),
+        ["estatica", resto @ ..] => {
+            let texto = resto.join(" ");
+            if let Err(e) = soso_red_core::parsear_orden(&texto) {
+                println!("ip: {}", e.texto());
+                return;
+            }
+            match configurar_estatica(&texto) {
+                Ok(()) => print_info(),
+                Err(e) => println!("ip: no pude guardar {} (errno {})", soso_red_core::RED_CONF, -e),
+            }
+        }
+        ["dhcp"] => match configurar_dhcp() {
+            Ok(()) => println!("ip: DHCP (guardado en {})", soso_red_core::RED_CONF),
+            Err(e) => println!("ip: no pude guardar {} (errno {})", soso_red_core::RED_CONF, -e),
+        },
+        ["medio", "auto"] => {
+            let _ = medio_auto();
+            print_info();
+        }
+        _ => println!("uso: ip | ip estatica <a.b.c.d/p> [gw <ip>] [dns <ip>] | ip dhcp | ip medio auto"),
+    }
 }
 
 pub fn tcp_listener_ready(slot: usize) -> bool {

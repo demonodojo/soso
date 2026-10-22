@@ -3,8 +3,9 @@
 #![cfg(feature = "std")]
 
 use soso_llm_core::pipeline::{
-    crc32c, decode_message, encode_message, FramedTransport, Message, PipelinePlan, PipelineRole,
-    RecvError, StepPayload, StepReplyPayload, Transport, HelloPayload, ROLE_HEAD,
+    crc32c, decode_message, encode_message, FramedTransport, Message, NodeCaps, PipelinePlan,
+    PipelineRole, RecvError, StepPayload, StepReplyPayload, Transport, HelloPayload, ROLE_HEAD,
+    TruncatePayload, WIRE_F32,
 };
 use soso_llm_core::runtime::Runtime;
 use soso_llm_core::source::host::MemFileMapper;
@@ -114,7 +115,9 @@ fn tiny_model() -> (Manifest, TensorIndex, MemFileMapper) {
 fn codec_roundtrip_fragmentado() {
     let msg = Message::Step(StepPayload {
         pos: 3,
-        want_token: 1,
+        prefix_hash: 0,
+        n_tokens: 1,
+        wire: WIRE_F32,
         hidden: vec![1.0, 2.0, 3.0],
     });
     let frame = encode_message(7, &msg);
@@ -124,6 +127,8 @@ fn codec_roundtrip_fragmentado() {
 
     let reply = Message::StepReply(StepReplyPayload {
         pos: 3,
+        n_tokens: 1,
+        wire: WIRE_F32,
         hidden: vec![4.0, 5.0],
     });
     let frame2 = encode_message(8, &reply);
@@ -155,6 +160,8 @@ fn framed_transport_mock() {
         model_name: String::from("tiny"),
         manifest_crc: 1,
         index_crc: 2,
+        kv_pos: 0,
+        prefix_hash: 0,
     }))
     .unwrap();
     tb.inner.rx.extend(ta.inner.tx.drain(..));
@@ -163,7 +170,11 @@ fn framed_transport_mock() {
 }
 
 #[test]
-fn forward_por_rangos_paridad() {
+fn loopback_dos_segmentos_greedy() {
+    forward_por_rangos_paridad_impl();
+}
+
+fn forward_por_rangos_paridad_impl() {
     let split = 2u32;
     let prompt = [10u32, 20];
 
@@ -175,7 +186,7 @@ fn forward_por_rangos_paridad() {
     for &tok in &prompt {
         full.embed_token(tok, &mut src_full).unwrap();
         let mut cancel_slot = None;
-        full.forward_step_par(&mut src_full, None, &mut None, None, &mut cancel_slot, None)
+        full.forward_step_par(&mut src_full, None, &mut None, None, &mut cancel_slot, None, &mut None)
             .unwrap();
     }
     let logits_full = full.logits(&mut src_full).unwrap().to_vec();
@@ -209,6 +220,11 @@ fn forward_por_rangos_paridad() {
 }
 
 #[test]
+fn forward_por_rangos_paridad() {
+    forward_por_rangos_paridad_impl();
+}
+
+#[test]
 fn forward_estrella_tres_segmentos() {
     let prompt = [10u32];
     let plan = PipelinePlan::from_splits(&[1, 2], 4).unwrap();
@@ -218,7 +234,7 @@ fn forward_estrella_tres_segmentos() {
     let mut src_full = MmapTensorSource::new(String::from(BASE), full.index.clone(), map1);
     full.embed_token(prompt[0], &mut src_full).unwrap();
     let mut cancel_slot = None;
-        full.forward_step_par(&mut src_full, None, &mut None, None, &mut cancel_slot, None)
+        full.forward_step_par(&mut src_full, None, &mut None, None, &mut cancel_slot, None, &mut None)
             .unwrap();
     let logits_full = full.logits(&mut src_full).unwrap().to_vec();
 
@@ -339,4 +355,100 @@ fn keepalive_detecta_peer_caido() {
 #[test]
 fn mensaje_invalido_falla() {
     assert!(decode_message(&[0u8; 4]).is_err());
+}
+
+#[test]
+fn protocolo_v4_truncate_roundtrip() {
+    let msg = Message::Truncate(TruncatePayload { pos: 42 });
+    let frame = encode_message(3, &msg);
+    assert_eq!(decode_message(&frame).unwrap().1, msg);
+}
+
+#[test]
+fn forward_bloque_rango_paridad() {
+    let prompt = [10u32, 20u32];
+    let split = 2u32;
+
+    let (m1, i1, map1) = tiny_model();
+    let mut rt = Runtime::new(m1, i1, 0, 0);
+    let mut src = MmapTensorSource::new(String::from(BASE), rt.index.clone(), map1);
+    let h = rt.manifest.hidden_dim as usize;
+    let mut hs_token = vec![0f32; 2 * h];
+    for (t, &tok) in prompt.iter().enumerate() {
+        rt.embed_token(tok, &mut src).unwrap();
+        rt.forward_layers_range(0, split, &mut src, None, &mut None)
+            .unwrap();
+        hs_token[t * h..(t + 1) * h].copy_from_slice(rt.hidden_slice());
+        rt.advance_pos();
+    }
+
+    let (m2, i2, map2) = tiny_model();
+    let mut rt2 = Runtime::new(m2, i2, 0, 0);
+    let mut src2 = MmapTensorSource::new(String::from(BASE), rt2.index.clone(), map2);
+    rt2.reset_sequence();
+    let mut hs_block = vec![0f32; 2 * h];
+    for (i, &tok) in prompt.iter().enumerate() {
+        rt2.embed_token(tok, &mut src2).unwrap();
+        hs_block[i * h..(i + 1) * h].copy_from_slice(rt2.hidden_slice());
+    }
+    rt2.forward_bloque_rango(0, split, &mut src2, None, &mut None, &mut hs_block, 2)
+        .unwrap();
+    for i in 0..2 * h {
+        assert!(
+            (hs_token[i] - hs_block[i]).abs() < 1e-5,
+            "bloque difiere en {i}"
+        );
+    }
+}
+
+#[test]
+fn reparto_capacidades_determinista() {
+    let caps = [
+        NodeCaps {
+            ram_free_mb: 4096,
+            workers: 2,
+            bw_score: 1000,
+        },
+        NodeCaps {
+            ram_free_mb: 2048,
+            workers: 1,
+            bw_score: 500,
+        },
+        NodeCaps {
+            ram_free_mb: 1024,
+            workers: 1,
+            bw_score: 500,
+        },
+    ];
+    let p1 = PipelinePlan::desde_capacidades(&caps, 8, 32 * 1024 * 1024).unwrap();
+    let p2 = PipelinePlan::desde_capacidades(&caps, 8, 32 * 1024 * 1024).unwrap();
+    assert_eq!(p1.segments, p2.segments);
+}
+
+#[test]
+fn reparto_capacidades_imposible() {
+    let caps = [NodeCaps {
+        ram_free_mb: 1,
+        workers: 1,
+        bw_score: 1,
+    }];
+    assert!(PipelinePlan::desde_capacidades(&caps, 8, 1024 * 1024 * 1024).is_err());
+}
+
+#[test]
+fn reparto_por_capacidades_dos_nodos() {
+    let caps = [
+        NodeCaps {
+            ram_free_mb: 2048,
+            workers: 2,
+            bw_score: 1000,
+        },
+        NodeCaps {
+            ram_free_mb: 1024,
+            workers: 1,
+            bw_score: 500,
+        },
+    ];
+    let plan = PipelinePlan::desde_capacidades(&caps, 4, 32 * 1024 * 1024).unwrap();
+    assert_eq!(plan.segments.len(), 2);
 }

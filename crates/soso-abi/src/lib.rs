@@ -373,6 +373,23 @@ pub const SYS_FTRUNCATE: u64 = 94;
 /// Syscall nuevo (no sube `ABI_VERSION`).
 pub const SYS_EXIT_GROUP: u64 = 95;
 
+/// Configuración de red: `(op, ptr, len)`. Syscall nuevo (no sube
+/// `ABI_VERSION`); `NetInfo` no cambia de tamaño, así que un `ip` viejo del
+/// rootfs sigue funcionando con un kernel nuevo.
+///
+/// - [`NETCFG_ESTADO`]: `ptr` = `*mut NetDetalle`.
+/// - [`NETCFG_ESTATICA`]: `ptr`/`len` = texto `<a.b.c.d/p> [gw <ip>] [dns <ip>]`.
+/// - [`NETCFG_DHCP`], [`NETCFG_MEDIO_AUTO`]: sin argumentos.
+pub const SYS_NETCFG: u64 = 96;
+/// Rellena un [`NetDetalle`].
+pub const NETCFG_ESTADO: u64 = 0;
+/// Fija una IPv4 estática y la guarda en `/etc/red.conf`.
+pub const NETCFG_ESTATICA: u64 = 1;
+/// Vuelve a DHCP y deja `/etc/red.conf` en `modo=dhcp`.
+pub const NETCFG_DHCP: u64 = 2;
+/// Suelta la preferencia por WiFi: el cable con enlace vuelve a mandar.
+pub const NETCFG_MEDIO_AUTO: u64 = 3;
+
 /// Cerrojo compartido: varios lectores a la vez, ningún escritor.
 pub const LOCK_SH: u64 = 1;
 /// Cerrojo exclusivo: un solo titular.
@@ -535,6 +552,45 @@ pub struct NetInfo {
     pub gateway: [u8; 4],
     pub mac: [u8; 6],
     pub _pad2: [u8; 2],
+}
+
+/// El medio activo tiene enlace: cable con carrier o WiFi autorizada.
+pub const NETDET_ENLACE: u32 = 1;
+/// La dirección es la de `/etc/red.conf`.
+pub const NETDET_ESTATICA: u32 = 2;
+/// El usuario eligió WiFi con `wifi connect`: el cable no la sustituye.
+pub const NETDET_PREF_WIFI: u32 = 4;
+/// `lease_secs` es válido (la dirección viene de un lease DHCP).
+pub const NETDET_LEASE: u32 = 8;
+
+/// Por qué la máquina tiene o no dirección (`NetDetalle.motivo`).
+pub const NET_MOTIVO_SIN_ADAPTADOR: u8 = 0;
+/// Cable sin enlace.
+pub const NET_MOTIVO_SIN_ENLACE: u8 = 1;
+/// WiFi asociada o caída, sin claves.
+pub const NET_MOTIVO_WIFI_SIN_AUTORIZAR: u8 = 2;
+/// Enlace arriba, sin lease todavía.
+pub const NET_MOTIVO_ESPERANDO_DHCP: u8 = 3;
+/// Dirección de un lease DHCP.
+pub const NET_MOTIVO_DHCP: u8 = 4;
+/// Dirección de `/etc/red.conf`.
+pub const NET_MOTIVO_ESTATICA: u8 = 5;
+/// Dirección de respaldo de QEMU: no hubo DHCP.
+pub const NET_MOTIVO_RESPALDO: u8 = 6;
+
+/// Respuesta de `SYS_NETCFG` / `NETCFG_ESTADO`: lo que `NetInfo` no cuenta.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct NetDetalle {
+    pub flags: u32,
+    pub motivo: u8,
+    /// Servidores de `dns` que valen.
+    pub dns_n: u8,
+    pub _pad: [u8; 2],
+    /// Segundos que quedan de lease (con `NETDET_LEASE`).
+    pub lease_secs: u32,
+    /// Los servidores a los que de verdad se pregunta, en orden.
+    pub dns: [[u8; 4]; 3],
 }
 
 /// Valores de `ProcInfo.state` (syscall `SYS_PSLIST`).

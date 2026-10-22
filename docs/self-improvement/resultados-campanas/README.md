@@ -30,3 +30,9 @@ La evidencia completa de estas tandas (conversaciones, eventos e informes por ta
 | `campana-39-gemma-v19-herramientas` … `campana-43-gemma-v29` | 39–43: Gemma, 40 turnos, 1 ronda, herramientas de edición y puertas (sintaxis, pruebas propias, Clippy, poda) | 1, 1, 0, 1, 1 /10 |
 | `campana-45-gemma-v31` | 45: Gemma, v31, inyección de caída a los 30 s en R33/R38, sin segundo intento | 1/10 (R40) |
 | `campana-46-gemma-v32` | 46: Gemma, v32, aviso de Clippy hasta 3 veces y rechazo de monólogos en comentarios | 2/10 (R39, R40) |
+| `campana-47-gemma-v33` | 47: Gemma, v33, redirección si solo hay comentarios/módulo vacío | 2/10 (R39, R40) |
+| `campana-48-gemma-v35` | 48: Gemma, v35, temperatura adaptativa ante ediciones sin efecto | 2/10 (R39, R40) |
+| `campana-49-claude-sonnet55` | 49: **Claude Sonnet 5.5** (suscripción, `claude -p` vía proxy), mismo arnés (v36), 40 turnos, 1 ronda | **10/10** |
+| `campana-50-qwen36-35b-a3b-iq3` | 50: **Qwen3.6-35B-A3B** (UD-IQ3_XXS, llama.cpp CUDA, sin razonamiento, T=0,7), arnés v37, 40 turnos, 1 ronda | **5/10** (R34, R36, R37, R39, R40) |
+| `campana-51-qwen36-35b-a3b-iq3-razonamiento` | 51: Qwen3.6-35B-A3B (UD-IQ3_XXS) **con razonamiento** (tope 4096 tokens, T=0,6), arnés v37, 40 turnos, 1 ronda | **5/10** (R31, R33, R37, R39, R40) |
+| `campana-53-qwen36-35b-a3b-iq3-v38` | 53: Qwen3.6-35B-A3B (UD-IQ3_XXS, sin razonamiento, T=0,7), arnés v38 (rechaza ediciones fuera de «Qué puedes tocar»), 40 turnos, 1 ronda | **7/10** (R31, R32, R35, R36, R37, R39, R40) |

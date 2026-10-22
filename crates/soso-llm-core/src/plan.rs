@@ -368,6 +368,15 @@ pub fn bytes_for_layer(layer: u32, index: &TensorIndex) -> u64 {
         .sum()
 }
 
+/// Media de bytes de tronco por capa (reparto del cluster).
+pub fn bytes_por_capa(index: &TensorIndex, num_layers: u32) -> u64 {
+    if num_layers == 0 {
+        return 1;
+    }
+    let sum: u64 = (0..num_layers).map(|l| bytes_for_layer(l, index)).sum();
+    (sum / num_layers as u64).max(1)
+}
+
 pub fn bytes_for_expert(layer: u32, expert: u32, index: &TensorIndex) -> u64 {
     let prefix = expert_tensor_prefix(layer, expert);
     index

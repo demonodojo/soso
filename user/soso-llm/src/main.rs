@@ -7,6 +7,7 @@ extern crate alloc;
 
 mod ask;
 mod cuda_host;
+mod cluster;
 mod distributed;
 mod net;
 mod pool;
@@ -21,14 +22,18 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use ask::{resto_tras, run_ask};
-use distributed::{crc_bytes, default_keepalive, default_timeouts, DistributedConfig};
+use distributed::{
+    crc_bytes, default_keepalive, default_timeouts, DistributedConfig, PrelinkedHead,
+};
 use libsoso::{println, sys};
 use pool::ThreadPool;
 use soso_abi::{self as abi, O_RDONLY};
 use soso_llm_core::layer::TensorSource;
 use soso_llm_core::parallel::RowParallel;
-use soso_llm_core::plan::{MemSnapshot, MemoryPlanConfig, MemoryPreset, ResourcePlanner};
-use soso_llm_core::pipeline::{PipelinePlan, PipelineRole};
+use soso_llm_core::plan::{
+    bytes_por_capa, MemSnapshot, MemoryPlanConfig, MemoryPreset, ResourcePlanner,
+};
+use soso_llm_core::pipeline::{NodeCaps, PipelinePlan, PipelineRole, WIRE_F16, WIRE_F32};
 use soso_llm_core::runtime::{Backend, Runtime};
 use soso_llm_core::conversation::ModelProfile;
 use soso_llm_core::generation::{
@@ -203,13 +208,16 @@ fn main(args: &[String]) -> u8 {
                 ping_idle,
                 standby,
                 standby_retry,
+                &parts,
             );
         }
         if let Some(remote) = parse_flag(&parts, "--remote") {
-            let split: u32 = parse_flag(&parts, "--split")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(2);
-            let splits = format!("{split}");
+            let splits = parse_splits(&parts).unwrap_or_else(|| {
+                let split: u32 = parse_flag(&parts, "--split")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(2);
+                format!("{split}")
+            });
             let (step_to, hs_to, _) = parse_timeouts(&parts);
             let (ping_int, ping_idle, standby_retry) = parse_keepalive(&parts);
             let standby = parts.iter().any(|&p| p == "--standby");
@@ -227,6 +235,7 @@ fn main(args: &[String]) -> u8 {
                 ping_idle,
                 standby,
                 standby_retry,
+                &parts,
             );
         }
         // Dispositivo software del kernel: enciende el camino de syscalls GPU en
@@ -470,6 +479,27 @@ fn run_model(
     rc
 }
 
+fn head_caps() -> NodeCaps {
+    let mut info = abi::MemInfo::default();
+    let ram_mb = if sys::meminfo(&mut info) == 0 {
+        (info.free_frames.saturating_mul(4096) / (1024 * 1024)) as u32
+    } else {
+        512
+    };
+    NodeCaps {
+        ram_free_mb: ram_mb,
+        workers: 1,
+        bw_score: 1000,
+    }
+}
+
+fn parse_wire(parts: &[&str]) -> u8 {
+    match parse_flag(parts, "--wire").as_deref() {
+        Some("f16") => WIRE_F16,
+        _ => WIRE_F32,
+    }
+}
+
 fn run_distributed_head(
     name: &str,
     prompt: &str,
@@ -484,22 +514,87 @@ fn run_distributed_head(
     ping_idle_ms: u64,
     standby: bool,
     standby_retry_ms: u64,
+    parts: &[&str],
 ) -> u8 {
-    let remotes = parse_pipeline_list(pipeline);
-    let split_vals = parse_split_list(splits);
-    let num_layers = match read_num_layers(name) {
-        Some(n) => n,
-        None => {
-            println!("soso-llm: no puedo leer manifest");
-            return 1;
-        }
+    let listen_port: u16 = parse_flag(parts, "--cluster-port")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(9900);
+    let remotes = if pipeline == "auto" {
+        println!("soso-llm: descubriendo nodos en /24…");
+        cluster::descubrir_nodos(listen_port)
+    } else {
+        parse_pipeline_list(pipeline)
     };
-    let plan = match PipelinePlan::from_splits(&split_vals, num_layers) {
-        Ok(p) => p,
-        Err(()) => {
-            println!("soso-llm: splits inválidos");
+    let (manifest, index, manifest_crc, index_crc) = match session::read_model_catalog(name) {
+        Ok(c) => c,
+        Err(c) => return c,
+    };
+    let num_layers = manifest.num_layers;
+    let bytes_capa = bytes_por_capa(&index, num_layers);
+    let probe_cfg = DistributedConfig {
+        plan: PipelinePlan {
+            segments: vec![soso_llm_core::pipeline::PipelineSegment {
+                layer_start: 0,
+                layer_end: num_layers,
+            }],
+        },
+        remotes: remotes.clone(),
+        listen_port: listen_port,
+        layer_start: 0,
+        layer_end: num_layers,
+        model_name: String::from(name),
+        manifest_crc,
+        index_crc,
+        step_timeout_ms,
+        handshake_timeout_ms,
+        accept_timeout_ms: default_timeouts().2,
+        ping_interval_ms,
+        ping_idle_ms,
+        standby,
+        standby_retry_ms,
+        wire: parse_wire(parts),
+        node_auto: true,
+        salir_tras_steps: 0,
+    };
+    let (plan, pre_estrella): (PipelinePlan, Option<PrelinkedHead>) = if splits == "auto" {
+        let (mut est, pending) = match distributed::sondeo_caps_enlaces(
+            &probe_cfg,
+            &remotes,
+            manifest.hidden_dim,
+            num_layers,
+        ) {
+            Ok(v) => v,
+            Err(()) => {
+                println!("soso-llm: handshake de capacidades falló");
+                return 1;
+            }
+        };
+        let mut caps = vec![head_caps()];
+        caps.extend(pending.iter().map(|p| p.caps));
+        let plan = match PipelinePlan::desde_capacidades(&caps, num_layers, bytes_capa) {
+            Ok(p) => p,
+            Err(()) => {
+                println!("soso-llm: reparto auto imposible");
+                return 1;
+            }
+        };
+        if distributed::completar_enlaces_auto(&mut est, plan.clone(), pending, 0, 0).is_err() {
+            println!("soso-llm: assign tras reparto auto falló");
             return 1;
         }
+        (plan, Some(est))
+    } else {
+        let plan = {
+        let split_vals = parse_split_list(splits);
+        match PipelinePlan::from_splits(&split_vals, num_layers) {
+            Ok(p) => p,
+            Err(()) => {
+                println!("soso-llm: splits inválidos");
+                return 1;
+            }
+        }
+        };
+        (plan, None)
     };
     if remotes.len() != plan.remote_count() {
         println!(
@@ -510,7 +605,17 @@ fn run_distributed_head(
         return 1;
     }
     let head = plan.head_segment();
-    let mut bundle = match load_model(name, PipelineRole::Head, head.layer_start, head.layer_end, true) {
+    let mut bundle = match session::load_model_from_catalog(
+        name,
+        manifest,
+        index,
+        manifest_crc,
+        index_crc,
+        PipelineRole::Head,
+        head.layer_start,
+        head.layer_end,
+        true,
+    ) {
         Ok(b) => b,
         Err(c) => return c,
     };
@@ -538,6 +643,11 @@ fn run_distributed_head(
         ping_idle_ms,
         standby,
         standby_retry_ms,
+        wire: parse_wire(parts),
+        node_auto: false,
+        salir_tras_steps: parse_flag(parts, "--salir-tras-steps")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
     };
     let text = if prompt.is_empty() { "test" } else { prompt };
     let run = if cfg.standby {
@@ -548,7 +658,7 @@ fn run_distributed_head(
             &cfg,
             text,
             max_new,
-            sampler,
+            &mut sampler,
             seed,
             par,
         )
@@ -563,6 +673,7 @@ fn run_distributed_head(
             &mut sampler,
             seed,
             par,
+            pre_estrella,
         )
     };
     let rc = match run {
@@ -577,6 +688,7 @@ fn run_distributed_head(
 }
 
 fn run_node(name: &str, layer_start: u32, layer_end: u32, listen: u16, parts: &[&str]) -> u8 {
+    let auto = parts.iter().any(|&p| p == "--auto");
     let num_layers = match read_num_layers(name) {
         Some(n) => n,
         None => {
@@ -584,10 +696,10 @@ fn run_node(name: &str, layer_start: u32, layer_end: u32, listen: u16, parts: &[
             return 1;
         }
     };
-    let role = PipelineRole::from_layer_range(layer_start, layer_end, num_layers);
-    let mut bundle = match load_model(name, role, layer_start, layer_end, true) {
-        Ok(b) => b,
-        Err(c) => return c,
+    let (ls, le) = if auto {
+        (0u32, num_layers)
+    } else {
+        (layer_start, layer_end)
     };
     let pool = ThreadPool::new();
     println!("soso-llm: workers={}", pool.workers());
@@ -598,17 +710,30 @@ fn run_node(name: &str, layer_start: u32, layer_end: u32, listen: u16, parts: &[
     };
     let (step_to, hs_to, accept_to) = parse_timeouts(parts);
     let (ping_int, ping_idle, standby_retry) = parse_keepalive(parts);
+    let (manifest_crc, index_crc) = if auto {
+        match session::read_model_catalog(name) {
+            Ok((_, _, mcrc, icrc)) => (mcrc, icrc),
+            Err(c) => return c,
+        }
+    } else {
+        let role = PipelineRole::from_layer_range(ls, le, num_layers);
+        let bundle = match load_model(name, role, ls, le, true) {
+            Ok(b) => b,
+            Err(c) => return c,
+        };
+        (bundle.manifest_crc, bundle.index_crc)
+    };
     let cfg = DistributedConfig {
         plan: PipelinePlan {
             segments: Vec::new(),
         },
         remotes: Vec::new(),
         listen_port: listen,
-        layer_start,
-        layer_end,
+        layer_start: ls,
+        layer_end: le,
         model_name: String::from(name),
-        manifest_crc: bundle.manifest_crc,
-        index_crc: bundle.index_crc,
+        manifest_crc,
+        index_crc,
         step_timeout_ms: step_to,
         handshake_timeout_ms: hs_to,
         accept_timeout_ms: accept_to,
@@ -616,6 +741,24 @@ fn run_node(name: &str, layer_start: u32, layer_end: u32, listen: u16, parts: &[
         ping_idle_ms: ping_idle,
         standby: false,
         standby_retry_ms: standby_retry,
+        wire: parse_wire(parts),
+        node_auto: auto,
+        salir_tras_steps: parse_flag(parts, "--salir-tras-steps")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+    };
+    if auto {
+        let (manifest, index, mcrc, icrc) = match session::read_model_catalog(name) {
+            Ok(c) => c,
+            Err(c) => return c,
+        };
+        let rc = distributed::run_node_auto(name, manifest, index, mcrc, icrc, &cfg, par);
+        return if rc == 0 { 0 } else { 1 };
+    }
+    let role = PipelineRole::from_layer_range(ls, le, num_layers);
+    let mut bundle = match load_model(name, role, ls, le, true) {
+        Ok(b) => b,
+        Err(c) => return c,
     };
     let rc = match distributed::run_node(&mut bundle.rt, &mut bundle.source, &cfg, par) {
         Ok(()) => 0,
@@ -795,6 +938,14 @@ pub(crate) fn generar_para_api(
         prepared.top_p as f32,
         seed,
     );
+    distributed::begin_turno_cluster(
+        sesion,
+        prepared.max_new_tokens,
+        prepared.temperature as f32,
+        prepared.top_p as f32,
+        seed,
+    )
+    .map_err(|_| ())?;
     let par: Option<&dyn RowParallel> = sesion
         .pool
         .as_ref()
@@ -804,6 +955,13 @@ pub(crate) fn generar_para_api(
         .sys_gpu
         .as_mut()
         .map(|g| g as &mut dyn soso_llm_core::gpu::GpuDispatch);
+    let mut cluster_gen = sesion.cluster.as_mut().map(|est| soso_llm_core::remoto::ClusterGen {
+        local_end: sesion.cluster_local_end,
+        remoto: est,
+        journal: None,
+        prefix_hash: 0,
+    });
+    let mut cluster_slot = cluster_gen.as_mut();
     sesion.bundle.rt.generate_stream_planned_observed(
         &mut sesion.bundle.source,
         prompt_ids,
@@ -814,6 +972,7 @@ pub(crate) fn generar_para_api(
         &mut gpu_ref,
         || sys::uptime_ms().max(0) as u64,
         &mut read_mem_snapshot,
+        &mut cluster_slot,
     )
 }
 
@@ -885,6 +1044,13 @@ pub(crate) fn generar_tokens(
             .map(|g| g as &mut dyn soso_llm_core::gpu::GpuDispatch);
         let bundle = &mut sesion.bundle;
         let eos = bundle.tokenizer.eos();
+        let mut cluster_gen = sesion.cluster.as_mut().map(|est| soso_llm_core::remoto::ClusterGen {
+            local_end: sesion.cluster_local_end,
+            remoto: est,
+            journal: None,
+            prefix_hash: 0,
+        });
+        let mut cluster_slot = cluster_gen.as_mut();
         if let Some(fd) = fd_out {
             let infer0 = sys::uptime_ms().max(0) as u64;
             ASK_TICK_FD.store(fd, Ordering::Relaxed);
@@ -930,15 +1096,33 @@ pub(crate) fn generar_tokens(
                     }
                 },
             };
-            match bundle.rt.generate_stream_par_observed(
-                &mut bundle.source,
-                prompt_tokens,
-                GenerationOptions::new(max_new, stops_from_eos(eos)),
-                sampler,
-                &mut obs,
-                par,
-                &mut gpu_ref,
-            ) {
+            let gen_opts = GenerationOptions::new(max_new, stops_from_eos(eos));
+            let gen_result = if cluster_slot.is_some() {
+                bundle.rt.generate_stream_planned_observed(
+                    &mut bundle.source,
+                    prompt_tokens,
+                    gen_opts,
+                    sampler,
+                    &mut obs,
+                    par,
+                    &mut gpu_ref,
+                    || sys::uptime_ms().max(0) as u64,
+                    &mut read_mem_snapshot,
+                    &mut cluster_slot,
+                )
+            } else {
+                bundle.rt.generate_stream_par_observed(
+                    &mut bundle.source,
+                    prompt_tokens,
+                    gen_opts,
+                    sampler,
+                    &mut obs,
+                    par,
+                    &mut gpu_ref,
+                    &mut None,
+                )
+            };
+            match gen_result {
                 Ok((tokens, report)) => {
                     if report.stop == StopReason::Cancelled {
                         ASK_CANCEL.store(true, Ordering::Relaxed);

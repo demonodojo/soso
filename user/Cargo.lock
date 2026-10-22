@@ -529,6 +529,7 @@ dependencies = [
  "soso-gpu",
  "soso-llm-api",
  "soso-llm-core",
+ "soso-red-core",
  "sosomodel",
 ]
 
@@ -557,6 +558,10 @@ version = "0.1.0"
 
 [[package]]
 name = "soso-notify-core"
+version = "0.1.0"
+
+[[package]]
+name = "soso-red-core"
 version = "0.1.0"
 
 [[package]]

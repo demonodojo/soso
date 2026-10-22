@@ -423,6 +423,7 @@ dependencies = [
  "soso-abi",
  "soso-hw",
  "soso-log-core",
+ "soso-red-core",
  "soso-resize-core",
  "soso-update-core",
  "soso-wpa2",
@@ -671,6 +672,10 @@ version = "0.1.0"
 
 [[package]]
 name = "soso-log-core"
+version = "0.1.0"
+
+[[package]]
+name = "soso-red-core"
 version = "0.1.0"
 
 [[package]]

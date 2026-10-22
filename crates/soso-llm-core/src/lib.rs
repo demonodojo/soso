@@ -7,6 +7,7 @@ extern crate alloc;
 pub mod chat;
 /// Tipos de conversación compartidos (T04): dominio sin HTTP ni syscalls.
 pub mod conversation;
+pub mod especulativo;
 pub mod generation;
 pub mod f16;
 pub mod gemm;
@@ -18,9 +19,12 @@ pub mod kv;
 pub mod layer;
 pub mod parallel;
 pub mod quant;
+pub mod restriccion;
 pub mod q8k;
 pub mod optim;
 pub mod pipeline;
+pub mod cluster;
+pub mod remoto;
 pub mod plan;
 pub mod runtime;
 pub mod sample;
@@ -39,6 +43,8 @@ pub use generation::{
     GenCancel, GenCheckpoint, GenerationLedger, GenerationObserver, GenerationOptions,
     GenerationReport, LegacyStreamObserver, NoCancelObserver, StopReason, stops_from_eos,
 };
+pub use restriccion::{Restriccion, TablaBytes};
+pub use remoto::{prefix_hash_tokens, ClusterGen, JournalActivaciones, TramoRemoto};
 pub use runtime::Runtime;
 pub use asr::{AsrPhase, AsrProfile, AsrTokenProfile};
 pub use sched::{CostModel, Dest, OpDesc, OpSched};

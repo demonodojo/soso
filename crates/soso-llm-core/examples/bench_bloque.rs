@@ -269,6 +269,7 @@ fn main() {
         &mut obs,
         Some(par),
         &mut None,
+        &mut None,
     )
     .expect("generar");
     let total = t0.elapsed().as_secs_f64();

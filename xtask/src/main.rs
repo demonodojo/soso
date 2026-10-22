@@ -131,6 +131,12 @@ fn main() {
         "test-distributed-llm-3" => {
             test_distributed::run_3();
         }
+        "test-distributed-llm-auto" => {
+            test_distributed::run_auto();
+        }
+        "test-distributed-llm-serve" => {
+            test_distributed::run_serve();
+        }
         "test-usb" => {
             test::run_usb();
         }
@@ -618,13 +624,17 @@ pub(crate) fn ovmf_paths() -> Option<(PathBuf, PathBuf)> {
 }
 
 /// Copia escribible de OVMF_VARS (QEMU la muta).
-fn ovmf_vars_writable(src: &Path) -> PathBuf {
-    let dst = project_root().join("target/OVMF_VARS.fd");
+fn ovmf_vars_writable_named(src: &Path, name: &str) -> PathBuf {
+    let dst = project_root().join("target").join(name);
     if let Some(parent) = dst.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     std::fs::copy(src, &dst).expect("no se pudo copiar OVMF_VARS");
     dst
+}
+
+fn ovmf_vars_writable(src: &Path) -> PathBuf {
+    ovmf_vars_writable_named(src, "OVMF_VARS.fd")
 }
 
 /// Compila el kernel y genera imágenes BIOS + UEFI. Devuelve la que
@@ -858,7 +868,12 @@ pub(crate) fn firmware_kind(img: &Path) -> &'static str {
 }
 
 /// Añade a `qemu` los drives de firmware (pflash OVMF) si la imagen es UEFI.
+/// `ovmf_vars_name`: fichero bajo `target/` para NVRAM (p. ej. varias QEMU a la vez).
 pub(crate) fn apply_firmware(qemu: &mut Command, img: &Path) {
+    apply_firmware_named(qemu, img, "OVMF_VARS.fd");
+}
+
+pub(crate) fn apply_firmware_named(qemu: &mut Command, img: &Path, ovmf_vars_name: &str) {
     // Por sufijo, no por nombre exacto: la suite arranca **copias por shard**
     // (`test-sys-uefi.img`), y comparar con "soso-uefi.img" hacía que una
     // imagen UEFI se lanzara sin OVMF. El síntoma era un guest mudo —cero bytes
@@ -873,7 +888,7 @@ pub(crate) fn apply_firmware(qemu: &mut Command, img: &Path) {
     let Some((code, vars_src)) = ovmf_paths() else {
         return;
     };
-    let vars = ovmf_vars_writable(&vars_src);
+    let vars = ovmf_vars_writable_named(&vars_src, ovmf_vars_name);
     let code_arg = format!(
         "if=pflash,format=raw,readonly=on,file={}",
         code.display()

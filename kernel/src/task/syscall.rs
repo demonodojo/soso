@@ -379,6 +379,7 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_FATLOG_FLUSH => sys_fatlog_flush(a1),
         abi::SYS_LOG_READ => sys_log_read(a1, a2, a3),
         abi::SYS_NETINFO => sys_netinfo(a1),
+        abi::SYS_NETCFG => sys_netcfg(a1, a2, a3),
         abi::SYS_FSINFO => sys_fsinfo(a1),
         abi::SYS_TXN_CONFIRM => sys_txn_confirm(),
         abi::SYS_PING => sys_ping(a1, a2),
@@ -1849,6 +1850,41 @@ fn sys_netinfo(out: u64) -> Result<u64, i64> {
     })
 }
 
+/// `SYS_NETCFG(op, ptr, len)`: estado ampliado de la red y su configuración.
+fn sys_netcfg(op: u64, ptr: u64, len: u64) -> Result<u64, i64> {
+    match op {
+        abi::NETCFG_ESTADO => {
+            let n = core::mem::size_of::<abi::NetDetalle>() as u64;
+            if !user_range_ok(ptr, n, true) {
+                return Err(-abi::EFAULT);
+            }
+            let det = crate::net::detalle();
+            let bytes = unsafe {
+                core::slice::from_raw_parts((&det as *const abi::NetDetalle).cast::<u8>(), n as usize)
+            };
+            super::with_current(|p| {
+                let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+                space.write(ptr, bytes).ok_or(-abi::EFAULT)?;
+                Ok(0)
+            })
+        }
+        abi::NETCFG_ESTATICA => {
+            let texto = user_str(ptr, len)?;
+            crate::net::configurar_estatica(texto)?;
+            Ok(0)
+        }
+        abi::NETCFG_DHCP => {
+            crate::net::configurar_dhcp()?;
+            Ok(0)
+        }
+        abi::NETCFG_MEDIO_AUTO => {
+            crate::net::medio_auto()?;
+            Ok(0)
+        }
+        _ => Err(-abi::EINVAL),
+    }
+}
+
 fn sys_meminfo(out: u64) -> Result<u64, i64> {
     let n = core::mem::size_of::<abi::MemInfo>() as u64;
     if !user_range_ok(out, n, true) {
@@ -2792,7 +2828,7 @@ fn sys_wifi_connect(ssid_ptr: u64, ssid_len: u64, psk_ptr: u64, psk_len: u64) ->
             return Err(-abi::EIO);
         }
         crate::net::wifi_wpa::persist_credentials(ssid, psk);
-        crate::net::on_wifi_connected();
+        crate::net::on_wifi_connected_explicito();
         Ok(0)
     }
 }

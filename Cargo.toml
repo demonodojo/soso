@@ -32,6 +32,7 @@ members = [
     "crates/soso-resize-core",
     "crates/soso-hw",
     "crates/soso-wpa2",
+    "crates/soso-red-core",
     "crates/soso-improve-core",
     "crates/soso-log-core",
     "crates/soso-notify-core",

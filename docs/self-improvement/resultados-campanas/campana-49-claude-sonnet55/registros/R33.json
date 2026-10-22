@@ -1,0 +1,14 @@
+{
+ "id": "R33",
+ "ronda": 1,
+ "resultado": "aceptada",
+ "intentos": 1,
+ "segundos": 149,
+ "nota": "",
+ "herramientas": 10,
+ "tokens": 406737,
+ "inyeccion": {
+  "que": "agente matado (kill -9) y coordinador reiniciado",
+  "recuperada": true
+ }
+}

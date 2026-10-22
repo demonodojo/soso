@@ -735,6 +735,7 @@ fn generar_planificado(
         &mut None,
         reloj_cero,
         &mut mem,
+        &mut None,
     )
     .expect("planificado")
     .0
@@ -912,3 +913,185 @@ fn bloques_con_h2o_y_kv_f16_mezclan_los_dos_kernels_sin_diferencias() {
     comprobar_bloques_con_h2o(true);
 }
 
+
+// Verificación del borrador PLD con un bloque: la misma secuencia (y el mismo estado final) que token a
+// token y que sin borrador, con menos forwards.
+fn rt_borrador(borrador: bool, bloques: bool) -> (Runtime, MmapTensorSource<MemFileMapper>) {
+    let (manifest, index, mapper) = tiny_model_gqa();
+    let mut rt = Runtime::new(manifest, index.clone(), 0, 0);
+    rt.borrador_activo = borrador;
+    rt.borrador_por_bloques = bloques;
+    (rt, MmapTensorSource::new(String::from(BASE), index, mapper))
+}
+
+fn generar_con_borrador(
+    borrador: bool,
+    bloques: bool,
+    prompt: &[u32],
+    max_new: usize,
+    stops: Vec<u32>,
+) -> (Vec<u32>, Runtime) {
+    use soso_llm_core::generation::GenerationOptions;
+    let (mut rt, mut source) = rt_borrador(borrador, bloques);
+    let (tokens, _) = rt
+        .generate_with_report(&mut source, prompt, GenerationOptions::new(max_new, stops))
+        .expect("generate");
+    (tokens, rt)
+}
+
+// Un prompt que se repite, para que el borrador por prompt-lookup proponga continuaciones.
+fn prompt_repetitivo() -> Vec<u32> {
+    let ciclo = [3u32, 9, 14, 21, 5, 30];
+    (0..24).map(|i| ciclo[i % ciclo.len()]).collect()
+}
+
+#[test]
+fn borrador_por_bloques_da_los_mismos_tokens_y_el_mismo_estado() {
+    let prompt = prompt_repetitivo();
+    let (base, rt_base) = generar_con_borrador(false, false, &prompt, 40, vec![]);
+    let (uno_a_uno, rt_1) = generar_con_borrador(true, false, &prompt, 40, vec![]);
+    let (bloque, rt_b) = generar_con_borrador(true, true, &prompt, 40, vec![]);
+    assert_eq!(base, uno_a_uno);
+    assert_eq!(base, bloque);
+    assert_eq!(estado(&rt_base), estado(&rt_1));
+    assert_eq!(estado(&rt_base), estado(&rt_b));
+    // Sin esto la prueba sería trivial: el borrador tiene que haberse ofrecido y aceptado.
+    assert!(rt_b.borrador_aceptados > 0, "el borrador nunca acertó: la prueba no cubre nada");
+    assert_eq!(rt_b.borrador_ofrecidos, rt_1.borrador_ofrecidos);
+    assert_eq!(rt_b.borrador_aceptados, rt_1.borrador_aceptados);
+    assert!(
+        rt_b.forwards_decode < rt_1.forwards_decode,
+        "bloques {} forwards, token a token {}",
+        rt_b.forwards_decode,
+        rt_1.forwards_decode
+    );
+}
+
+#[test]
+fn borrador_por_bloques_respeta_las_paradas_dentro_del_borrador() {
+    let prompt = prompt_repetitivo();
+    let (completo, _) = generar_con_borrador(false, false, &prompt, 40, vec![]);
+    // Cada token generado, como parada: tanto si cae en la cabeza de una ronda como dentro de un borrador.
+    for i in prompt.len()..completo.len() {
+        let parada = completo[i];
+        let (a, rt_a) = generar_con_borrador(false, false, &prompt, 40, vec![parada]);
+        let (b, rt_b) = generar_con_borrador(true, true, &prompt, 40, vec![parada]);
+        assert_eq!(a, b, "parada {parada} en {i}");
+        assert_eq!(estado(&rt_a), estado(&rt_b), "parada {parada} en {i}");
+    }
+}
+
+#[test]
+fn borrador_por_bloques_respeta_el_limite_de_tokens() {
+    let prompt = prompt_repetitivo();
+    for max_new in [1usize, 2, 3, 5, 9] {
+        let (a, _) = generar_con_borrador(false, false, &prompt, max_new, vec![]);
+        let (b, _) = generar_con_borrador(true, true, &prompt, max_new, vec![]);
+        assert_eq!(a, b, "max_new={max_new}");
+        assert_eq!(a.len(), prompt.len() + max_new);
+    }
+}
+
+#[test]
+fn borrador_por_bloques_con_planificador_da_lo_mismo() {
+    let prompt = prompt_repetitivo();
+    let mut salidas = Vec::new();
+    let mut forwards = Vec::new();
+    for bloques in [false, true] {
+        let (mut rt, mut source) = runtime_planificado();
+        rt.borrador_por_bloques = bloques;
+        salidas.push(generar_planificado(&mut rt, &mut source, &prompt, 40));
+        forwards.push(rt.forwards_decode);
+    }
+    assert_eq!(salidas[0], salidas[1]);
+    assert!(forwards[1] < forwards[0], "{forwards:?}");
+}
+
+fn reloj_que_avanza() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static T: AtomicU64 = AtomicU64::new(0);
+    T.fetch_add(3, Ordering::Relaxed)
+}
+
+#[test]
+fn la_politica_del_borrador_no_cambia_lo_generado() {
+    let prompt = prompt_repetitivo();
+    let (base, _) = generar_con_borrador(false, false, &prompt, 60, vec![]);
+    for bloques in [false, true] {
+        let (mut rt, mut source) = rt_borrador(true, bloques);
+        rt.reloj = Some(reloj_que_avanza);
+        let (tokens, _) = rt
+            .generate_with_report(&mut source, &prompt, soso_llm_core::generation::GenerationOptions::new(60, vec![]))
+            .expect("generate");
+        assert_eq!(tokens, base, "bloques={bloques}");
+        // La política recibió muestras: pasó por ella.
+        assert!(rt.politica.muestras() > 0);
+    }
+}
+
+// Restricción del muestreo en el bucle de generación: sólo tokens pares. Anota los tokens que se le avisan
+// (el original; las copias para verificar un borrador van aparte).
+mod restringido {
+    use super::*;
+    use soso_llm_core::generation::GenerationOptions;
+    use soso_llm_core::restriccion::Restriccion;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    struct SoloPares {
+        vistos: Rc<RefCell<Vec<u32>>>,
+    }
+
+    impl Restriccion for SoloPares {
+        fn permite(&self, token: u32) -> bool {
+            token % 2 == 0
+        }
+        fn avanza(&mut self, token: u32) {
+            self.vistos.borrow_mut().push(token);
+        }
+        fn activa(&self) -> bool {
+            true
+        }
+        fn abandonar(&mut self) {}
+        fn duplicar(&self) -> Box<dyn Restriccion> {
+            Box::new(SoloPares { vistos: Rc::new(RefCell::new(Vec::new())) })
+        }
+    }
+
+    fn generar(borrador: bool, bloques: bool, prompt: &[u32], max_new: usize) -> (Vec<u32>, Vec<u32>, Runtime) {
+        let (mut rt, mut source) = rt_borrador(borrador, bloques);
+        let vistos = Rc::new(RefCell::new(Vec::new()));
+        let opciones = GenerationOptions::new(max_new, vec![])
+            .con_restriccion(Some(Box::new(SoloPares { vistos: vistos.clone() })));
+        let (tokens, _) = rt.generate_with_report(&mut source, prompt, opciones).expect("generate");
+        let v = vistos.borrow().clone();
+        (tokens, v, rt)
+    }
+
+    #[test]
+    fn solo_salen_tokens_permitidos_y_se_avisa_de_todos() {
+        let prompt = prompt_repetitivo();
+        let (base, vistos_base, _) = generar(false, false, &prompt, 40);
+        let (uno, vistos_uno, rt_uno) = generar(true, false, &prompt, 40);
+        let (bloque, vistos_bloque, rt_bloque) = generar(true, true, &prompt, 40);
+        for (nombre, t, v) in [("sin borrador", &base, &vistos_base), ("token a token", &uno, &vistos_uno), ("bloque", &bloque, &vistos_bloque)] {
+            let generados = &t[prompt.len()..];
+            assert_eq!(generados.len(), 40, "{nombre}");
+            assert!(generados.iter().all(|x| x % 2 == 0), "{nombre}: salió un token no permitido: {generados:?}");
+            assert_eq!(v, generados, "{nombre}: la restricción debe ver exactamente los tokens generados");
+        }
+        assert_eq!(base, uno);
+        assert_eq!(base, bloque);
+        // El borrador sigue funcionando con la restricción (si no, la prueba no cubriría el camino).
+        assert!(rt_bloque.borrador_ofrecidos > 0 || rt_uno.borrador_ofrecidos > 0);
+    }
+
+    #[test]
+    fn sin_restriccion_nada_cambia() {
+        let prompt = prompt_repetitivo();
+        let (a, _) = generar_con_borrador(true, true, &prompt, 30, vec![]);
+        let (b, _) = generar_con_borrador(true, true, &prompt, 30, vec![]);
+        assert_eq!(a, b);
+        assert!(a[prompt.len()..].iter().any(|x| x % 2 == 1), "sin restringir el modelo sí saca impares");
+    }
+}

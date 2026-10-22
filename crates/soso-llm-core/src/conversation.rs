@@ -35,6 +35,11 @@ pub mod render;
 pub mod tools;
 /// Plantilla y llamadas a herramientas de Gemma 4 (G6).
 pub mod gemma4;
+pub mod gramatica;
+/// Texto de prompt con los tramos de terceros marcados (higiene de tokens de control).
+pub mod plantilla;
+/// Interpretación de la salida con distinción entre marcadores emitidos como token y como texto.
+pub mod salida;
 
 pub use render::render_messages;
 pub use tools::{

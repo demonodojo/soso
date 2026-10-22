@@ -16,6 +16,7 @@ use soso_llm_api::{
     HttpError, HttpReader, HttpRequest, PreparedChatCompletion,
 };
 use soso_llm_core::chat;
+use soso_llm_core::conversation::salida::interpretar_ids;
 use soso_llm_core::conversation::{
     parse_assistant_output_pasante, render_messages, AssistantTurn, ChatError, ModelProfile, Role,
     ToolChoice,
@@ -28,11 +29,13 @@ use crate::serve_poll::{write_bytes_or_cancel, ServePollEnv};
 use soso_llm_core::plan::MemoryPlanConfig;
 use soso_llm_core::tokenizer::Tokenizer;
 
-use crate::ask::{atender_conexion_ask, leer_fichero, modelos, Conf, ASK_PORT};
+use crate::ask::{atender_conexion_ask, cluster_firma, leer_conf, leer_fichero, modelos, Conf, ASK_PORT};
+use crate::distributed::wire_from_str;
 use crate::generar_para_api;
 use crate::net::TcpFd;
 use crate::session::{
-    perfil_api, preparar_sesion_api, PropietarioSesion, PoliticaModelo, resolver_modelo,
+    perfil_api, preparar_sesion_api, preparar_sesion_cluster, PropietarioSesion, PoliticaModelo,
+    resolver_modelo,
 };
 
 pub const HTTP_PORT_DEFAULT: u16 = 7422;
@@ -115,16 +118,48 @@ pub fn run(args: &[&str]) -> u8 {
         return 1;
     }
 
+    let cluster = flag(args, "--cluster");
+    let splits = flag(args, "--splits").unwrap_or_else(|| String::from("auto"));
+    let wire = flag(args, "--wire")
+        .map(|w| wire_from_str(w.trim()))
+        .unwrap_or(0);
+    let cluster_port: u16 = flag(args, "--cluster-port")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(9900);
+
     libsoso::logln!("serve: cargando modelo {model}…");
-    let sesion = match preparar_sesion_api(&model, false, MemoryPlanConfig::default()) {
-        Ok(s) => s,
-        Err(c) => {
-            println!("serve: no pude cargar «{model}» (código {c})");
-            return c;
+    let sesion = if let Some(ref pipe) = cluster {
+        if pipe.is_empty() {
+            println!("serve: --cluster no puede estar vacío (use auto o ip:puerto,...)");
+            return 1;
+        }
+        match preparar_sesion_cluster(
+            &model,
+            pipe,
+            &splits,
+            wire,
+            cluster_port,
+            None,
+        ) {
+            Ok(s) => s,
+            Err(c) => {
+                println!("serve: no pude preparar cluster «{model}» (código {c})");
+                return c;
+            }
+        }
+    } else {
+        match preparar_sesion_api(&model, false, MemoryPlanConfig::default()) {
+            Ok(s) => s,
+            Err(c) => {
+                println!("serve: no pude cargar «{model}» (código {c})");
+                return c;
+            }
         }
     };
     let profile = perfil_api(&sesion);
-    let backend = if sesion.sys_gpu.is_some() {
+    let backend = if sesion.cluster.is_some() {
+        String::from("cluster")
+    } else if sesion.sys_gpu.is_some() {
         String::from("gpu")
     } else {
         String::from("cpu")
@@ -157,10 +192,15 @@ pub fn run(args: &[&str]) -> u8 {
         profile.id
     );
 
-    let mut conf = Conf::default();
+    let mut conf = leer_conf();
     conf.modelo = model.clone();
+    if let Some(ref pipe) = cluster {
+        conf.cluster = pipe.clone();
+        conf.splits = splits;
+    }
 
     let http_listener_fd = http_listener.fd;
+    let cluster_firma = cluster_firma(&conf);
     let mut rt = ServeRuntime {
         token,
         profile,
@@ -168,6 +208,7 @@ pub fn run(args: &[&str]) -> u8 {
         propietario: PropietarioSesion {
             sesion: Some(sesion),
             modelo: model,
+            cluster_firma,
         },
         conf,
         admission: AdmissionState::default(),
@@ -356,19 +397,18 @@ fn post_chat_generar(
         );
     }
 
-    let generated_text = rt
+    let tokenizer = &rt
         .propietario
         .sesion
         .as_ref()
         .ok_or(GuestServiceError::Inferencia)?
         .bundle
-        .tokenizer
-        .decode(&token_ids);
-    let turn = parse_assistant_output_pasante(
-        &prepared.input,
-        &generated_text,
-        prepared.input.siguiente_id_llamada(),
-    )
+        .tokenizer;
+    let generated_text = tokenizer.decode(&token_ids);
+    // Un marcador emitido como token no se confunde con el mismo texto escrito dentro de un argumento.
+    let turn = interpretar_ids(tokenizer, &token_ids, |t| {
+        parse_assistant_output_pasante(&prepared.input, t, prepared.input.siguiente_id_llamada())
+    })
     .map_err(|e| {
         // Sin esto sólo se sabe que la llamada era inválida, no qué escribió el modelo.
         libsoso::logln!(
@@ -472,19 +512,18 @@ fn post_chat_stream(
         return Ok(Vec::new());
     }
 
-    let generated_text = rt
+    let tokenizer = &rt
         .propietario
         .sesion
         .as_ref()
         .ok_or(GuestServiceError::Inferencia)?
         .bundle
-        .tokenizer
-        .decode(&token_ids);
-    let turn = parse_assistant_output_pasante(
-        &prepared.input,
-        &generated_text,
-        prepared.input.siguiente_id_llamada(),
-    )
+        .tokenizer;
+    let generated_text = tokenizer.decode(&token_ids);
+    // Un marcador emitido como token no se confunde con el mismo texto escrito dentro de un argumento.
+    let turn = interpretar_ids(tokenizer, &token_ids, |t| {
+        parse_assistant_output_pasante(&prepared.input, t, prepared.input.siguiente_id_llamada())
+    })
     .map_err(|e| {
         // Sin esto sólo se sabe que la llamada era inválida, no qué escribió el modelo.
         libsoso::logln!(
@@ -708,6 +747,8 @@ fn flag(args: &[&str], name: &str) -> Option<String> {
 fn uso_serve() {
     println!("uso:");
     println!("  soso-llm serve --model <nombre> --port <puerto> --token-file <ruta>");
+    println!("    [--cluster auto|ip:puerto,...] [--splits auto|2,3] [--wire f32|f16]");
+    println!("    [--cluster-port <puerto>]  (descubrimiento /24, default 9900)");
     println!("    (puerto HTTP por defecto {HTTP_PORT_DEFAULT}; ask en {ASK_PORT})");
     println!("    Sondeo cooperativo T17; producción: pendiente de T14 go.");
 }
