@@ -1,0 +1,11 @@
+{
+ "id": "R38",
+ "ronda": 1,
+ "resultado": "error",
+ "intentos": 1,
+ "segundos": 2529,
+ "nota": "tarea: Bloqueado",
+ "fallo": "infraestructura",
+ "herramientas": 40,
+ "tokens": 642344
+}

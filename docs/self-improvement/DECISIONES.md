@@ -152,3 +152,21 @@ como decisión de plan del usuario. Portar Bun/OpenCode es del orden de meses y 
 - El **port de OpenCode/Bun** (N-005…N-008, N-011) queda **aplazado**, sin ficha de entrada, y puede recuperarse si algún día interesa; las N-xxx ya hechas no se pierden.
 - N-006 sigue aplazada (no hay consumidor de C).
 
+## D11 — Modelo de trabajo del agente nativo: Qwen3.6-35B-A3B + Qwen3.6-27B denso (2026-10-23) — **propuesta, pendiente de que la acepte el usuario**
+
+**Contexto.** D9 fijó `qwen2.5-coder-14b` para T25–T29 y T29 cerró con Gemma 4 12B (2/10 en el banco R31–R40 con el arnés v10–v33). La calibración con Claude Sonnet 5.5 (campaña 49, misma configuración, suscripción vía `claude -p`) dio **10/10**: el arnés no es el límite, lo es el modelo.
+
+**Evidencia (banco R31–R40, 40 turnos, 1 ronda, sin inyección salvo indicación; n=1 por tarea):**
+
+| Modelo | Aceptadas |
+|---|---|
+| Gemma 4 12B | 2/10 |
+| Qwen3.6-35B-A3B IQ3_XXS (MoE, 62–70 tok/s) | 5/10, 5/10 (con razonamiento), 7/10 (v38), 6/10 (v39), 5/10 (v41) |
+| Qwen3.6-27B denso IQ3_XXS (9–13 tok/s) sobre las rechazadas del MoE | 3/5 (R31, R32, R38) y R33 con plazo de 5400 s |
+| **Combo MoE → denso** | **9/10** (R37 falla con todos los modelos locales) |
+| Claude Sonnet 5.5 | 10/10 |
+
+**Propuesta.** Modelo de trabajo = **Qwen3.6-35B-A3B** (pasada A: banco entero en ≈75 min) y **Qwen3.6-27B denso** con 5400 s por tarea sólo para lo rechazado (pasada B: ≈35 min por tarea). Sin razonamiento (modo instruct, T=0,7): con razonamiento el MoE no mejora el total. Claude queda como **techo de calibración**, no como dependencia. Requisitos de la máquina: ≈10 GB de RAM libres para el MoE y ≈12 GB de VRAM; el denso no cabe entero (57/64 capas en GPU).
+
+**Límites que cambian el trabajo futuro.** (1) Aún se sirve con llama.cpp (CUDA) en el host: el runtime de soso no tiene atención lineal (Gated DeltaNet) en GPU. (2) El banco R31–R40 ya no es ciego (el arnés se afinó mirando sus fallos): hace falta un banco nuevo para medir. (3) La memoria manda: Chrome/Cursor llevaron la máquina al límite varias veces y las campañas fallaron por tiempo, no por el modelo. (4) Un hueco estable, R37 (cortar el host por el primer `/` o `?`), sólo lo resuelve Claude.
+

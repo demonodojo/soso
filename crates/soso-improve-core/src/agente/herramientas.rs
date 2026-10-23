@@ -330,6 +330,11 @@ pub fn api_publica_alterada<E: Entorno>(e: &mut E, originales: &alloc::collectio
     Some(format!("{}{mas}", lineas.iter().take(12).cloned().collect::<Vec<_>>().join("\n")))
 }
 
+/// ¿Pide `TASK.md` que no haya pánico o desbordamiento? (pública para el aviso del bucle)
+pub fn pide_sin_panico<E: Entorno>(e: &mut E, pol: &Politica) -> bool {
+    tarea_pide_sin_panico(&leer_task(e, pol))
+}
+
 /// ¿Pide la tarea que no haya pánico o desbordamiento? Entonces vale la pena pasar los lints de Clippy que los detectan.
 fn tarea_pide_sin_panico(task: &str) -> bool {
     let t = task.to_lowercase();
@@ -369,9 +374,12 @@ fn orden_clippy(cmd: &str) -> Option<String> {
 /// `None` si la tarea no habla de pánico o desbordamiento, si no hay orden de comprobación o si no hay nada en sus líneas.
 pub fn alertas_de_panico<E: Entorno>(e: &mut E, pol: &Politica, anadidas: &alloc::collections::BTreeMap<String, alloc::collections::BTreeSet<usize>>) -> Option<String> {
     let task = leer_task(e, pol);
-    if !tarea_pide_sin_panico(&task) || anadidas.is_empty() {
+    if anadidas.is_empty() {
         return None;
     }
+    // Si la tarea no habla de pánico, sólo se avisa de las sumas/restas/productos que pueden desbordar (en las pruebas, que van en `debug`, un desbordamiento
+    // es un pánico: R33 de la campaña 54 promediaba estéreo sumando dos `i16` y fallaba `estereo_se_promedia` con `attempt to add with overflow`).
+    let general = !tarea_pide_sin_panico(&task);
     let cmd = comandos_de_la_tarea(e, pol).into_iter().next()?;
     let orden = orden_clippy(&cmd)?;
     let argv: Vec<String> = orden.split_whitespace().map(|s| s.to_string()).collect();
@@ -399,7 +407,7 @@ pub fn alertas_de_panico<E: Entorno>(e: &mut E, pol: &Politica, anadidas: &alloc
         let (Some(ruta), Some(n), Some(_col), Some(resto)) = (partes.next(), partes.next(), partes.next(), partes.next()) else { continue };
         let Ok(n) = n.trim().parse::<usize>() else { continue };
         // Sólo los dos lints pedidos (no, por ejemplo, `result_unit_err` de una firma que el agente reformateó).
-        if !resto.contains("warning") || !(resto.contains("may panic") || resto.contains("side-effects")) {
+        if !resto.contains("warning") || !(resto.contains("side-effects") || (!general && resto.contains("may panic"))) {
             continue;
         }
         let ruta = ruta.trim_start_matches("./");

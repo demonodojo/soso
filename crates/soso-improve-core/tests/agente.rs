@@ -204,6 +204,7 @@ impl Modelo for Guion {
 /// Configuración de los tests que no hablan del aviso «no has modificado nada»: sin él, un guion que acaba sin editar sigue acabando.
 fn cfg_base() -> Config {
     let mut c = Config::nueva("m", "s");
+    c.plegado_holgura = 0;
     c.avisos_sin_editar = 0;
     c
 }
@@ -1220,6 +1221,27 @@ fn quitar_o_cambiar_la_firma_de_un_item_publico_se_avisa_antes_de_terminar_y_cam
 }
 
 #[test]
+fn plegar_en_bloques_reescribe_el_principio_de_la_conversacion_muchas_menos_veces() {
+    fn pliegues(holgura: usize) -> usize {
+        let mut e = repo();
+        let mut guion: Vec<Value> = (0..30).map(|i| llamada("grep", json!({"pattern": format!("zzz{i}")}))).collect();
+        guion.push(json!({"role": "assistant", "content": "listo"}));
+        let mut cfg = cfg_base();
+        cfg.max_turnos = 60;
+        cfg.mensajes_max = Some(14);
+        cfg.plegado_holgura = holgura;
+        let mut m = Guion(guion, vec![]);
+        let _ = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg, "t", &mut |_, _| {});
+        // Cuántas veces cambia el mensaje de la tarea (índice 1) entre una petición y la siguiente = cuántas veces se invalida el prefijo.
+        let tareas: Vec<String> = m.1.iter().map(|p| serde_json::from_str::<Value>(p).unwrap()["messages"][1]["content"].as_str().unwrap_or("").to_string()).collect();
+        tareas.windows(2).filter(|w| w[0] != w[1]).count()
+    }
+    let uno_a_uno = pliegues(0);
+    let en_bloques = pliegues(8);
+    assert!(en_bloques * 3 <= uno_a_uno, "uno a uno {uno_a_uno} pliegues, en bloques {en_bloques}");
+}
+
+#[test]
 fn un_modulo_de_pruebas_vacio_no_cuenta_como_editar_y_el_atasco_se_redirige() {
     let mut e = repo();
     let mut guion: Vec<Value> = vec![llamada("insertar", json!({"filePath": "src/lib.rs", "linea": -1, "texto": "#[cfg(test)]\nmod pruebas_agente {\n    // pendiente\n}\n"}))];
@@ -1855,7 +1877,7 @@ fn si_la_tarea_pide_no_entrar_en_panico_clippy_marca_las_lineas_del_agente_y_sol
 }
 
 #[test]
-fn si_la_tarea_no_habla_de_panico_no_se_pasa_clippy() {
+fn si_la_tarea_no_habla_de_panico_clippy_avisa_una_sola_vez_y_solo_de_las_operaciones_que_desbordan() {
     let task = "# T\n\n## Qué se pide\n- que ordene bien\n\n## Qué tiene que pasar\n\n- `cargo test -q -p x`\n";
     let mut e = ConClippy(repo().con("/w/TASK.md", task));
     let mut cfg = cfg_base();
@@ -1866,12 +1888,15 @@ fn si_la_tarea_no_habla_de_panico_no_se_pasa_clippy() {
             llamada("reemplazar_texto", json!({"filePath": "src/lib.rs", "buscar": "hit();", "nuevo": "hit();\nlet z = d[0];"})),
             llamada("bash", json!({"command": "cargo test -q -p x"})),
             json!({"role": "assistant", "content": "Listo."}),
+            json!({"role": "assistant", "content": "Listo otra vez."}),
         ],
         vec![],
     );
     let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg, "t", &mut |_, _| {});
-    assert_eq!((inf.fin, inf.alertas_panico), (Fin::Terminado, 0));
-    assert!(!e.0.ordenes.borrow().iter().any(|a| a.iter().any(|x| x == "clippy")));
+    assert_eq!((inf.fin, inf.alertas_panico), (Fin::Terminado, 1), "{:?}", inf.error);
+    let aviso = inf.mensajes.iter().find(|x| x["role"] == "user" && x["content"].as_str().unwrap_or("").contains("DESBORDAR")).expect("falta el aviso general");
+    let t = aviso["content"].as_str().unwrap();
+    assert!(t.contains("src/lib.rs:2:") && !t.contains("src/lib.rs:4") && !t.contains("indexing"), "{t}");
 }
 
 #[test]

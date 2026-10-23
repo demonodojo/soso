@@ -1,0 +1,11 @@
+{
+ "id": "R32",
+ "ronda": 1,
+ "resultado": "rechazada",
+ "intentos": 1,
+ "segundos": 254,
+ "nota": "",
+ "fallo": "programacion",
+ "herramientas": 40,
+ "tokens": 667327
+}

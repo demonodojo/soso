@@ -99,6 +99,10 @@ pub struct Config {
     /// intento la conversación llegaba a 71 y 5 de 10 tareas de la campaña 23 morían con «messages: 71 supera el máximo de 64».
     /// Al acercarse se pliegan los intercambios (llamada + resultados) más antiguos. `None` lo apaga.
     pub mensajes_max: Option<usize>,
+    /// Al pasar de `mensajes_max` se pliega de golpe hasta `mensajes_max - plegado_holgura` en vez de uno a uno: el pliegue reescribe el principio de la conversación
+    /// (la tarea lleva el historial) y con ello se invalida la caché de prefijo del servidor; plegando cada turno se reprocesaban ~18 000 tokens en 1 de cada 4
+    /// peticiones (el 87 % del prefill de la campaña 54). En bloques, el prefijo se mantiene estable entre pliegues.
+    pub plegado_holgura: usize,
     /// Si `true`, antes de dar por terminado un trabajo en el que hubo ediciones se le muestra al modelo la revisión (`revision::texto`:
     /// su diff y los requisitos de `TASK.md`) hasta `avisos_revision` veces, para que contraste cada punto con lo que hizo.
     pub revision: bool,
@@ -145,6 +149,7 @@ impl Config {
             avisos_pocas_pruebas: 1,
             repetidas_ok_max: 3,
             mensajes_max: Some(60),
+            plegado_holgura: 16,
             revision: false,
             avisos_revision: 1,
             revisor: false,
@@ -299,7 +304,7 @@ pub fn correr_con_originales<E: Entorno, M: Modelo, R: Reloj>(
         }
         let plazo = cfg.plazo_turno_ms.min(cfg.plazo_total_ms - gastado);
         if let Some(max) = cfg.mensajes_max {
-            let n = limitar_mensajes(&mut mensajes, max);
+            let n = limitar_mensajes(&mut mensajes, max, cfg.plegado_holgura);
             if n > 0 {
                 vistas.clear();
                 fallidas.clear();
@@ -408,15 +413,23 @@ pub fn correr_con_originales<E: Entorno, M: Modelo, R: Reloj>(
                     continue;
                 }
             }
-            if cfg.alertas_panico && informe.alertas_panico < cfg.avisos_panico && hubo_edicion(&mensajes) {
-                let anadidas = revision::lineas_anadidas(e, &pol.raiz, &originales);
-                if let Some(alertas) = herramientas::alertas_de_panico(e, pol, &anadidas) {
-                    informe.alertas_panico += 1;
-                    mensajes.push(json!({"role": "user", "content": format!(
-                        "La tarea pide que no haya pánico ni desbordamiento. Clippy (con los lints `indexing_slicing` y `arithmetic_side_effects`) marca estas líneas que has añadido o cambiado como capaces de entrar en pánico o desbordar:\n\n{alertas}\n\nComprueba cada una: usa `.get(..)` en vez de indexar, `checked_add`/`checked_mul` (o `saturating_*`) en las cuentas con valores que vienen de los datos, y una comprobación de longitud ANTES de leer. Ojo con las sumas de rangos como `off..off + N`: calcula `let fin = off.checked_add(N).ok_or(..)?;` y usa `get(off..fin)`. Corrige TODAS las líneas de la lista (no sólo la primera) y verás de nuevo los avisos que queden. Después ejecuta las comprobaciones y escribe el informe final."
-                    )}));
-                    al_turno(e, &mensajes);
-                    continue;
+            if cfg.alertas_panico && hubo_edicion(&mensajes) {
+                let pedido = herramientas::pide_sin_panico(e, pol);
+                // Si la tarea no habla de pánico, sólo se avisa una vez y sólo de las operaciones que pueden desbordar.
+                let tope = if pedido { cfg.avisos_panico } else { 1 };
+                if informe.alertas_panico < tope {
+                    let anadidas = revision::lineas_anadidas(e, &pol.raiz, &originales);
+                    if let Some(alertas) = herramientas::alertas_de_panico(e, pol, &anadidas) {
+                        informe.alertas_panico += 1;
+                        let texto = if pedido {
+                            format!("La tarea pide que no haya pánico ni desbordamiento. Clippy (con los lints `indexing_slicing` y `arithmetic_side_effects`) marca estas líneas que has añadido o cambiado como capaces de entrar en pánico o desbordar:\n\n{alertas}\n\nComprueba cada una: usa `.get(..)` en vez de indexar, `checked_add`/`checked_mul` (o `saturating_*`) en las cuentas con valores que vienen de los datos, y una comprobación de longitud ANTES de leer. Ojo con las sumas de rangos como `off..off + N`: calcula `let fin = off.checked_add(N).ok_or(..)?;` y usa `get(off..fin)`. Corrige TODAS las líneas de la lista (no sólo la primera) y verás de nuevo los avisos que queden. Después ejecuta las comprobaciones y escribe el informe final.")
+                        } else {
+                            format!("Clippy (`arithmetic_side_effects`) marca estas operaciones que has añadido o cambiado como capaces de DESBORDAR (las pruebas se compilan en `debug`, donde un desbordamiento es un pánico):\n\n{alertas}\n\nSi los operandos pueden ser grandes, ensancha el tipo antes de operar (por ejemplo `i16` → `i32`: `(a as i32 + b as i32) / 2`) o usa `checked_*`/`saturating_*`/`wrapping_*` según lo que pida la tarea. Si la operación no puede desbordar de verdad (un contador pequeño, un índice acotado), ignora el aviso. Después ejecuta las comprobaciones y escribe el informe final.")
+                        };
+                        mensajes.push(json!({"role": "user", "content": texto}));
+                        al_turno(e, &mensajes);
+                        continue;
+                    }
                 }
             }
             if cfg.proteger_api && api_avisos < cfg.avisos_api && hubo_edicion(&mensajes) {
@@ -956,11 +969,16 @@ fn linea_historial(llamada: &Value, resultado: &str) -> String {
 /// mensajes no se tocan. Lo plegado no se pierde sin más: queda una línea por llamada en la tarea, para que el modelo sepa qué ya
 /// hizo (con un simple recorte, en la campaña 27 olvidaba sus ediciones y las repetía hasta agotar los turnos). Devuelve cuántos
 /// intercambios se pliegan.
-fn limitar_mensajes(mensajes: &mut Vec<Value>, max: usize) -> usize {
+fn limitar_mensajes(mensajes: &mut Vec<Value>, max: usize, holgura: usize) -> usize {
     const HISTORIAL_MAX: usize = 40;
+    if mensajes.len() <= max {
+        return 0;
+    }
+    // Se pliega hasta `objetivo` (no sólo hasta `max`): así no hace falta volver a plegar en los turnos siguientes.
+    let objetivo = max.saturating_sub(holgura).max(6.min(max));
     let mut nuevas: Vec<String> = Vec::new();
     let mut quitados = 0;
-    while mensajes.len() > max {
+    while mensajes.len() > objetivo {
         let Some(i) = (2..mensajes.len()).find(|&i| mensajes[i]["role"] == "assistant") else { break };
         let mut fin = i + 1;
         while fin < mensajes.len() && mensajes[fin]["role"] == "tool" {
