@@ -1,0 +1,39 @@
+--- a/crates/soso-log-core/src/texto.rs
++++ b/crates/soso-log-core/src/texto.rs
+@@ -53,7 +53,7 @@
+     if let Some(f) = c.fecha {
+         let _ = write!(w, " fecha {f}");
+     }
+-    let _ = write!(w, " ===\n");
++    let _ = writeln!(w, " ===");
+     w.len()
+ }
+ 
+@@ -61,7 +61,7 @@
+ /// arranque ruidoso deja un salto invisible en el fichero.
+ pub fn marca_perdida(out: &mut [u8], bytes: u64) -> usize {
+     let mut w = EscritorSlice::new(out);
+-    let _ = write!(w, "=== se perdieron {bytes} bytes por sobrescritura del ring ===\n");
++    let _ = writeln!(w, "=== se perdieron {bytes} bytes por sobrescritura del ring ===");
+     w.len()
+ }
+ 
+@@ -69,6 +69,6 @@
+ /// nunca al fichero que acaba de fallar.
+ pub fn marca_fallo(out: &mut [u8], flujo: &str, fallos: u32) -> usize {
+     let mut w = EscritorSlice::new(out);
+-    let _ = write!(w, "logfs: {flujo}: escritura fallida ({fallos} seguidos)\n");
++    let _ = writeln!(w, "logfs: {flujo}: escritura fallida ({fallos} seguidos)");
+     w.len()
+ }
+--- a/crates/soso-red-core/src/estatica.rs
++++ b/crates/soso-red-core/src/estatica.rs
+@@ -142,7 +142,7 @@
+     use core::fmt::Write;
+     let mut out = String::from("modo=estatica\naddr=");
+     push_ip(&mut out, r.addr);
+-    let _ = write!(out, "/{}\n", r.prefijo);
++    let _ = writeln!(out, "/{}", r.prefijo);
+     if let Some(gw) = r.gw {
+         out.push_str("gw=");
+         push_ip(&mut out, gw);

@@ -1132,8 +1132,8 @@
         "note": "Sin evidencia de ejecución nativa completa; ver NATIVO.md y la ficha."
       },
       "tracking": {
-        "updated_at": "2026-10-23T12:00:00+02:00",
-        "summary": "Seis campañas. Con Qwen2.5-Coder-14B (runtime de soso): 1→2→3 de 10 (banco ajustado) y 2 de 10 (banco nuevo R11–R20). Con Gemma 4 12B QAT Q4_0: 6 de 10 servido por llama.cpp en GPU (campaña 5) y **5 de 10 servido por soso** en CPU (campaña 6): GO en el criterio de SI-4 en el umbral exacto, recuperación kill -9 real (R12, R17), base final verde, modelo servido por soso. Tres de los cinco fallos son bucles del modelo (misma llamada reemplazar_texto repetida) que agotan las 30 herramientas. Siete campañas: la 7 es una medida CIEGA sobre un banco nuevo (R21–R30, agente congelado, mismo modelo y criterio): 5 de 10, GO en el umbral exacto (kill -9 en R22 y R27, base final verde). Margen mínimo. Campañas 8 y 9 (A/B del agente sobre un tercer banco ciego R31–R40): 2 de 10 con el agente anterior y 2 de 10 con el mejorado, NO-GO en ambas; 12 de 30 en tres bancos distintos: el GO de SI-4 es real pero frágil, y mejorar herramientas del agente no movió la cifra. Actualización 2026-10-23 (campañas 45–57): el arnés v41 (rechazo de ediciones fuera de alcance, puerta de API pública, Clippy aritmético general, plegado de mensajes en bloques) y el cambio de modelo suben el banco R31–R40 de 2/10 (Gemma 12B) a 5–7/10 con Qwen3.6-35B-A3B y a 9/10 con el combo MoE→Qwen3.6-27B denso; Claude Sonnet 5.5 (suscripción) da 10/10, así que el límite era el modelo. Propuesta D11 pendiente de aceptación.",
+        "updated_at": "2026-10-24T18:00:00+02:00",
+        "summary": "Seis campañas. Con Qwen2.5-Coder-14B (runtime de soso): 1→2→3 de 10 (banco ajustado) y 2 de 10 (banco nuevo R11–R20). Con Gemma 4 12B QAT Q4_0: 6 de 10 servido por llama.cpp en GPU (campaña 5) y **5 de 10 servido por soso** en CPU (campaña 6): GO en el criterio de SI-4 en el umbral exacto, recuperación kill -9 real (R12, R17), base final verde, modelo servido por soso. Tres de los cinco fallos son bucles del modelo (misma llamada reemplazar_texto repetida) que agotan las 30 herramientas. Siete campañas: la 7 es una medida CIEGA sobre un banco nuevo (R21–R30, agente congelado, mismo modelo y criterio): 5 de 10, GO en el umbral exacto (kill -9 en R22 y R27, base final verde). Margen mínimo. Campañas 8 y 9 (A/B del agente sobre un tercer banco ciego R31–R40): 2 de 10 con el agente anterior y 2 de 10 con el mejorado, NO-GO en ambas; 12 de 30 en tres bancos distintos: el GO de SI-4 es real pero frágil, y mejorar herramientas del agente no movió la cifra. Actualización 2026-10-23 (campañas 45–57): el arnés v41 (rechazo de ediciones fuera de alcance, puerta de API pública, Clippy aritmético general, plegado de mensajes en bloques) y el cambio de modelo suben el banco R31–R40 de 2/10 (Gemma 12B) a 5–7/10 con Qwen3.6-35B-A3B y a 9/10 con el combo MoE→Qwen3.6-27B denso; Claude Sonnet 5.5 (suscripción) da 10/10, así que el límite era el modelo. D11 aceptada el 2026-10-24. Actualización 2026-10-24: banco ciego 5 (R41–R50, tareas mixtas redactadas sin mirar los fallos del agente): MoE Qwen3.6-35B-A3B 3/10, combo MoE→27B denso 7/10, Claude Sonnet 5.5 10/10; los 9/10 anteriores estaban inflados por el ajuste a R31–R40. Arreglos de infraestructura: JSON roto en el historial (v42), refs de base antiguas y tope de memoria por proceso en correr.sh.",
         "evidence": [
           "docs/self-improvement/campana.md",
           "docs/self-improvement/seguimiento/T29.md",
@@ -1163,10 +1163,12 @@
           "docs/self-improvement/resultados-campanas/analisis-rechazos-45-47.md",
           "docs/self-improvement/resultados-campanas/campana-56-combo-moe-denso",
           "tests/self-improvement/campana/combo-moe-denso.sh",
-          "tests/self-improvement/campana/claude_proxy.py"
+          "tests/self-improvement/campana/claude_proxy.py",
+          "tests/self-improvement/campana5",
+          "docs/self-improvement/resultados-campanas/campana-59-banco-ciego-5"
         ],
         "blocker": "",
-        "next_step": "Banco ciego nuevo (diez tareas con pruebas reservadas escritas sin mirar los fallos del agente) para medir el combo Qwen3.6-35B-A3B → 27B denso y calibrarlo con Claude; después, trabajo real del repositorio (avisos de Clippy, huecos de pruebas) con revisión del usuario. T30 sigue exigiendo máquina física y runtime de soso con atención lineal. Aceptar o rechazar D11 en DECISIONES.md."
+        "next_step": "Cifra de referencia del agente local: combo 7/10 en el banco ciego 5 (Claude 10/10). Siguiente: trabajo real del repositorio con el combo (avisos de Clippy, huecos de pruebas) y revisión del usuario; o un segundo banco ciego para medir la dispersión. T30/T31 siguen exigiendo máquina física y runtime de soso con atención lineal. D11 aceptada (2026-10-24)."
       }
     },
     {

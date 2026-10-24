@@ -579,7 +579,7 @@ Tras la calibración con Claude (10/10, ver arriba) se buscó un modelo local m�
 
 `unsloth/Qwen3.6-27B-GGUF` **UD-IQ3_XXS (12,0 GB)**; con 12 GB de VRAM no cabe entero con el KV: `qwen27-servir.sh` (puerto 7461) pone **57 de 64 capas en GPU** (59 se queda sin VRAM en el búfer de cómputo), contexto 38 912, KV q8_0, sin razonamiento, T=0,7. **Velocidad: decode 9–13 tok/s (7–8 con el swap lleno) frente a 62–70 del 35B-A3B; prefill ≈835 tok/s frente a ≈1500.** Arnés v41, `campaign-15.json` (sin inyección), `max_tokens` 6144.
 
-**Resultado: R34 aceptada (1374 s/36 herr.), R35 aceptada (2876 s/40), R33 rechazada (1987 s/35), R38 rechazada (2529 s/40).** El arnés las registró como `error: Bloqueado` (R33 y R38): el validador no llegó a decidir (con el swap lleno la comprobación excedió su plazo); repetidas a mano sobre la copia: **R33 pasa 9 de 10 pruebas reservadas** (falla `otros_formatos_no_se_admiten`) y **R38 no compila** (usa mal `miniz_oxide`: `FlushPending`, `BadData`). Con el 35B-A3B (campaña 54) esas cuatro salieron rechazadas las cuatro, y R35 había pasado en la 53: el 27B denso gana en las difíciles, pero a un coste de **2,4 h para cuatro tareas** (unos 35 min por tarea); el banco entero serían 5–6 h.
+**Resultado: R34 aceptada (1374 s/36 herr.), R35 aceptada (2876 s/40), R33 rechazada (1987 s/35), R38 rechazada (2529 s/40).** El arnés las registró como `error: Bloqueado` (R33 y R38). **Causa real (descubierta en la campaña 58):** la carpeta de salida se reutilizó tras una ejecución abortada y `refs/base-campana-Rxx.*` conservaba la base publicada por el intento anterior; la captura nueva partía de otra base y el validador contestó «la base cambió» (no tiene que ver con el swap). Corregido en `correr.sh` (borra esas referencias al empezar cada tarea). Repetidas a mano sobre la copia: **R33 pasa 9 de 10 pruebas reservadas** (falla `otros_formatos_no_se_admiten`) y **R38 no compila** (usa mal `miniz_oxide`: `FlushPending`, `BadData`). Con el 35B-A3B (campaña 54) esas cuatro salieron rechazadas las cuatro, y R35 había pasado en la 53: el 27B denso gana en las difíciles, pero a un coste de **2,4 h para cuatro tareas** (unos 35 min por tarea); el banco entero serían 5–6 h.
 
 **Lectura.** El 35B-A3B es el modelo de trabajo (≈70 min por banco, 6–7/10) y el 27B denso es un modelo de **segunda oportunidad** para lo que el MoE no resuelve. La combinación (MoE primero; las rechazadas, al denso con `ROUNDS=2`) costaría unas 2–2,5 h por banco y podría llegar a 8–9/10; sin medir. Además la memoria manda: con Chrome (8–14 GB) + Cursor la máquina vive al límite y tres veces la guarda paró la campaña o el modelo cayó a 6–8 tok/s.
 
@@ -592,6 +592,36 @@ Tras la calibración con Claude (10/10, ver arriba) se buscó un modelo local m�
 - **Combinado: 8/10** (R31, R32, R34, R35, R36, R38, R39, R40), frente a Gemma 12B 2/10, Qwen35B-A3B solo 5–7/10 y Claude Sonnet 5.5 10/10. **El denso resuelve en la pasada B tres de las cinco que el MoE no resolvía, con ~35 min por tarea.** Pendiente: R33 (falla una prueba con el denso en la 55; en la 56 se agotó el plazo) y R37 (hueco estable). Un plazo mayor que 3600 s (R38 acabó a 3520 s) podría salvar R33; no medido. n=1 por tarea.
 
 **Repetición de R33 y R37 con el denso y 5400 s por tarea (`campaign-16.json`, `denso-solo.sh`): R33 aceptada (1987 s, 38 herr.) y R37 rechazada (607 s, 20 herr.). Combo: 9/10** (R31, R32, R33, R34, R35, R36, R38, R39, R40). El plazo de 3600 s era lo que impedía acabar a R33 con el denso. **R37 es el único hueco:** `la_query_se_conserva_aunque_no_haya_ruta` falla con todos los modelos locales por la misma lectura: «el host termina en el **primer** `/` o `?`» se implementa cortando primero por `/` y luego por `?`, de modo que `https://h.org:8080?q=1/2` deja `h.org:8080?q=1` como host y el puerto no parsea (`Err(Parse)`); sólo Claude toma el mínimo de las dos posiciones.
+
+## Banco ciego 5 (R41–R50): la medida honesta (2026-10-23/24)
+
+Diez tareas mixtas (3 endurecimientos, 3 defectos reales, 2 funcionalidades, 1 rendimiento, 1 ampliación de API; [campana5/](../../tests/self-improvement/campana5/README.md)) redactadas por cinco agentes **sin mirar** los fallos del agente y verificadas con el verificador oficial (tal cual: fallo; `--con-referencia`: ok). Arnés congelado v41 (v42 sólo con arreglos de infraestructura), `campaign-17.json` (5400 s), T=0,7, 40 turnos, 1 ronda, sin inyección.
+
+| Tarea | tipo | MoE 35B-A3B | denso 27B | **combo** | Claude |
+|---|---|---|---|---|---|
+| R41 gptdisk `Guid::parse` | defecto | ✓ 156 s | – | ✓ | ✓ 174 s |
+| R42 gptdisk GPT corrupta | endurecimiento | ✗ | ✗ 1696 s | ✗ | ✓ 375 s |
+| R43 wpa2 EAPOL/KDE | endurecimiento | ✗ (×2) | ✓ 1871 s | ✓ | ✓ 268 s |
+| R44 semver pre-release | funcionalidad | ✗ | ✓ 1656 s | ✓ | ✓ 209 s |
+| R45 http redirecciones | defecto | ✗ | ✓ 1597 s | ✓ | ✓ 147 s |
+| R46 web-core percent | funcionalidad | ✓ 333 s | – | ✓ | ✓ 182 s |
+| R47 sosofs rendimiento | rendimiento | ✗ | ✓ 1817 s | ✓ | ✓ 1185 s |
+| R48 sosomfs API | API | ✓ 118 s | – | ✓ | ✓ 222 s |
+| R49 llm-core tokenizador | defecto | ✗ (×2) | ✗ 1454 s | ✗ | ✓ 154 s |
+| R50 resize-core | endurecimiento | ✗ | ✗ 2265 s | ✗ | ✓ 199 s |
+| **Total** | | **3/10** | **4/7** | **7/10** | **10/10** |
+
+**Lectura.** Con el banco ajustado (R31–R40) el MoE sacaba 5–7/10 y el combo 9/10; con el banco ciego, **3/10 y 7/10**: parte de la cifra anterior era ajuste del arnés a esas diez tareas. Claude da 10/10 en ambos, así que el arnés y el banco están bien. El denso cuesta ≈30 min por tarea (el combo entero, ≈5 h). R42 y R50 son desbordes aritméticos y la puerta de Clippy **sí saltó** (avisos en sus conversaciones) pero los arreglos no cubrieron todos los casos; R49 (streaming con prefijo incompleto) es semántica fina del tokenizador. Los 7/10 del combo son la cifra de referencia del agente local.
+
+**Incidencias de infraestructura (no cambian la estrategia del agente):** (1) **R43 con v41:** una llamada con el JSON roto (el modelo se quedó repitiendo `0`) quedaba en el historial y llama-server contestaba 500 en cada petición: v42 guarda `{}` y devuelve el error al modelo. (2) **Refs de base antiguas:** reutilizar una carpeta tras una ejecución abortada daba «Bloqueado: la base cambió» aunque la solución fuera buena (también explicaba los «Bloqueado» de la campaña 55): `correr.sh` borra `refs/base-campana-Rxx.*` al empezar. (3) **OOM:** una prueba descontrolada del candidato (un binario de `soso-llm-core` llegó a 13,5 GB) mató la unidad entera: `correr.sh` limita la memoria de datos a 8 GB por proceso (`ulimit -d`) y las unidades llevan `OOMPolicy=continue`. (4) **Límite de sesión de la suscripción de Claude** a los ≈25 min de campaña: R46–R50 se repitieron en otra ventana.
+
+## Arnés estable v43 (2026-10-24)
+
+El arnés queda **congelado como estable en v43** (`target/gemma-work/target-v43/debug/soso-improve`, sha256 `f62f230e37af4a69d31bc552f9b1e0562579901d2727ceeae7f4c38848694855`), construido con
+`CARGO_TARGET_DIR=target/gemma-work/target-v43 cargo build -p soso-improve`. Incluye: puertas antes de terminar (sintaxis, pruebas propias, comprobación de la
+tarea, Clippy de pánico y aritmético, API pública, ediciones fuera de «Qué puedes tocar», poda), plegado de mensajes en bloques, temperatura adaptativa, llamadas con
+JSON roto fuera del historial (v42) y captura que conserva `vendor/` salvo `vendor/rust/` (v43). Las campañas se lanzan con `correr.sh` (refs de base limpias y tope
+de 8 GB de memoria de datos por proceso). **Cualquier cambio del arnés tras este punto invalida una medida en curso**: se hace entre medidas y se anota aquí.
 
 ---
 

@@ -1,0 +1,11 @@
+{
+ "id": "R43",
+ "ronda": 1,
+ "resultado": "error",
+ "intentos": 1,
+ "segundos": 212,
+ "nota": "error: entorno: el intento no termin\u00f3: ErrorModelo entorno: el servidor contest\u00f3 Some(500): {\"error\":{\"code\":500,\"message\":\"Failed to parse tool call arguments as JSON: [json.exception.parse_error.101",
+ "fallo": "infraestructura",
+ "herramientas": 18,
+ "tokens": 300976
+}

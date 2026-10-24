@@ -7,10 +7,11 @@
 
 ## Por dónde empezar
 
-> **Estado (2026-10-23).** T29 está **hecha** y su línea de trabajo cambió de modelo: con el arnés v41 el banco R31–R40 da **9/10 con el combo
-> Qwen3.6-35B-A3B → Qwen3.6-27B denso** (Gemma 12B daba 2/10; Claude Sonnet 5.5, 10/10 como techo de calibración). Propuesta
-> [D11](DECISIONES.md) pendiente de aceptación. **Lo siguiente:** un banco ciego nuevo y trabajo real del repositorio con revisión del usuario;
-> T30/T31 siguen exigiendo máquina física y runtime de soso con atención lineal. Resumen: [campana.md](campana.md) y
+> **Estado (2026-10-24).** T29 está **hecha** y su línea de trabajo cambió de modelo. Cifra de referencia: **banco ciego 5 (R41–R50), combo
+> Qwen3.6-35B-A3B → Qwen3.6-27B denso 7/10** (MoE solo 3/10; Claude Sonnet 5.5, 10/10); en el banco ajustado R31–R40 daba 9/10 (inflado por el ajuste del arnés) y Gemma 12B 2/10. Decisión
+> [D11](DECISIONES.md) aceptada (2026-10-24). **Lo siguiente:** un banco ciego nuevo y trabajo real del repositorio con revisión del usuario;
+> T30/T31 siguen exigiendo máquina física y runtime de soso con atención lineal. **Plan para ponerla en marcha:**
+> [PLAN-PUESTA-EN-MARCHA.md](PLAN-PUESTA-EN-MARCHA.md). Resumen: [campana.md](campana.md) y
 > [seguimiento/T29.md](seguimiento/T29.md). Lo de abajo es histórico (2026-10-10).
 >
 > **Estado (2026-10-10).** [T22](T22-primera-mejora.md) está **hecha**: Qwen2.5-Coder-14B a T=0 real resuelve R03 con

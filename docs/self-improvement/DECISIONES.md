@@ -152,7 +152,7 @@ como decisión de plan del usuario. Portar Bun/OpenCode es del orden de meses y 
 - El **port de OpenCode/Bun** (N-005…N-008, N-011) queda **aplazado**, sin ficha de entrada, y puede recuperarse si algún día interesa; las N-xxx ya hechas no se pierden.
 - N-006 sigue aplazada (no hay consumidor de C).
 
-## D11 — Modelo de trabajo del agente nativo: Qwen3.6-35B-A3B + Qwen3.6-27B denso (2026-10-23) — **propuesta, pendiente de que la acepte el usuario**
+## D11 — Modelo de trabajo del agente nativo: Qwen3.6-35B-A3B + Qwen3.6-27B denso (2026-10-23) — **aceptada** (2026-10-24, por el usuario: «acepto D11»)
 
 **Contexto.** D9 fijó `qwen2.5-coder-14b` para T25–T29 y T29 cerró con Gemma 4 12B (2/10 en el banco R31–R40 con el arnés v10–v33). La calibración con Claude Sonnet 5.5 (campaña 49, misma configuración, suscripción vía `claude -p`) dio **10/10**: el arnés no es el límite, lo es el modelo.
 
@@ -165,8 +165,9 @@ como decisión de plan del usuario. Portar Bun/OpenCode es del orden de meses y 
 | Qwen3.6-27B denso IQ3_XXS (9–13 tok/s) sobre las rechazadas del MoE | 3/5 (R31, R32, R38) y R33 con plazo de 5400 s |
 | **Combo MoE → denso** | **9/10** (R37 falla con todos los modelos locales) |
 | Claude Sonnet 5.5 | 10/10 |
+| **Banco ciego 5 (R41–R50, diez tareas nuevas y mixtas, sin ajustar el arnés)** | MoE **3/10**; denso 4/7 sobre las rechazadas; **combo 7/10**; Claude Sonnet 5.5 **10/10** |
 
-**Propuesta.** Modelo de trabajo = **Qwen3.6-35B-A3B** (pasada A: banco entero en ≈75 min) y **Qwen3.6-27B denso** con 5400 s por tarea sólo para lo rechazado (pasada B: ≈35 min por tarea). Sin razonamiento (modo instruct, T=0,7): con razonamiento el MoE no mejora el total. Claude queda como **techo de calibración**, no como dependencia. Requisitos de la máquina: ≈10 GB de RAM libres para el MoE y ≈12 GB de VRAM; el denso no cabe entero (57/64 capas en GPU).
+**Sustituye a D9** (`qwen2.5-coder-14b`) como modelo de trabajo de la línea T25–T29 en adelante; Qwen2.5-Coder-7B sigue siendo el perfil ligero. **Cifra de referencia.** La del banco ciego 5: **combo local 7/10** (Claude 10/10); los 9/10 de R31–R40 estaban inflados por el ajuste del arnés a esas tareas. **Propuesta.** Modelo de trabajo = **Qwen3.6-35B-A3B** (pasada A: banco entero en ≈75 min) y **Qwen3.6-27B denso** con 5400 s por tarea sólo para lo rechazado (pasada B: ≈35 min por tarea). Sin razonamiento (modo instruct, T=0,7): con razonamiento el MoE no mejora el total. Claude queda como **techo de calibración**, no como dependencia. Requisitos de la máquina: ≈10 GB de RAM libres para el MoE y ≈12 GB de VRAM; el denso no cabe entero (57/64 capas en GPU).
 
 **Límites que cambian el trabajo futuro.** (1) Aún se sirve con llama.cpp (CUDA) en el host: el runtime de soso no tiene atención lineal (Gated DeltaNet) en GPU. (2) El banco R31–R40 ya no es ciego (el arnés se afinó mirando sus fallos): hace falta un banco nuevo para medir. (3) La memoria manda: Chrome/Cursor llevaron la máquina al límite varias veces y las campañas fallaron por tiempo, no por el modelo. (4) Un hueco estable, R37 (cortar el host por el primer `/` o `?`), sólo lo resuelve Claude.
 

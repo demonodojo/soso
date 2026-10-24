@@ -231,14 +231,15 @@ Plan/ID, estado (catálogo = ficha = fila), evidencia, bloqueo, siguiente ficha
 
 Estado vigente y siguiente ficha en [README](../../../docs/self-improvement/README.md).
 
-**Actualización 2026-10-23 (línea T29 / campañas).** El banco R31–R40 da **9/10 con el combo Qwen3.6-35B-A3B → Qwen3.6-27B denso**
-(Gemma 12B: 2/10; Claude Sonnet 5.5: 10/10 como techo). Propuesta de modelo de trabajo D11 pendiente de aceptación. Antes de lanzar
+**Actualización 2026-10-24 (línea T29 / campañas).** Cifra de referencia: **banco ciego 5 (R41–R50): combo Qwen3.6-35B-A3B → Qwen3.6-27B
+denso 7/10** (MoE solo 3/10; Claude Sonnet 5.5: 10/10 como techo); el banco ajustado R31–R40 daba 9/10 (inflado). Gemma 12B: 2/10. Modelo de trabajo D11 **aceptada** (2026-10-24). Antes de lanzar
 una campaña: [campana.md](../../../docs/self-improvement/campana.md) y [seguimiento/T29.md](../../../docs/self-improvement/seguimiento/T29.md).
 Lanzadores en `tests/self-improvement/campana/`: `combo-moe-denso.sh NOMBRE` (MoE + denso), `qwen36-servir.sh`, `qwen27-servir.sh`,
 `denso-solo.sh`, `claude-piloto.sh`/`claude_proxy.py` (Claude por la suscripción; se niegan a arrancar con `ANTHROPIC_API_KEY`).
 Trampas operativas: el servidor Qwen necesita ≈10 GB de RAM libres y Chrome/Cursor/`/tmp` (tmpfs) la agotan (campañas inválidas por
-tiempo agotado: vigila la memoria y el swap); `ls` es eza en este shell (`/bin/ls` en scripts); el validador sale «Bloqueado» si la
-máquina está en swap (repite a mano con `soso-improve verificar repo --caso Rxx --banco campana4 --arbol RUTA/copia`); la inyección de
+tiempo agotado: vigila la memoria y el swap); `ls` es eza en este shell (`/bin/ls` en scripts); el validador sale «Bloqueado» («la base cambió») si
+reutilizas una carpeta de salida tras una ejecución abortada (`correr.sh` ya borra `refs/base-campana-Rxx.*` al empezar; en campañas viejas
+repite a mano con `soso-improve verificar repo --caso Rxx --banco campanaN --arbol RUTA/copia`); la inyección de
 caída a los 30 s pilla a los modelos rápidos tras su primera edición (usa `campaign-15.json`, sin inyección); `campaign-16.json` da 5400 s
 por tarea al denso. El banco R31–R40 ya no es ciego: lo siguiente es un banco nuevo.
 **10-oct-2026:** T22 está **hecha** con Qwen2.5-Coder-14B a T=0 (OpenCode + herramienta propia

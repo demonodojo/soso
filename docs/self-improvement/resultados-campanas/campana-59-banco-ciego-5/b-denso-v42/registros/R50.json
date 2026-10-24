@@ -1,0 +1,11 @@
+{
+ "id": "R50",
+ "ronda": 1,
+ "resultado": "rechazada",
+ "intentos": 1,
+ "segundos": 2265,
+ "nota": "",
+ "fallo": "programacion",
+ "herramientas": 36,
+ "tokens": 735781
+}
