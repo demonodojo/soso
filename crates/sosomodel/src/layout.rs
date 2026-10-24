@@ -10,6 +10,43 @@ pub const DTYPE_Q8_0: u8 = 2;
 pub const DTYPE_Q4_K: u8 = 3;
 pub const DTYPE_MXFP4: u8 = 4;
 pub const DTYPE_Q4_0: u8 = 5;
+/// Formatos GGML de Unsloth (K-quants e i-quants), passthrough con el layout de GGML tal cual.
+/// El `quant` del índice vale lo mismo que el dtype. Ver `iq.rs`.
+pub const DTYPE_Q3_K: u8 = 6;
+pub const DTYPE_Q5_K: u8 = 7;
+pub const DTYPE_IQ2_XS: u8 = 8;
+pub const DTYPE_IQ2_S: u8 = 9;
+pub const DTYPE_IQ3_XXS: u8 = 10;
+pub const DTYPE_IQ3_S: u8 = 11;
+pub const DTYPE_IQ4_XS: u8 = 12;
+
+/// dtype sosomodel de un tipo GGML de `iq.rs`.
+pub fn dtype_de_ggml_iq(ggml: u32) -> Option<u8> {
+    Some(match ggml {
+        crate::iq::GGML_Q3_K => DTYPE_Q3_K,
+        crate::iq::GGML_Q5_K => DTYPE_Q5_K,
+        crate::iq::GGML_IQ2_XS => DTYPE_IQ2_XS,
+        crate::iq::GGML_IQ2_S => DTYPE_IQ2_S,
+        crate::iq::GGML_IQ3_XXS => DTYPE_IQ3_XXS,
+        crate::iq::GGML_IQ3_S => DTYPE_IQ3_S,
+        crate::iq::GGML_IQ4_XS => DTYPE_IQ4_XS,
+        _ => return None,
+    })
+}
+
+/// Tipo GGML de un dtype de `iq.rs` (inversa de [`dtype_de_ggml_iq`]).
+pub fn ggml_de_dtype_iq(dtype: u8) -> Option<u32> {
+    Some(match dtype {
+        DTYPE_Q3_K => crate::iq::GGML_Q3_K,
+        DTYPE_Q5_K => crate::iq::GGML_Q5_K,
+        DTYPE_IQ2_XS => crate::iq::GGML_IQ2_XS,
+        DTYPE_IQ2_S => crate::iq::GGML_IQ2_S,
+        DTYPE_IQ3_XXS => crate::iq::GGML_IQ3_XXS,
+        DTYPE_IQ3_S => crate::iq::GGML_IQ3_S,
+        DTYPE_IQ4_XS => crate::iq::GGML_IQ4_XS,
+        _ => return None,
+    })
+}
 
 pub const QUANT_NONE: u8 = 0;
 pub const QUANT_Q8_0: u8 = 1;

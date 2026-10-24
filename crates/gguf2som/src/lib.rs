@@ -424,6 +424,7 @@ pub fn convert_with_options<R: Read + Seek>(
             DTYPE_Q4_K => make_q4_k_entry(*id, som_name, &shard_name, 0, &shape),
             DTYPE_Q4_0 => make_q4_0_entry(*id, som_name, &shard_name, 0, &shape),
             DTYPE_MXFP4 => make_mxfp4_entry(*id, som_name, &shard_name, 0, &shape),
+            d if sosomodel::layout::ggml_de_dtype_iq(d).is_some() => sosomodel::index::make_iq_entry(d, *id, som_name, &shard_name, 0, &shape),
             _ => make_f32_entry(*id, som_name, &shard_name, 0, &shape),
         });
         *id += 1;
@@ -1466,8 +1467,18 @@ fn read_tensor<R: Read + Seek>(
             }
             Ok((quantize_q8_0(&f), DTYPE_Q8_0))
         }
+        other if sosomodel::layout::dtype_de_ggml_iq(other).is_some() => {
+            // K-quants e i-quants: el layout .som es el de GGML tal cual (passthrough)
+            let bb = sosomodel::iq::bytes_de_bloque(other).unwrap_or(0);
+            if elems % sosomodel::iq::QK_K != 0 {
+                return Err(format!("tensor GGML {other} con {elems} elems (no múltiplo de 256)"));
+            }
+            let mut out = vec![0u8; (elems / sosomodel::iq::QK_K) * bb];
+            file.read_exact(&mut out)?;
+            Ok((out, sosomodel::layout::dtype_de_ggml_iq(other).unwrap_or(0)))
+        }
         other => Err(format!(
-            "dtype GGML {other} no soportado (solo F32/F16/Q4_0/Q5_0/Q8_0/Q4_K/Q6_K/MXFP4)"
+            "dtype GGML {other} no soportado (solo F32/F16/Q4_0/Q5_0/Q8_0/Q4_K/Q6_K/MXFP4/Q3_K/Q5_K/IQ2_XS/IQ2_S/IQ3_XXS/IQ3_S/IQ4_XS)"
         )),
     }
 }

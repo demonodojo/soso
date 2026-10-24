@@ -1,0 +1,73 @@
+# Cuenta bytes y saltos LF; rechaza NUL y UTF-8 inválido.
+fn continuacion(c: Int) -> Int
+    if c < 128
+        0
+    elsif c > 191
+        0
+    else
+        1
+
+fn texto_valido(s: String) -> Int
+    i = 0
+    n = str_len(s)
+    while i < n
+        c = str_char(s, i)
+        if c == 0
+            return 0
+        if c < 128
+            i = i + 1
+        else
+            ancho = 0
+            if c < 194
+                return 0
+            elsif c < 224
+                ancho = 2
+            elsif c < 240
+                ancho = 3
+            elsif c < 245
+                ancho = 4
+            else
+                return 0
+            if i + ancho > n
+                return 0
+            segundo = str_char(s, i + 1)
+            if c == 224
+                if segundo < 160
+                    return 0
+            if c == 237
+                if segundo > 159
+                    return 0
+            if c == 240
+                if segundo < 144
+                    return 0
+            if c == 244
+                if segundo > 143
+                    return 0
+            j = 1
+            while j < ancho
+                if continuacion(str_char(s, i + j)) == 0
+                    return 0
+                j = j + 1
+            i = i + ancho
+    1
+
+fn main() -> Int ! io, alloc
+    if argc() != 2
+        _e = eprint_str(d"uso: sal-contar <archivo>\n")
+        return 2
+    ruta = argv(1)
+    if path_readable(ruta) == 0
+        _e = eprint_str(d"sal-contar: no se puede leer el archivo\n")
+        return 1
+    texto = read_file(ruta)
+    if texto_valido(texto) == 0
+        _e = eprint_str(d"sal-contar: se requiere UTF-8 sin NUL\n")
+        return 1
+    n = str_len(texto)
+    i = 0
+    lineas = 0
+    while i < n
+        if str_char(texto, i) == 10
+            lineas = lineas + 1
+        i = i + 1
+    print_str("bytes=" + int_to_str(n) + " lineas=" + int_to_str(lineas) + "\n")

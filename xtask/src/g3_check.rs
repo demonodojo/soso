@@ -52,6 +52,7 @@ pub fn run(_args: &[String]) {
         "gsp_cmdq.c",
         "gsp_mmio.c",
         "gsp_bringup.c",
+        "gsp_3d.c",
         "gsp_fwsec.c",
         "acr_fw.c",
         "falcon_lx.c",
@@ -221,6 +222,10 @@ pub fn run(_args: &[String]) {
         "G4f SASS en VRAM + compute armado (log)",
         log_contains(&log, "SASS de ") && log_contains(&log, "compute listo cls=")
             && !gpu_gone,
+    );
+    print_criterion(
+        "H1 3D CLEAR_SURFACE verificado (log)",
+        log_contains(&log, "3D clear verificado (H1 GO)") && !gpu_gone,
     );
     print_criterion(
         "G3b nvkm ACR port (inventario stubs)",

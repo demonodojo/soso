@@ -16,6 +16,7 @@ lxdde/ports/nouveau/gsp_ce.c
 lxdde/ports/nouveau/gsp_grctx.c
 lxdde/ports/nouveau/gsp_buf.c
 lxdde/ports/nouveau/gsp_compute.c
+lxdde/ports/nouveau/gsp_3d.c
 # Un juego de SASS por arquitectura (generados por l6-g4f-build-sass.sh).
 lxdde/ports/nouveau/sass_sm86.c
 lxdde/ports/nouveau/sass_sm120.c

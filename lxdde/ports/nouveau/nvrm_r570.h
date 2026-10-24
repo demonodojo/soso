@@ -748,6 +748,11 @@ typedef struct NVC0B5_ALLOCATION_PARAMETERS {
 
 #define AMPERE_A                   0x0000c697u
 #define AMPERE_B                   0x0000c797u
+/* Clases 3D por generación (cl*c97.h en open-gpu-kernel-modules 570.144). */
+#define ADA_3D_A                   0x0000c997u
+#define HOPPER_3D_A                0x0000cb97u
+#define BLACKWELL_3D_A             0x0000cd97u
+#define BLACKWELL_3D_B             0x0000ce97u
 #define NVKM_RM_THREED_GOLDEN      0x3d000000u
 
 #define NVC7C0_SET_OBJECT                    0x00000000u

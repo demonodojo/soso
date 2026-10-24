@@ -16,10 +16,14 @@ mod heap_scan;
 #[cfg(test)]
 mod heap_hueco;
 
+mod sal;
+
 fn main() {
     as_user::restore_invoking_env();
     let cmd = std::env::args().nth(1).unwrap_or_else(|| "run".into());
     match cmd.as_str() {
+        "sal-build" => sal::build(&std::env::args().skip(2).collect::<Vec<_>>()),
+        "test-sal" => sal::test(),
         "build" => {
             build_image();
         }
@@ -938,6 +942,7 @@ pub(crate) fn build_user() -> bool {
         "halt",
         "reboot",
         "soso-llm",
+        "soso-gfx-demo",
         "soso-install",
         "soso-hf",
         "soso-voz",
@@ -974,6 +979,7 @@ pub(crate) fn build_user() -> bool {
             cambiado = true;
         }
     }
+    cambiado |= sal::install(&root);
     cambiado
 }
 

@@ -241,3 +241,19 @@ pub fn make_mxfp4_entry(
         quant: QUANT_MXFP4,
     }
 }
+
+/// Entrada de un tensor en un formato de `iq.rs` (superbloques de 256 elementos, layout de GGML).
+pub fn make_iq_entry(dtype: u8, id: u32, name: &str, shard: &str, offset: u64, shape: &[u32]) -> TensorEntry {
+    let elems: u64 = shape.iter().map(|&d| d as u64).product();
+    let bb = crate::layout::ggml_de_dtype_iq(dtype).and_then(crate::iq::bytes_de_bloque).unwrap_or(0);
+    TensorEntry {
+        id,
+        name: String::from(name),
+        shard: String::from(shard),
+        offset,
+        byte_len: elems.div_ceil(crate::iq::QK_K as u64) * bb as u64,
+        shape: shape.to_vec(),
+        dtype,
+        quant: dtype,
+    }
+}

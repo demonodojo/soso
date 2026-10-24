@@ -1,0 +1,12 @@
+[package]
+name = "sal-runtime"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+libsoso = { workspace = true }
+libm = "0.2"

@@ -1,0 +1,2 @@
+fn respuesta() -> Int
+    42

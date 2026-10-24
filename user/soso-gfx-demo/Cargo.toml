@@ -1,0 +1,13 @@
+[package]
+name = "soso-gfx-demo"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+
+[[bin]]
+name = "soso-gfx-demo"
+path = "src/main.rs"
+
+[dependencies]
+soso-abi = { workspace = true }
+libsoso = { workspace = true }

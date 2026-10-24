@@ -330,12 +330,19 @@ pub fn info() -> GpuInfo {
         let n = core::cmp::min(label.len(), phase.len() - 1);
         phase[..n].copy_from_slice(&label[..n]);
     }
+    let mut pad = [0u8; 4];
+    if g.vendor == GPU_VENDOR_NVIDIA {
+        #[cfg(feature = "lxdde")]
+        {
+            pad[0] = crate::lxdde::gfx3d_ready() as u8;
+        }
+    }
     GpuInfo {
         present: g.present as u8,
         vendor: g.vendor,
         compute: g.compute as u8,
         vram_bufs: vram_bufs_usables(&g) as u8,
-        _pad: [0; 4],
+        _pad: pad,
         vram_total: g.vram_total,
         vram_free: vram_free_bytes(&g),
         name: g.name,
@@ -782,6 +789,7 @@ fn soft_sqrtf(x: f32) -> f32 {
 ///   expandirla. Es lo que permite subir los bytes del shard tal cual: 8× menos
 ///   tráfico y 8× menos VRAM que el plano f32.
 /// - `b"GFINI"` — apaga GSP-RM y deja la tarjeta sin DMA (irreversible)
+/// - `b"GCLR3"` + u64 rt_handle + u32 w + u32 h + u32 pitch + u32 rgba (A8B8G8R8)
 /// - `b"SOFTG"` / `b"SOFTX"` — enciende/apaga el dispositivo software de pruebas
 ///
 /// El valor de vuelta de SAXPY/MATVF/MATVQ lleva `abi::GPU_SUBMIT_ON_GPU` (lo hizo
@@ -814,6 +822,31 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
     if cmd.len() >= 5 && &cmd[..5] == b"GFINI" {
         drop(g);
         return Ok(gsp_fini() as u64);
+    }
+    if cmd.len() >= 5 && &cmd[..5] == b"GCLR3" && cmd.len() >= 29 {
+        let rt_h = u64::from_le_bytes(cmd[5..13].try_into().unwrap_or([0; 8]));
+        let w = u32::from_le_bytes(cmd[13..17].try_into().unwrap_or([0; 4]));
+        let h = u32::from_le_bytes(cmd[17..21].try_into().unwrap_or([0; 4]));
+        let pitch = u32::from_le_bytes(cmd[21..25].try_into().unwrap_or([0; 4]));
+        let rgba = u32::from_le_bytes(cmd[25..29].try_into().unwrap_or([0; 4]));
+        let rt_va = g
+            .buffers
+            .get(rt_h as usize)
+            .and_then(|b| b.as_ref())
+            .and_then(|b| b.device_va());
+        drop(g);
+        #[cfg(feature = "lxdde")]
+        {
+            if !crate::lxdde::gfx3d_ready() {
+                return Err(abi::ENOTSUP);
+            }
+            if let Some(va) = rt_va {
+                return crate::lxdde::submit_3d_clear(va, w, h, pitch, rgba)
+                    .map(|on_gpu| submit_bits(on_gpu))
+                    .map_err(|_| abi::EIO);
+            }
+        }
+        return Err(abi::EINVAL);
     }
     if cmd.len() >= 5 && &cmd[..5] == b"SAXPY" && cmd.len() >= 29 {
         let a = f32::from_le_bytes(cmd[5..9].try_into().unwrap_or([0; 4]));

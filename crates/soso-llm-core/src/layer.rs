@@ -211,7 +211,18 @@ pub fn matvec_view_par(
                 )
                 .is_ok()
             }
-            _ => false,
+            d => match sosomodel::dequant::row_bytes(d, cols) {
+                Some(row_bytes) => crate::gemm::matvec_iq(
+                    d,
+                    &bytes[r0 * row_bytes..r1 * row_bytes],
+                    r1 - r0,
+                    cols,
+                    x,
+                    &mut out[r0..r1],
+                )
+                .is_ok(),
+                None => false,
+            },
         };
         if !ok {
             unsafe {
@@ -367,7 +378,24 @@ pub fn matvec_view_batch_par(
                 }
                 ok
             }
-            _ => false,
+            d => match sosomodel::dequant::row_bytes(d, cols) {
+                Some(row_bytes) => {
+                    let mut ok = true;
+                    for j in 0..n {
+                        ok &= crate::gemm::matvec_iq(
+                            d,
+                            &bytes[r0 * row_bytes..r1 * row_bytes],
+                            sub,
+                            cols,
+                            &xs[j * cols..(j + 1) * cols],
+                            &mut outs[j * rows + r0..j * rows + r1],
+                        )
+                        .is_ok();
+                    }
+                    ok
+                }
+                None => false,
+            },
         };
         if !ok {
             unsafe {

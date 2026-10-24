@@ -51,6 +51,11 @@ Docs fuente: `docs/L6-native-autonomy.md` (maestro), `docs/L6-G1-gate.md`,
 | G5 | LLM híbrido (capas en ~12 GiB VRAM) | matvec en GPU en `soso-llm` | **GO funcional** (2026-07-29): `soso-llm run tiny --max 4` → **97 matvec en GPU OK** |
 | **G6** | Pesos en VRAM, 1 QMD/matvec | `matvec residente OK` | **Implementado** (2026-07-30): `gsp_buf` + CE upload; recompilar SASS antes del ciclo HW |
 | **L6-H** | `--cuda-host` → cuda-proxy | texto + tok/s desde soso | **GO** (2026-07-27): ~35 tok/s, Docker llama-server |
+| **H1** | Motor 3D + `CLEAR_SURFACE` | log `3D clear verificado (H1 GO)`; `soso-gfx-demo` | **Implementado** (hostcheck + demo); GO en silicio = VFIO GB205 |
+
+**H1 (gráficos):** `gsp_3d.c` reserva clase 3D (`BLACKWELL_3D_B` / `0xce97` en GB205) en
+subcanal 0 del canal GR0; userspace usa `SYS_GPU_SUBMIT` **`GCLR3`** (RT en VRAM) y
+`GpuInfo._pad[0]` (`gfx3d`). Plan: [docs/PLAN-GRAFICOS-JUEGOS.md](../../docs/PLAN-GRAFICOS-JUEGOS.md).
 
 **Pendiente post-G6:** medir tok/s nativo vs CPU en silicio (`bench`, timeout amplio);
 Ampere GA10x/GA107: cadena FWSEC-FRTS + booter escrita — validar `pool VRAM=sí`

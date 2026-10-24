@@ -22,6 +22,9 @@ extern int lx_nouveau_submit_layernorm_rows(float *x, const float *weight,
                                             const float *bias, unsigned rows,
                                             unsigned cols, float eps);
 extern int lx_nouveau_compute_wait_fence(unsigned sem_slot);
+extern int lx_nouveau_3d_ready(void);
+extern int lx_nouveau_3d_clear(uint64_t rt_va, unsigned width, unsigned height,
+                               unsigned pitch, uint32_t rgba);
 extern uint64_t lx_nouveau_vram_bytes(void);
 extern const char *lx_nouveau_gpu_name(void);
 extern uint64_t lx_nouveau_buf_alloc(uint64_t size);
@@ -182,4 +185,15 @@ uint64_t lx_nouveau_device_pool_free(void)
 unsigned lx_nouveau_device_pt_free(void)
 {
     return lx_nouveau_buf_pt_free();
+}
+
+int lx_nouveau_gfx3d_ready(void)
+{
+    return lx_nouveau_3d_ready();
+}
+
+int lx_nouveau_gfx3d_clear(uint64_t rt_va, unsigned width, unsigned height,
+                           unsigned pitch, uint32_t rgba)
+{
+    return lx_nouveau_3d_clear(rt_va, width, height, pitch, rgba);
 }

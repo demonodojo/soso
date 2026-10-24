@@ -331,6 +331,24 @@ pub fn matvec_q8_0_scalar(bytes: &[u8], _rows: usize, cols: usize, x: &[f32], ou
     }
 }
 
+/// matvec escalar sobre pesos K-quant/i-quant de `sosomodel::iq` (descuantiza fila a fila).
+pub fn matvec_iq(dtype: u8, bytes: &[u8], rows: usize, cols: usize, x: &[f32], out: &mut [f32]) -> Result<(), ()> {
+    let row_bytes = sosomodel::dequant::row_bytes(dtype, cols).ok_or(())?;
+    if x.len() != cols || out.len() != rows || bytes.len() != rows * row_bytes {
+        return Err(());
+    }
+    let mut row_f32 = alloc::vec![0.0f32; cols];
+    for (r, o) in out.iter_mut().enumerate() {
+        sosomodel::dequant::dequant_iq_range(dtype, &bytes[r * row_bytes..(r + 1) * row_bytes], 0, &mut row_f32)?;
+        let mut acc = 0.0f32;
+        for (w, &xi) in row_f32.iter().zip(x.iter()) {
+            acc += w * xi;
+        }
+        *o = acc;
+    }
+    Ok(())
+}
+
 /// matvec sobre pesos MXFP4 (bloques de 32 elems / 20 B).
 pub fn matvec_mxfp4(bytes: &[u8], rows: usize, cols: usize, x: &[f32], out: &mut [f32]) -> Result<(), ()> {
     use crate::quant::dequant_mxfp4_range;

@@ -10,6 +10,8 @@
 extern crate alloc;
 
 pub mod dequant;
+pub mod iq;
+pub mod iq_tablas;
 pub mod layout;
 pub mod manifest;
 pub mod index;

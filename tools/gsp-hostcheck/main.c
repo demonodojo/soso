@@ -476,6 +476,7 @@ static int falcon_lx_start(unsigned base)
 #include "gsp_sass.h"
 #include "sass_sets.h"
 #include "gsp_compute_body.inc"
+#include "gsp_3d_body.inc"
 #include "gsp_fini_body.inc"
 
 static int load_blob(enum gsp_fw_kind kind, const char *path)
@@ -2930,13 +2931,17 @@ static int check_classlist(const struct gsp_libos *lo)
     /* Dos chips de mentira. El de Blackwell lleva las clases que `rm/gb20x.c`
      * dice para GB205; el de Ampere, las de una GA10x. Ninguno de los dos lleva
      * las del otro: si el pick no mira el catálogo, uno de los dos falla. */
+    static const uint32_t threed_cand[] = {
+        BLACKWELL_3D_B, BLACKWELL_3D_A, HOPPER_3D_A, ADA_3D_A,
+        AMPERE_B, AMPERE_A,
+    };
     static const uint32_t cat_blackwell[] = {
         0x0000u, 0x0080u, 0x2080u, BLACKWELL_CHANNEL_GPFIFO_B,
-        BLACKWELL_DMA_COPY_B, BLACKWELL_COMPUTE_B, 0x902du,
+        BLACKWELL_DMA_COPY_B, BLACKWELL_COMPUTE_B, BLACKWELL_3D_B, 0x902du,
     };
     static const uint32_t cat_ampere[] = {
         0x0000u, 0x0080u, 0x2080u, AMPERE_CHANNEL_GPFIFO_A,
-        AMPERE_DMA_COPY_A, AMPERE_COMPUTE_B,
+        AMPERE_DMA_COPY_A, AMPERE_COMPUTE_B, AMPERE_B,
     };
     const struct {
         const char *name;
@@ -2944,13 +2949,14 @@ static int check_classlist(const struct gsp_libos *lo)
         unsigned nr;
         uint32_t want_chan;
         uint32_t want_ce;
+        uint32_t want_3d;
     } chip[2] = {
         { "gb20x",  cat_blackwell,
           (unsigned)(sizeof(cat_blackwell) / sizeof(cat_blackwell[0])),
-          BLACKWELL_CHANNEL_GPFIFO_B, BLACKWELL_DMA_COPY_B },
+          BLACKWELL_CHANNEL_GPFIFO_B, BLACKWELL_DMA_COPY_B, BLACKWELL_3D_B },
         { "ga10x",  cat_ampere,
           (unsigned)(sizeof(cat_ampere) / sizeof(cat_ampere[0])),
-          AMPERE_CHANNEL_GPFIFO_A, AMPERE_DMA_COPY_A },
+          AMPERE_CHANNEL_GPFIFO_A, AMPERE_DMA_COPY_A, AMPERE_B },
     };
 
     if (gsp_rpc_init(lo, &rpc) != 0) { printf("FALLO: rpc_init (cls)\n"); return -1; }
@@ -2986,6 +2992,7 @@ static int check_classlist(const struct gsp_libos *lo)
         NV0080_CTRL_GPU_GET_CLASSLIST_V2_PARAMS *cl;
         uint32_t chan_cls;
         uint32_t ce_cls;
+        uint32_t threed_cls;
         unsigned k;
 
         if (!reply) { printf("FALLO: sin memoria (cls)\n"); return -1; }
@@ -3033,10 +3040,15 @@ static int check_classlist(const struct gsp_libos *lo)
 
         chan_cls = gsp_rm_class_pick("canal", chan_cand, 5);
         ce_cls = gsp_rm_class_pick("CE", ce_cand, 5);
-        if (chan_cls != chip[i].want_chan || ce_cls != chip[i].want_ce) {
-            printf("FALLO: %s eligió canal=0x%04x CE=0x%04x (esperaba "
-                   "0x%04x/0x%04x)\n", chip[i].name, chan_cls, ce_cls,
-                   chip[i].want_chan, chip[i].want_ce);
+        threed_cls = gsp_rm_class_pick("3D", threed_cand,
+                                       (unsigned)(sizeof(threed_cand) /
+                                                  sizeof(threed_cand[0])));
+        if (chan_cls != chip[i].want_chan || ce_cls != chip[i].want_ce ||
+            threed_cls != chip[i].want_3d) {
+            printf("FALLO: %s eligió canal=0x%04x CE=0x%04x 3D=0x%04x (esperaba "
+                   "0x%04x/0x%04x/0x%04x)\n", chip[i].name, chan_cls, ce_cls,
+                   threed_cls, chip[i].want_chan, chip[i].want_ce,
+                   chip[i].want_3d);
             return -1;
         }
         if (gsp_rm_class_supported(chip[i].want_chan) != 1 ||
@@ -3045,11 +3057,31 @@ static int check_classlist(const struct gsp_libos *lo)
                    chip[i].name);
             return -1;
         }
-        printf("OK: catálogo %s (%u clases) → canal 0x%04x, CE 0x%04x\n",
-               chip[i].name, chip[i].nr, chan_cls, ce_cls);
+        printf("OK: catálogo %s (%u clases) → canal 0x%04x, CE 0x%04x, 3D 0x%04x\n",
+               chip[i].name, chip[i].nr, chan_cls, ce_cls, threed_cls);
     }
 
     gsp_rm_classes_forget();
+    return 0;
+}
+
+static int check_3d_encode(void)
+{
+    struct gsp_chan c;
+    unsigned char pb[GSP_CHAN_PB_SIZE];
+
+    memset(&c, 0, sizeof(c));
+    c.pushbuf.va = pb;
+    c.pushbuf.size = sizeof(pb);
+    c.ready = 1;
+    c.pb_pos = 0;
+    if (gsp_3d_selftest_encode(&c, BLACKWELL_3D_B, 0x80100000ull, 64u, 64u, 256u,
+                               0xff00ff00u, 0x80200000ull, 1u) != 0) {
+        printf("FALLO: gsp_3d_selftest_encode (cabecera SET_OBJECT)\n");
+        return -1;
+    }
+    printf("OK: pushbuffer 3D CLEAR_SURFACE (cls Blackwell 0x%04x)\n",
+           BLACKWELL_3D_B);
     return 0;
 }
 
@@ -5865,6 +5897,8 @@ static int check_cot(const struct gsp_wpr *wpr)
     if (check_ga104_dead_boot0() != 0)
         return -1;
     if (check_cpu_seq() != 0)
+        return -1;
+    if (check_3d_encode() != 0)
         return -1;
     if (check_g4e_chan_ce(&lo) != 0)
         return -1;

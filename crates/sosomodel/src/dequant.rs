@@ -56,7 +56,10 @@ pub fn row_bytes(dtype: u8, cols: usize) -> Option<usize> {
         crate::layout::DTYPE_Q4_0 => (Q4_0_BLOCK_ELEMS, Q4_0_BLOCK_BYTES),
         crate::layout::DTYPE_Q4_K => (Q4_K_BLOCK_ELEMS, Q4_K_BLOCK_BYTES),
         crate::layout::DTYPE_MXFP4 => (MXFP4_BLOCK_ELEMS, MXFP4_BLOCK_BYTES),
-        _ => return None,
+        d => match crate::layout::ggml_de_dtype_iq(d).and_then(crate::iq::bytes_de_bloque) {
+            Some(b) => (crate::iq::QK_K, b),
+            None => return None,
+        },
     };
     if cols == 0 || cols % elems != 0 {
         return None;
@@ -301,7 +304,7 @@ pub fn matvec_row(
         crate::layout::DTYPE_Q4_0 => dequant_q4_0(fila, &mut scratch[..cols]),
         crate::layout::DTYPE_Q4_K => dequant_q4_k(fila, &mut scratch[..cols]),
         crate::layout::DTYPE_MXFP4 => dequant_mxfp4(fila, &mut scratch[..cols]),
-        _ => return None,
+        d => dequant_iq_range(d, fila, 0, &mut scratch[..cols]),
     };
     deq.ok()?;
     let mut sum = 0.0f32;
@@ -309,4 +312,29 @@ pub fn matvec_row(
         sum += scratch[c] * x[c];
     }
     Some(sum)
+}
+
+/// Descuantiza `out.len()` elementos desde `elem_off` de un tensor en un formato de `iq.rs`
+/// (`bytes` es el tensor completo o una fila; múltiplo de superbloque). `Err` si el dtype no es de ese módulo.
+pub fn dequant_iq_range(dtype: u8, bytes: &[u8], elem_off: usize, out: &mut [f32]) -> Result<(), ()> {
+    use crate::iq::{bytes_de_bloque, dequant_bloque, QK_K};
+    let ggml = crate::layout::ggml_de_dtype_iq(dtype).ok_or(())?;
+    let bb = bytes_de_bloque(ggml).ok_or(())?;
+    if bytes.len() % bb != 0 || out.is_empty() {
+        return Err(());
+    }
+    let end = elem_off.checked_add(out.len()).ok_or(())?;
+    if end > (bytes.len() / bb) * QK_K {
+        return Err(());
+    }
+    let mut tmp = [0f32; QK_K];
+    for b in elem_off / QK_K..=(end - 1) / QK_K {
+        if !dequant_bloque(ggml, &bytes[b * bb..(b + 1) * bb], &mut tmp) {
+            return Err(());
+        }
+        let (lo, hi) = (b * QK_K, (b + 1) * QK_K);
+        let (a, z) = (lo.max(elem_off), hi.min(end));
+        out[a - elem_off..z - elem_off].copy_from_slice(&tmp[a - lo..z - lo]);
+    }
+    Ok(())
 }

@@ -282,7 +282,10 @@ impl<M: FileMapper> TensorSource for MmapTensorSource<M> {
                 let bytes = self.tensor_bytes(&entry, 0, entry.byte_len as usize)?;
                 dequant_mxfp4(bytes, out)
             }
-            _ => Err(()),
+            d => {
+                let bytes = self.tensor_bytes(&entry, 0, entry.byte_len as usize)?;
+                sosomodel::dequant::dequant_iq_range(d, bytes, 0, out)
+            }
         }
     }
 
@@ -313,7 +316,10 @@ impl<M: FileMapper> TensorSource for MmapTensorSource<M> {
                 let bytes = self.tensor_bytes(&entry, 0, entry.byte_len as usize)?;
                 dequant_mxfp4_range(bytes, elem_off, out)
             }
-            _ => Err(()),
+            d => {
+                let bytes = self.tensor_bytes(&entry, 0, entry.byte_len as usize)?;
+                sosomodel::dequant::dequant_iq_range(d, bytes, elem_off, out)
+            }
         }
     }
 

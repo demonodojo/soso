@@ -98,6 +98,14 @@ unsafe extern "C" {
     fn lx_nouveau_device_pt_free() -> u32;
     fn lx_nouveau_set_boot0(boot0: u32, device_id: u32);
     fn lx_nouveau_gsp_fini() -> i32;
+    fn lx_nouveau_gfx3d_ready() -> i32;
+    fn lx_nouveau_gfx3d_clear(
+        rt_va: u64,
+        width: u32,
+        height: u32,
+        pitch: u32,
+        rgba: u32,
+    ) -> i32;
 }
 
 pub fn notify_boot0(boot0: u32, device_id: u16) {
@@ -225,6 +233,28 @@ pub fn device_buf_free(va: u64) -> Result<(), ()> {
 /// vfio-pci sobre un GSP vivo colgó el host el 2026-07-25 (ver `gsp_fini.h`).
 pub fn gsp_fini() -> bool {
     unsafe { lx_nouveau_gsp_fini() == 0 }
+}
+
+pub fn gfx3d_ready() -> bool {
+    unsafe { lx_nouveau_gfx3d_ready() != 0 }
+}
+
+pub fn submit_3d_clear(
+    rt_va: u64,
+    width: u32,
+    height: u32,
+    pitch: u32,
+    rgba: u32,
+) -> Result<bool, ()> {
+    if rt_va == 0 || width == 0 || height == 0 || pitch == 0 {
+        return Err(());
+    }
+    let rc = unsafe { lx_nouveau_gfx3d_clear(rt_va, width, height, pitch, rgba) };
+    if rc < 0 {
+        Err(())
+    } else {
+        Ok(rc != 0)
+    }
 }
 
 pub fn submit_saxpy(a: f32, x: &[f32], y: &mut [f32]) -> Result<bool, ()> {

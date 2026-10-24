@@ -16,12 +16,15 @@
 #include "gsp_chan.h"
 #include "gsp_ce.h"
 #include "gsp_compute.h"
+#include "gsp_3d.h"
 #include "gsp_grctx.h"
 #include "gsp_top.h"
 #include "gsp_vram.h"
 #include "gsp_buf.h"
 #include "gsp_bar1.h"
 #include "gsp_wpr.h"
+
+void *memset(void *dst, int c, unsigned long n);
 #include "gsp_fwsec.h"
 #include "gsp_chip.h"
 #include "gsp_dma.h"
@@ -107,6 +110,8 @@ static struct gsp_chan g_chan;           /* canal GPFIFO del CE, motor COPY0 (G4
 static struct gsp_chan g_chan_gr;        /* canal GPFIFO del compute, motor GR0 */
 static struct gsp_ce g_ce;               /* motor de copia CE (G4e) */
 static struct gsp_compute g_compute;     /* compute + QMD (G4f) */
+static struct gsp_3d g_3d;               /* objeto 3D persistente (H1) */
+static int g_3d_ready;                   /* CLEAR_SURFACE verificado o init ok */
 static struct gsp_buf g_buf;             /* buffers de usuario en VRAM (G6) */
 static struct gsp_bar1 g_bar1;           /* apertura de CPU a VRAM: sólo mirar */
 static struct gsp_grctx g_grctx;          /* contexto del canal de GR (G4f) */
@@ -934,7 +939,10 @@ static int gsp_gr_golden_oneinit(void)
     }
     gsp_grctx_golden_publish(&golden_ctx);
     {
-        static const uint32_t cand[] = { AMPERE_B, AMPERE_A };
+        static const uint32_t cand[] = {
+            BLACKWELL_3D_B, BLACKWELL_3D_A, HOPPER_3D_A, ADA_3D_A,
+            AMPERE_B, AMPERE_A,
+        };
 
         threed_cls = gsp_rm_class_pick("3D golden", cand,
                                        (unsigned)(sizeof(cand) / sizeof(cand[0])));
@@ -987,6 +995,37 @@ static int ce_rebind_copy2(void)
     return ce_rebind_engine(NV2080_ENGINE_TYPE_COPY2);
 }
 
+#define G3D_H1_TEST_VA  (G4D_VA_BASE + 0x20000ull)
+#define G3D_H1_SIZE     64u
+
+static int gsp_3d_h1_selftest(void)
+{
+    const uint32_t rgba = 0xff00ff00u; /* A8B8G8R8 verde */
+    uint32_t *pix;
+
+    if (!g_ce_verified || !g_ce.ready || !g_scratch.va) {
+        lx_printk("nouveau-lx: 3D autoprueba omitida (sin CE)\n");
+        return -1;
+    }
+    if (gsp_3d_clear(&g_3d, G3D_H1_TEST_VA, G3D_H1_SIZE, G3D_H1_SIZE,
+                     G3D_H1_SIZE * 4u, rgba) != 0) {
+        return -1;
+    }
+    memset(g_scratch.va, 0, 4096);
+    if (gsp_ce_copy_sync(&g_ce, G4D_SCRATCH_VA, G3D_H1_TEST_VA,
+                         G3D_H1_SIZE * 4u, GSP_CE_WAIT_MS) != 0) {
+        lx_printk("nouveau-lx: 3D autoprueba — readback CE falló\n");
+        return -1;
+    }
+    pix = (uint32_t *)g_scratch.va;
+    if (pix[0] != rgba) {
+        lx_printk("nouveau-lx: 3D autoprueba — pixel0=0x%08x esperaba 0x%08x\n",
+                  pix[0], rgba);
+        return -1;
+    }
+    return 0;
+}
+
 static int run_compute_stage(void)
 {
     /* Golden ctx antes del GR0 de usuario: r535_gr_oneinit. Best-effort. */
@@ -1029,6 +1068,16 @@ static int run_compute_stage(void)
     if (gsp_compute_init(&g_vmm.rm, &g_chan_gr, &g_compute) != 0) {
         gsp_chan_fini(&g_chan_gr);
         return -1;
+    }
+    if (gsp_3d_init(&g_vmm.rm, &g_chan_gr, &g_3d) == 0) {
+        g_3d_ready = 1;
+        if (gsp_3d_h1_selftest() == 0) {
+            lx_printk("nouveau-lx: 3D clear verificado (H1 GO)\n");
+        } else {
+            lx_printk("nouveau-lx: 3D clear falló en autoprueba (compute sigue)\n");
+        }
+    } else {
+        lx_printk("nouveau-lx: sin objeto 3D persistente (compute sigue)\n");
     }
     g_phase = GSP_RM_COMPUTE;
 
@@ -1250,6 +1299,7 @@ int lx_nouveau_gsp_fini(void)
      * páginas. El canal de GR0 se suelta tras su objeto de compute y antes del
      * de COPY0, en orden inverso al de creación. */
     gsp_buf_fini(&g_buf);
+    gsp_3d_fini(&g_3d);
     gsp_compute_fini(&g_compute);
     gsp_chan_fini(&g_chan_gr);
     gsp_ce_fini(&g_ce);
@@ -1649,6 +1699,28 @@ int lx_nouveau_compute_wait_fence(unsigned sem_slot)
         return -1;
     }
     return gsp_compute_wait_fence(&g_compute, sem_slot);
+}
+
+static int threed_usable(void)
+{
+    return g_3d_ready && g_3d.ready && compute_usable();
+}
+
+int lx_nouveau_3d_ready(void)
+{
+    return threed_usable();
+}
+
+int lx_nouveau_3d_clear(uint64_t rt_va, unsigned width, unsigned height,
+                        unsigned pitch, uint32_t rgba)
+{
+    if (!threed_usable() || !rt_va || !width || !height || !pitch) {
+        return -1;
+    }
+    if (gsp_3d_clear(&g_3d, rt_va, width, height, pitch, rgba) != 0) {
+        return -1;
+    }
+    return 1;
 }
 
 void lx_nouveau_compute_batch_begin(void)

@@ -172,6 +172,20 @@ pub fn enqueue_matvec_q_resident(
     Err(())
 }
 
+pub fn gfx3d_ready() -> bool {
+    false
+}
+
+pub fn submit_3d_clear(
+    _rt_va: u64,
+    _width: u32,
+    _height: u32,
+    _pitch: u32,
+    _rgba: u32,
+) -> Result<bool, ()> {
+    Err(())
+}
+
 pub fn init_module() -> i32 {
     -1
 }

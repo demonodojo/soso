@@ -478,6 +478,7 @@ pub struct GpuInfo {
     ///
     /// Sale del hueco de `_pad`, así que el layout no cambia.
     pub vram_bufs: u8,
+    /// `_pad[0]`: 1 = motor 3D (`CLEAR_SURFACE`) listo en NVIDIA (H1).
     pub _pad: [u8; 4],
     pub vram_total: u64,
     pub vram_free: u64,

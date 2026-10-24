@@ -796,6 +796,19 @@ con `SOSO_ASR_DIR=target/whisper-tiny-model cargo xtask mkfs`.
 
 Para QEMU con micrófono emulado: `SOSO_QEMU_AUDIO=1 cargo xtask run`.
 
+### soso-gfx-demo — prueba del motor 3D (H1)
+
+Demostración de limpieza de pantalla con el motor 3D NVIDIA (`CLEAR_SURFACE` en VRAM)
+y presentación en el framebuffer GOP. Requiere GPU NVIDIA con GSP en fase `rm_compute`
+y `gfx3d=1` en `GpuInfo` (campo interno `_pad[0]`).
+
+```text
+soso-gfx-demo --frames 120
+```
+
+Sin motor 3D imprime un mensaje y sale con código 1. En VFIO GB205 el log de serie debe
+incluir `3D clear verificado (H1 GO)` tras el arranque.
+
 ### soso-web — navegador mínimo
 
 ```sh

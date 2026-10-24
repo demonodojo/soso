@@ -12,7 +12,7 @@ fases con criterio de salida medible. No sustituye al [plan padre](../../SELF_IM
 | **N2 — Servido por soso** | El mismo bucle con el modelo servido por el runtime de soso (guest o máquina física), no por llama.cpp. | Parcial: runtime con atención lineal en CPU; falta la variante MoE, GPU y medida |
 | **N3 — Todo nativo** | Agente (ya nativo), coordinador, build, validación y recuperación dentro de soso, sin Forja ni ejecutores Linux (SI-6/SI-7, T43/T44/T51). | Pendiente |
 
-**Recomendación:** apuntar a **N1 primero** (valor inmediato y medible: parches reales revisados) y avanzar N2 en paralelo; N3 depende de
+**Orden acordado (2026-10-24):** primero la **GPU de soso** (opción A y después B, que llevan a N2) con el ciclo N1 de trabajo real en los huecos de GPU; N3 depende de la
 máquina física y de cerrar T43/T44/T51.
 
 ## 1. Dónde estamos
@@ -62,18 +62,42 @@ coordinador con estado durable y recuperación, validador independiente, bancos 
 6. **Higiene.** 42 rutas sin commitear (arnés, scripts de campaña, bancos, documentación); D11 aceptada (2026-10-24); `cargo clippy` falla al compilar en
    `gguf2som`, `soso-llm-api` y `soso-llm-core` (un error, 345 avisos arrastrados); 36 avisos en `soso-improve-core`; `cargo test -p soso-improve-core` necesita `--features std`.
 
-## 3. Plan por fases
+## 3. Plan por fases (orden acordado el 2026-10-24: primero la GPU de soso, A y luego B)
 
 Tamaños: S (horas), M (días), L (semanas). Cada fase termina con un criterio medible.
 
-### F0 — Cerrar y ordenar (S)
-- Commits agrupados (los hace el usuario): arnés (`soso-improve-core`, `tools/soso-improve`), scripts de campaña, bancos `campana5`/`campana6`, documentación y revisiones.
-- Aceptar o rechazar **D11**; marcar el arnés v43 como estable.
-- **Estado (2026-10-24):** arnés v43 marcado como estable ([campana.md](campana.md), «Arnés estable v43»); agrupación de commits propuesta (22 rutas de automejora en 3 commits; el resto del árbol —WiFi/iwlwifi, kernel, ROG— es trabajo ajeno y va aparte); **D11 aceptada por el usuario el 2026-10-24**.
+**Por qué este orden.** El objetivo es que el modelo lo sirva soso, y la GPU es el tramo largo. Las dos «GPU» son incompatibles en la misma máquina a la vez: con el driver NVIDIA
+cargado hay CUDA en el host (**opción A**: nuestro runtime con nuestros kernels, L6-H), y con `vfio-pci` persistente la tarjeta pasa a soso pero el host pierde CUDA (**opción B**: GPU
+nativa sin Linux, L6 G1→G5). Pasar de una a otra exige reiniciar. Por eso A va primero. Además hay una sola GPU de 12 GB: no se puede desarrollar kernels y correr campañas a la vez, así que
+el ciclo de trabajo real (F3) avanza en los **huecos** (tandas nocturnas con llama.cpp, que habla con el mismo API que luego tendrá el servidor de soso).
+
+### F0 — Cerrar y ordenar (S) — en curso
+- **Estado (2026-10-24):** arnés v43 marcado como estable ([campana.md](campana.md), «Arnés estable v43»); **D11 aceptada** el 2026-10-24; agrupación de commits propuesta (22 rutas de
+  automejora en 3 commits; el resto del árbol —WiFi/iwlwifi, kernel, ROG— es trabajo ajeno); falta revisar R52/R53 de la pasada B de trabajo real.
 - **Salida:** árbol limpio y decisiones registradas.
 
-### F1 — Ciclo N1 de trabajo real (M)
-1. **Generador de tareas** `generar-tareas`: por crate, avisos de Clippy / pruebas rojas → especificación con enunciado, criterio y alcance (ya hay prototipo en `campana6`).
+### F1 — Servir Qwen3.6 con el runtime de soso en GPU, en el host (opción A) (L)
+Qué tipos de tensor llevan los modelos que usamos (medido en los GGUF): **35B-A3B** (`qwen35moe`) = IQ2_S 52 %, IQ3_XXS 29 %, Q6_K 15 %, IQ4_XS 3 %; **27B denso** (`qwen35`) = IQ3_XXS 59 %,
+Q4_K 12 %, Q6_K 10 %, Q5_K 7 %, Q3_K 5 %, IQ2_S, IQ4_XS, IQ3_S, IQ2_XS. Hoy el conversor y el runtime sólo conocen F16/F32/Q4_0/Q4_K/Q6_K/Q8_0/MXFP4. Soportar las IQ permite correr **los mismos pesos
+que medimos con llama.cpp** (misma calidad) y que quepan (IQ3_XXS: 27B ≈ 12 GB, 35B-A3B ≈ 13 GB; con Q4_K_M son 16,8 y 22 GB).
+- **A0 medir lo que hay (S):** 27B denso `Q4_K_M` (sin formatos nuevos) en el runtime de soso en CPU: ¿carga `qwen35`?, paridad de logits con llama.cpp, tok/s y RAM. Línea base y prueba de la atención lineal.
+- **A1 cuantizaciones IQ (L)**, en tres escalones:
+  1. *Corrección en CPU (M):* dequantización de IQ4_XS, IQ3_XXS, IQ2_S, IQ2_XS, IQ3_S y de los K-quants que faltan (Q5_K, Q3_K), con las tablas de `ggml-common.h`, validada **bloque a bloque contra
+     libggml como oráculo**; dtypes nuevos en `sosomodel`/`gguf2som` (paso directo, sin recuantizar) y matvec escalar correcto.
+  2. *Velocidad en CPU (M):* AVX2 para los tipos dominantes (IQ3_XXS, IQ2_S, IQ4_XS).
+  3. *GPU (L):* matvec y GEMM de prefill (dequantización en shared) por formato, capas residentes y losas de expertos con los dtypes nuevos (hoy la capa MoE exige gate/up Q4_K y down Q8_0).
+- **A2 variante MoE (M):** `qwen35moe` (MoE + Gated DeltaNet + experto compartido) en `gguf2som` y `arch.rs`, CPU primero.
+- **A3 kernels GPU (L):** atención lineal (GDN) y experto compartido en CUDA, y flujo de expertos con LRU para el 35B-A3B, reutilizando lo hecho para Mellum y Qwen3-Coder-30B-A3B. Recompilar el PTX tras tocar el `.cu`.
+- **A4 paridad y rendimiento (M):** misma campaña con el servidor de soso y con llama.cpp (calidad ±1 tarea) y tok/s medidos; el umbral mínimo se fija con esas medidas.
+- **Salida:** el combo corre sobre el servidor de soso con CUDA en el host, con los mismos pesos IQ y calidad equivalente.
+
+### F2 — GPU nativa de soso, sin Linux (opción B) (L)
+- Requiere ceder la GPU a soso (`l6-g1-vfio-persist.sh --enable` y reinicio; el host pierde CUDA mientras tanto).
+- **G4 cómputo** (lanzar kernels vía lxdde + nvkm + SASS) y **G5 inferencia** con los mismos kernels de F1; validar con el chip real (GB205; la 3060/Ampere es el objetivo de validación recomendado).
+- **Salida:** la misma campaña con el modelo servido por soso con la GPU controlada por soso, sin Linux ni CUDA.
+
+### F3 — Ciclo N1 de trabajo real (M, en los huecos de GPU)
+1. **Generador de tareas** `generar-tareas`: por crate, avisos de Clippy / pruebas rojas → especificación con enunciado, criterio y alcance (prototipo en `campana6`).
 2. **Modo mantenimiento:** `--sistema estandar`, enunciado «cambio mínimo que quite el aviso», límite de líneas cambiadas, sin módulos de pruebas obligatorios.
 3. **Puerta de revisión:** checklist fija (equivalencia, sin `#[allow]`, sin pruebas no pedidas, sin reestructuración innecesaria) + prueba diferencial para refactors; revisor = Claude
    (cupo de la suscripción: ≈25 min de campaña por ventana) o el usuario.
@@ -83,27 +107,19 @@ Tamaños: S (horas), M (días), L (semanas). Cada fase termina con un criterio m
 6. **Métricas:** parches aceptados tras revisión / propuestos, incidentes de infraestructura, tiempo por parche.
 - **Salida:** 20 parches reales revisados y aplicados sin regresión en `cargo xtask check`; ≥60 % aceptados tras revisión; 0 incidentes de infraestructura en tandas de 6 tareas.
 
-### F2 — Subir la calidad local (M, en paralelo a F1)
-- Tareas de más sustancia que el estilo (defectos, huecos de pruebas), con enunciados escritos sin mirar los fallos.
-- Probar el denso con razonamiento y otra cuantización; atacar los huecos estables (desbordes, semántica fina) con puertas o prompts, **midiendo en un banco ciego nuevo** (el 5 ya está visto).
+### F4 — Subir la calidad local (M, en paralelo a F3)
+- Tareas de más sustancia que el estilo; probar el denso con razonamiento y otra cuantización; atacar los huecos estables (desbordes, semántica fina), **midiendo en un banco ciego nuevo**.
 - **Salida:** banco ciego 6 con el combo ≥ 8/10 sin tocar el arnés durante la medida.
 
-### F3 — Servir desde soso (L)
-- Medir el 27B denso (`qwen35`) en el runtime CPU del guest: tok/s, RAM, calidad frente a llama.cpp (misma campaña, ±1 tarea).
-- Añadir `qwen35moe` (MoE + GDN + experto compartido) a `gguf2som` y `arch.rs`, con descarga de expertos a RAM; luego kernels GPU para GDN (como Gemma/Mellum).
-- **Salida:** campaña de F1 completa con el servidor de soso y calidad equivalente; umbral de tok/s fijado tras medir.
+### F5 — Máquina física (L)
+- Elegir equipo (docs/HW-MATRIX), medir servicio e inferencia (T30) y probar la recuperación completa de la instalación (T31). **Salida:** 10 tareas consecutivas sin caída ni fuga de recursos (SI-5).
 
-### F4 — Máquina física (L)
-- Elegir equipo (docs/HW-MATRIX), medir servicio e inferencia (T30), probar la recuperación completa de la instalación (T31).
-- **Salida:** 10 tareas consecutivas atendidas sin caída ni fuga de recursos (SI-5).
-
-### F5 — Circuito nativo (L)
-- T43, T44 y T51: validar y recuperar candidatos construidos en soso; tres mejoras repetidas; campaña completa sin Forja ni ejecutores Linux.
-- **Salida:** SI-7 cerrado con evidencia nativa.
+### F6 — Circuito nativo (L)
+- T43, T44 y T51: validar y recuperar candidatos construidos en soso; tres mejoras repetidas; campaña completa sin Forja ni ejecutores Linux. **Salida:** SI-7 cerrado con evidencia nativa.
 
 ## 4. Decisiones que hacen falta
 1. ~~**D11**~~ — **aceptada** (2026-10-24): Qwen3.6-35B-A3B + 27B denso como modelo de trabajo.
-2. **Objetivo inmediato:** N1 (host asistido) primero, o ir directo a servir desde soso (F3).
+2. ~~**Objetivo inmediato**~~ — **resuelto** (2026-10-24): GPU de soso primero (A y luego B), ciclo N1 en los huecos.
 3. **Revisor:** Claude con la suscripción (rápido, con cupo limitado) o el usuario; o mixto (Claude propone, el usuario aprueba).
 4. **Máquina física** para F4: cuál.
 5. **Política de commits:** cómo agrupar lo pendiente y con qué frecuencia entregar parches revisados.

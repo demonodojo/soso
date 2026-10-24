@@ -1,0 +1,4 @@
+import modulo
+
+fn main() -> Int ! io, alloc
+    print_str("respuesta=" + int_to_str(respuesta()) + "\n")
