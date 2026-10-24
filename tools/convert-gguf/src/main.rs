@@ -45,6 +45,30 @@ fn main() {
         return;
     }
 
+    if args.first().map(|s| s.as_str()) == Some("--inspect-kev") {
+        args.remove(0);
+        let path = args.first().map(PathBuf::from).unwrap_or_else(|| {
+            eprintln!("uso: convert-gguf --inspect-kev <modelo.gguf>");
+            process::exit(2);
+        });
+        match gguf2som::inspect_kev_gguf(&path) {
+            Ok(info) => {
+                println!(
+                    "kev: temperature={} pointer_dim={} {} {}",
+                    info.temperature,
+                    info.pointer_dim,
+                    info.head_q_tensor,
+                    info.head_k_tensor
+                );
+            }
+            Err(why) => {
+                eprintln!("convert-gguf: {why}");
+                process::exit(1);
+            }
+        }
+        return;
+    }
+
     let gguf = args.first().cloned().unwrap_or_else(|| {
         eprintln!("uso: convert-gguf <modelo.gguf> [dir_salida] [--name nombre]");
         eprintln!("     convert-gguf --check <dir_modelo>");

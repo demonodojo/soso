@@ -19,7 +19,7 @@ pub mod validate;
 
 pub use layout::*;
 pub use manifest::{
-    AttnKind, AudioSpec, FfnKind, LayerSpec, Manifest, ModelKind, NormKind, UnsupportedLayer,
+    AttnKind, AudioSpec, FfnKind, KevSpec, LayerSpec, Manifest, ModelKind, NormKind, UnsupportedLayer,
     ManifestExt, FLAG_GEGLU, FLAG_LAYER_SCALE, FLAG_QK_NORM, FLAG_ROPE_FACTORS, FLAG_ROPE_NEOX,
     FLAG_SANDWICH_NORM, FLAG_V_FROM_K, FLAG_V_NORM,
 };

@@ -121,6 +121,11 @@ pub trait ChatBackend: Send {
         prepared: &PreparedChatCompletion,
         observer: &mut dyn GenerationObserver,
     ) -> Result<(Vec<u32>, GenerationReport), ()>;
+
+    /// Decisión Kev (`POST /v1/systemone`); por defecto no implementado.
+    fn systemone_json(&mut self, _body: &str) -> Result<String, String> {
+        Err(String::from("backend no soporta /v1/systemone"))
+    }
 }
 
 enum RunSource {
@@ -361,6 +366,15 @@ impl ChatBackend for CpuBackend {
         // prompt, con sus `<tool_call>` de ejemplo, como si fuera la salida del modelo.
         Ok((solo_generados(&secuencia, prompt_ids.len()), report))
     }
+
+    fn systemone_json(&mut self, body: &str) -> Result<String, String> {
+        crate::systemone::run_systemone(body, &mut self.rt, &self.tokenizer, &mut self.source)
+        .map_err(|e| match e {
+            crate::systemone::SystemOneError::Json(m)
+            | crate::systemone::SystemOneError::Modelo(m)
+            | crate::systemone::SystemOneError::Inferencia(m) => m,
+        })
+    }
 }
 
 /// Quita el prompt del principio de una secuencia devuelta por el runtime.
@@ -467,6 +481,8 @@ impl<B: ChatBackend + Send> HostService<B> {
             }
             ("POST", "/v1/chat/completions") => self.post_chat(req, stream),
             (_, "/v1/chat/completions") => Err(ServiceError::MethodNotAllowed),
+            ("POST", "/v1/systemone") => self.post_systemone(req),
+            (_, "/v1/systemone") => Err(ServiceError::MethodNotAllowed),
             _ => Err(ServiceError::NotFound),
         }
     }
@@ -570,6 +586,23 @@ impl<B: ChatBackend + Send> HostService<B> {
             200,
             &[("Content-Type", "application/json")],
             &json,
+        ))
+    }
+
+    fn post_systemone(&self, req: HttpRequest) -> Result<Vec<u8>, ServiceError> {
+        let body = std::str::from_utf8(&req.body)
+            .map_err(|_| ServiceError::Api(ApiError::PeticionInvalida {
+                motivo: String::from("cuerpo no UTF-8"),
+            }))?;
+        let mut backend = self.backend.lock().unwrap();
+        backend.begin_request();
+        let json = backend
+            .systemone_json(body)
+            .map_err(|m| ServiceError::Api(ApiError::PeticionInvalida { motivo: m }))?;
+        Ok(format_response(
+            200,
+            &[("Content-Type", "application/json")],
+            json.as_bytes(),
         ))
     }
 

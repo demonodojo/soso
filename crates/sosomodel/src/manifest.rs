@@ -80,6 +80,8 @@ impl NormKind {
 pub enum ModelKind {
     Decoder = 0,
     AsrEncoderDecoder = 1,
+    /// Modelo de decisión tipo Jev/Kev (System One): tronco causal + cabeza de puntero.
+    Decision = 2,
 }
 
 impl ModelKind {
@@ -87,9 +89,23 @@ impl ModelKind {
         match v {
             0 => Some(Self::Decoder),
             1 => Some(Self::AsrEncoderDecoder),
+            2 => Some(Self::Decision),
             _ => None,
         }
     }
+
+    pub fn es_decision(&self) -> bool {
+        matches!(self, Self::Decision)
+    }
+}
+
+/// Metadatos de la cabeza de puntero Kev (manifest v9).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KevSpec {
+    /// Temperatura de calibración (inferencia).
+    pub temperature: f32,
+    /// Dimensión interna de la cabeza (p. ej. 256).
+    pub pointer_dim: u32,
 }
 
 /// YaRN de las capas de atención completa (Mellum 2.1). `factor == 0` es RoPE plano.
@@ -301,6 +317,8 @@ pub struct Manifest {
     pub norm_kind: NormKind,
     /// Extensiones v7 (Gemma 4).
     pub ext: ManifestExt,
+    /// Cabeza Kev (v9); `None` en decoders clásicos.
+    pub kev: Option<KevSpec>,
 }
 
 const LAYER_SPEC_BYTES: usize = 60;
@@ -673,6 +691,7 @@ impl Manifest {
             audio: AudioSpec::default(),
             norm_kind: NormKind::Rms,
             ext: ManifestExt::default(),
+            kev: None,
         };
         m.fill_layers_from_globals();
         m
@@ -720,6 +739,7 @@ impl Manifest {
             audio: AudioSpec::default(),
             norm_kind: NormKind::Rms,
             ext: ManifestExt::default(),
+            kev: None,
         };
         m.fill_layers_from_globals();
         m
@@ -827,6 +847,7 @@ impl Manifest {
             audio,
             norm_kind: NormKind::Layer,
             ext: ManifestExt::default(),
+            kev: None,
         }
     }
 
@@ -888,6 +909,7 @@ impl Manifest {
             audio,
             norm_kind: NormKind::Layer,
             ext: ManifestExt::default(),
+            kev: None,
         }
     }
 
@@ -939,7 +961,7 @@ impl Manifest {
         body.extend_from_slice(&self.audio.n_text_layer.to_le_bytes());
         body.extend_from_slice(&self.audio.n_text_head.to_le_bytes());
         debug_assert_eq!(LAYER_SPEC_BYTES, 60);
-        let version = if self.ext.yarn.activa() || !self.ext.es_vacia() {
+        let mut version = if self.ext.yarn.activa() || !self.ext.es_vacia() {
             // v7: trailer tras el AudioSpec. Un lector antiguo no lo ve (llega a su fin natural).
             body.extend_from_slice(&self.ext.embed_scale.to_le_bytes());
             body.extend_from_slice(&self.ext.logit_softcap.to_le_bytes());
@@ -969,6 +991,30 @@ impl Manifest {
         } else {
             5
         };
+        if let Some(k) = self.kev {
+            // El bloque v6 (model_kind + AudioSpec) ya va siempre antes; sólo falta v7 si no se escribió.
+            if version < 7 {
+                let e = ManifestExt::default();
+                body.extend_from_slice(&e.embed_scale.to_le_bytes());
+                body.extend_from_slice(&e.logit_softcap.to_le_bytes());
+                body.extend_from_slice(&e.attn_scale.to_le_bytes());
+                body.extend_from_slice(&0u32.to_le_bytes());
+                body.extend_from_slice(&0u32.to_le_bytes());
+                body.extend_from_slice(&0u32.to_le_bytes());
+                version = 7;
+            }
+            if version < 8 {
+                let y = YarnSpec::default();
+                body.extend_from_slice(&y.factor.to_le_bytes());
+                body.extend_from_slice(&y.orig_ctx.to_le_bytes());
+                body.extend_from_slice(&y.beta_fast.to_le_bytes());
+                body.extend_from_slice(&y.beta_slow.to_le_bytes());
+                version = 8;
+            }
+            body.extend_from_slice(&k.temperature.to_le_bytes());
+            body.extend_from_slice(&k.pointer_dim.to_le_bytes());
+            version = version.max(9);
+        }
         pack_som(&body, version, CACHE_ALIGN)
     }
 
@@ -1094,6 +1140,14 @@ impl Manifest {
         } else {
             ManifestExt::default()
         };
+        let kev = if version >= 9 {
+            Some(KevSpec {
+                temperature: r.f32()?,
+                pointer_dim: r.u32()?,
+            })
+        } else {
+            None
+        };
         let manifest = Self {
             name,
             vocab_size,
@@ -1115,6 +1169,7 @@ impl Manifest {
             audio,
             norm_kind,
             ext,
+            kev,
         };
         manifest.validate_layer_divisibility()?;
         Ok(manifest)

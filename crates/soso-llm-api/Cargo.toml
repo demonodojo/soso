@@ -38,6 +38,10 @@ required-features = ["std"]
 name = "serve_guion"
 required-features = ["std"]
 
+[[example]]
+name = "decide"
+required-features = ["std"]
+
 [[test]]
 name = "admission"
 required-features = ["std"]

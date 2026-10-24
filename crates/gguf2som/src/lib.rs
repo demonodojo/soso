@@ -111,6 +111,58 @@ pub fn convert_path_with_options(
     convert_with_options(&mut f, &mut out, stem.as_deref(), options)
 }
 
+/// Cabecera Kev embebida en un GGUF (`dec.head_*`, metadatos `kev.*`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct KevGgufInspect {
+    pub temperature: f32,
+    pub pointer_dim: u32,
+    pub head_q_tensor: String,
+    pub head_k_tensor: String,
+}
+
+#[cfg(feature = "std")]
+pub fn inspect_kev_gguf(path: &std::path::Path) -> Result<KevGgufInspect, String> {
+    use crate::io::std_file::File as IoFile;
+    let mut f = IoFile(
+        std::fs::File::open(path)
+            .map_err(|e| format!("abrir {}: {e}", path.display()))?,
+    );
+    let gguf = parse_gguf(&mut f)?;
+    inspect_kev_from_gguf(&gguf)
+}
+
+fn inspect_kev_from_gguf(gguf: &GgufFile) -> Result<KevGgufInspect, String> {
+    let head_q = ["dec.head.q.weight", "dec.head_q.weight"]
+        .into_iter()
+        .find(|n| gguf.tensors.contains_key(*n))
+        .map(String::from)
+        .ok_or_else(|| String::from("falta dec.head.q.weight (o dec.head_q.weight)"))?;
+    let head_k = ["dec.head.k.weight", "dec.head_k.weight"]
+        .into_iter()
+        .find(|n| gguf.tensors.contains_key(*n))
+        .map(String::from)
+        .ok_or_else(|| String::from("falta dec.head.k.weight (o dec.head_k.weight)"))?;
+    let temperature = gguf
+        .meta_f32("kev.temperature")
+        .or_else(|_| gguf.meta_f32("kev.calibration_temperature"))?;
+    let pointer_dim = gguf
+        .meta_u32("kev.pointer_dim")
+        .or_else(|_| gguf.meta_u32("kev.head_dim"))
+        .or_else(|_| {
+            gguf.tensors
+                .get(&head_q)
+                .and_then(|t| t.shape.first().copied())
+                .map(|d| d as u32)
+                .ok_or_else(|| String::from("kev.pointer_dim ausente y forma de head_q desconocida"))
+        })?;
+    Ok(KevGgufInspect {
+        temperature,
+        pointer_dim,
+        head_q_tensor: head_q,
+        head_k_tensor: head_k,
+    })
+}
+
 const GGML_F32: u32 = 0;
 const GGML_Q4_0: u32 = 2;
 const GGML_Q5_0: u32 = 6;
@@ -624,6 +676,51 @@ pub fn convert_with_options<R: Read + Seek>(
         emit(file, &mut index, &mut id, "rope_freqs.weight", "rope_freqs", out)?;
     }
 
+    let mut kev_head_q = false;
+    for (gguf_name, som_name) in [
+        ("dec.head.q.weight", "kev.head_q"),
+        ("dec.head_q.weight", "kev.head_q"),
+    ] {
+        if gguf.tensors.contains_key(gguf_name) {
+            emit(file, &mut index, &mut id, gguf_name, som_name, out)?;
+            kev_head_q = true;
+            break;
+        }
+    }
+    let mut kev_head_k = false;
+    for (gguf_name, som_name) in [
+        ("dec.head.k.weight", "kev.head_k"),
+        ("dec.head_k.weight", "kev.head_k"),
+    ] {
+        if gguf.tensors.contains_key(gguf_name) {
+            emit(file, &mut index, &mut id, gguf_name, som_name, out)?;
+            kev_head_k = true;
+            break;
+        }
+    }
+    let kev_pack = kev_head_q && kev_head_k;
+    let kev_temperature = if kev_pack {
+        gguf
+            .meta_f32("kev.temperature")
+            .or_else(|_| gguf.meta_f32("kev.calibration_temperature"))
+            .unwrap_or(1.0)
+    } else {
+        1.0
+    };
+    let kev_pointer_dim = if kev_pack {
+        gguf
+            .meta_u32("kev.pointer_dim")
+            .or_else(|_| gguf.meta_u32("kev.head_dim"))
+            .unwrap_or_else(|_| {
+                index
+                    .find("kev.head_q")
+                    .and_then(|e| e.shape.first().copied())
+                    .unwrap_or(256)
+            })
+    } else {
+        0
+    };
+
     if index.find("embed").is_none() {
         return Err("el GGUF no contiene token_embd.weight".into());
     }
@@ -652,7 +749,18 @@ pub fn convert_with_options<R: Read + Seek>(
         audio: AudioSpec::default(),
         norm_kind: NormKind::Rms,
         ext: ManifestExt::default(),
+        kev: if kev_pack {
+            Some(sosomodel::manifest::KevSpec {
+                temperature: kev_temperature,
+                pointer_dim: kev_pointer_dim,
+            })
+        } else {
+            None
+        },
     };
+    if kev_pack {
+        manifest.model_kind = ModelKind::Decision;
+    }
     manifest.fill_layers_from_globals();
     if is_qwen2 {
         for spec in manifest.layers.iter_mut() {
@@ -2505,9 +2613,13 @@ mod tests {
             ("blk.1.ffn_up.weight", vec![H, FFN]),
             ("blk.1.ffn_gate.weight", vec![H, FFN]),
             ("blk.1.ffn_down.weight", vec![FFN, H]),
+            ("dec.head.q.weight", vec![4, H]),
+            ("dec.head.k.weight", vec![4, H]),
         ];
-        let g = pack_gguf_v3(13, |g| {
+        let g = pack_gguf_v3(15, |g| {
             gguf_kv_str(g, "general.architecture", "qwen35");
+            gguf_kv_f32(g, "kev.temperature", 2.19);
+            gguf_kv_u32(g, "kev.pointer_dim", 4);
             gguf_kv_u32(g, "qwen35.embedding_length", H as u32);
             gguf_kv_u32(g, "qwen35.block_count", 2);
             gguf_kv_u32(g, "qwen35.feed_forward_length", FFN as u32);
@@ -2526,6 +2638,10 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let gguf_path = dir.join("qwen35.gguf");
         fs::File::create(&gguf_path).unwrap().write_all(&g).unwrap();
+        let kev_meta = inspect_kev_gguf(&gguf_path).unwrap();
+        assert_eq!(kev_meta.temperature, 2.19);
+        assert_eq!(kev_meta.pointer_dim, 4);
+        assert_eq!(kev_meta.head_q_tensor, "dec.head.q.weight");
         let out = dir.join("out");
         convert_path(gguf_path.to_str().unwrap(), &out, Some("qwen38")).unwrap();
         let manifest = Manifest::parse(&fs::read(out.join(MANIFEST_FILE)).unwrap()).unwrap();
@@ -2533,11 +2649,15 @@ mod tests {
         assert_eq!(manifest.layers[1].attn_kind, AttnKind::Gated);
         assert_eq!(manifest.layers[0].v_head_dim, D as u32);
         assert_eq!(manifest.layers[1].v_head_dim, GHD as u32);
+        assert_eq!(manifest.model_kind, ModelKind::Decision);
+        assert!(manifest.kev.is_some());
         let index = TensorIndex::parse(&fs::read(out.join(INDEX_FILE)).unwrap()).unwrap();
         assert!(index.find("L00.attn_qkv").is_some());
         assert!(index.find("L00.ssm_a").is_some());
         assert!(index.find("L01.attn_q_norm").is_some());
         assert!(index.find("L00.ffn_norm").is_some());
+        assert!(index.find("kev.head_q").is_some());
+        assert!(index.find("kev.head_k").is_some());
         let rt = soso_llm_core::runtime::Runtime::new(manifest, index, 0, 0);
         rt.validate_shapes().expect("shapes qwen35");
     }

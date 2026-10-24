@@ -12,6 +12,7 @@ pub mod generation;
 pub mod f16;
 pub use sosomodel::iq;
 pub use sosomodel::iq_tablas;
+pub mod kev;
 pub mod gemm;
 pub mod gemma;
 pub mod gpu;

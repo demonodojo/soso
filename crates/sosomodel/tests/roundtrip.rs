@@ -1,5 +1,5 @@
 use sosomodel::index::{pack_shard, TensorIndex, make_f32_entry};
-use sosomodel::manifest::{AttnKind, FfnKind, LayerSpec, Manifest};
+use sosomodel::manifest::{AttnKind, FfnKind, KevSpec, LayerSpec, Manifest, ModelKind};
 
 #[test]
 fn manifest_v4_roundtrip_layer_specs() {
@@ -203,6 +203,21 @@ fn shard_payload_con_ceros_finales_se_conserva() {
     let packed = pack_shard(&data);
     let payload = sosomodel::index::verify_shard(&packed).unwrap();
     assert_eq!(payload, &data);
+}
+
+#[test]
+fn manifest_v9_kev_roundtrip() {
+    let mut m = Manifest::tiny("kev");
+    m.model_kind = ModelKind::Decision;
+    m.kev = Some(KevSpec {
+        temperature: 2.41,
+        pointer_dim: 256,
+    });
+    let parsed = Manifest::parse(&m.serialize()).unwrap();
+    assert_eq!(parsed.model_kind, ModelKind::Decision);
+    let k = parsed.kev.unwrap();
+    assert!((k.temperature - 2.41).abs() < 1e-6);
+    assert_eq!(k.pointer_dim, 256);
 }
 
 #[test]

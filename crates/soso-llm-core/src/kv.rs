@@ -16,6 +16,7 @@ pub enum KvDtype {
 }
 
 /// Cache K/V de una capa.
+#[derive(Clone)]
 pub struct LayerKv {
     pub dtype: KvDtype,
     /// Si true, `k_*` guarda el vector latente MLA (`c_kv`) por token.

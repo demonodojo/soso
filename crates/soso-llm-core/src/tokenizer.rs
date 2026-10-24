@@ -131,6 +131,14 @@ impl Tokenizer {
         matches!(self, Tokenizer::Vocab(_))
     }
 
+    /// Id de una pieza literal del vocabulario (p. ej. tokens especiales Kev).
+    pub fn piece_id(&self, piece: &str) -> Option<u32> {
+        match self {
+            Tokenizer::ByteLevel => None,
+            Tokenizer::Vocab(v) => v.id_de_pieza(piece),
+        }
+    }
+
     pub fn decode(&self, tokens: &[u32]) -> String {
         match self {
             Tokenizer::ByteLevel => {

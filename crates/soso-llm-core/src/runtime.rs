@@ -156,6 +156,14 @@ enum Especulativo {
     Parar,
 }
 
+/// Prefijo compartido entre preguntas Kev (estado + caché recurrente).
+#[derive(Clone)]
+pub struct KevPrefixSnapshot {
+    pub pos: usize,
+    pub hidden: Vec<f32>,
+    pub kv: Vec<LayerKv>,
+}
+
 pub struct Runtime {
     pub manifest: Manifest,
     pub index: TensorIndex,
@@ -473,6 +481,23 @@ impl Runtime {
         if let Some(pl) = self.planner.as_mut() {
             pl.reset_moe_hints();
         }
+    }
+
+    /// Copia posición, oculto y caché KV/GDN tras codificar el estado Kev.
+    pub fn snapshot_kev_prefix(&self) -> KevPrefixSnapshot {
+        KevPrefixSnapshot {
+            pos: self.pos,
+            hidden: self.hidden.clone(),
+            kv: self.kv.clone(),
+        }
+    }
+
+    /// Restaura un prefijo Kev antes de procesar otra fila de pregunta.
+    pub fn restore_kev_prefix(&mut self, snap: &KevPrefixSnapshot) {
+        self.pos = snap.pos;
+        self.hidden.copy_from_slice(&snap.hidden);
+        self.kv.clone_from(&snap.kv);
+        self.cached_tokens.clear();
     }
 
     /// Ancho de K/V por token de una capa de atención clásica; `None` si la

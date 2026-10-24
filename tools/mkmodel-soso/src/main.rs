@@ -399,6 +399,7 @@ fn main() {
         audio: AudioSpec::default(),
         norm_kind: NormKind::Rms,
         ext: sosomodel::manifest::ManifestExt::default(),
+        kev: None,
     };
     manifest.fill_layers_from_globals();
     if num_shared > 0 {

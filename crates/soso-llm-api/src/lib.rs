@@ -45,6 +45,8 @@ pub mod host_mmap;
 #[cfg(feature = "std")]
 pub mod host_pool;
 #[cfg(feature = "std")]
+pub mod systemone;
+#[cfg(feature = "std")]
 pub mod service;
 
 #[cfg(feature = "std")]
@@ -58,6 +60,6 @@ pub use e2e::{
 pub use host_pool::HostPool;
 #[cfg(feature = "std")]
 pub use service::{
-    http_error_bytes, load_cpu_backend, run_accept_loop, CancelBridge, ChatBackend, CpuBackend,
-    solo_generados, HostService, LoadError, OwnedMapper, ServiceError,
+    http_error_bytes, load_cpu_backend, run_accept_loop, sha256_hex, CancelBridge, ChatBackend,
+    CpuBackend, solo_generados, HostService, LoadError, OwnedMapper, ServiceError,
 };
