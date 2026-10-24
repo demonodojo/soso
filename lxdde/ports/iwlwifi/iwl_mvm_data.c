@@ -166,6 +166,8 @@ static const char *link_lost_name(uint8_t cause)
         return "firmware caído";
     case IWL_LINK_LOST_TXQ_STUCK:
         return "cola TX atascada";
+    case IWL_LINK_LOST_RX_STUCK:
+        return "RX parado";
     default:
         return "?";
     }
@@ -186,6 +188,9 @@ void iwl_mvm_link_down(struct iwl_ax211_priv *iwl, uint8_t cause, uint16_t reaso
     iwl->link_lost_cause = cause;
     iwl->link_lost_reason = reason;
     iwl->cmd_needs_recover = 1;
+    iwl->rx_last_progress_ms = 0;
+    iwl->rx_had_traffic = 0;
+    iwl->rx_health_read_snap = 0;
     lx_printk("iwl_mvm: enlace perdido (%s, motivo 802.11 %u)\n",
               link_lost_name(cause), (unsigned)reason);
 }

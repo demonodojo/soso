@@ -92,6 +92,7 @@ impl LxIwlContadores {
             3 => "beacons perdidos",
             4 => "firmware caído",
             5 => "cola TX atascada",
+            6 => "RX parado",
             _ => "sin aviso del AP",
         }
     }
@@ -99,6 +100,63 @@ impl LxIwlContadores {
     /// Reason code 802.11 de la última DEAUTH/DISASSOC.
     pub fn motivo(&self) -> u32 {
         self.link_lost_reason
+    }
+}
+
+static ULTIMO_WIFI_POLL_MS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static ULTIMO_MANTENER_MS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static POLL_TRY_FAIL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static SONDEO_GAP_MAX_MS: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Llamado desde [`super::net::wifi_wpa::mantener`].
+pub fn poll_lock_fallo() {
+    POLL_TRY_FAIL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn registrar_mantener() {
+    let now = crate::arch::pit::uptime_ms();
+    vigilar_sondeo_gaps(now, false);
+    ULTIMO_MANTENER_MS.store(now, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// ¿Hace más de `limite_ms` que no corre `mantener` en la BSP?
+pub fn mantener_atrasado(limite_ms: u64) -> bool {
+    let last = ULTIMO_MANTENER_MS.load(core::sync::atomic::Ordering::Relaxed);
+    if last == 0 {
+        return false;
+    }
+    crate::arch::pit::uptime_ms().saturating_sub(last) > limite_ms
+}
+
+fn vigilar_sondeo_gaps(now: u64, es_poll_wifi: bool) {
+    const LIMITE: u64 = 500;
+    let (prev, label) = if es_poll_wifi {
+        (
+            ULTIMO_WIFI_POLL_MS.swap(now, core::sync::atomic::Ordering::Relaxed),
+            "wifi::poll",
+        )
+    } else {
+        (
+            ULTIMO_MANTENER_MS.load(core::sync::atomic::Ordering::Relaxed),
+            "mantener",
+        )
+    };
+    if prev != 0 {
+        let gap = now.saturating_sub(prev);
+        if gap > LIMITE {
+            let pid = crate::arch::percpu::current_pid();
+            let fails = POLL_TRY_FAIL.load(core::sync::atomic::Ordering::Relaxed);
+            crate::println!(
+                "wifi: sondeo parado {gap} ms ({label}, pid={pid}, poll_try_lock_fallos={fails})"
+            );
+            let prev_max = SONDEO_GAP_MAX_MS.load(core::sync::atomic::Ordering::Relaxed);
+            if gap > prev_max as u64 {
+                SONDEO_GAP_MAX_MS.store(gap as u32, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
     }
 }
 
@@ -121,9 +179,11 @@ pub fn vigilar_contadores(tx_err: u64) {
         return;
     }
     *u = (perdidas, tx_err, ahora);
+    let sondeo_max = SONDEO_GAP_MAX_MS.load(core::sync::atomic::Ordering::Relaxed);
     crate::println!(
         "wifi: pérdidas tx_cola_llena={} tx_err={tx_err} rxq_llena={} eapolq_llena={} \
-         rx_truncado={} rx_vid={} rx_datos_mal={} hcmd_lleno={} (rx_ok={} rb_multi={} caídas={})",
+         rx_truncado={} rx_vid={} rx_datos_mal={} hcmd_lleno={} (rx_ok={} rb_multi={} caídas={} \
+         sondeo_max={sondeo_max} ms)",
         c.tx_full_drop,
         c.rxq_full_drop,
         c.eapolq_full_drop,
@@ -175,8 +235,12 @@ pub fn poll() {
     // El sondeo cede si otro camino ya es el propietario: volverá al próximo
     // tick en vez de girar detrás de un scan de varios segundos.
     let Some(_g) = TRANS_LOCK.try_lock() else {
+        POLL_TRY_FAIL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         return;
     };
+    let now = crate::arch::pit::uptime_ms();
+    vigilar_sondeo_gaps(now, true);
+    ULTIMO_WIFI_POLL_MS.store(now, core::sync::atomic::Ordering::Relaxed);
     unsafe { lx_iwlwifi_poll() };
 }
 

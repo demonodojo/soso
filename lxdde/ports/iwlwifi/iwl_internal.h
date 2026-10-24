@@ -73,7 +73,7 @@ enum iwl_device_family {
 #define IWL_MVM_DQA_CMD_QUEUE        0
 #define DQA_ENABLE_CMD               0x0
 #define IWL_MVM_HCMD_TIMEOUT_MS      2000
-#define IWL_GEN2_RX_N                32
+#define IWL_GEN2_RX_N                256
 #define IWL_GEN2_RX_SZ               4096
 /* iwl-trans.h: cabecera `len_n_flags` de cada paquete dentro de un RB. */
 #define FH_RSCSR_FRAME_SIZE_MSK      0x00003fffu
@@ -164,6 +164,7 @@ typedef char iwl_rx_completion_rbid_off[
 #define FH_MEM_CBBC_QUEUE(chnl)      (FH_MEM_LOWER_BOUND + 0x9d0u + 4u * (unsigned)(chnl))
 #define IWL_CTXT_INFO_TFD_FORMAT_LONG 0x0100u
 #define IWL_CTXT_INFO_RB_CB_SIZE_32   0x0050u
+#define IWL_CTXT_INFO_RB_CB_SIZE_256  0x0080u
 #define IWL_CTXT_INFO_RB_SIZE_4K      0x0800u
 #define TFD_QUEUE_CB_SIZE_32          2
 #define SCD_QUEUE_CFG                 0x1d
@@ -228,6 +229,7 @@ static inline uint32_t tfd_queue_cb_size(unsigned qsize)
 #define CSR_INT_BIT_WAKEUP                    (1u << 1)
 #define CSR_INT_BIT_RESET_DONE                (1u << 2)
 #define CSR_INT_BIT_SW_RX                     (1u << 3)
+#define CSR_INT_BIT_CT_KILL                   (1u << 6)
 #define CSR_INT_BIT_RF_KILL                   (1u << 7)
 #define CSR_INT_BIT_SW_ERR                    (1u << 25)
 #define CSR_INT_BIT_SCD                       (1u << 26)

@@ -6,7 +6,7 @@
 
 **Modelo de trabajo:** `qwen2.5-coder-14b` (decisión D9 de [DECISIONES.md](DECISIONES.md), 2026-10-11): GO 10/10 en T14 y único que resuelve R03 a T=0 con OpenCode. Lock: `target/self-improvement/tasks/T14/model-lock-14b.json`; el 7B queda como perfil ligero.
 
-**Actualización (2026-10-23).** Tras las campañas 45–57 el banco R31–R40 da **2/10** con Gemma 4 12B, **5–7/10** con Qwen3.6-35B-A3B (MoE, llama.cpp) y **9/10** con el combo MoE → Qwen3.6-27B denso (R37 es el único hueco local); la calibración con Claude Sonnet 5.5 da **10/10** con el mismo arnés, así que el límite es el modelo. Propuesta de modelo de trabajo: [D11](DECISIONES.md) (pendiente de aceptación). Detalle: [campana.md](campana.md), [análisis de rechazos](resultados-campanas/analisis-rechazos-45-47.md) y [campaña 56](resultados-campanas/campana-56-combo-moe-denso). El banco R31–R40 **ya no es ciego**: para una cifra honesta hace falta uno nuevo.
+**Actualización (2026-10-23).** Tras las campañas 45–57 el banco R31–R40 da **2/10** con Gemma 4 12B, **5–7/10** con Qwen3.6-35B-A3B (MoE, llama.cpp) y **9/10** con el combo MoE → Qwen3.6-27B denso (R37 es el único hueco local); la calibración con Claude Sonnet 5.5 da **10/10** con el mismo arnés, así que el límite es el modelo. Modelo de trabajo: [D11](DECISIONES.md) (aceptada el 2026-10-24). Detalle: [campana.md](campana.md), [análisis de rechazos](resultados-campanas/analisis-rechazos-45-47.md) y [campaña 56](resultados-campanas/campana-56-combo-moe-denso). El banco R31–R40 **ya no es ciego**: para una cifra honesta hace falta uno nuevo.
 
 ## Objetivo y entrega
 

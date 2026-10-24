@@ -359,6 +359,13 @@ detección única de reloj parado (`CLOCK_DEAD`) para no colgar el arranque si e
 no avanza. Afectaba también a `gsp_mmio_poll_ready`. **Si un poll de este port
 "falla instantáneamente", sospecha del reloj antes que del hardware.**
 
+**Gotcha ROG (2026-10-24): inferencia GPU en la BSP y WiFi.** `launch_wait_sem`
+(`gsp_compute.c`) espera con `lx_mdelay`; en la BSP eso bloqueaba `lxdde::poll` y
+`wifi_wpa::mantener` (sin IRQ WiFi). Síntoma: `SW_ERR` o DNS mudo tras `ask` GPU.
+Mitigación en kernel: `timer::sleep_ms` bombea `net::poll` + `wifi::poll` cada ms;
+el tick fuerza `schedule_inner` si `mantener` >100 ms. Detalle: skill **`soso-wifi`**
+(ROG AX200, scripts `l6-rog-red-*`).
+
 **Gotcha 2 (2026-07-25): all-ones NO es "listo", es la GPU fuera del bus.**
 `gsp_mmio_poll_ready` daba por bueno `0x118128=0xffffffff` / `0x118234=0xffffffff`
 porque cumplen `(a&1) && ((b&0xff)==0xff)` — y así el checklist dio **`G3b hw boot

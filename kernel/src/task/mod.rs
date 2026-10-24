@@ -2145,13 +2145,20 @@ fn desalojar_si_toca(f: &mut TrapFrame, cur: u64, bsp_fpu: bool) -> u64 {
     let force_kill = procs
         .iter()
         .any(|p| p.pid == cur && (p.kill_pending || matches!(p.state, State::Zombie(_))));
-    if !force_kill && remaining().fetch_sub(1, Ordering::Relaxed) > 1 {
+    #[cfg(feature = "lxdde")]
+    let wifi_yield = bsp_fpu
+        && crate::arch::percpu::cpu_index() == 0
+        && crate::lxdde::wifi_present()
+        && crate::lxdde::wifi::mantener_atrasado(100);
+    #[cfg(not(feature = "lxdde"))]
+    let wifi_yield = false;
+    if !force_kill && !wifi_yield && remaining().fetch_sub(1, Ordering::Relaxed) > 1 {
         return 0;
     }
     let hay_otro = procs
         .iter()
         .any(|p| p.pid != cur && p.state == State::Runnable);
-    if !force_kill && !hay_otro {
+    if !force_kill && !wifi_yield && !hay_otro {
         remaining().store(TIMESLICE_TICKS, Ordering::Relaxed);
         return 0;
     }

@@ -121,6 +121,14 @@ pub fn contadores() -> LxIwlContadores {
 
 pub fn vigilar_contadores(_tx_err: u64) {}
 
+pub fn poll_lock_fallo() {}
+
+pub fn registrar_mantener() {}
+
+pub fn mantener_atrasado(_limite_ms: u64) -> bool {
+    false
+}
+
 pub fn vigilar_salud() {}
 
 pub fn reset_link() {}

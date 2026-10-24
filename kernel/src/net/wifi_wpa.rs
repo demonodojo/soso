@@ -188,6 +188,7 @@ pub fn mantener() {
     if !crate::lxdde::wifi_present() {
         return;
     }
+    crate::lxdde::wifi::registrar_mantener();
     crate::lxdde::wifi::vigilar_contadores(super::device::wifi_tx_errores());
     if CONECTANDO.load(Ordering::Acquire) {
         return;
@@ -260,7 +261,23 @@ fn vigilar_enlace() {
 
 fn reintentar() {
     let en = REINTENTO_EN.load(Ordering::Relaxed);
-    if en == 0 || crate::arch::pit::uptime_ms() < en {
+    let now = crate::arch::pit::uptime_ms();
+    if en != 0 && now < en {
+        static ULTIMO_ESTADO_MS: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        let ult = ULTIMO_ESTADO_MS.load(Ordering::Relaxed);
+        if now.saturating_sub(ult) >= 60_000 {
+            ULTIMO_ESTADO_MS.store(now, Ordering::Relaxed);
+            let rest = en.saturating_sub(now);
+            crate::println!(
+                "wifi: sin enlace; próximo intento en {} s (fase {})",
+                rest / 1000,
+                crate::lxdde::wifi::phase()
+            );
+        }
+        return;
+    }
+    if en == 0 || now < en {
         return;
     }
     REINTENTO_EN.store(0, Ordering::Relaxed);
@@ -268,7 +285,7 @@ fn reintentar() {
         return;
     };
     let ssid = core::str::from_utf8(&red.ssid[..red.len]).unwrap_or("");
-    crate::println!("wifi: reconectando a '{ssid}'…");
+    crate::println!("wifi: reconectando a '{ssid}' (recover + scan/assoc/4-way)…");
     // El intento anterior pudo dejar MAC/STA/colas a medias: firmware nuevo.
     crate::lxdde::wifi::reset_link();
     if conectar(ssid, red.pmk.as_ref()) == 0 {

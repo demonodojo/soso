@@ -157,6 +157,15 @@ build mcc_chan \
 echo "=== iwl MCC / política de canales hostcheck ==="
 run mcc_chan
 
+cc "${CFLAGS_COMMON[@]}" -DIWL_HOSTCHECK_SRAM_BYTES=65536 \
+    -o "$out/fw_errlog" "$root/tools/iwl-hostcheck/fw_errlog_test.c"
+if san_enabled; then
+    cc "${CFLAGS_COMMON[@]}" "${SAN_FLAGS[@]}" -DIWL_HOSTCHECK_SRAM_BYTES=65536 \
+        -o "$out/fw_errlog-san" "$root/tools/iwl-hostcheck/fw_errlog_test.c"
+fi
+echo "=== iwl volcado error firmware hostcheck ==="
+run fw_errlog
+
 build pnvm_publish \
     "$root/tools/iwl-hostcheck/pnvm_publish_test.c" \
     "$root/tools/iwl-hostcheck/iwl_fw_pnvm_weak.c" \

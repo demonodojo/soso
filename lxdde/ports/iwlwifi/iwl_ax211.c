@@ -248,9 +248,10 @@ static int iwl_ax211_ensure_ready(struct iwl_ax211_priv *iwl)
                   "(reinicia el equipo o recarga el módulo)\n", fallos);
         return -1;
     }
-    lx_printk("iwlwifi: cola bloqueada tras timeout; reiniciando transporte\n");
+    lx_printk("iwlwifi: etapa recover — reiniciando transporte (cola bloqueada)\n");
     iwl_set_phase(iwl, "recover");
     iwl_trans_recover(iwl);
+    lx_printk("iwlwifi: etapa recover — recargando firmware\n");
     if (iwl_ax211_start_firmware() != 0) {
         fallos++;
         lx_printk("iwlwifi: recuperación falló (firmware no rearrancó, %d de "
@@ -259,7 +260,7 @@ static int iwl_ax211_ensure_ready(struct iwl_ax211_priv *iwl)
         return -1;
     }
     fallos = 0;
-    lx_printk("iwlwifi: transporte recuperado (%u reinicios)\n",
+    lx_printk("iwlwifi: etapa recover ok — ALIVE listo (%u reinicios)\n",
               (unsigned)iwl->cmd_recover);
     return 0;
 }

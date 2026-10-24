@@ -626,6 +626,15 @@ static void salud(int gen3)
     snprintf(label, sizeof(label), "%s: SW_ERR en CSR_INT → firmware caído, una vez", chip);
     check(ok, label);
 
+    salud_prepara(&iwl, gen3, QID);
+    iwl.rx_had_traffic = 1;
+    iwl.rx_last_progress_ms = 1000;
+    ok = iwl_trans_check_health(&iwl, 1000) == 0;
+    ok = ok && iwl_trans_check_health(&iwl, 3999) == 0;
+    ok = ok && iwl_trans_check_health(&iwl, 4001) == IWL_LINK_LOST_RX_STUCK;
+    snprintf(label, sizeof(label), "%s: RX sin progreso 3 s → RX parado", chip);
+    check(ok, label);
+
     /* ALIVE y FH_RX se quedan en CSR_INT durante la marcha normal. */
     salud_prepara(&iwl, gen3, QID);
     g_mmio_stub[CSR_INT / 4] = CSR_INT_BIT_ALIVE | CSR_INT_BIT_FH_RX;

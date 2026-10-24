@@ -2,9 +2,9 @@
 name: soso-wifi
 description: >-
   soso WiFi Intel (iwlwifi/lxdde) — AX211/AX200, firmware TLV, WPA2 EAPOL,
-  VFIO and hostcheck. Use when modifying lxdde/ports/iwlwifi, net/wifi_wpa.rs,
-  wificonf, SOSOWIFI.TXT, wifi syscalls, scripts l6-wifi-* / l6-iwl-*, or
-  diagnosing scan/assoc/ALIVE on live USB or QEMU passthrough.
+  VFIO and hostcheck. Use when modifying lxdde/ports/iwlwifi, kernel/lxdde/wifi.rs,
+  net/wifi_wpa.rs, wificonf, SOSOWIFI.TXT, scripts l6-wifi-* / l6-iwl-* /
+  l6-rog-red-*, or diagnosing scan/assoc/ALIVE and ROG link drops (GPU/update).
 ---
 
 # soso — WiFi Intel (iwlwifi)
@@ -51,12 +51,18 @@ en silencio; el fallo lo canta el llamante (`iwl_ax211: firmware no encontrado`)
 | `iwlwifi_lx.c` | exports C → Rust (`lx_iwlwifi_*`) |
 | `lxdde/shim/src/{iwlwifi,skbuff,netdev,cfg80211,mac80211}_lx.c` | shims mínimos |
 | `crates/soso-wpa2/` | máquina WPA2-PSK/CCMP `no_std`, con su banco de host |
-| `kernel/src/net/wifi_wpa.rs` | sólo E/S: credenciales y bucle del 4-way |
+| `kernel/src/net/wifi_wpa.rs` | supplicant: 4-way, `mantener`, reconexión |
+| `kernel/src/lxdde/wifi.rs` | sondeo, huecos >500 ms, pérdidas periódicas |
+| `kernel/src/lxdde/timer.rs` | `sleep_ms`: bombeo `net`/`wifi` en BSP |
+| `kernel/src/task/mod.rs` | yield forzado si `mantener` >100 ms |
 | `kernel/src/drivers/wificonf.rs` | lee `SOSOWIFI.TXT` (ESP, 8.3) |
 | `tools/iwl-hostcheck/main.c` | parser TLV contra blobs reales |
 | `tools/iwl-hostcheck/rx_datapath_test.c` | descriptores RX por generación + datos + anillo TX |
-| `tools/iwl-hostcheck/ring_soak_test.c` | anillos RX/TX contra un modelo de firmware, bajo carga |
+| `tools/iwl-hostcheck/ring_soak_test.c` | anillos RX/TX + salud (TX/RX/SW_ERR) |
+| `tools/iwl-hostcheck/fw_errlog_test.c` | punteros ALIVE + volcado error LMAC sintético |
 | `scripts/l6-wifi-capture-4way.sh` | captura un 4-way real (hwsim + hostapd) como fixture |
+| `scripts/l6-rog-red-watch.sh` | ping/SSH cada 5 s al ROG (cruzar con SOSOLOG) |
+| `scripts/l6-rog-red-hw-run.sh` | checklist placa + copia opcional de `kernel.log` |
 
 ## Pila en soso
 
@@ -75,14 +81,20 @@ sosh / kshell: `wifi scan|status|connect <ssid> [psk]`.
 ```bash
 cargo xtask lx-build iwlwifi
 ./scripts/l6-iwl-fw-hostcheck.sh          # parser SEC_RT vs ucode del rootfs (~1 s)
+# Si /tmp está lleno: TMPDIR=target/iwl-hostcheck ./scripts/l6-iwl-fw-hostcheck.sh
 cargo test -p soso-wpa2                   # supplicant WPA2: vectores + transcripciones
 sudo ./scripts/l6-wifi-capture-4way.sh    # una vez: 4-way real de hostapd → fixture
 sudo ./scripts/l6-wifi-vfio-test.sh       # VFIO AX211 → QEMU; GO = ALIVE real
+# ROG (AX200): vigía en host mientras corres escenarios en placa
+./scripts/l6-rog-red-watch.sh <IP> target/rog-red-YYYY-MM-DD
+./scripts/l6-rog-red-hw-run.sh            # recoger logs (no uses /tmp del host)
 # Live (nouveau+iwlwifi ya van): editar SOSOWIFI.TXT en ESP p1.
 # Agente: monta p1 con udisksctl (skill soso-live, sin sudo/TTY); no uses cargo xtask sosolog.
 # El agente no graba el USB (sudo pide contraseña, no hay TTY); deja el comando:
 cargo xtask flash-usb-live /dev/sdX --yes --only kernel
 ```
+
+Informe ROG red: [`docs/DIAGNOSTICO-ROG-2026-10-24.md`](../../docs/DIAGNOSTICO-ROG-2026-10-24.md).
 
 VFIO: `SOSO_WIFI_BDF` (default `80:14.3`), log `target/wifi-vfio-serial.log`.
 QEMU nic: `SOSO_QEMU_NIC=vfio:<BDF>` + `SOSO_LXDDE_MODE=iwlwifi`.
@@ -130,16 +142,6 @@ QEMU nic: `SOSO_QEMU_NIC=vfio:<BDF>` + `SOSO_LXDDE_MODE=iwlwifi`.
   pisa el de `compiler_builtins`: el live se clava en `boot: live-disk` con
   `lx: lxdde: stub trace: memcmp` al comparar el GPT. Implementar en
   `lxdde/shim/src/shims.c` y listar en `provided_symbols()`.
-- **Nunca dejar `memcmp`/`memcpy`/… como dummy.** `lx-build` stubbea lo
-  undefined con `lx_emul_trace_and_stop`. Ese símbolo se enlaza al kernel y
-  pisa el de `compiler_builtins`: el live se clava en `boot: live-disk` con
-  `lx: lxdde: stub trace: memcmp` al comparar el GPT. Implementar en
-  `lxdde/shim/src/shims.c` y listar en `provided_symbols()`.
-- **Nunca dejar `memcmp`/`memcpy`/… como dummy.** `lx-build` stubbea lo
-  undefined con `lx_emul_trace_and_stop`. Ese símbolo se enlaza al kernel y
-  pisa el de `compiler_builtins`: el live se clava en `boot: live-disk` con
-  `lx: lxdde: stub trace: memcmp` al comparar el GPT. Implementar en
-  `lxdde/shim/src/shims.c` y listar en `provided_symbols()`.
 - **QEMU no emula ninguna tarjeta WiFi.** No hay modelo 802.11 upstream (QEMU
   8.2 lista 0). `mac80211_hwsim` y `virt_wifi` simulan por encima de mac80211,
   que soso no usa: no sirven para el driver. El único camino con silicio es
@@ -181,6 +183,27 @@ QEMU nic: `SOSO_QEMU_NIC=vfio:<BDF>` + `SOSO_LXDDE_MODE=iwlwifi`.
   `rb_hw == rx_read` el firmware ya no entrega RX; `rb_stop=1` con
   `rx_pend>0` es el drenaje parado por la trama aparcada. Banco:
   `ring_soak` (`salud`).
+- **Volcado de error del firmware (2026-10-24).** Tras `UCODE_ALIVE_NTFY` se
+  guardan los punteros `error_event_table` / `error_info_addr` (como Linux
+  `mvm/fw.c`). Ante `SW_ERR`/`HW_ERR`/`CT_KILL`/`RF_KILL`, `iwl_trans_dump_fw_errors`
+  lee la tabla LMAC/UMAC por `HBUS_TARG_MEM_*` y escribe
+  `iwl_trans: error fw lmac… id=0x… (nombre) pc=…`. Banco: `fw_errlog_test`.
+- **RX parado (2026-10-24).** Si ya hubo tráfico RX, no hay tramas TX
+  pendientes y `rx_read` no avanza 3 s → causa 6 «RX parado»
+  (`IWL_LINK_LOST_RX_STUCK`) con `rb_hw`/`rx_pend`. Banco: `ring_soak` (`salud`).
+- **Anillo RX gen2 = 256 RBD (2026-10-24).** Linux 22000 usa hasta 2048;
+  soso pasó de 32 a 256 (`IWL_GEN2_RX_N`, context-info `RB_CB_SIZE` 2^8).
+- **Huecos de sondeo (2026-10-24).** Si `wifi::poll` o `mantener` llevan >500 ms
+  sin correr, `wifi: sondeo parado …` (pid, fallos de `try_lock`). La línea
+  `wifi: pérdidas` incluye `sondeo_max`. En la BSP, `lx_mdelay` bombea red cada
+  ms y el tick fuerza `schedule_inner` si `mantener` lleva >100 ms (inferencia
+  GPU sin matar la WiFi). Ver también **`soso-gpu`** (`launch_wait_sem`).
+- **Reconexión visible (2026-10-24).** Tras caída: `wifi: enlace perdido …`,
+  `wifi: reconectando … (recover + scan/assoc/4-way)`, `iwlwifi: etapa recover …`,
+  y cada 60 s sin enlace una línea de estado. `parse-logs` marca `reconexion: ok`
+  con `etapa recover ok` o `wifi: reconectando … recover`.
+- **ROG ≠ AX211.** ASUS ROG Strix usa **AX200** (`8086:2723`, gen2). No confundir
+  firmware PNVM ni tamaños de descriptor con AX211.
 - **La IP no se encola.** `rx_pend` guarda una trama. Con ella ocupada, el
   drenaje se para en el siguiente MPDU y no recicla el RB: smoltcp pide tramas
   en bucle y se las lleva todas. EAPOL sigue en su cola de 4. Antes de
@@ -228,14 +251,16 @@ Entradas seed: `ax211-wifi` (`8086:7f70`), `ax200-wifi` (`8086:2723`) en
 [`docs/hw-matrix.json`](../../docs/hw-matrix.json).
 
 Tras SOSOLOG de placa, el agente **sí** actualiza la matriz (`parse-logs`
-`--id ax211-wifi`). Monta la ESP con `udisksctl` (skill **soso-live**), no
-`cargo xtask sosolog`. No uses `--boot-ok` ni marques `alive: ok` sin
-`UCODE_ALIVE_NTFY` en el log. `timeout ALIVE` / `alive=false` = fail.
+`--id ax200-wifi` en ROG, `--id ax211-wifi` en GB205). Monta la ESP con
+`udisksctl` (skill **soso-live**), no `cargo xtask sosolog`. No uses
+`--boot-ok` ni marques `alive: ok` sin `UCODE_ALIVE_NTFY` en el log.
+`timeout ALIVE` / `alive=false` = fail. Marcadores de estabilidad (oct 2026):
+`iwl_trans: error fw`, `RX parado`, `wifi: sondeo parado`, `wifi: reconectando`.
 
 ```bash
 ./scripts/l6-iwl-fw-hostcheck.sh          # host, ~1 s
 sudo ./scripts/l6-wifi-vfio-test.sh       # VFIO → ALIVE real
-cargo xtask hw-matrix parse-logs --id ax211-wifi --sosolog SOSOLOG.TXT --sosodrv SOSODRV.TXT
+cargo xtask hw-matrix parse-logs --id ax200-wifi --sosolog target/rog-red-*/SOSOLOG.txt
 cargo xtask hw-matrix show
 ```
 

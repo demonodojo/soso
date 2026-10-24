@@ -67,6 +67,13 @@ pub extern "C" fn lx_mdelay(ms: u32) {
 /// bring-up de la GPU (fibra única) el retardo se evaporaba y los bucles de
 /// sondeo daban miles de vueltas en microsegundos. Así se comió los 4 s de espera
 /// del lockdown del GSP el 2026-07-25 y también el `gsp_mmio_poll_ready(2000)`.
+/// Durante esperas largas en la BSP, atiende WiFi y TCP sin bloquear el transporte.
+fn bombeo_red_bsp() {
+    crate::net::poll();
+    #[cfg(feature = "lxdde")]
+    crate::lxdde::wifi::poll();
+}
+
 pub fn sleep_ms(ms: u32) {
     use core::sync::atomic::{AtomicBool, Ordering};
     /// Si el PIT no avanza (x2APIC en placa) y aún no hay TSC, esperar por
@@ -80,6 +87,16 @@ pub fn sleep_ms(ms: u32) {
         return;
     }
     if crate::arch::tsc::ready() {
+        if ms >= 1 && crate::arch::percpu::cpu_index() == 0 {
+            let mut left = ms as u64;
+            while left > 0 {
+                bombeo_red_bsp();
+                let chunk = left.min(1);
+                crate::arch::tsc::delay_ms(chunk);
+                left -= chunk;
+            }
+            return;
+        }
         crate::arch::tsc::delay_ms(ms as u64);
         return;
     }

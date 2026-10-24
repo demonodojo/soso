@@ -164,6 +164,8 @@ pub fn poll() {
         return;
     }
     let Some(_g) = POLL_LOCK.try_lock() else {
+        #[cfg(feature = "lxdde")]
+        crate::lxdde::wifi::poll_lock_fallo();
         return;
     };
     // Barrido de centinelas, espaciado: recorrerlos en cada vuelta costaría más

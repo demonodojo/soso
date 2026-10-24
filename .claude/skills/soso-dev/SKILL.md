@@ -77,6 +77,8 @@ Estado y matriz hardware: [`docs/ESTADO.md`](../../docs/ESTADO.md), [`docs/HW-MA
 | `cargo xtask lx-build nouveau` | Compilar solo el port nouveau/nvkm (GPU, L6/G5 GO en GB205) |
 | `cargo xtask lx-build iwlwifi` | Compilar driver Intel AX211/AX200 (WiFi + mac80211 mínimo) |
 | `./scripts/l6-iwl-fw-hostcheck.sh` | Parser TLV iwlwifi vs ucode del rootfs (sin NIC) |
+| `./scripts/l6-rog-red-watch.sh` | Vigía ping/SSH al ROG (estabilidad WiFi + GPU) |
+| `./scripts/l6-rog-red-hw-run.sh` | Recoger SOSOLOG/kernel.log tras campaña ROG |
 | `./scripts/l6-wifi-vfio-test.sh` | Passthrough VFIO WiFi AX211 a QEMU (prueba ALIVE) |
 | `cargo xtask test-distributed-llm` | Humo LLM repartido (2–3 QEMU multicast); `-auto` `--splits auto`; `-serve` `serve --cluster` + HTTP (health, models, chat) |
 | `cargo xtask install-disk /dev/nvmeXn1 --yes` | Dual-boot desde Linux: escribe live + entrada GRUB |
@@ -119,8 +121,10 @@ cargo xtask flash-usb-live /dev/sdX --yes --only kernel
 # cargo xtask flash-usb-live /dev/sdX --yes --skip-models
 # WiFi: edita SOSOWIFI.TXT en ESP p1 o /etc/wifi.conf antes de flashear
 # SSH en placa: ssh -i target/soso_test_key soso@<ip>  (puerto 22)
+TMPDIR=target/iwl-hostcheck ./scripts/l6-iwl-fw-hostcheck.sh   # si /tmp lleno
 ./scripts/l6-iwl-fw-hostcheck.sh          # parser TLV, sin hardware
 sudo ./scripts/l6-wifi-vfio-test.sh       # VFIO AX211 en QEMU
+# ROG AX200: ./scripts/l6-rog-red-watch.sh <IP> target/rog-red-YYYY-MM-DD
 ```
 
 Config: `SOSOWIFI.TXT` (ESP) o `/etc/wifi.conf` (`ssid=`, `psk=`). Firmware en `rootfs/lib/firmware/iwlwifi-so-a0-gf-a0-*` (AX211) y `iwlwifi-cc-a0-*.ucode` (AX200).

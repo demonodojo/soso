@@ -3,6 +3,10 @@
 #include "iwl_ax211.h"
 #include "lx_emul.h"
 
+#ifndef IWL_HOSTCHECK_SRAM_BYTES
+#define IWL_HOSTCHECK_SRAM_BYTES 0
+#endif
+
 extern void *memcpy(void *dst, const void *src, unsigned long n);
 extern void *memset(void *dst, int c, unsigned long n);
 
@@ -114,6 +118,229 @@ static uint32_t iwl_read_prph(struct iwl_ax211_priv *iwl, uint32_t addr)
     iwl_release_nic_access(iwl);
     return v;
 }
+
+/* --- Lectura SRAM del firmware y volcado de error (Linux fw/dump.c) -------- */
+
+struct iwl_error_event_table {
+    uint32_t valid;
+    uint32_t error_id;
+    uint32_t trm_hw_status0;
+    uint32_t trm_hw_status1;
+    uint32_t blink2;
+    uint32_t ilink1;
+    uint32_t ilink2;
+    uint32_t data1;
+    uint32_t data2;
+    uint32_t data3;
+    uint32_t bcon_time;
+    uint32_t tsf_low;
+    uint32_t tsf_hi;
+    uint32_t gp1;
+    uint32_t gp2;
+    uint32_t fw_rev_type;
+    uint32_t major;
+    uint32_t minor;
+    uint32_t hw_ver;
+    uint32_t brd_ver;
+    uint32_t log_pc;
+    uint32_t frame_ptr;
+    uint32_t stack_ptr;
+    uint32_t hcmd;
+    uint32_t isr0;
+    uint32_t isr1;
+    uint32_t isr2;
+    uint32_t isr3;
+    uint32_t isr4;
+    uint32_t last_cmd_id;
+    uint32_t wait_event;
+    uint32_t l2p_control;
+    uint32_t l2p_duration;
+    uint32_t l2p_mhvalid;
+    uint32_t l2p_addr_match;
+    uint32_t lmpm_pmg_sel;
+    uint32_t u_timestamp;
+    uint32_t flow_handler;
+};
+
+struct iwl_umac_error_event_table {
+    uint32_t valid;
+    uint32_t error_id;
+    uint32_t blink1;
+    uint32_t blink2;
+    uint32_t ilink1;
+    uint32_t ilink2;
+    uint32_t data1;
+    uint32_t data2;
+    uint32_t data3;
+    uint32_t umac_major;
+    uint32_t umac_minor;
+    uint32_t frame_pointer;
+    uint32_t stack_pointer;
+    uint32_t cmd_header;
+    uint32_t nic_isr_pref;
+};
+
+#define IWL_ALIVE_LMAC_ALIVE_SIZE 44u
+#define IWL_ALIVE_UMAC_ALIVE_SIZE 16u
+
+#if IWL_HOSTCHECK_SRAM_BYTES > 0
+extern uint8_t iwl_hostcheck_sram[IWL_HOSTCHECK_SRAM_BYTES];
+#endif
+
+static int iwl_trans_read_mem32(struct iwl_ax211_priv *iwl, uint32_t addr,
+                                uint32_t *out)
+{
+    if (!iwl || !out)
+        return -1;
+#if IWL_HOSTCHECK_SRAM_BYTES > 0
+    if (addr + 4u <= IWL_HOSTCHECK_SRAM_BYTES) {
+        memcpy(out, &iwl_hostcheck_sram[addr], 4);
+        return 0;
+    }
+#endif
+    if (!iwl->mmio)
+        return -1;
+    if (iwl_grab_nic_access(iwl) != 0)
+        return -1;
+    iwl_write32(iwl, HBUS_TARG_MEM_RADDR, addr);
+    *out = iwl_read32(iwl, HBUS_TARG_MEM_RDAT);
+    iwl_release_nic_access(iwl);
+    return 0;
+}
+
+static void iwl_trans_read_mem_bytes(struct iwl_ax211_priv *iwl, uint32_t addr,
+                                     void *buf, unsigned len)
+{
+    uint8_t *dst = buf;
+    unsigned off;
+
+    if (!buf || !len)
+        return;
+#if IWL_HOSTCHECK_SRAM_BYTES > 0
+    if (addr + len <= IWL_HOSTCHECK_SRAM_BYTES) {
+        memcpy(buf, &iwl_hostcheck_sram[addr], len);
+        return;
+    }
+#endif
+    for (off = 0; off + 4u <= len; off += 4u) {
+        uint32_t v;
+
+        if (iwl_trans_read_mem32(iwl, addr + off, &v) != 0)
+            break;
+        dst[off] = (uint8_t)(v & 0xffu);
+        dst[off + 1] = (uint8_t)((v >> 8) & 0xffu);
+        dst[off + 2] = (uint8_t)((v >> 16) & 0xffu);
+        dst[off + 3] = (uint8_t)((v >> 24) & 0xffu);
+    }
+    if (off < len) {
+        uint32_t v;
+
+        if (iwl_trans_read_mem32(iwl, addr + off, &v) == 0) {
+            unsigned rest = len - off;
+            unsigned i;
+
+            for (i = 0; i < rest; i++)
+                dst[off + i] = (uint8_t)((v >> (8u * i)) & 0xffu);
+        }
+    }
+}
+
+static const char *iwl_fw_error_name(uint32_t error_id)
+{
+    switch (error_id & 0xffu) {
+    case 0x70:
+        return "FW_ASSERT_LMAC_FATAL";
+    case 0x71:
+        return "FW_ASSERT_UMAC_FATAL";
+    case 0x72:
+        return "FW_ASSERT_LMAC2_FATAL";
+    case 0x73:
+        return "RT_NMI_INTERRUPT_OTHER_LMAC_FATAL";
+    case 0x84:
+        return "FW_ASSERT_NMI_UNKNOWN";
+    default:
+        return "?";
+    }
+}
+
+static uint32_t alive_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+void iwl_trans_alive_store_dbg_ptrs(struct iwl_ax211_priv *iwl,
+                                    const uint8_t *data, int pay)
+{
+    unsigned off;
+    unsigned lmacs;
+    unsigned umac_off;
+
+    if (!iwl || !data || pay < 4)
+        return;
+    iwl->dbg_lmac_err_ptr[0] = 0;
+    iwl->dbg_lmac_err_ptr[1] = 0;
+    iwl->dbg_umac_err_ptr = 0;
+    off = 4; /* status + flags */
+    if (pay >= (int)(4 + IWL_ALIVE_LMAC_ALIVE_SIZE * 2 + IWL_ALIVE_UMAC_ALIVE_SIZE)) {
+        lmacs = 2;
+        umac_off = off + IWL_ALIVE_LMAC_ALIVE_SIZE * 2;
+    } else if (pay >= (int)(4 + IWL_ALIVE_LMAC_ALIVE_SIZE + IWL_ALIVE_UMAC_ALIVE_SIZE)) {
+        lmacs = 1;
+        umac_off = off + IWL_ALIVE_LMAC_ALIVE_SIZE;
+    } else {
+        return;
+    }
+    if (lmacs >= 1)
+        iwl->dbg_lmac_err_ptr[0] =
+            alive_le32(data + off + 16); /* dbg_ptrs.error_event_table_ptr */
+    if (lmacs >= 2)
+        iwl->dbg_lmac_err_ptr[1] =
+            alive_le32(data + off + IWL_ALIVE_LMAC_ALIVE_SIZE + 16);
+    iwl->dbg_umac_err_ptr = alive_le32(data + umac_off + 8);
+}
+
+void iwl_trans_dump_fw_errors(struct iwl_ax211_priv *iwl)
+{
+    struct iwl_error_event_table lmac = {0};
+    struct iwl_umac_error_event_table umac = {0};
+    unsigned i;
+
+    if (!iwl)
+        return;
+    for (i = 0; i < 2; i++) {
+        if (!iwl->dbg_lmac_err_ptr[i])
+            continue;
+        iwl_trans_read_mem_bytes(iwl, iwl->dbg_lmac_err_ptr[i], &lmac,
+                                 sizeof(lmac));
+        if (!lmac.valid)
+            continue;
+        lx_printk("iwl_trans: error fw lmac%u id=0x%x (%s) pc=0x%x "
+                  "blink=0x%x ilink=0x%x data1=0x%x data2=0x%x data3=0x%x "
+                  "line=0x%x\n",
+                  i, (unsigned)lmac.error_id,
+                  iwl_fw_error_name(lmac.error_id), (unsigned)lmac.log_pc,
+                  (unsigned)lmac.blink2, (unsigned)lmac.ilink1,
+                  (unsigned)lmac.data1, (unsigned)lmac.data2,
+                  (unsigned)lmac.data3, (unsigned)lmac.u_timestamp);
+    }
+    if (iwl->dbg_umac_err_ptr) {
+        iwl_trans_read_mem_bytes(iwl, iwl->dbg_umac_err_ptr, &umac,
+                                 sizeof(umac));
+        if (umac.valid) {
+            lx_printk("iwl_trans: error fw umac id=0x%x (%s) pc=0x%x "
+                      "blink=0x%x ilink=0x%x data1=0x%x data2=0x%x "
+                      "data3=0x%x line=0x%x\n",
+                      (unsigned)umac.error_id, iwl_fw_error_name(umac.error_id),
+                      (unsigned)umac.frame_pointer, (unsigned)umac.blink1,
+                      (unsigned)umac.blink2, (unsigned)umac.data1,
+                      (unsigned)umac.data2, (unsigned)umac.data3,
+                      (unsigned)umac.umac_major);
+        }
+    }
+}
+
+#define IWL_RX_STUCK_MS 3000u
 
 static int iwl_prepare_card_hw(struct iwl_ax211_priv *iwl)
 {
@@ -395,10 +622,12 @@ static void deliver_eth(struct iwl_ax211_priv *iwl, const uint8_t *eth, int len)
     ethertype = (uint16_t)(((uint16_t)eth[12] << 8) | eth[13]);
     if (ethertype == ETH_P_EAPOL) {
         iwl->rx_data_ok++;
+        iwl->rx_had_traffic = 1;
         iwl_ax211_deliver_eapol(eth, len);
         return;
     }
     iwl->rx_data_ok++;
+    iwl->rx_had_traffic = 1;
     iwl_ax211_deliver_rx(eth, len);
     /* Antes de autorizar nadie lee la pila. Aparcar la trama pararía el anillo
      * y el EAPOL del 4-way se quedaría detrás. */
@@ -577,6 +806,12 @@ int iwl_trans_recover(struct iwl_ax211_priv *iwl)
         scratch->ctrl_cfg.pnvm_cfg.pnvm_size = 0;
     }
     iwl->sku_id[0] = 0;
+    iwl->dbg_lmac_err_ptr[0] = 0;
+    iwl->dbg_lmac_err_ptr[1] = 0;
+    iwl->dbg_umac_err_ptr = 0;
+    iwl->rx_last_progress_ms = 0;
+    iwl->rx_had_traffic = 0;
+    iwl->rx_health_read_snap = 0;
     iwl->sku_id[1] = 0;
     iwl->sku_id[2] = 0;
     iwl->radio_ready = 0;
@@ -772,29 +1007,44 @@ int iwl_trans_check_health(struct iwl_ax211_priv *iwl, uint64_t now_ms)
     if (!iwl || !iwl->mmio || !iwl->alive || iwl->in_trans || iwl->cmd_needs_recover)
         return 0;
     inta = iwl_read32(iwl, CSR_INT);
+    used = 0;
+    if (iwl->data_txq_ready && iwl->associated)
+        used = txq_used(iwl, iwl->data_txq_write, iwl->data_txq_read);
+    if (iwl->associated && now_ms) {
+        if (iwl->rx_read != iwl->rx_health_read_snap) {
+            iwl->rx_health_read_snap = iwl->rx_read;
+            iwl->rx_last_progress_ms = now_ms;
+            iwl->rx_had_traffic = 1;
+        }
+    }
     if (iwl->family != IWL_DEVICE_FAMILY_8000 && iwl->rb_stts)
         rb_hw = iwl_closed_rb_idx(iwl->rb_stts, IWL_GEN2_RX_N);
-    if (inta & (CSR_INT_BIT_SW_ERR | CSR_INT_BIT_HW_ERR)) {
-        lx_printk("iwl_trans: firmware caído CSR_INT=0x%08x GP=0x%08x%s%s "
+    if (inta & (CSR_INT_BIT_SW_ERR | CSR_INT_BIT_HW_ERR | CSR_INT_BIT_CT_KILL)) {
+        lx_printk("iwl_trans: firmware caído CSR_INT=0x%08x GP=0x%08x%s%s%s%s "
                   "rb_hw=%u rx_read=%u rx_write=%u\n",
                   (unsigned)inta, (unsigned)iwl_read32(iwl, CSR_GP_CNTRL),
                   (inta & CSR_INT_BIT_SW_ERR) ? " SW_ERR" : "",
                   (inta & CSR_INT_BIT_HW_ERR) ? " HW_ERR" : "",
+                  (inta & CSR_INT_BIT_CT_KILL) ? " CT_KILL" : "",
+                  !(iwl_read32(iwl, CSR_GP_CNTRL) &
+                    CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW)
+                      ? " RF_KILL"
+                      : "",
                   rb_hw, (unsigned)iwl->rx_read, (unsigned)iwl->rx_write);
+        iwl_trans_dump_fw_errors(iwl);
         iwl->txq_wd_since_ms = 0;
         return IWL_LINK_LOST_FW_ERROR;
     }
 
     if (!iwl->data_txq_ready || !iwl->associated) {
         iwl->txq_wd_since_ms = 0;
-        return 0;
+        goto rx_stuck_check;
     }
-    used = txq_used(iwl, iwl->data_txq_write, iwl->data_txq_read);
     /* Se arma con la primera trama pendiente, no cuando la cola se vació: una
      * cola ociosa diez segundos no está atascada por recibir una trama. */
     if (used == 0) {
         iwl->txq_wd_since_ms = 0;
-        return 0;
+        goto rx_stuck_check;
     }
     if (!iwl->txq_wd_since_ms || iwl->data_txq_read != iwl->txq_wd_read) {
         iwl->txq_wd_read = iwl->data_txq_read;
@@ -814,6 +1064,21 @@ int iwl_trans_check_health(struct iwl_ax211_priv *iwl, uint64_t now_ms)
               (unsigned)iwl->rx_rb_stop, iwl->rx_pend_len);
     iwl->txq_wd_since_ms = 0;
     return IWL_LINK_LOST_TXQ_STUCK;
+
+rx_stuck_check:
+    if (iwl->associated && iwl->rx_had_traffic && !used &&
+        iwl->rx_last_progress_ms && now_ms &&
+        now_ms - iwl->rx_last_progress_ms >= IWL_RX_STUCK_MS) {
+        lx_printk("iwl_trans: RX parado %u ms rb_hw=%u rx_read=%u rx_write=%u "
+                  "rx_hold=%u rb_stop=%u rx_pend=%d\n",
+                  (unsigned)(now_ms - iwl->rx_last_progress_ms), rb_hw,
+                  (unsigned)iwl->rx_read, (unsigned)iwl->rx_write,
+                  (unsigned)iwl->rx_hold, (unsigned)iwl->rx_rb_stop,
+                  iwl->rx_pend_len);
+        iwl->rx_last_progress_ms = now_ms;
+        return IWL_LINK_LOST_RX_STUCK;
+    }
+    return 0;
 }
 
 static const char *tx_status_name(uint32_t st)
@@ -1067,6 +1332,7 @@ static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsig
     if (group == 0 && cmd == UCODE_ALIVE_NTFY) {
         iwl->alive = 1;
         lx_iwlwifi_set_alive(1);
+        iwl_trans_alive_store_dbg_ptrs(iwl, data, pay);
         if (pay >= (int)IWL_ALIVE_NTFY_V5_LEN) {
             const uint8_t *sku = data + IWL_ALIVE_SKU_OFF;
 
@@ -1263,7 +1529,7 @@ int iwl_trans_gen2_start(struct iwl_ax211_priv *iwl)
     ctxt->version.version = 0;
     ctxt->version.size = (uint16_t)(sizeof(*ctxt) / 4);
     ctxt->control.control_flags = IWL_CTXT_INFO_TFD_FORMAT_LONG |
-                                  IWL_CTXT_INFO_RB_CB_SIZE_32 |
+                                  IWL_CTXT_INFO_RB_CB_SIZE_256 |
                                   IWL_CTXT_INFO_RB_SIZE_4K;
     ctxt->rbd_cfg.free_rbd_addr = iwl->rx_bd_dma;
     ctxt->rbd_cfg.used_rbd_addr = iwl->used_bd_dma;

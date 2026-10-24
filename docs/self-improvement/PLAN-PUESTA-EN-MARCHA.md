@@ -59,7 +59,7 @@ coordinador con estado durable y recuperación, validador independiente, bancos 
    **no** hay rastro de `qwen35moe` (la variante MoE del 35B-A3B) y no hay kernels GPU para atención lineal. Sin medir: tok/s y memoria en el guest.
 4. **Máquina física (N2/N3).** T30/T31: elegir equipo, medir servicio/inferencia y probar la recuperación completa.
 5. **Circuito nativo (N3).** T43 (validar y recuperar candidatos construidos en soso), T44 (tres mejoras repetidas) y T51 (campaña completa sin Forja ni Linux).
-6. **Higiene.** 42 rutas sin commitear (arnés, scripts de campaña, bancos, documentación); D11 pendiente de aceptación; `cargo clippy` falla al compilar en
+6. **Higiene.** 42 rutas sin commitear (arnés, scripts de campaña, bancos, documentación); D11 aceptada (2026-10-24); `cargo clippy` falla al compilar en
    `gguf2som`, `soso-llm-api` y `soso-llm-core` (un error, 345 avisos arrastrados); 36 avisos en `soso-improve-core`; `cargo test -p soso-improve-core` necesita `--features std`.
 
 ## 3. Plan por fases

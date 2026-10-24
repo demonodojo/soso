@@ -1448,6 +1448,11 @@ pub fn parse_wifi_stages(text: &str) -> WifiStages {
         }) {
             StageStatus::fail("reconexión fallida")
         } else if any_line(&lines, |l| {
+            l.contains("etapa recover ok")
+                || (l.contains("wifi: reconectando") && l.contains("recover"))
+        }) {
+            StageStatus::ok(Some("recover + scan/assoc"))
+        } else if any_line(&lines, |l| {
             (l.contains("reconex") || l.contains("reconnect"))
                 && (l.contains("ok") || l.contains("éxito") || l.contains("exito"))
         }) {

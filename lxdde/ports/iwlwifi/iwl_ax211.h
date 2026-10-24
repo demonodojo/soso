@@ -216,6 +216,13 @@ struct iwl_ax211_priv {
     uint32_t cmd_reentry_reject;
     uint32_t cmd_recover;
     uint8_t cmd_needs_recover;
+    /* Punteros SRAM del ALIVE (Linux mvm/fw.c) para volcar error en SW_ERR. */
+    uint32_t dbg_lmac_err_ptr[2];
+    uint32_t dbg_umac_err_ptr;
+    /* Última vez que avanzó el consumidor RX (ms de uptime). */
+    uint64_t rx_last_progress_ms;
+    uint16_t rx_health_read_snap;
+    uint8_t rx_had_traffic;
     /* Guardia de reentrada: envío/RX/poll tienen un único propietario. */
     uint8_t in_trans;
     int cmd_status;
@@ -290,6 +297,7 @@ extern struct iwl_ax211_priv g_iwl;
 #define IWL_LINK_LOST_BEACONS   3
 #define IWL_LINK_LOST_FW_ERROR  4
 #define IWL_LINK_LOST_TXQ_STUCK 5
+#define IWL_LINK_LOST_RX_STUCK  6
 
 void lx_iwlwifi_set_alive(int alive);
 void lx_iwlwifi_set_phase(const char *phase);
@@ -347,6 +355,9 @@ unsigned iwl_trans_tx_space(const struct iwl_ax211_priv *iwl);
 unsigned iwl_trans_data_tx_space(const struct iwl_ax211_priv *iwl);
 void iwl_trans_tx_reclaim(struct iwl_ax211_priv *iwl, uint16_t seq);
 int iwl_trans_check_health(struct iwl_ax211_priv *iwl, uint64_t now_ms);
+void iwl_trans_alive_store_dbg_ptrs(struct iwl_ax211_priv *iwl,
+                                    const uint8_t *data, int pay);
+void iwl_trans_dump_fw_errors(struct iwl_ax211_priv *iwl);
 void iwl_ax211_check_health(uint64_t now_ms);
 
 #endif
