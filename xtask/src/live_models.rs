@@ -49,6 +49,8 @@ pub struct LiveModelSpec {
     pub min_usb_bytes: u64,
     /// Tokenizer que tiene que traer su `.som` para segmentar como el original.
     pub tokenizer: TokenizerEsperado,
+    /// Árbol `.som` ya convertido, relativo a la raíz. `None` → `target/{name}-model`.
+    pub dir_rel: Option<&'static str>,
 }
 
 /// Catálogo ordenado de peor a mejor calidad (el picker recorre al revés).
@@ -60,6 +62,7 @@ pub const CATALOG: &[LiveModelSpec] = &[
         gguf_bytes_estimate: 700 * 1024 * 1024,
         min_usb_bytes: 8 * 1024 * 1024 * 1024,
         tokenizer: TokenizerEsperado::Piezas,
+        dir_rel: None,
     },
     LiveModelSpec {
         name: "qwen2.5-coder-3b",
@@ -68,6 +71,7 @@ pub const CATALOG: &[LiveModelSpec] = &[
         gguf_bytes_estimate: 2100 * 1024 * 1024,
         min_usb_bytes: 8 * 1024 * 1024 * 1024,
         tokenizer: TokenizerEsperado::Fusiones,
+        dir_rel: None,
     },
     LiveModelSpec {
         name: "qwen3-4b-instruct-2507",
@@ -76,6 +80,7 @@ pub const CATALOG: &[LiveModelSpec] = &[
         gguf_bytes_estimate: 2500 * 1024 * 1024,
         min_usb_bytes: 8 * 1024 * 1024 * 1024,
         tokenizer: TokenizerEsperado::Fusiones,
+        dir_rel: None,
     },
     LiveModelSpec {
         name: "mistral-7b",
@@ -84,6 +89,7 @@ pub const CATALOG: &[LiveModelSpec] = &[
         gguf_bytes_estimate: 4_400 * 1024 * 1024,
         min_usb_bytes: 16 * 1024 * 1024 * 1024,
         tokenizer: TokenizerEsperado::Piezas,
+        dir_rel: None,
     },
     LiveModelSpec {
         name: "gemma-4-12b",
@@ -93,6 +99,7 @@ pub const CATALOG: &[LiveModelSpec] = &[
         min_usb_bytes: 16 * 1024 * 1024 * 1024,
         // El `.som` v3 trae la tabla de fusiones y los tokens especiales por tipo.
         tokenizer: TokenizerEsperado::Fusiones,
+        dir_rel: None,
     },
     LiveModelSpec {
         name: "mixtral",
@@ -101,6 +108,7 @@ pub const CATALOG: &[LiveModelSpec] = &[
         gguf_bytes_estimate: 26 * 1024 * 1024 * 1024,
         min_usb_bytes: 32 * 1024 * 1024 * 1024,
         tokenizer: TokenizerEsperado::Piezas,
+        dir_rel: None,
     },
     LiveModelSpec {
         name: "llama2-70b",
@@ -109,6 +117,16 @@ pub const CATALOG: &[LiveModelSpec] = &[
         gguf_bytes_estimate: 39 * 1024 * 1024 * 1024,
         min_usb_bytes: 64 * 1024 * 1024 * 1024,
         tokenizer: TokenizerEsperado::Piezas,
+        dir_rel: None,
+    },
+    LiveModelSpec {
+        name: "qwen27-iq3",
+        repo: "unsloth/Qwen3.6-27B-GGUF",
+        gguf_file: Some("Qwen3.6-27B-UD-IQ3_XXS.gguf"),
+        gguf_bytes_estimate: 12 * 1024 * 1024 * 1024,
+        min_usb_bytes: 32 * 1024 * 1024 * 1024,
+        tokenizer: TokenizerEsperado::Fusiones,
+        dir_rel: Some("target/qwen36-work/som-27b-iq3"),
     },
     LiveModelSpec {
         name: "qwen3.8-27b",
@@ -117,6 +135,7 @@ pub const CATALOG: &[LiveModelSpec] = &[
         gguf_bytes_estimate: 19 * 1024 * 1024 * 1024,
         min_usb_bytes: 32 * 1024 * 1024 * 1024,
         tokenizer: TokenizerEsperado::Fusiones,
+        dir_rel: None,
     },
 ];
 
@@ -133,12 +152,15 @@ fn som_version(path: &Path) -> Result<u32, String> {
         .map_err(|_| format!("{}: cabecera o CRC de .som inválidos", path.display()))
 }
 
-/// Modelo demo de `package-usb-live` cuando no hay pendrive ni `SOSO_LIVE_CAPACITY`.
+/// Modelo demo de `package-usb-live` y de `flash-usb-live` sin escalera.
+///
+/// Es el denso de automejora (Qwen3.6-27B UD-IQ3_XXS). La escalera por tamaño
+/// del stick solo entra con `SOSO_LIVE_AUTO_MODEL` o `SOSO_LIVE_CAPACITY`.
 pub fn default_live_spec() -> LiveModelSpec {
     *CATALOG
         .iter()
-        .find(|s| s.name == "qwen3-4b-instruct-2507")
-        .expect("qwen3-4b-instruct-2507 en CATALOG")
+        .find(|s| s.name == "qwen27-iq3")
+        .expect("qwen27-iq3 en CATALOG")
 }
 
 impl LiveModelSpec {
@@ -183,7 +205,10 @@ impl LiveModelSpec {
     }
 
     pub fn target_dir(&self, root: &Path) -> PathBuf {
-        root.join(format!("target/{}-model", self.name))
+        match self.dir_rel {
+            Some(rel) => root.join(rel),
+            None => root.join(format!("target/{}-model", self.name)),
+        }
     }
 
     /// Directorio materializado válido (`--check` OK), con fallback a `{name}-model-new`.
@@ -267,7 +292,7 @@ pub fn auto_model_from_usb() -> bool {
 }
 
 /// Capacidad para `pick_for_usb` al flashear: `SOSO_LIVE_CAPACITY`, auto con
-/// `SOSO_LIVE_AUTO_MODEL`, o `None` → `default_live_spec` (qwen3-4b-instruct-2507).
+/// `SOSO_LIVE_AUTO_MODEL`, o `None` → `default_live_spec` (qwen27-iq3).
 pub fn model_pick_bytes_for_flash(disk_bytes: u64) -> Option<u64> {
     if let Ok(raw) = std::env::var("SOSO_LIVE_CAPACITY") {
         return Some(parse_capacity_env(&raw).unwrap_or_else(|e| {
@@ -533,12 +558,11 @@ mod tests {
     }
 
     #[test]
-    fn default_live_es_qwen3_4b_instruct() {
-        assert_eq!(default_live_spec().name, "qwen3-4b-instruct-2507");
-        assert_eq!(
-            default_live_spec().gguf_file,
-            Some("Qwen_Qwen3-4B-Instruct-2507-Q4_K_M.gguf")
-        );
+    fn default_live_es_qwen27_iq3() {
+        let spec = default_live_spec();
+        assert_eq!(spec.name, "qwen27-iq3");
+        assert_eq!(spec.gguf_file, Some("Qwen3.6-27B-UD-IQ3_XXS.gguf"));
+        assert_eq!(spec.dir_rel, Some("target/qwen36-work/som-27b-iq3"));
     }
 
     #[test]

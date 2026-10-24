@@ -485,6 +485,88 @@ int gsp_buf_upload_dma(struct gsp_buf *b, uint64_t va, uint64_t offset,
     return 0;
 }
 
+int gsp_buf_download_dma(struct gsp_buf *b, uint64_t src_va, uint64_t src_offset,
+                         const uint64_t *phys, unsigned npages, unsigned dst_off,
+                         uint64_t size)
+{
+    struct gsp_buf_slot *s;
+    uint64_t esperadas;
+    unsigned i;
+
+    if (!b || !b->ready || !b->vmm || !phys || npages == 0 || size == 0) {
+        return -1;
+    }
+    if (dst_off >= VRAM_PAGE) {
+        return -1;
+    }
+    if (size > G6_SRC_MAX - (uint64_t)dst_off) {
+        return -1;
+    }
+    esperadas = (dst_off + gsp_ce_io_bytes((uint32_t)size) + VRAM_PAGE - 1ull) /
+                VRAM_PAGE;
+    if ((uint64_t)npages != esperadas) {
+        return -1;
+    }
+    s = slot_find_va(src_va);
+    if (!s) {
+        return -1;
+    }
+    if (src_offset > s->size || size > s->size - src_offset) {
+        return -1;
+    }
+    if (src_offset + gsp_ce_io_bytes((uint32_t)size) > s->size) {
+        return -1;
+    }
+    if (src_offset & (VRAM_PAGE - 1ull)) {
+        return -1;
+    }
+    if (size > VRAM_PAGE && (size & (VRAM_PAGE - 1ull))) {
+        return -1;
+    }
+    for (i = 0; i < npages; i++) {
+        if (phys[i] & (VRAM_PAGE - 1ull)) {
+            return -1;
+        }
+    }
+    if (gsp_vmm_map_pages(b->vmm, G6_SRC_VA, phys, npages, GSP_VMM_SYSMEM) != 0) {
+        lx_printk("nouveau-lx: G6 — present DMA: fallo al mapear destino (%u páginas)\n",
+                  npages);
+        return -1;
+    }
+    {
+        uint64_t off;
+        uint64_t chunk;
+        uint64_t rest;
+        unsigned max_chunk = b->scratch_bytes ? b->scratch_bytes : (unsigned)VRAM_PAGE;
+
+        for (off = 0; off < size; off += chunk) {
+            rest = size - off;
+            chunk = rest;
+            if (chunk > (uint64_t)max_chunk) {
+                chunk = max_chunk;
+            }
+            if (chunk > VRAM_PAGE) {
+                chunk &= ~(VRAM_PAGE - 1ull);
+            }
+            if (chunk == 0) {
+                return -1;
+            }
+            if (gsp_ce_copy_sync(b->ce, G6_SRC_VA + (uint64_t)dst_off + off,
+                                 src_va + src_offset + off, (uint32_t)chunk,
+                                 GSP_CE_WAIT_MS) != 0) {
+                if (!b->ce->stuck) {
+                    lx_printk("nouveau-lx: G6 — present DMA falló (off=%llu "
+                              "chunk=%llu de %llu)\n",
+                              (unsigned long long)off, (unsigned long long)chunk,
+                              (unsigned long long)size);
+                }
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
 int gsp_buf_free(struct gsp_buf *b, uint64_t va)
 {
     struct gsp_buf_slot *s;

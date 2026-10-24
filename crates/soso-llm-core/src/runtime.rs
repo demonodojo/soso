@@ -164,6 +164,13 @@ pub struct KevPrefixSnapshot {
     pub kv: Vec<LayerKv>,
 }
 
+/// Estado de las capas GDN tras procesar `tokens` (el prompt de una petición).
+#[derive(Clone)]
+struct InstantaneaGdn {
+    tokens: Vec<u32>,
+    capas: Vec<(usize, Vec<f32>, Vec<f32>)>,
+}
+
 pub struct Runtime {
     pub manifest: Manifest,
     pub index: TensorIndex,
@@ -175,6 +182,9 @@ pub struct Runtime {
     /// nueva puede reutilizar sin repetir el prefill (T22). Vacío cuando la caché
     /// no es fiable (cancelación, planificador, otra generación en curso).
     cached_tokens: Vec<u32>,
+    /// Instantáneas del estado de las capas Gated DeltaNet al final de cada prompt (las más recientes primero). El estado
+    /// recurrente no se puede recortar como un KV: para reutilizar un prefijo hay que volver a un punto guardado.
+    gdn_instantaneas: Vec<InstantaneaGdn>,
     /// Buffers del prefill por bloques (T82); se crean la primera vez que hacen falta.
     block: Option<BlockScratch>,
     /// Prefill por bloques activado (por defecto sí). Apagarlo fuerza el camino token
@@ -252,6 +262,7 @@ impl Runtime {
                 .collect(),
             pos: 0,
             cached_tokens: Vec::new(),
+            gdn_instantaneas: Vec::new(),
             block: None,
             prefill_por_bloques: true,
             tokens_en_bloque: 0,
@@ -475,6 +486,7 @@ impl Runtime {
     pub fn reset_sequence(&mut self) {
         self.pos = 0;
         self.cached_tokens.clear();
+        self.gdn_instantaneas.clear();
         for layer in &mut self.kv {
             layer.reset();
         }
@@ -536,9 +548,11 @@ impl Runtime {
         // Con ventana deslizante real (Gemma), una capa que ya expulsó filas sólo puede volver a una posición
         // `p` si conserva las `ventana` filas que preceden a `p`: de ahí el suelo `minimo`.
         let mut minimo = 0usize;
+        let hay_gdn = self.hay_gdn();
         for (l, kv) in self.kv.iter().enumerate() {
             match self.kv_dim_recortable(l) {
                 Some(d) if kv.posiciones(d) == self.pos => {}
+                None if hay_gdn && self.manifest.layer(l as u32).is_some_and(|sp| sp.attn_kind == AttnKind::Gdn) => continue,
                 _ => return 0,
             }
             if kv.dropped > 0 {
@@ -551,11 +565,50 @@ impl Runtime {
             .zip(prompt)
             .take_while(|(a, b)| a == b)
             .count();
-        let p = comun.min(prompt.len() - 1);
+        let mut p = comun.min(prompt.len() - 1);
+        if hay_gdn {
+            // Sólo se puede volver a un punto con instantánea: la mayor posición guardada que sea prefijo del prompt nuevo
+            // y cuyo K/V siga en la caché de las capas de atención.
+            p = match self.instantanea_para(prompt, p) {
+                Some(i) => self.gdn_instantaneas[i].tokens.len(),
+                None => 0,
+            };
+        }
         if p < minimo {
             return 0;
         }
         p
+    }
+
+    fn hay_gdn(&self) -> bool {
+        (0..self.manifest.num_layers).any(|l| self.manifest.layer(l).is_some_and(|sp| sp.attn_kind == AttnKind::Gdn))
+    }
+
+    /// Índice de la instantánea de mayor posición `<= limite` cuyos tokens son prefijo de `prompt`.
+    fn instantanea_para(&self, prompt: &[u32], limite: usize) -> Option<usize> {
+        self.gdn_instantaneas
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| i.tokens.len() <= limite && i.tokens.len() < prompt.len() && prompt.starts_with(&i.tokens))
+            .max_by_key(|(_, i)| i.tokens.len())
+            .map(|(k, _)| k)
+    }
+
+    /// Guarda el estado GDN tras el prefill de `prompt` (llamar con `self.pos == prompt.len()`).
+    fn guardar_instantanea_gdn(&mut self, prompt: &[u32]) {
+        if !self.hay_gdn() || self.pos != prompt.len() {
+            return;
+        }
+        let capas: Vec<(usize, Vec<f32>, Vec<f32>)> = self
+            .kv
+            .iter()
+            .enumerate()
+            .filter(|(_, kv)| !kv.gdn_s.is_empty())
+            .map(|(l, kv)| (l, kv.gdn_s.clone(), kv.gdn_conv.clone()))
+            .collect();
+        self.gdn_instantaneas.retain(|i| i.tokens != prompt);
+        self.gdn_instantaneas.insert(0, InstantaneaGdn { tokens: prompt.to_vec(), capas });
+        self.gdn_instantaneas.truncate(3);
     }
 
     /// Empieza una secuencia reaprovechando el prefijo de la anterior. Devuelve
@@ -566,9 +619,21 @@ impl Runtime {
             self.reset_sequence();
             return 0;
         }
+        if self.hay_gdn() {
+            let Some(i) = self.instantanea_para(prompt, p) else {
+                self.reset_sequence();
+                return 0;
+            };
+            let snap = self.gdn_instantaneas[i].clone();
+            for (l, s, c) in &snap.capas {
+                self.kv[*l].gdn_s.clone_from(s);
+                self.kv[*l].gdn_conv.clone_from(c);
+            }
+        }
         for l in 0..self.kv.len() {
-            let d = self.kv_dim_recortable(l).unwrap_or(0);
-            self.kv[l].truncate_tokens(p, d);
+            if let Some(d) = self.kv_dim_recortable(l) {
+                self.kv[l].truncate_tokens(p, d);
+            }
         }
         self.pos = p;
         // Durante la generación la caché no es fiable hasta que termina bien.
@@ -651,6 +716,9 @@ impl Runtime {
             Self::BLOQUE_PREFILL_MOE_GPU
         } else if gemma_gpu {
             32
+        } else if (0..self.manifest.num_layers).all(|l| crate::bloque35::soporta(&exec, l, &self.kv[l as usize])) {
+            // Qwen3.5: cada experto/matriz lee sus pesos una vez por bloque, así que cuanto mayor, mejor.
+            Self::BLOQUE_PREFILL_FLUJO
         } else {
             Self::BLOQUE_PREFILL
         }
@@ -698,7 +766,10 @@ impl Runtime {
             && (0..self.manifest.num_layers).all(|l| {
                 LayerExecutor { manifest: &self.manifest, has_gate: self.has_gate, parallel: None }.es_capa_moe_gpu(l)
             });
-        if base_gpu && !es_gemma && !es_moe_gpu {
+        // Qwen3.5/3.6 (GDN + atención con puerta): por bloques en CPU aunque haya GPU.
+        let exec0 = LayerExecutor { manifest: &self.manifest, has_gate: self.has_gate, parallel: None };
+        let todas_q35 = (0..self.manifest.num_layers).all(|l| crate::bloque35::soporta(&exec0, l, &self.kv[l as usize]));
+        if base_gpu && !es_gemma && !es_moe_gpu && !todas_q35 {
             return Some("hay GPU");
         }
         if let Some(pl) = self.planner.as_ref() {
@@ -726,10 +797,13 @@ impl Runtime {
             // Con GPU, las capas de Gemma (con ventana) y las MoE de GQA clásica van por bloques por su propio camino
             // (`forward_layer_gemma_block` / `moe_gpu`), que cae a token a token por CPU si la GPU las rechaza.
             let es_gemma_l = self.manifest.layer(l).is_some_and(|sp| crate::gemma::es_capa_gemma(sp.flags));
-            if !exec.soporta_bloque(l, kv) && !(base_gpu && (exec.es_capa_moe_gpu(l) || es_gemma_l)) {
+            let q35 = crate::bloque35::soporta(&exec, l, kv);
+            if !q35 && !exec.soporta_bloque(l, kv) && !(base_gpu && (exec.es_capa_moe_gpu(l) || es_gemma_l)) {
                 return Some("capa no soportada (MLA/KDA/gated/GDN/MoE)");
             }
-            if kv.posiciones(kv_dim) != self.pos {
+            // Las capas GDN no guardan K/V: su posición no es la del bloque.
+            let sin_kv = q35 && self.manifest.layer(l).is_some_and(|sp| sp.attn_kind == AttnKind::Gdn);
+            if !sin_kv && kv.posiciones(kv_dim) != self.pos {
                 return Some("el KV ya no coincide con la posición");
             }
         }
@@ -1433,7 +1507,10 @@ impl Runtime {
         }
         let base_gpu = matches!(self.backend, Backend::Gpu | Backend::Auto)
             && gpu.as_ref().is_some_and(|g| g.available());
-        if base_gpu {
+        let exec0 = LayerExecutor { manifest: &self.manifest, has_gate: self.has_gate, parallel: None };
+        // Las capas de Qwen3.5 van por bloques (en CPU) también con GPU disponible.
+        let todas_q35 = (layer_start..layer_end).all(|l| crate::bloque35::soporta(&exec0, l, &self.kv[l as usize]));
+        if base_gpu && !todas_q35 {
             return false;
         }
         if self.planner.is_some() {
@@ -1451,10 +1528,15 @@ impl Runtime {
             let kv = &self.kv[l as usize];
             let kv_dim = self.manifest.effective_num_kv_heads(l) as usize
                 * self.manifest.effective_head_dim(l) as usize;
-            if !exec.soporta_bloque(l, kv) {
+            let q35 = crate::bloque35::soporta(&exec, l, kv);
+            if !q35 && !exec.soporta_bloque(l, kv) {
                 return false;
             }
-            if kv.posiciones(kv_dim) != self.pos {
+            // Las capas GDN no guardan K/V: su posición no es la del bloque.
+            if !q35 && kv.posiciones(kv_dim) != self.pos {
+                return false;
+            }
+            if q35 && self.manifest.layer(l).is_some_and(|sp| sp.attn_kind == AttnKind::Gated) && kv.posiciones(kv_dim) != self.pos {
                 return false;
             }
         }
@@ -1876,6 +1958,7 @@ impl Runtime {
         if cancel_slot.as_ref().is_some_and(|g| g.stopped) {
             return Ok((tokens, ledger.into_report()));
         }
+        self.guardar_instantanea_gdn(prompt);
         let greedy = sampler.temp <= 0.0;
         let mut remaining = options.max_new;
         if cancel_slot.as_mut().is_some_and(|g| {
@@ -2112,6 +2195,7 @@ impl Runtime {
         if cancel_slot.as_ref().is_some_and(|g| g.stopped) {
             return Ok((tokens, ledger.into_report()));
         }
+        self.guardar_instantanea_gdn(prompt);
         let greedy = sampler.temp <= 0.0;
         let mut remaining = options.max_new;
         if cancel_slot.as_mut().is_some_and(|g| {

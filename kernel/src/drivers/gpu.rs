@@ -671,6 +671,50 @@ fn subir_por_dma(va: u64, user_ptr: u64, n: usize) -> Result<(), Motivo> {
     Ok(())
 }
 
+/// Trozo máximo de una presentación CE (mismo criterio que la subida DMA).
+#[cfg(feature = "lxdde")]
+const LOTE_PRESENT: usize = 16 * 1024 * 1024 - 4096;
+
+/// CE: RT en VRAM → shadow del GOP (sysmem del kernel).
+#[cfg(feature = "lxdde")]
+fn descargar_vram_a_shadow(rt_va: u64, dst_virt: u64, size: usize) -> Result<(), i64> {
+    if rt_va == 0 || size == 0 {
+        return Err(abi::EINVAL);
+    }
+    let mut off = 0usize;
+    while off < size {
+        let resto = size - off;
+        let c = if resto > LOTE_PRESENT {
+            LOTE_PRESENT
+        } else if resto > 4096 {
+            resto & !0xfff
+        } else {
+            resto
+        };
+        if c == 0 {
+            return Err(abi::EINVAL);
+        }
+        if off > 0 && (off & 0xfff) != 0 {
+            return Err(abi::EINVAL);
+        }
+        let chunk_virt = dst_virt + off as u64;
+        let dst_off = (chunk_virt & 0xfff) as u32;
+        let page_base = chunk_virt & !0xfff;
+        let paginas = (dst_off as u64 + ce_io_bytes(c) as u64 + 4095) / 4096;
+        if paginas == 0 || paginas > 4098 {
+            return Err(abi::EINVAL);
+        }
+        let mut phys = alloc::vec![0u64; paginas as usize];
+        for (i, slot) in phys.iter_mut().enumerate() {
+            *slot = crate::mm::virt_to_phys(page_base + (i as u64) * 4096).ok_or(abi::EIO)?;
+        }
+        crate::lxdde::device_buf_download_dma(rt_va, off as u64, &phys, dst_off, c as u64)
+            .map_err(|_| abi::EIO)?;
+        off += c;
+    }
+    Ok(())
+}
+
 /// Sube `len` bytes del proceso al búfer. **Devuelve 0**, no la cuenta de bytes.
 ///
 /// Lo devolvía, y su hermana `map_to_user` (gpu_read) devolvía 0: la asimetría no
@@ -790,6 +834,7 @@ fn soft_sqrtf(x: f32) -> f32 {
 ///   tráfico y 8× menos VRAM que el plano f32.
 /// - `b"GFINI"` — apaga GSP-RM y deja la tarjeta sin DMA (irreversible)
 /// - `b"GCLR3"` + u64 rt_handle + u32 w + u32 h + u32 pitch + u32 rgba (A8B8G8R8)
+/// - `b"GPRES"` + u64 rt_handle + u32 w + u32 h + u32 pitch — CE VRAM→shadow GOP (F1)
 /// - `b"SOFTG"` / `b"SOFTX"` — enciende/apaga el dispositivo software de pruebas
 ///
 /// El valor de vuelta de SAXPY/MATVF/MATVQ lleva `abi::GPU_SUBMIT_ON_GPU` (lo hizo
@@ -847,6 +892,47 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
             }
         }
         return Err(abi::EINVAL);
+    }
+    if cmd.len() >= 5 && &cmd[..5] == b"GPRES" && cmd.len() >= 25 {
+        let rt_h = u64::from_le_bytes(cmd[5..13].try_into().unwrap_or([0; 8]));
+        let w = u32::from_le_bytes(cmd[13..17].try_into().unwrap_or([0; 4]));
+        let h = u32::from_le_bytes(cmd[17..21].try_into().unwrap_or([0; 4]));
+        let pitch = u32::from_le_bytes(cmd[21..25].try_into().unwrap_or([0; 4]));
+        let frame_bytes = (pitch as u64)
+            .checked_mul(h as u64)
+            .ok_or(abi::EINVAL)?;
+        if w == 0 || h == 0 || pitch == 0 || frame_bytes == 0 {
+            return Err(abi::EINVAL);
+        }
+        let (rt_va, cap) = {
+            let buf = g
+                .buffers
+                .get(rt_h as usize)
+                .and_then(|b| b.as_ref())
+                .ok_or(abi::EINVAL)?;
+            (buf.device_va().ok_or(abi::EINVAL)?, buf.len() as u64)
+        };
+        if frame_bytes > cap {
+            return Err(abi::EINVAL);
+        }
+        drop(g);
+        #[cfg(feature = "lxdde")]
+        {
+            if !crate::lxdde::gfx3d_ready() {
+                return Err(abi::ENOTSUP);
+            }
+            return crate::drivers::fb::present_shadow_after(frame_bytes as usize, |_ptr, virt| {
+                descargar_vram_a_shadow(rt_va, virt, frame_bytes as usize).map_err(|_| ())?;
+                Ok(())
+            })
+            .map(|()| submit_bits(true))
+            .map_err(|_| abi::EIO);
+        }
+        #[cfg(not(feature = "lxdde"))]
+        {
+            let _ = (rt_va, w, h, pitch, frame_bytes);
+            return Err(abi::ENOSYS);
+        }
     }
     if cmd.len() >= 5 && &cmd[..5] == b"SAXPY" && cmd.len() >= 29 {
         let a = f32::from_le_bytes(cmd[5..9].try_into().unwrap_or([0; 4]));

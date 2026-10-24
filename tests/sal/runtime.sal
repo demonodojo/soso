@@ -1,18 +1,25 @@
 fn main() -> Int ! io, alloc
-    if argc() != 2
-        return 2
-    if str_eq(argv(1), "dos palabras") == 0
-        return 3
     v = vec_new()
     _v = vec_push(v, 42)
-    if vec_get(v, 0) != 42
-        return 4
     texto = "hola " + "ñ" + "\n"
-    if write_file(d"/tmp/sal-texto", texto) != 0
-        return 5
+    escrito = write_file(d"/tmp/sal-texto", texto)
     otro = read_file(d"/tmp/sal-texto")
-    if str_eq(texto, otro) == 0
-        return 6
+    elemento = vec_get(v, 0)
     _p = print_str(texto)
     _f = vec_free(v)
-    0
+    if argc() != 2
+        2
+    else
+        if str_eq(argv(1), "dos palabras") == 0
+            3
+        else
+            if elemento != 42
+                4
+            else
+                if escrito != 0
+                    5
+                else
+                    if str_eq(texto, otro) == 0
+                        6
+                    else
+                        0

@@ -968,3 +968,26 @@ pub fn present_from_user(buf: &[u8]) -> Result<(), ()> {
     flush_all(st);
     Ok(())
 }
+
+/// F1: rellena el shadow (p. ej. CE desde VRAM) y vuelca al GOP en una sola
+/// copia WC. `frame_bytes` no puede superar el shadow lógico.
+pub fn present_shadow_after<F, R>(frame_bytes: usize, fill: F) -> Result<R, ()>
+where
+    F: FnOnce(*mut u8, u64) -> Result<R, ()>,
+{
+    if frame_bytes == 0 || frame_bytes > 32 * 1024 * 1024 {
+        return Err(());
+    }
+    let mut guard = FB.lock();
+    let Some(st) = guard.as_mut() else {
+        return Err(());
+    };
+    if frame_bytes > st.shadow.len() {
+        return Err(());
+    }
+    let ptr = st.shadow.as_mut_ptr();
+    let virt = ptr as u64;
+    let out = fill(ptr, virt)?;
+    flush_all(st);
+    Ok(out)
+}

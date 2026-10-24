@@ -511,10 +511,11 @@ fn write_flash(
         .map(|b| format!("Medido al flashear: {}.\n", live_models::format_bytes(b)))
         .unwrap_or_default();
     let model_demo = format!(
-        "Modelo demo empaquetado: `{}` (Q4_K_M). También `tiny` sintético.\n\
-         Por defecto al flashear: qwen3-4b-instruct-2507. Escalera por tamaño: SOSO_LIVE_AUTO_MODEL=1 \
+        "Modelo demo empaquetado: `{}`. También `tiny` sintético.\n\
+         Por defecto al flashear: {}. Escalera por tamaño: SOSO_LIVE_AUTO_MODEL=1 \
          (tinyllama → qwen2.5-coder-3b → qwen3-4b-instruct-2507 → mistral-7b → gemma-4-12b (16 GB+) → qwen3.8-27b en 32 GB+) o SOSO_LIVE_CAPACITY=32G.",
-        selection.llm_name
+        selection.llm_name,
+        live_models::default_live_spec().name
     );
     let body = format!(
         r#"soso — arranque LIVE desde USB (no modifica el disco interno)

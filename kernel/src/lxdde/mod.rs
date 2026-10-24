@@ -257,6 +257,16 @@ pub fn device_buf_upload_dma(
     gpu::device_buf_upload_dma(va, offset, phys, src_off, size)
 }
 
+pub fn device_buf_download_dma(
+    src_va: u64,
+    src_offset: u64,
+    phys: &[u64],
+    dst_off: u32,
+    size: u64,
+) -> Result<(), ()> {
+    gpu::device_buf_download_dma(src_va, src_offset, phys, dst_off, size)
+}
+
 pub fn device_buf_free(va: u64) -> Result<(), ()> {
     gpu::device_buf_free(va)
 }
@@ -437,4 +447,18 @@ pub fn enqueue_matvec_q_resident(
     sem_slot: u32,
 ) -> Result<(), ()> {
     gpu::enqueue_matvec_q_resident(w_va, dtype, rows, cols, x, y_va, sem_slot)
+}
+
+pub fn gfx3d_ready() -> bool {
+    gpu::gfx3d_ready()
+}
+
+pub fn submit_3d_clear(
+    rt_va: u64,
+    width: u32,
+    height: u32,
+    pitch: u32,
+    rgba: u32,
+) -> Result<bool, ()> {
+    gpu::submit_3d_clear(rt_va, width, height, pitch, rgba)
 }

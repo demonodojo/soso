@@ -208,12 +208,12 @@ pub fn convert_with_options<R: Read + Seek>(
     // Mellum 2.1 es Qwen3-MoE (GQA, QK-norm, SwiGLU) más ventana deslizante 3:1 y YaRN en las globales.
     let is_mellum = arch_name == "mellum";
     let is_qwen3 = arch_name == "qwen3" || arch_name == "qwen3moe" || is_mellum;
-    let is_qwen35 = arch_name == "qwen35" || arch_name == "qwen38";
+    let is_qwen35 = arch_name == "qwen35" || arch_name == "qwen38" || arch_name == "qwen35moe";
     // Gemma 4 (denso): atención mixta local/global, normas en sándwich, QK-norm, GeGLU.
     let is_gemma4 = arch_name == "gemma4";
     if arch_name != "llama" && !is_mla && !is_qwen2 && !is_qwen3 && !is_qwen35 && !is_gemma4 {
         return Err(format!(
-            "arquitectura {arch_name} no soportada (llama | deepseek2 | qwen2 | qwen3 | qwen3moe | qwen35 | qwen38 | gemma4 | mellum)"
+            "arquitectura {arch_name} no soportada (llama | deepseek2 | qwen2 | qwen3 | qwen3moe | qwen35 | qwen35moe | qwen38 | gemma4 | mellum)"
         ));
     }
     let meta_prefix = if is_mla {
@@ -495,13 +495,31 @@ pub fn convert_with_options<R: Read + Seek>(
                 ("attn_output", "attn_output"),
                 ("ffn_norm", "ffn_norm"),
             ];
-            if is_qwen3 {
+            if is_qwen35 {
+                // qwen35moe: capas alternas de atención con puerta y Gated DeltaNet; la FFN es MoE con experto
+                // compartido (con su propia puerta sigmoide, `ffn_gate_inp_shexp`).
+                attn_parts = if gguf_has_layer_part(&gguf, layer, "attn_q") { QWEN35_GATED_PARTS } else { QWEN35_GDN_PARTS }
+                    .iter()
+                    .copied()
+                    .filter(|(_, som)| !matches!(*som, "ffn_up" | "ffn_gate" | "ffn_down"))
+                    .collect();
+            } else if is_qwen3 {
                 // QK-norm por cabeza (Qwen3 MoE): sin ellas la atención no coincide con la del modelo.
                 attn_parts.push(("attn_q_norm", "attn_q_norm"));
                 attn_parts.push(("attn_k_norm", "attn_k_norm"));
             }
+            if is_qwen35 {
+                attn_parts.push(("ffn_gate_inp_shexp", "ffn_gate_inp_shexp"));
+            }
             for (gguf_part, som_part) in attn_parts {
-                let gguf_name = format!("blk.{layer}.{gguf_part}.weight");
+                let gguf_name = if is_qwen35 {
+                    match gguf_tensor_name(&gguf, layer, gguf_part) {
+                        Some(n) => n,
+                        None => continue,
+                    }
+                } else {
+                    format!("blk.{layer}.{gguf_part}.weight")
+                };
                 let som_name = format!("L{layer:02}.{som_part}");
                 if options.pack_trunk {
                     if let Some(t) = gguf.tensors.get(&gguf_name) {
@@ -1172,11 +1190,7 @@ fn emit_moe_experts<R: Read + Seek>(
         let shard_name = format!("{som_name}.tensor");
         out.write(&format!("{SHARDS_DIR}/{shard_name}"), &pack_shard(&slice))?;
         let exp_shape = vec![rows as u32, cols as u32];
-        index.entries.push(match dtype {
-            DTYPE_Q8_0 => make_q8_0_entry(*id, &som_name, &shard_name, 0, &exp_shape),
-            DTYPE_Q4_K => make_q4_k_entry(*id, &som_name, &shard_name, 0, &exp_shape),
-            _ => make_f32_entry(*id, &som_name, &shard_name, 0, &exp_shape),
-        });
+        index.entries.push(entry_por_dtype(dtype, *id, &som_name, &shard_name, &exp_shape));
         *id += 1;
     }
     Ok(true)
@@ -1213,11 +1227,7 @@ fn emit_moe_experts_split<R: Read + Seek>(
         let som_name = format!("L{layer:02}.E{expert:02}.{som_suffix}");
         let shard_name = format!("{som_name}.tensor");
         out.write(&format!("{SHARDS_DIR}/{shard_name}"), &pack_shard(&payload))?;
-        index.entries.push(match dtype {
-            DTYPE_Q8_0 => make_q8_0_entry(*id, &som_name, &shard_name, 0, &shape),
-            DTYPE_Q4_K => make_q4_k_entry(*id, &som_name, &shard_name, 0, &shape),
-            _ => make_f32_entry(*id, &som_name, &shard_name, 0, &shape),
-        });
+        index.entries.push(entry_por_dtype(dtype, *id, &som_name, &shard_name, &shape));
         *id += 1;
     }
     Ok(true)
@@ -1237,28 +1247,38 @@ fn emit_moe_shared_experts<R: Read + Seek>(
     let Some(t) = gguf.tensors.get(gguf_name) else {
         return Ok(0);
     };
-    if t.shape.len() != 3 {
-        return Err(format!("{gguf_name}: se esperaban 3 dimensiones shared MoE"));
+    // 3D = varios compartidos apilados (DeepSeek); 2D = uno solo (Qwen3.5 MoE).
+    if t.shape.len() != 3 && t.shape.len() != 2 {
+        return Err(format!("{gguf_name}: se esperaban 2 o 3 dimensiones shared MoE"));
     }
     let (payload, dtype) = read_tensor(file, gguf, t)?;
     let shape: Vec<u32> = t.shape.iter().rev().map(|&d| d as u32).collect();
-    let n_exp = shape[0] as usize;
-    let rows = shape[1] as usize;
-    let cols = shape[2] as usize;
+    let dos_d = shape.len() == 2;
+    let n_exp = if dos_d { 1 } else { shape[0] as usize };
+    let rows = shape[shape.len() - 2] as usize;
+    let cols = shape[shape.len() - 1] as usize;
     for shared in 0..n_exp {
-        let slice = slice_expert_3d(&payload, dtype, rows, cols, shared)?;
+        let slice = if dos_d { payload.clone() } else { slice_expert_3d(&payload, dtype, rows, cols, shared)? };
         let som_name = format!("L{layer:02}.S{shared:02}.{som_suffix}");
         let shard_name = format!("{som_name}.tensor");
         out.write(&format!("{SHARDS_DIR}/{shard_name}"), &pack_shard(&slice))?;
         let exp_shape = vec![rows as u32, cols as u32];
-        index.entries.push(match dtype {
-            DTYPE_Q8_0 => make_q8_0_entry(*id, &som_name, &shard_name, 0, &exp_shape),
-            DTYPE_Q4_K => make_q4_k_entry(*id, &som_name, &shard_name, 0, &exp_shape),
-            _ => make_f32_entry(*id, &som_name, &shard_name, 0, &exp_shape),
-        });
+        index.entries.push(entry_por_dtype(dtype, *id, &som_name, &shard_name, &exp_shape));
         *id += 1;
     }
     Ok(n_exp as u32)
+}
+
+/// Entrada del índice para un tensor ya leído, según su dtype (Q8_0, Q4_K, Q4_0, MXFP4, i-quants; el resto F32).
+fn entry_por_dtype(dtype: u8, id: u32, name: &str, shard: &str, shape: &[u32]) -> sosomodel::index::TensorEntry {
+    match dtype {
+        DTYPE_Q8_0 => make_q8_0_entry(id, name, shard, 0, shape),
+        DTYPE_Q4_K => make_q4_k_entry(id, name, shard, 0, shape),
+        DTYPE_Q4_0 => make_q4_0_entry(id, name, shard, 0, shape),
+        DTYPE_MXFP4 => make_mxfp4_entry(id, name, shard, 0, shape),
+        d if sosomodel::layout::ggml_de_dtype_iq(d).is_some() => sosomodel::index::make_iq_entry(d, id, name, shard, 0, shape),
+        _ => make_f32_entry(id, name, shard, 0, shape),
+    }
 }
 
 fn slice_expert_3d(
@@ -1303,7 +1323,16 @@ fn slice_expert_3d(
                 .map(|s| s.to_vec())
                 .ok_or_else(|| "slice experto Q4_K fuera de rango".into())
         }
-        other => Err(format!("dtype {other} no soportado en slice MoE")),
+        other => {
+            let row_bytes = sosomodel::dequant::row_bytes(other, cols)
+                .ok_or_else(|| format!("dtype {other} no soportado en slice MoE (cols={cols})"))?;
+            let expert_bytes = rows * row_bytes;
+            let off = expert * expert_bytes;
+            payload
+                .get(off..off + expert_bytes)
+                .map(|s| s.to_vec())
+                .ok_or_else(|| format!("slice experto dtype {other} fuera de rango"))
+        }
     }
 }
 

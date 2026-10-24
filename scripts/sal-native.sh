@@ -18,7 +18,8 @@ test -x "$llvm"
 test "$("$llvm" --version | cut -d. -f1)" = 19
 clang $("$llvm" --cflags) -O2 -c "$repo/tools/sal-llc/main.c" -o "$out/llc.o"
 ar rcs "$out/libsal_llc.a" "$out/llc.o"
-cp "$repo/tests/self-improvement/native/llvm/"{lanzador.rs,shims.rs} "$out/"
+cp "$repo/tests/self-improvement/native/llvm/shims.rs" "$out/"
+cp "$repo/tools/sal-llc/main.rs" "$out/lanzador.rs"
 args=(-Zunstable-options --sysroot "$out/sysroot" --edition 2021 --target x86_64-unknown-soso
       -C linker=wild-soso -C panic=abort -C opt-level=2 -C link-arg=--allow-multiple-definition
       -L "$out" -l static=sal_llc)
@@ -27,8 +28,17 @@ for lib in $("$llvm" --link-static --system-libs); do args+=(-C "link-arg=$lib")
 args+=(-l stdc++ -l m -l dl -l pthread -l rt)
 "$rustc" "${args[@]}" "$out/lanzador.rs" -o "$out/sal-llc"
 # Host procedural macros stay on Linux; ordinary dependencies use soso's std.
+host_lld="$repo/scripts/sal-rust-linker.sh"
+clang -ffreestanding -c "$repo/tools/sal-llc/unwind-abort.c" -o "$out/unwind-abort.o"
 RUSTC="$rustc" CARGO_TARGET_DIR="$out/cargo" \
- CARGO_TARGET_X86_64_UNKNOWN_SOSO_RUSTFLAGS="-Zunstable-options --sysroot=$out/sysroot -C linker=wild-soso -C panic=abort" \
- cargo build --manifest-path "$sal/Cargo.toml" --target x86_64-unknown-soso --release --bin sal
+ CARGO_TARGET_X86_64_UNKNOWN_SOSO_RUSTFLAGS="-Zunstable-options --sysroot=$out/sysroot -C linker=$host_lld -C panic=abort -C link-arg=-static -C link-arg=$out/unwind-abort.o" \
+ cargo build --locked --manifest-path "$sal/Cargo.toml" --target x86_64-unknown-soso --release --bin sal
 cp "$out/cargo/x86_64-unknown-soso/release/sal" "$out/sal"
 printf 'Compilador Sal y LLVM nativos: %s\n' "$out"
+
+for binary in "$out/sal" "$out/sal-llc"; do
+    if readelf -l -d "$binary" | grep -E 'INTERP|NEEDED'; then
+        echo "ERROR: dependencia dinámica en $binary" >&2
+        exit 1
+    fi
+done

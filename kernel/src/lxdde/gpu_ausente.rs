@@ -62,6 +62,16 @@ pub fn device_buf_upload_dma(
     Err(())
 }
 
+pub fn device_buf_download_dma(
+    _src_va: u64,
+    _src_offset: u64,
+    _phys: &[u64],
+    _dst_off: u32,
+    _size: u64,
+) -> Result<(), ()> {
+    Err(())
+}
+
 pub fn device_buf_free(_va: u64) -> Result<(), ()> {
     Err(())
 }

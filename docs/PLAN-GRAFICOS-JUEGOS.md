@@ -17,8 +17,8 @@ framebuffer userspace (`SYS_FB_*`, `SYS_INPUT_POLL`); skill **`soso-gpu`**.
 
 | ID | Entregable | Criterio GO | Estado |
 |----|-----------|-------------|--------|
-| **H1** | Objeto 3D persistente + `CLEAR_SURFACE` en VRAM + demo + hostcheck | Log `3D clear verificado (H1 GO)` en VFIO GB205; `soso-gfx-demo` mide FPS | **En curso** |
-| **F1** | Presentación sin triple copia | Superficie fijada; CE VRAM→sysmem; una copia WC al GOP | Pendiente |
+| **H1** | Objeto 3D persistente + `CLEAR_SURFACE` en VRAM + demo + hostcheck | Log `3D clear verificado (H1 GO)` en VFIO GB205; `soso-gfx-demo` mide FPS | **Implementado** (hostcheck + demo); GO silicio = VFIO GB205 |
+| **F1** | Presentación sin triple copia | Superficie fijada; CE VRAM→sysmem; una copia WC al GOP; `GPRES` + hostcheck | **Implementado** (hostcheck); GO silicio con `soso-gfx-demo` en VFIO |
 | **F2** | Primer triángulo | `tools/shaderc-soso` (SPIR-V→SASS); `DRAW` visible | Pendiente |
 | **F3** | Crate `soso-gfx` | Búferes, RT, pipelines, batch submit | Pendiente |
 | **F4** | Canal GR por proceso | GPFIFO/PB mapeados; doorbell usermode | Pendiente |
@@ -34,6 +34,16 @@ framebuffer userspace (`SYS_FB_*`, `SYS_INPUT_POLL`); skill **`soso-gpu`**.
 3. Autoprueba 64×64 en bring-up + lectura CE.
 4. Comando `GCLR3` y flag `gfx3d` en `GpuInfo`.
 5. `/bin/soso-gfx-demo`, hostcheck, `g3-check`.
+
+## F1 — Detalle
+
+1. Shadow del GOP fijado; sus páginas se mapean en el vaspace GPU (`G6_SRC_VA`).
+2. `gsp_buf_download_dma`: CE VRAM → sysmem en trozos (mismo límite que G6).
+3. Comando `GPRES` en `SYS_GPU_SUBMIT` (handle RT + w/h/pitch); el kernel vuelca shadow→GOP (`movntdq`).
+4. `soso-gfx-demo`: `GCLR3` + `GPRES` por frame (sin `gpu_read` ni `fb_present`).
+5. Hostcheck: codificación del pushbuffer de presentación.
+
+**Scanout:** la consola y `soso-web` siguen usando `fb_present` al mismo shadow; un futuro compositor sería dueño de ese volcado, no del motor 3D.
 
 ## Validación
 

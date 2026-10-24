@@ -1,2 +1,3 @@
 fn main() -> Int
-    desconocido()
+    let x: TipoInexistente = 1
+    x

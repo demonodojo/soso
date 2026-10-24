@@ -4753,6 +4753,54 @@ static int check_g4e_chan_ce(const struct gsp_libos *lo)
         printf("OK: el DMA rechaza lista descuadrada, ventana pasada, offset y "
                "físicas sin alinear\n");
 
+        /* F1 present: VRAM → G6_SRC_VA (destino sysmem), espejo del upload. */
+        {
+            struct gsp_dma_buf destino;
+            uint64_t phys_dst[3];
+            unsigned antes_dl;
+
+            if (gsp_dma_alloc(&destino, 3u * 4096u, "destino F1") != 0) {
+                printf("FALLO: destino F1\n");
+                return -1;
+            }
+            for (i = 0; i < 3u; i++) {
+                phys_dst[i] = destino.phys + (uint64_t)i * 4096ull;
+            }
+            memset(destino.va, 0, 3u * 4096u);
+            antes_dl = chan.pb_pos;
+            if (gsp_buf_download_dma(&buf, va, 0, phys_dst, 3u, 0u, 3u * 4096u) != 0) {
+                printf("FALLO: gsp_buf_download_dma\n");
+                return -1;
+            }
+            pb = (const uint32_t *)((const unsigned char *)chan.pushbuf.va + antes_dl);
+            if (pb_method_value(pb, (chan.pb_pos - antes_dl) / 4u, NVC6B5_OFFSET_OUT_UPPER,
+                                &hi) != 0 ||
+                pb_method_value(pb, (chan.pb_pos - antes_dl) / 4u, NVC6B5_OFFSET_OUT_LOWER,
+                                &lo) != 0) {
+                printf("FALLO: al pushbuffer de present le falta OFFSET_OUT\n");
+                return -1;
+            }
+            dst = ((uint64_t)hi << 32) | lo;
+            if (pb_method_value(pb, (chan.pb_pos - antes_dl) / 4u, NVC6B5_OFFSET_IN_UPPER,
+                                &hi) != 0 ||
+                pb_method_value(pb, (chan.pb_pos - antes_dl) / 4u, NVC6B5_OFFSET_IN_LOWER,
+                                &lo) != 0) {
+                printf("FALLO: al pushbuffer de present le falta OFFSET_IN\n");
+                return -1;
+            }
+            src = ((uint64_t)hi << 32) | lo;
+            if (dst != G6_SRC_VA || src != va) {
+                printf("FALLO: present dst=0x%llx src=0x%llx\n",
+                       (unsigned long long)dst, (unsigned long long)src);
+                return -1;
+            }
+            if (gsp_buf_download_dma(&buf, va, 0, phys_dst, 2u, 0u, 3u * 4096u) == 0) {
+                printf("FALLO: present acepta lista de páginas descuadrada\n");
+                return -1;
+            }
+            printf("OK: gsp_buf_download_dma (F1 GPRES) codifica VRAM→G6_SRC_VA\n");
+        }
+
         /* EL CASO DE VERDAD: el payload de un shard `.som` empieza en el byte 64
          * del fichero, así que el puntero de un tensor mapeado llega aquí en +64.
          * Mientras esto exigió alineación de página, el camino sin copias no se

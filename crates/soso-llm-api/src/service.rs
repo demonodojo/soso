@@ -351,6 +351,8 @@ impl ChatBackend for CpuBackend {
         );
         let mut gpu: Option<&mut dyn soso_llm_core::gpu::GpuDispatch> =
             self.gpu.as_mut().map(|b| &mut **b as &mut dyn soso_llm_core::gpu::GpuDispatch);
+        let t_inicio = std::time::Instant::now();
+        eprintln!("[soso] petición: prompt de {} tokens, hasta {} nuevos", prompt_ids.len(), prepared.max_new_tokens);
         let (secuencia, report) = self.rt.generate_stream_par_observed(
             &mut self.source,
             prompt_ids,
@@ -364,6 +366,11 @@ impl ChatBackend for CpuBackend {
         // `ChatBackend` devuelve sólo lo generado. El runtime devuelve la secuencia
         // entera (prompt + generación): sin recortarla el parser de llamadas leía el
         // prompt, con sus `<tool_call>` de ejemplo, como si fuera la salida del modelo.
+        eprintln!(
+            "[soso] respuesta: {} tokens generados en {:.1} s (en total, con el prefill)",
+            secuencia.len().saturating_sub(prompt_ids.len()),
+            t_inicio.elapsed().as_secs_f64()
+        );
         Ok((solo_generados(&secuencia, prompt_ids.len()), report))
     }
 

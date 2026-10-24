@@ -60,6 +60,9 @@ impl CacheLock {
 pub struct MmapTensorSource<M: FileMapper> {
     pub shards_base: String,
     pub index: TensorIndex,
+    /// Nombre → posición en `index.entries`: `TensorIndex::find` es lineal y un MoE de 256 expertos por capa tiene
+    /// decenas de miles de entradas (68 µs por búsqueda, 27 búsquedas por capa y token).
+    por_nombre: BTreeMap<String, usize>,
     pub mapper: M,
     cache: BTreeMap<String, CachedShard>,
     cache_lock: CacheLock,
@@ -71,9 +74,11 @@ pub struct MmapTensorSource<M: FileMapper> {
 
 impl<M: FileMapper> MmapTensorSource<M> {
     pub fn new(shards_base: String, index: TensorIndex, mapper: M) -> Self {
+        let por_nombre = index.entries.iter().enumerate().map(|(i, e)| (e.name.clone(), i)).collect();
         Self {
             shards_base,
             index,
+            por_nombre,
             mapper,
             cache: BTreeMap::new(),
             cache_lock: CacheLock::new(),
@@ -85,6 +90,17 @@ impl<M: FileMapper> MmapTensorSource<M> {
     pub fn with_sync_prefetch(mut self) -> Self {
         self.async_staging = false;
         self
+    }
+
+    /// `TensorIndex::find` con índice por nombre. Si alguien tocó `index.entries` a mano, vuelve a la búsqueda lineal.
+    fn buscar(&self, name: &str) -> Option<&TensorEntry> {
+        if self.por_nombre.len() == self.index.entries.len() {
+            return match self.por_nombre.get(name) {
+                Some(&i) => self.index.entries.get(i).filter(|e| e.name == name).or_else(|| self.index.find(name)),
+                None => None,
+            };
+        }
+        self.index.find(name)
     }
 
     fn shard_path(&self, shard: &str) -> String {
@@ -257,7 +273,7 @@ fn bytes_to_f32(bytes: &[u8], out: &mut [f32]) -> Result<(), ()> {
 
 impl<M: FileMapper> TensorSource for MmapTensorSource<M> {
     fn load_f32(&mut self, name: &str, out: &mut [f32]) -> Result<(), ()> {
-        let entry = self.index.find(name).ok_or(())?.clone();
+        let entry = self.buscar(name).ok_or(())?.clone();
         if entry.elems() != out.len() {
             return Err(());
         }
@@ -290,7 +306,7 @@ impl<M: FileMapper> TensorSource for MmapTensorSource<M> {
     }
 
     fn load_f32_range(&mut self, name: &str, elem_off: usize, out: &mut [f32]) -> Result<(), ()> {
-        let entry = self.index.find(name).ok_or(())?.clone();
+        let entry = self.buscar(name).ok_or(())?.clone();
         let end = elem_off.checked_add(out.len()).ok_or(())?;
         if end > entry.elems() {
             return Err(());
@@ -324,7 +340,7 @@ impl<M: FileMapper> TensorSource for MmapTensorSource<M> {
     }
 
     fn tensor_view(&mut self, name: &str) -> Result<TensorView<'_>, ()> {
-        let entry = self.index.find(name).ok_or(())?.clone();
+        let entry = self.buscar(name).ok_or(())?.clone();
         let elems = entry.elems();
         let dtype = entry.dtype;
         let bytes = self.tensor_bytes(&entry, 0, entry.byte_len as usize)?;

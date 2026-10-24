@@ -297,6 +297,17 @@ pub trait GpuDispatch {
         Ok(false)
     }
 
+    /// Varios matvec de **un** vector con una sola espera al final. `hecho[i]` queda a `true` para los que el
+    /// despacho ha calculado en `ops[i].out`; los demás los hace quien llama. Por defecto, uno a uno.
+    fn matvec_lote(&mut self, ops: &mut [MatvecOp<'_>], hecho: &mut [bool]) -> Result<(), ()> {
+        for (i, op) in ops.iter_mut().enumerate() {
+            if self.dtype_soportado(op.view.dtype) && self.matvec(op.key, op.view, op.rows, op.cols, op.x, op.out)? {
+                hecho[i] = true;
+            }
+        }
+        Ok(())
+    }
+
     /// Varios matvec encolados; espera única al final.
     fn matvec_batch(&mut self, ops: &mut [MatvecOp<'_>]) -> Result<bool, ()> {
         let mut any = false;

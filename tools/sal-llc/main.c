@@ -4,7 +4,8 @@
 #include <llvm-c/Analysis.h>
 #include <llvm-c/Target.h>
 #include <llvm-c/TargetMachine.h>
-#include <stdio.h>
+#include <stddef.h>
+extern void sal_llc_message(const char *, int);
 #include <string.h>
 
 int herramienta_main(int argc, const char **argv) {
@@ -12,17 +13,17 @@ int herramienta_main(int argc, const char **argv) {
     LLVMCodeGenOptLevel opt = LLVMCodeGenLevelNone;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
-        if (!strcmp(a, "--version")) { puts("sal-llc 1 (LLVM 19, x86_64 soso)"); return 0; }
+        if (!strcmp(a, "--version")) { sal_llc_message("sal-llc 1 (LLVM 19, x86_64 soso)", 0); return 0; }
         if (!strcmp(a, "-o") && i + 1 < argc) { output = argv[++i]; continue; }
         if (!strcmp(a, "-x") && i + 1 < argc && !strcmp(argv[i+1], "ir")) { i++; continue; }
         if (!strcmp(a, "-O3")) { opt = LLVMCodeGenLevelAggressive; continue; }
         if (!strcmp(a, "-c") || !strcmp(a, "-O0") || !strcmp(a, "-g") ||
             !strcmp(a, "--target=x86_64-unknown-none-elf") || !strcmp(a, "-ffreestanding") ||
             !strcmp(a, "-fno-stack-protector") || !strcmp(a, "-mno-red-zone") || !strcmp(a, "-fno-pic")) continue;
-        if (a[0] == '-' || input) { fprintf(stderr, "sal-llc: argumento no admitido: %s\n", a); return 1; }
+        if (a[0] == '-' || input) { sal_llc_message(a, 1); return 1; }
         input = a;
     }
-    if (!input || !output) { fputs("uso: sal-llc -x ir fuente.ll -c -o destino.o\n", stderr); return 1; }
+    if (!input || !output) { sal_llc_message("uso: sal-llc -x ir fuente.ll -c -o destino.o", 1); return 1; }
     LLVMInitializeX86TargetInfo(); LLVMInitializeX86Target();
     LLVMInitializeX86TargetMC(); LLVMInitializeX86AsmPrinter();
     LLVMContextRef ctx = LLVMContextCreate();
@@ -50,7 +51,7 @@ int herramienta_main(int argc, const char **argv) {
     LLVMDisposeModule(mod); LLVMContextDispose(ctx);
     return 0;
 fail:
-    fprintf(stderr, "sal-llc: %s\n", error ? error : "error LLVM");
+    sal_llc_message(error ? error : "error LLVM", 1);
     if (error) LLVMDisposeMessage(error);
     return 1;
 }

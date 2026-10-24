@@ -48,6 +48,9 @@ pub fn render_messages(
         // parser descarta el pensamiento. Cuesta más tokens por turno.
         "gemma4-pensar" => super::gemma4::render_gemma4_marcado(input, true, true)?,
         "mellum" => render_mellum_marcado(input, true)?,
+        // Qwen3.5/3.6 sin razonamiento (como el servidor de llama.cpp con `enable_thinking: false`) o con él.
+        "qwen35" => render_qwen35_marcado(input, true, false)?,
+        "qwen35-pensar" => render_qwen35_marcado(input, true, true)?,
         otro => {
             return Err(ChatError::FamiliaNoImplementada {
                 family: String::from(otro),
@@ -519,4 +522,134 @@ fn py_json(v: &Value) -> String {
         }
         otro => serde_json::to_string(otro).unwrap_or_default(),
     }
+}
+
+// ------------------------------------------------------------------ Qwen3.5 / 3.6
+
+const Q35_TOOLS_CABECERA: &str = "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>";
+
+/// Qwen3.5 / 3.6: ChatML con herramientas en JSON dentro de `<tools>` y llamadas en XML (`<function=…><parameter=…>`), como
+/// Qwen3-Coder. Contrastado con `/apply-template` de llama.cpp (plantilla Jinja del GGUF de Unsloth).
+///
+/// - Los mensajes van recortados (`|trim`); dos mensajes de sistema seguidos se funden con `\n`.
+/// - **Todos** los turnos del asistente llevan su bloque `<think>…</think>` (aunque vacío): es lo que hace llama.cpp con
+///   `preserve_thinking` activado por defecto. El razonamiento viaja ya recortado del contenido, así que el bloque sale vacío.
+/// - El aviso de generación cierra el pensamiento (`<think>\n\n</think>\n\n`) salvo con `pensar`, que lo deja abierto.
+///
+/// Diferencia conocida (igual que en Qwen3-Coder): las claves de los objetos JSON de los esquemas salen en orden alfabético.
+pub fn render_qwen35(input: &ChatInput, add_generation_prompt: bool, pensar: bool) -> Result<String, ChatError> {
+    render_qwen35_marcado(input, add_generation_prompt, pensar).map(|p| p.texto)
+}
+
+/// Como [`render_qwen35`], con los tramos de terceros marcados.
+pub fn render_qwen35_marcado(input: &ChatInput, add_generation_prompt: bool, pensar: bool) -> Result<Plantilla, ChatError> {
+    let mut out = Plantilla::new();
+    let mensajes = &input.messages;
+    let es_sistema = |m: &Message| m.role == Role::System;
+    let n_sis = if mensajes.first().is_some_and(es_sistema) {
+        if mensajes.get(1).is_some_and(es_sistema) { 2 } else { 1 }
+    } else {
+        0
+    };
+    let sistema: Vec<&str> = mensajes[..n_sis].iter().map(|m| contenido(m).trim()).collect();
+    let resto = &mensajes[n_sis..];
+    let escribir_sistema = |out: &mut Plantilla| {
+        for (i, s) in sistema.iter().enumerate() {
+            if i > 0 {
+                out.push('\n');
+            }
+            out.ajeno(s);
+        }
+    };
+    if !input.tools.is_empty() {
+        out.push_str(Q35_TOOLS_CABECERA);
+        for t in &input.tools {
+            out.push_str("\n{\"type\": \"function\", \"function\": {\"name\": ");
+            out.push_str(&serde_json::to_string(&t.name).unwrap_or_default());
+            if let Some(d) = &t.description {
+                out.push_str(", \"description\": ");
+                out.push_str(&serde_json::to_string(d).unwrap_or_default());
+            }
+            out.push_str(", \"parameters\": ");
+            out.push_str(&py_json(&t.parameters));
+            out.push_str("}}");
+        }
+        out.push_str("\n</tools>");
+        out.push_str(Q3C_TOOLS_PIE.split_once("</tools>").map(|(_, r)| r).unwrap_or(""));
+        if n_sis > 0 {
+            out.push_str("\n\n");
+            escribir_sistema(&mut out);
+        }
+        out.push_str(IM_END);
+        out.push('\n');
+    } else if n_sis > 0 {
+        out.push_str(IM_START);
+        out.push_str("system\n");
+        escribir_sistema(&mut out);
+        out.push_str(IM_END);
+        out.push('\n');
+    }
+    for (i, m) in resto.iter().enumerate() {
+        let texto = contenido(m).trim();
+        match m.role {
+            Role::User => {
+                out.push_str(IM_START);
+                out.push_str("user\n");
+                out.ajeno(texto);
+                out.push_str(IM_END);
+                out.push('\n');
+            }
+            Role::Assistant => {
+                out.push_str(IM_START);
+                out.push_str("assistant\n<think>\n\n</think>\n\n");
+                out.ajeno(texto);
+                for (k, call) in m.tool_calls.iter().enumerate() {
+                    let args: Value = serde_json::from_str(&call.arguments)
+                        .map_err(|_| ChatError::ArgumentosInvalidos { llamada: call.id.clone() })?;
+                    if k == 0 {
+                        out.push_str(if texto.is_empty() { "<tool_call>\n<function=" } else { "\n\n<tool_call>\n<function=" });
+                    } else {
+                        out.push_str("\n<tool_call>\n<function=");
+                    }
+                    out.push_str(&call.name);
+                    out.push_str(">\n");
+                    if let Some(obj) = args.as_object() {
+                        for (nombre, valor) in obj {
+                            out.push_str("<parameter=");
+                            out.push_str(nombre);
+                            out.push_str(">\n");
+                            match valor {
+                                Value::Object(_) | Value::Array(_) => out.ajeno(&py_json(valor)),
+                                otro => out.ajeno(&py_string(otro)),
+                            }
+                            out.push_str("\n</parameter>\n");
+                        }
+                    }
+                    out.push_str("</function>\n</tool_call>");
+                }
+                out.push_str(IM_END);
+                out.push('\n');
+            }
+            Role::Tool => {
+                if i == 0 || resto[i - 1].role != Role::Tool {
+                    out.push_str(IM_START);
+                    out.push_str("user");
+                }
+                out.push_str("\n<tool_response>\n");
+                out.ajeno(texto);
+                out.push_str("\n</tool_response>");
+                if resto.get(i + 1).map_or(true, |s| s.role != Role::Tool) {
+                    out.push_str(IM_END);
+                    out.push('\n');
+                }
+            }
+            Role::System => {}
+        }
+    }
+    if add_generation_prompt {
+        out.push_str(IM_START);
+        out.push_str("assistant\n");
+        out.push_str(if pensar { "<think>\n" } else { "<think>\n\n</think>\n\n" });
+    }
+    Ok(out)
 }

@@ -23,11 +23,18 @@ use std::ffi::{CString, c_char, c_int, c_void};
 use soso_llm_core::gpu::{GpuDispatch, GpuStats};
 use soso_llm_core::layer::TensorView;
 use sosomodel::layout::{
-    DTYPE_Q4_0, DTYPE_Q4_K, DTYPE_Q8_0, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMS, Q4_K_BLOCK_BYTES,
+    DTYPE_IQ2_S, DTYPE_IQ3_S, DTYPE_IQ3_XXS, DTYPE_IQ4_XS, DTYPE_Q4_0, DTYPE_Q4_K, DTYPE_Q5_K, DTYPE_Q8_0, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMS, Q4_K_BLOCK_BYTES,
     Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMS,
 };
 
 const PTX_Q4_0: &str = include_str!("../cuda/matvec_q4_0.ptx");
+/// i-quants y Q5_K residentes tal cual (`matvec_iq.cu`, compilado con NVRTC: `tools/cuda-nvrtc/compilar.py`).
+const PTX_IQ: &str = include_str!("../cuda/matvec_iq.ptx");
+
+/// Dtypes que resuelve `iq_matvec`.
+fn es_iq_gpu(dtype: u8) -> bool {
+    matches!(dtype, DTYPE_Q5_K | DTYPE_IQ2_S | DTYPE_IQ3_S | DTYPE_IQ3_XXS | DTYPE_IQ4_XS)
+}
 /// Elementos de un superbloque Q4_K: el kernel exige `cols` múltiplo.
 const Q4_K_ELEMS: usize = 256;
 
@@ -184,6 +191,7 @@ pub struct CudaGpu {
     f_matmul_q4: CuFunction,
     /// GEMM con tensor cores para el prefill de Q4_0 (`gemm_q4_0_tc`), si no se desactiva con `SOSO_CUDA_SIN_TC=1`.
     f_gemm_q4: CuFunction,
+    f_iq: CuFunction,
     /// `None` = ya se intentó y no sirve (otro dtype, no cabe): no se reintenta en cada token.
     pesos: HashMap<String, Option<Peso>>,
     presupuesto: usize,
@@ -238,6 +246,7 @@ impl CudaGpu {
             let f_matvec_q4 = func(m4, "matvec_q4_0r")?;
             let f_matmul_q4 = func(m4, "matmul_q4_0r8")?;
             let f_gemm_q4 = func(m4, "gemm_q4_0_tc")?;
+            let f_iq = func(cargar(PTX_IQ)?, "iq_matvec")?;
             let (mut libre, mut total) = (0usize, 0usize);
             ck((api.mem_info)(&mut libre, &mut total), "cuMemGetInfo")?;
             let capa = capa::Estado::nueva(&api)?;
@@ -256,6 +265,7 @@ impl CudaGpu {
                 f_matvec_q4,
                 f_matmul_q4,
                 f_gemm_q4,
+                f_iq,
                 pesos: HashMap::new(),
                 presupuesto: libre.saturating_sub(RESERVA_VRAM),
                 usado: 0,
@@ -438,6 +448,20 @@ impl CudaGpu {
                     bytes: total,
                 }))
             }
+            d if es_iq_gpu(d) && cols % 256 == 0 => {
+                let total = view.bytes.len();
+                let rb = sosomodel::dequant::row_bytes(d, cols).unwrap_or(0);
+                if rb == 0 || total != rows * rb {
+                    return Ok(None);
+                }
+                if self.usado + total + (self.x_cap + self.y_cap) * 4 > self.presupuesto {
+                    return Ok(None);
+                }
+                let dd = self.alloc_peso(total)?;
+                self.subir(dd, view.bytes)?;
+                self.usado += total;
+                Ok(Some(Peso { d: dd, qs: 0, dtype: d, rows, cols, bytes: total }))
+            }
             _ => Ok(None),
         }
     }
@@ -476,38 +500,19 @@ impl CudaGpu {
         )
     }
 
-    fn calcular(
+    /// Lanza el kernel del peso `dtype` sobre `n` vectores ya en el dispositivo (`x_dev`, `y_dev`); `false` si no hay kernel.
+    fn lanzar_peso(
         &mut self,
-        key: &str,
-        view: &TensorView<'_>,
+        dtype: u8,
+        pd: u64,
+        pq: u64,
         rows: usize,
         cols: usize,
         n: usize,
-        x: &[f32],
-        out: &mut [f32],
+        x_dev: u64,
+        y_dev: u64,
     ) -> Result<bool, String> {
-        if x.len() != n * cols || out.len() != n * rows || n == 0 {
-            return Ok(false);
-        }
-        // El contexto es del hilo: el servidor atiende cada petición en uno distinto del que lo creó.
-        unsafe { ck((self.api.ctx_set_current)(self.ctx), "cuCtxSetCurrent")? };
-        if !self.pesos.contains_key(key) {
-            let p = self.subir_peso(view, rows, cols)?;
-            self.pesos.insert(key.to_string(), p);
-        }
-        let Some(Some(p)) = self.pesos.get(key) else {
-            return Ok(false);
-        };
-        if p.rows != rows || p.cols != cols || p.dtype != view.dtype {
-            return Ok(false);
-        }
-        let (dtype, pd, pq) = (p.dtype, p.d, p.qs);
-        let _ = p.bytes;
-        self.asegurar_buffers(n * cols, n * rows)?;
-        let x_bytes = unsafe { std::slice::from_raw_parts(x.as_ptr() as *const u8, x.len() * 4) };
-        self.subir(self.x_dev, x_bytes)?;
         let (r32, c32) = (rows as c_int, cols as c_int);
-        let (x_dev, y_dev) = (self.x_dev, self.y_dev);
         match dtype {
             DTYPE_Q4_0 if n == 1 => {
                 let (mut a0, mut a1, mut a2, mut a3, mut a4, mut a5) =
@@ -573,7 +578,131 @@ impl CudaGpu {
                 ];
                 self.lanzar3(self.capa.fns.mm8n, ((rows as u32).div_ceil(32), 1, 1), (256, 1, 1), &mut args)?;
             }
+            d if es_iq_gpu(d) && n == 1 => {
+                let rb = sosomodel::dequant::row_bytes(d, cols).unwrap_or(0) as i64;
+                let ggml = sosomodel::layout::ggml_de_dtype_iq(d).unwrap_or(0) as c_int;
+                let (mut a0, mut a1, mut a2) = (pd, x_dev, y_dev);
+                let (mut a3, mut a4, mut a5, mut a6) = (r32, c32, ggml, rb);
+                let mut args = [
+                    &mut a0 as *mut _ as *mut c_void,
+                    &mut a1 as *mut _ as *mut c_void,
+                    &mut a2 as *mut _ as *mut c_void,
+                    &mut a3 as *mut _ as *mut c_void,
+                    &mut a4 as *mut _ as *mut c_void,
+                    &mut a5 as *mut _ as *mut c_void,
+                    &mut a6 as *mut _ as *mut c_void,
+                ];
+                self.lanzar3s(self.f_iq, ((rows as u32).div_ceil(8), 1, 1), (256, 1, 1), (cols * 4) as u32, &mut args)?;
+            }
             _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// Varios matvec de un vector con **un solo** envío de activaciones, lanzamientos seguidos y una sola espera y
+    /// descarga. Marca en `hecho` los que ha resuelto (los demás —dtype sin kernel, sin VRAM— los hace quien llama).
+    fn lote(&mut self, ops: &mut [soso_llm_core::gpu::MatvecOp<'_>], hecho: &mut [bool]) -> Result<(), String> {
+        unsafe { ck((self.api.ctx_set_current)(self.ctx), "cuCtxSetCurrent")? };
+        struct Plan {
+            i: usize,
+            dtype: u8,
+            pd: u64,
+            pq: u64,
+            x_off: usize,
+            y_off: usize,
+        }
+        let mut plan: Vec<Plan> = Vec::new();
+        let mut xs: Vec<(usize, usize, usize)> = Vec::new(); // (ptr, len, offset en floats)
+        let (mut x_tot, mut y_tot) = (0usize, 0usize);
+        for (i, op) in ops.iter().enumerate() {
+            if op.x.len() != op.cols || op.out.len() != op.rows {
+                continue;
+            }
+            if !self.pesos.contains_key(op.key) {
+                let p = self.subir_peso(op.view, op.rows, op.cols)?;
+                self.pesos.insert(op.key.to_string(), p);
+            }
+            let Some(Some(p)) = self.pesos.get(op.key) else { continue };
+            if p.rows != op.rows || p.cols != op.cols || p.dtype != op.view.dtype || !(es_iq_gpu(p.dtype) || p.dtype == DTYPE_Q8_0 || p.dtype == DTYPE_Q4_K) {
+                continue;
+            }
+            let key_x = (op.x.as_ptr() as usize, op.x.len());
+            let x_off = match xs.iter().find(|e| (e.0, e.1) == key_x) {
+                Some(e) => e.2,
+                None => {
+                    xs.push((key_x.0, key_x.1, x_tot));
+                    x_tot += op.cols;
+                    x_tot - op.cols
+                }
+            };
+            plan.push(Plan { i, dtype: p.dtype, pd: p.d, pq: p.qs, x_off, y_off: y_tot });
+            y_tot += op.rows;
+        }
+        if plan.is_empty() {
+            return Ok(());
+        }
+        self.asegurar_buffers(x_tot, y_tot)?;
+        for (ptr, len, off) in &xs {
+            let bytes = unsafe { std::slice::from_raw_parts(*ptr as *const u8, len * 4) };
+            self.subir(self.x_dev + (*off * 4) as u64, bytes)?;
+        }
+        let mut lanzados: Vec<usize> = Vec::new();
+        for pl in &plan {
+            let op = &ops[pl.i];
+            let (xd, yd) = (self.x_dev + (pl.x_off * 4) as u64, self.y_dev + (pl.y_off * 4) as u64);
+            if self.lanzar_peso(pl.dtype, pl.pd, pl.pq, op.rows, op.cols, 1, xd, yd)? {
+                lanzados.push(pl.i);
+            }
+        }
+        ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
+        let mut host = vec![0f32; y_tot];
+        ck(unsafe { (self.api.dtoh)(host.as_mut_ptr() as *mut c_void, self.y_dev, y_tot * 4) }, "cuMemcpyDtoH")?;
+        for pl in &plan {
+            if lanzados.contains(&pl.i) {
+                let op = &mut ops[pl.i];
+                op.out.copy_from_slice(&host[pl.y_off..pl.y_off + op.rows]);
+                hecho[pl.i] = true;
+            }
+        }
+        self.stats.launches += 1;
+        self.stats.bytes_up += (x_tot * 4) as u64;
+        self.stats.bytes_down += (y_tot * 4) as u64;
+        Ok(())
+    }
+
+    fn calcular(
+        &mut self,
+        key: &str,
+        view: &TensorView<'_>,
+        rows: usize,
+        cols: usize,
+        n: usize,
+        x: &[f32],
+        out: &mut [f32],
+    ) -> Result<bool, String> {
+        if x.len() != n * cols || out.len() != n * rows || n == 0 {
+            return Ok(false);
+        }
+        // El contexto es del hilo: el servidor atiende cada petición en uno distinto del que lo creó.
+        unsafe { ck((self.api.ctx_set_current)(self.ctx), "cuCtxSetCurrent")? };
+        if !self.pesos.contains_key(key) {
+            let p = self.subir_peso(view, rows, cols)?;
+            self.pesos.insert(key.to_string(), p);
+        }
+        let Some(Some(p)) = self.pesos.get(key) else {
+            return Ok(false);
+        };
+        if p.rows != rows || p.cols != cols || p.dtype != view.dtype {
+            return Ok(false);
+        }
+        let (dtype, pd, pq) = (p.dtype, p.d, p.qs);
+        let _ = p.bytes;
+        self.asegurar_buffers(n * cols, n * rows)?;
+        let x_bytes = unsafe { std::slice::from_raw_parts(x.as_ptr() as *const u8, x.len() * 4) };
+        self.subir(self.x_dev, x_bytes)?;
+        let (x_dev, y_dev) = (self.x_dev, self.y_dev);
+        if !self.lanzar_peso(dtype, pd, pq, rows, cols, n, x_dev, y_dev)? {
+            return Ok(false);
         }
         ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
         let out_bytes =
@@ -605,7 +734,7 @@ impl GpuDispatch for CudaGpu {
     }
 
     fn dtype_soportado(&self, dtype: u8) -> bool {
-        matches!(dtype, DTYPE_Q4_0 | DTYPE_Q8_0 | DTYPE_Q4_K)
+        matches!(dtype, DTYPE_Q4_0 | DTYPE_Q8_0 | DTYPE_Q4_K) || es_iq_gpu(dtype)
     }
 
     fn gemma_puede(&self, layer: u32) -> bool {
@@ -686,6 +815,19 @@ impl GpuDispatch for CudaGpu {
             Err(e) => {
                 eprintln!("cuda: capa {}: {e}; sigo en CPU", capa.layer);
                 self.capa.rechazar(capa.layer);
+                Err(())
+            }
+        }
+    }
+
+    fn matvec_lote(&mut self, ops: &mut [soso_llm_core::gpu::MatvecOp<'_>], hecho: &mut [bool]) -> Result<(), ()> {
+        match self.lote(ops, hecho) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if !self.avisado {
+                    eprintln!("cuda: {e}; sigo en CPU");
+                    self.avisado = true;
+                }
                 Err(())
             }
         }

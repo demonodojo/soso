@@ -77,6 +77,10 @@ pub static mut sal_os_stderr: *mut Archivo = &raw mut SAL_STDERR;
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sal_os_fopen(p: *const c_char, mode: *const c_char) -> *mut Archivo {
     let flags = if texto(mode).starts_with('w') { abi::O_WRONLY | abi::O_CREAT | abi::O_TRUNC } else { 0 };
+    if flags == 0 {
+        let mut st = abi::Stat::default();
+        if sys::stat(texto(p), &mut st) < 0 || st.file_type != abi::FT_FILE { return ptr::null_mut(); }
+    }
     let fd = sys::open(texto(p), flags);
     if fd < 0 { return ptr::null_mut(); }
     let f = sal_os_malloc(core::mem::size_of::<Archivo>()).cast::<Archivo>();
@@ -120,6 +124,8 @@ pub unsafe extern "C" fn sal_os_ftell(f: *mut Archivo) -> i64 { sys::seek((*f).f
 pub unsafe extern "C" fn sal_os_fflush(f: *mut Archivo) -> c_int { if (*f).error == 0 { 0 } else { -1 } }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sal_os_access(p: *const c_char, _: c_int) -> c_int {
+    let mut st = abi::Stat::default();
+    if sys::stat(texto(p), &mut st) < 0 || st.file_type != abi::FT_FILE { return -1; }
     let fd = sys::open(texto(p), 0);
     if fd < 0 { -1 } else { sys::close(fd as u64); 0 }
 }
@@ -171,6 +177,24 @@ pub unsafe extern "C" fn sal_os_strtod(p: *const c_char, end: *mut *const c_char
 #[unsafe(no_mangle)]
 pub extern "C" fn expf(x: f32) -> f32 { libm::expf(x) }
 
+fn lanzar(bin: &str, argv: &[&str], stdio: [u64; 3]) -> i64 {
+    // spawn transfiere fds: reservar ranuras libres y duplicar antes de lanzarlo.
+    // El runtime v1 es monohilo; ningún open puede competir con esta reserva.
+    let mut copias = Vec::new();
+    for fd in stdio {
+        let slot = sys::open("/", 0);
+        if slot < 0 || sys::dup2(fd, slot as u64) < 0 {
+            if slot >= 0 { sys::close(slot as u64); }
+            for slot in copias { sys::close(slot); }
+            return -1;
+        }
+        copias.push(slot as u64);
+    }
+    let pid = sys::spawn_io_ex(bin, argv, &[], copias[0], copias[1], copias[2]);
+    for slot in copias { sys::close(slot); }
+    pid
+}
+
 fn esperar(pid: i64) -> i64 {
     if pid < 0 { return 1; }
     loop { match sys::wait() {
@@ -181,7 +205,7 @@ fn esperar(pid: i64) -> i64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sal_os_spawn(bin: *const c_char, args: *const *const c_char, n: usize) -> i64 {
     let argv: Vec<&str> = slice::from_raw_parts(args, n).iter().map(|p| texto(*p)).collect();
-    esperar(sys::spawn_io_ex(texto(bin), &argv, &[], 0, 1, 2))
+    esperar(lanzar(texto(bin), &argv, [0, 1, 2]))
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sal_os_capture(bin: *const c_char, arg: *const c_char) -> *mut c_char {
@@ -190,7 +214,7 @@ pub unsafe extern "C" fn sal_os_capture(bin: *const c_char, arg: *const c_char) 
     let mut argv = alloc::vec![bin];
     argv.extend(texto(arg).split_whitespace());
     let (r, w) = sys::pipe().unwrap_or_else(|_| fallo("no se puede abrir pipe"));
-    let pid = sys::spawn_io_ex(bin, &argv, &[], 0, w, 2);
+    let pid = lanzar(bin, &argv, [0, w, 2]);
     sys::close(w);
     if pid < 0 { sys::close(r); fallo("no se puede ejecutar el proceso"); }
     let mut out = Vec::new();
@@ -205,3 +229,23 @@ pub unsafe extern "C" fn sal_os_capture(bin: *const c_char, arg: *const c_char) 
     if esperar(pid) != 0 { fallo("el proceso terminó con error"); }
     copiar(&out)
 }
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sal_os_clock_gettime(id: c_int, out: *mut abi::Timespec) -> c_int {
+    sys::clock_gettime(id as u64, &mut *out) as c_int
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sal_os_format_f64(value: f64, out: *mut u8, cap: usize) -> usize {
+    let mut s = alloc::format!("{value}");
+    if s.len() > cap { s = alloc::format!("{value:e}"); }
+    if s.len() > cap { fallo("desbordamiento al formatear un real"); }
+    ptr::copy_nonoverlapping(s.as_ptr(), out, s.len()); s.len()
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn sqrt(x: f64) -> f64 { libm::sqrt(x) }
+#[unsafe(no_mangle)]
+pub extern "C" fn pow(x: f64, y: f64) -> f64 { libm::pow(x, y) }
+#[unsafe(no_mangle)]
+pub extern "C" fn sin(x: f64) -> f64 { libm::sin(x) }
+#[unsafe(no_mangle)]
+pub extern "C" fn cos(x: f64) -> f64 { libm::cos(x) }

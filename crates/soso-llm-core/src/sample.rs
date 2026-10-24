@@ -5,9 +5,19 @@ use alloc::vec::Vec;
 
 use crate::restriccion::Restriccion;
 
+/// `top_k` con que nacen los muestreadores (0 = sin límite). Lo fija el servidor para imitar el muestreo por defecto de llama.cpp
+/// con los modelos Qwen3.x (`--top-k 20`) cuando la petición no lo dice.
+static TOP_K_DEFECTO: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+pub fn fijar_top_k_defecto(k: usize) {
+    TOP_K_DEFECTO.store(k, core::sync::atomic::Ordering::Relaxed);
+}
+
 pub struct Sampler {
     pub temp: f32,
     pub top_p: f32,
+    /// Sólo se consideran los `top_k` tokens más probables antes del núcleo top-p (0 = todos).
+    pub top_k: usize,
     rng: u64,
     // buffers reutilizados entre tokens
     probs: Vec<f32>,
@@ -19,6 +29,7 @@ impl Sampler {
         Self {
             temp,
             top_p: top_p.clamp(0.01, 1.0),
+            top_k: TOP_K_DEFECTO.load(core::sync::atomic::Ordering::Relaxed),
             rng: seed | 1,
             probs: Vec::new(),
             idx: Vec::new(),
@@ -73,11 +84,16 @@ impl Sampler {
                 .partial_cmp(&probs[a as usize])
                 .unwrap_or(core::cmp::Ordering::Equal)
         });
+        // top-k: sólo los `top_k` más probables; el núcleo se calcula sobre su masa
+        let limite = if self.top_k > 0 && self.top_k < n { self.top_k } else { n };
+        if limite < n {
+            sum = self.idx[..limite].iter().map(|&i| self.probs[i as usize]).sum();
+        }
         // núcleo: el prefijo más corto que acumula top_p de la masa
         let cutoff = self.top_p * sum;
         let mut mass = 0.0f32;
         let mut k = 0;
-        for &i in &self.idx {
+        for &i in &self.idx[..limite] {
             mass += self.probs[i as usize];
             k += 1;
             if mass >= cutoff {

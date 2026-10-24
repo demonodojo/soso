@@ -87,6 +87,15 @@ fn main() {
             Err(e) => eprintln!("serve_host: sin GPU ({e}); sigo en CPU"),
         }
     }
+    // Muestreo por defecto de las peticiones que no lo traen (los Qwen3.x recomiendan top_p 0,8 y top_k 20; llama.cpp los aplica solo).
+    if let Some(p) = std::env::var("SOSO_TOP_P").ok().and_then(|v| v.parse::<f32>().ok()) {
+        soso_llm_api::request::fijar_top_p_defecto(p);
+        eprintln!("serve_host: top_p por defecto {p}");
+    }
+    if let Some(k) = std::env::var("SOSO_TOP_K").ok().and_then(|v| v.parse::<usize>().ok()) {
+        soso_llm_core::sample::fijar_top_k_defecto(k);
+        eprintln!("serve_host: top_k por defecto {k}");
+    }
     let model_id = backend.profile().id.clone();
     let service = Arc::new(HostService::new(token, backend));
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();

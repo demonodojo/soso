@@ -9,7 +9,7 @@
 //! del grupo: todas las sumas siguen un orden fijo. Así el prefill por bloques, la decodificación
 //! token a token y cualquier reparto entre hilos dan lo mismo bit a bit.
 //!
-//! Sin AVX2+FMA (o con `head_dim` distinto de 64/128) se cae al camino escalar de `attn`.
+//! Sin AVX2+FMA (o con `head_dim` distinto de 64/128/256) se cae al camino escalar de `attn`.
 
 use crate::attn::attention_decode_f16_tiled_scalar;
 
@@ -90,7 +90,7 @@ pub unsafe fn attention_f16_tokens_raw(
         return;
     }
     #[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "fma"))]
-    if AVX2 && (head_dim == 64 || head_dim == 128) && g <= MAX_Q {
+    if AVX2 && (head_dim == 64 || head_dim == 128 || head_dim == 256) && g <= MAX_Q {
         // Tokens por llamada: que `ntok * g` quepa en el estado del kernel.
         let por_llamada = (MAX_Q / g).max(1);
         let mut i0 = 0usize;
@@ -99,7 +99,9 @@ pub unsafe fn attention_f16_tokens_raw(
             unsafe {
                 let q = qs.add(i0 * stride);
                 let o = outs.add(i0 * stride);
-                if head_dim == 128 {
+                if head_dim == 256 {
+                    avx::multi::<32>(q, o, stride, nt, g, seq_primero + i0, k_f16, v_f16, kv_dim, kv_head);
+                } else if head_dim == 128 {
                     avx::multi::<16>(q, o, stride, nt, g, seq_primero + i0, k_f16, v_f16, kv_dim, kv_head);
                 } else {
                     avx::multi::<8>(q, o, stride, nt, g, seq_primero + i0, k_f16, v_f16, kv_dim, kv_head);
@@ -259,8 +261,8 @@ mod avx {
             let hd = NCH * 8;
             let inv = 1.0 / libm::sqrtf(hd as f32);
             let nq = ntok * g;
-            let mut kbuf = [0.0f32; GT * 128];
-            let mut vbuf = [0.0f32; GT * 128];
+            let mut kbuf = [0.0f32; GT * 256];
+            let mut vbuf = [0.0f32; GT * 256];
             let mut m = [f32::NEG_INFINITY; MAX_Q];
             let mut l = [0.0f32; MAX_Q];
             let mut pr = [0.0f32; GT];

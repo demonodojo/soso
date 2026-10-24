@@ -256,7 +256,8 @@ pub fn matvec_view_batch_par(
         return Err(());
     }
     let dtype = v.dtype;
-    let q8k_ready = if dtype == DTYPE_Q4_K && crate::gemm::q4_matvec_via_q8k() {
+    let es_iq_q8k = sosomodel::layout::ggml_de_dtype_iq(dtype).is_some_and(crate::iq_dot::soporta) && crate::gemm::iq_via_q8k() && cols % 256 == 0;
+    let q8k_ready = if (dtype == DTYPE_Q4_K && crate::gemm::q4_matvec_via_q8k()) || es_iq_q8k {
         if let Some(buf) = q8k_work {
             let need = crate::q8k::q8k_buffer_len(n, cols);
             if buf.len() < need {
@@ -377,6 +378,14 @@ pub fn matvec_view_batch_par(
                     .is_ok();
                 }
                 ok
+            }
+            d if q8k_ready.is_some() && es_iq_q8k => {
+                let (q8k_ptr, q8k_len) = q8k_ready.unwrap_or((0, 0));
+                let q8k = unsafe { core::slice::from_raw_parts(q8k_ptr as *const u8, q8k_len) };
+                match (sosomodel::dequant::row_bytes(d, cols), sosomodel::layout::ggml_de_dtype_iq(d)) {
+                    (Some(row_bytes), Some(ggml)) => crate::iq_dot::matvec_q8k(ggml, &bytes[r0 * row_bytes..r1 * row_bytes], sub, cols, q8k, n, &mut outs[r0..], rows).is_ok(),
+                    _ => false,
+                }
             }
             d => match sosomodel::dequant::row_bytes(d, cols) {
                 Some(row_bytes) => {
@@ -503,6 +512,132 @@ impl LayerScratch {
             mass_buf: vec![0.0; kv_cap],
         }
     }
+}
+
+/// Un matvec de un lote repartido en una sola región paralela (ver `moe_expertos_agrupados`).
+#[derive(Clone, Copy)]
+pub(crate) struct TrabajoMatvec {
+    bytes: *const u8,
+    len: usize,
+    dtype: u8,
+    rows: usize,
+    cols: usize,
+    x: *const f32,
+    out: *mut f32,
+}
+unsafe impl Send for TrabajoMatvec {}
+unsafe impl Sync for TrabajoMatvec {}
+
+/// Ejecuta todos los matvec del lote repartiendo el total de filas entre los workers. Cada tramo de filas de una
+/// matriz se calcula con el kernel de siempre sobre una vista de esas filas, así que el resultado es idéntico bit a bit.
+pub(crate) fn matvec_multi_par(jobs: &[TrabajoMatvec], par: &dyn RowParallel) -> Result<(), ()> {
+    let total: usize = jobs.iter().map(|j| j.rows).sum();
+    let err = core::sync::atomic::AtomicBool::new(false);
+    par.for_rows(total, &|r0, r1| {
+        let mut base = 0usize;
+        for j in jobs {
+            let (lo, hi) = (r0.max(base), r1.min(base + j.rows));
+            if lo < hi {
+                let (a, b) = (lo - base, hi - base);
+                let rb = if j.dtype == DTYPE_F32 { Some(j.cols * 4) } else { sosomodel::dequant::row_bytes(j.dtype, j.cols) };
+                let ok = match rb {
+                    Some(rb) if j.len == j.rows * rb => {
+                        let bytes = unsafe { core::slice::from_raw_parts(j.bytes.add(a * rb), (b - a) * rb) };
+                        let x = unsafe { core::slice::from_raw_parts(j.x, j.cols) };
+                        let out = unsafe { core::slice::from_raw_parts_mut(j.out.add(a), b - a) };
+                        let v = TensorView { bytes, dtype: j.dtype, elems: (b - a) * j.cols };
+                        matvec_view_par(&v, b - a, j.cols, x, out, &Sequential).is_ok()
+                    }
+                    _ => false,
+                };
+                if !ok {
+                    err.store(true, Ordering::Relaxed);
+                }
+            }
+            base += j.rows;
+            if base >= r1 {
+                break;
+            }
+        }
+    });
+    if err.load(Ordering::Relaxed) { Err(()) } else { Ok(()) }
+}
+
+/// Diagnóstico: `false` desactiva el lote de las capas de atención (cada matvec por su cuenta).
+pub static LOTE_ACTIVO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+/// Lote de matvec independientes (mismas o distintas entradas): se ejecutan juntos (ver [`ejecutar_lote`]). Guarda punteros
+/// crudos a los pesos (del mmap de la fuente), a `x` y a `out`: quien lo use no debe tocar esos buffers hasta `ejecutar`.
+pub(crate) struct Lote {
+    jobs: Vec<TrabajoMatvec>,
+    claves: Vec<String>,
+}
+
+impl Lote {
+    pub(crate) fn nuevo() -> Self {
+        Lote { jobs: Vec::new(), claves: Vec::new() }
+    }
+
+    pub(crate) fn anadir(&mut self, layer: u32, key: &str, v: TensorView<'_>, rows: usize, cols: usize, x: &[f32], out: &mut [f32]) -> Result<(), ()> {
+        if v.elems != rows * cols || x.len() != cols || out.len() != rows {
+            return Err(());
+        }
+        note_infer_op(Some(layer), key);
+        self.jobs.push(TrabajoMatvec { bytes: v.bytes.as_ptr(), len: v.bytes.len(), dtype: v.dtype, rows, cols, x: x.as_ptr(), out: out.as_mut_ptr() });
+        self.claves.push(String::from(key));
+        Ok(())
+    }
+
+    pub(crate) fn ejecutar(self, par: &dyn RowParallel, gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>, use_gpu: bool) -> Result<(), ()> {
+        if !LOTE_ACTIVO.load(Ordering::Relaxed) {
+            // Diagnóstico: uno a uno, como antes del lote.
+            for (j, k) in self.jobs.iter().zip(self.claves.iter()) {
+                let v = TensorView { bytes: unsafe { core::slice::from_raw_parts(j.bytes, j.len) }, dtype: j.dtype, elems: j.rows * j.cols };
+                let (x, o) = unsafe { (core::slice::from_raw_parts(j.x, j.cols), core::slice::from_raw_parts_mut(j.out, j.rows)) };
+                matvec_step(use_gpu, gpu, k, v, j.rows, j.cols, x, o, par, None, 0)?;
+            }
+            return Ok(());
+        }
+        ejecutar_lote(&self.jobs, &self.claves, par, gpu, use_gpu)
+    }
+}
+
+/// Ejecuta un lote de matvec: lo que la GPU resuelva en una sola espera, y el resto repartido por la CPU.
+fn ejecutar_lote(
+    jobs: &[TrabajoMatvec],
+    claves: &[String],
+    par: &dyn RowParallel,
+    gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
+    use_gpu: bool,
+) -> Result<(), ()> {
+    let mut hecho = vec![false; jobs.len()];
+    if use_gpu {
+        if let Some(g) = gpu.as_deref_mut().filter(|g| g.available()) {
+            let vistas: Vec<TensorView<'_>> = jobs
+                .iter()
+                .map(|j| TensorView { bytes: unsafe { core::slice::from_raw_parts(j.bytes, j.len) }, dtype: j.dtype, elems: j.rows * j.cols })
+                .collect();
+            let mut ops: Vec<crate::gpu::MatvecOp<'_>> = jobs
+                .iter()
+                .zip(vistas.iter())
+                .zip(claves.iter())
+                .map(|((j, v), k)| crate::gpu::MatvecOp {
+                    key: k.as_str(),
+                    view: v,
+                    rows: j.rows,
+                    cols: j.cols,
+                    x: unsafe { core::slice::from_raw_parts(j.x, j.cols) },
+                    out: unsafe { core::slice::from_raw_parts_mut(j.out, j.rows) },
+                })
+                .collect();
+            let _ = g.matvec_lote(&mut ops, &mut hecho);
+        }
+    }
+    if hecho.iter().all(|&d| d) {
+        return Ok(());
+    }
+    let resto: Vec<TrabajoMatvec> = jobs.iter().zip(&hecho).filter(|(_, h)| !**h).map(|(j, _)| *j).collect();
+    matvec_multi_par(&resto, par)
 }
 
 /// matvec con offload GPU opcional (G5).
@@ -663,7 +798,7 @@ pub(crate) fn perfil_marca(t: &mut u64, fase: usize) {
 ///
 /// Cada tarea escribe una porción distinta de `outs` y sólo lee el KV, así que el reparto no
 /// cambia el resultado: el de cada consulta sale del mismo kernel con el mismo orden de sumas.
-fn atencion_f16_grupos(
+pub(crate) fn atencion_f16_grupos(
     par: &dyn RowParallel,
     qs: &[f32],
     outs: &mut [f32],
@@ -821,6 +956,7 @@ impl<'a> LayerExecutor<'a> {
                 self, layer, pos, hidden, s, kv, source, gpu, use_gpu, planner_ro,
             );
         }
+        let mut t_perfil = perfil_ahora();
         let mut timing = LayerTiming::default();
         // MoE entera en la GPU (router, expertos y atención con KV residente), si el despacho puede.
         if spec.attn_kind == AttnKind::Gqa
@@ -1115,6 +1251,7 @@ impl<'a> LayerExecutor<'a> {
         }
         } // Gqa
 
+        perfil_marca(&mut t_perfil, FASE_ATENCION);
         // --- FFN (denso, MoE o LatentMoE) ---
         s.residual.copy_from_slice(hidden);
         source.load_f32(&format!("{prefix}.ffn_norm"), &mut s.norm_w)?;
@@ -1161,35 +1298,26 @@ impl<'a> LayerExecutor<'a> {
                 index,
             )?;
         } else {
-            matvec_step(
-                use_gpu,
-                gpu,
-                &name_ffn_up,
-                source.tensor_view(&name_ffn_up)?,
-                ffn,
-                h,
-                hidden,
-                &mut s.up[..ffn],
-                par,
-                planner_ro,
-                layer,
-            )?;
             if self.has_gate {
+                let mut lote = Lote::nuevo();
+                lote.anadir(layer, &name_ffn_up, source.tensor_view(&name_ffn_up)?, ffn, h, hidden, &mut s.up[..ffn])?;
+                lote.anadir(layer, &name_ffn_gate, source.tensor_view(&name_ffn_gate)?, ffn, h, hidden, &mut s.gate[..ffn])?;
+                lote.ejecutar(par, gpu, use_gpu)?;
+                swiglu_inplace(&mut s.up[..ffn], &s.gate[..ffn]);
+            } else {
                 matvec_step(
                     use_gpu,
                     gpu,
-                    &name_ffn_gate,
-                    source.tensor_view(&name_ffn_gate)?,
+                    &name_ffn_up,
+                    source.tensor_view(&name_ffn_up)?,
                     ffn,
                     h,
                     hidden,
-                    &mut s.gate[..ffn],
+                    &mut s.up[..ffn],
                     par,
                     planner_ro,
                     layer,
                 )?;
-                swiglu_inplace(&mut s.up[..ffn], &s.gate[..ffn]);
-            } else {
                 silu_inplace(&mut s.up[..ffn]);
             }
             matvec_step(
@@ -1214,6 +1342,7 @@ impl<'a> LayerExecutor<'a> {
                 .matvec_ms
                 .saturating_add(t_ffn1.saturating_sub(t_ffn0));
         }
+        perfil_marca(&mut t_perfil, FASE_FFN_UP_GATE);
         Ok(timing)
     }
 
@@ -1264,6 +1393,9 @@ impl<'a> LayerExecutor<'a> {
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
         use_gpu: bool,
     ) -> Result<(), ()> {
+        if crate::bloque35::soporta(self, layer, kv) {
+            return crate::bloque35::forward_layer_block_q35(self, layer, pos0, n, hs, bs, s, kv, source);
+        }
         if crate::gemma::es_capa_gemma(self.manifest.layer(layer).map_or(0, |l| l.flags)) {
             return crate::gemma::forward_layer_gemma_block(self, layer, pos0, n, hs, bs, s, kv, source, gpu, use_gpu);
         }
@@ -1538,6 +1670,100 @@ impl<'a> LayerExecutor<'a> {
         Ok(())
     }
 
+    /// Expertos del MoE (los elegidos y los compartidos) con **una región paralela por fase** en vez de una por matvec:
+    /// con matrices de 512×2048 el trabajo de cada una es menor que la barrera del pool, y 27 matvec por capa
+    /// dominaban el decode del 35B-A3B. Fases: gate+up de todos, SwiGLU, down de todos.
+    fn moe_expertos_agrupados<S: TensorSource>(
+        &self,
+        layer: u32,
+        prefix: &str,
+        h: usize,
+        ffn: usize,
+        ranked: &[(usize, f32)],
+        hidden: &mut [f32],
+        s: &mut LayerScratch,
+        source: &mut S,
+        par: &dyn RowParallel,
+        gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
+        use_gpu: bool,
+    ) -> Result<(), ()> {
+        let mut t_perfil = perfil_ahora();
+        let n_shared = self.manifest.layer(layer).map(|sp| sp.num_shared_experts).unwrap_or(0) as usize;
+        let mut nombres: Vec<String> = Vec::with_capacity(ranked.len() + n_shared);
+        for (e, _) in ranked {
+            nombres.push(format!("{prefix}.E{e:02}"));
+        }
+        for sh in 0..n_shared {
+            nombres.push(format!("{prefix}.S{sh:02}"));
+        }
+        let n = nombres.len();
+        // Las vistas apuntan al mmap del shard, que vive en la fuente hasta que se liberen los shards: aquí no se libera.
+        let mut vistas: Vec<[(usize, usize, u8, usize); 3]> = Vec::with_capacity(n);
+        for nom in &nombres {
+            let mut v3 = [(0usize, 0usize, 0u8, 0usize); 3];
+            for (i, suf) in ["ffn_gate", "ffn_up", "ffn_down"].iter().enumerate() {
+                let name = format!("{nom}.{suf}");
+                note_infer_op(Some(layer), &name);
+                let v = source.tensor_view(&name)?;
+                v3[i] = (v.bytes.as_ptr() as usize, v.bytes.len(), v.dtype, v.elems);
+            }
+            vistas.push(v3);
+        }
+        perfil_marca(&mut t_perfil, FASE_QKV);
+        let mut puerta_compartido = 1.0f32;
+        let name_pg = format!("{prefix}.ffn_gate_inp_shexp");
+        let pg = if n_shared > 0 { source.tensor_view(&name_pg).ok().map(|v| (v.bytes.as_ptr() as usize, v.bytes.len(), v.dtype, v.elems)) } else { None };
+        let mut gates = vec![0.0f32; n * ffn];
+        let mut ups = vec![0.0f32; n * ffn];
+        let mut pg_out = [0.0f32; 1];
+        let mut jobs: Vec<TrabajoMatvec> = Vec::with_capacity(2 * n + 1);
+        let mut claves: Vec<String> = Vec::with_capacity(2 * n + 1);
+        for (i, v3) in vistas.iter().enumerate() {
+            for (k, buf) in [(0usize, &mut gates), (1usize, &mut ups)] {
+                let (p, l, d, _) = v3[k];
+                claves.push(format!("{}.{}", nombres[i], if k == 0 { "ffn_gate" } else { "ffn_up" }));
+                jobs.push(TrabajoMatvec { bytes: p as *const u8, len: l, dtype: d, rows: ffn, cols: h, x: hidden.as_ptr(), out: buf[i * ffn..].as_mut_ptr() });
+            }
+        }
+        if let Some((p, l, d, _)) = pg {
+            claves.push(name_pg.clone());
+            jobs.push(TrabajoMatvec { bytes: p as *const u8, len: l, dtype: d, rows: 1, cols: h, x: hidden.as_ptr(), out: pg_out.as_mut_ptr() });
+        }
+        perfil_marca(&mut t_perfil, FASE_ROPE_KV);
+        ejecutar_lote(&jobs, &claves, par, gpu, use_gpu)?;
+        perfil_marca(&mut t_perfil, FASE_O);
+        if pg.is_some() {
+            puerta_compartido = 1.0 / (1.0 + libm::expf(-pg_out[0]));
+        }
+        for i in 0..n {
+            swiglu_inplace(&mut ups[i * ffn..(i + 1) * ffn], &gates[i * ffn..(i + 1) * ffn]);
+        }
+        perfil_marca(&mut t_perfil, FASE_SWIGLU);
+        let mut downs = vec![0.0f32; n * h];
+        jobs.clear();
+        claves.clear();
+        for (i, v3) in vistas.iter().enumerate() {
+            let (p, l, d, _) = v3[2];
+            claves.push(format!("{}.ffn_down", nombres[i]));
+            jobs.push(TrabajoMatvec { bytes: p as *const u8, len: l, dtype: d, rows: h, cols: ffn, x: ups[i * ffn..].as_ptr(), out: downs[i * h..].as_mut_ptr() });
+        }
+        ejecutar_lote(&jobs, &claves, par, gpu, use_gpu)?;
+        perfil_marca(&mut t_perfil, FASE_FFN_DOWN);
+        s.moe_acc.fill(0.0);
+        for (i, (_, w)) in ranked.iter().enumerate() {
+            for j in 0..h {
+                s.moe_acc[j] += downs[i * h + j] * w;
+            }
+        }
+        for i in ranked.len()..n {
+            for j in 0..h {
+                s.moe_acc[j] += downs[i * h + j] * puerta_compartido;
+            }
+        }
+        hidden.copy_from_slice(&s.moe_acc);
+        Ok(())
+    }
+
     /// FFN MoE estilo Mixtral: router → top-k → SwiGLU por experto → suma ponderada.
     fn forward_moe_ffn<S: TensorSource>(
         &self,
@@ -1589,6 +1815,9 @@ impl<'a> LayerExecutor<'a> {
             }
         }
 
+        if !use_gpu || gpu.as_deref().is_some_and(|g| g.available()) {
+            return self.moe_expertos_agrupados(layer, &prefix, h, ffn, &ranked, hidden, s, source, par, gpu, use_gpu);
+        }
         s.moe_acc.fill(0.0);
         for (expert, weight) in &ranked {
             let ep = format!("{prefix}.E{expert:02}");
@@ -1644,6 +1873,15 @@ impl<'a> LayerExecutor<'a> {
             .layer(layer)
             .map(|sp| sp.num_shared_experts)
             .unwrap_or(0);
+        // qwen35moe: el experto compartido lleva una puerta sigmoide escalar (`ffn_gate_inp_shexp`).
+        let mut puerta_compartido = 1.0f32;
+        if n_shared > 0 {
+            let name_pg = format!("{prefix}.ffn_gate_inp_shexp");
+            if let Ok(view) = source.tensor_view(&name_pg) {
+                matvec_step(use_gpu, gpu, &name_pg, view, 1, h, hidden, &mut s.router[..1], par, planner.as_deref(), layer)?;
+                puerta_compartido = 1.0 / (1.0 + libm::expf(-s.router[0]));
+            }
+        }
         for shared in 0..n_shared {
             let ep = format!("{prefix}.S{shared:02}");
             let name_gate = format!("{ep}.ffn_gate");
@@ -1690,7 +1928,7 @@ impl<'a> LayerExecutor<'a> {
                 layer,
             )?;
             for i in 0..h {
-                s.moe_acc[i] += s.q[i];
+                s.moe_acc[i] += s.q[i] * puerta_compartido;
             }
         }
         hidden.copy_from_slice(&s.moe_acc);

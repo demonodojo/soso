@@ -40,8 +40,8 @@ Evidencia: `tests/self-improvement/opencode/t14-campana-14b/` y
 | Presupuesto | mediana 160 212 ms, máximo 593 024 ms, timeout sugerido 1 186 048 ms, tokens de salida máx 19 |
 
 La revisión Hugging Face del lock figura como desconocida. El selector del
-live USB (`default_live_spec`) sigue en `qwen3-4b-instruct-2507`; no es este
-perfil.
+live USB (`default_live_spec`) es `qwen27-iq3` (Qwen3.6-27B UD-IQ3_XXS); no es
+este perfil.
 
 ## Candidato anterior (3B)
 

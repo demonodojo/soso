@@ -331,8 +331,31 @@ pub fn matvec_q8_0_scalar(bytes: &[u8], _rows: usize, cols: usize, x: &[f32], ou
     }
 }
 
+static IQ_Q8K: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
+
+/// Activa o desactiva el producto entero × Q8_K de los i-quants (diagnóstico: `false` = descuantizar a f32).
+pub fn iq_q8k_activar(on: bool) {
+    IQ_Q8K.store(on, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// IQ3_XXS/IQ2_S/IQ4_XS por producto entero × Q8_K, como llama.cpp. En tests se deja el camino f32.
+pub fn iq_via_q8k() -> bool {
+    IQ_Q8K.load(core::sync::atomic::Ordering::Relaxed) && !cfg!(test)
+}
+
 /// matvec escalar sobre pesos K-quant/i-quant de `sosomodel::iq` (descuantiza fila a fila).
 pub fn matvec_iq(dtype: u8, bytes: &[u8], rows: usize, cols: usize, x: &[f32], out: &mut [f32]) -> Result<(), ()> {
+    if iq_via_q8k() && cols % 256 == 0 {
+        if let Some(ggml) = sosomodel::layout::ggml_de_dtype_iq(dtype).filter(|&g| crate::iq_dot::soporta(g)) {
+            let row_bytes = sosomodel::dequant::row_bytes(dtype, cols).ok_or(())?;
+            if x.len() != cols || out.len() != rows || bytes.len() != rows * row_bytes {
+                return Err(());
+            }
+            let mut buf = q8k_scratch(crate::q8k::q8k_buffer_len(1, cols));
+            crate::q8k::quantize_row_q8_k(x, &mut buf);
+            return crate::iq_dot::matvec_q8k(ggml, bytes, rows, cols, &buf, 1, out, rows);
+        }
+    }
     let row_bytes = sosomodel::dequant::row_bytes(dtype, cols).ok_or(())?;
     if x.len() != cols || out.len() != rows || bytes.len() != rows * row_bytes {
         return Err(());

@@ -97,8 +97,8 @@ El disco NVMe/SSD con Linux **no se toca**.
 ./scripts/l6-pack-firmware.sh
 
 # Imagen live con perfil live-usb (nouveau + drv-gpu-nvidia + firmware Ampere y Blackwell)
-cargo xtask package-usb-live          # qwen2.5-coder-3b Q4_K_M (sin medir pendrive)
-# flashear (por defecto qwen2.5-coder-3b; p3 se estira al tamaño del stick):
+cargo xtask package-usb-live          # qwen27-iq3 (Qwen3.6-27B UD-IQ3_XXS; sin medir pendrive)
+# flashear (por defecto qwen27-iq3; p3 se estira al tamaño del stick):
 sudo env "PATH=$PATH" "HOME=$HOME" cargo xtask flash-usb-live /dev/sdX --yes
 
 ls -lh target/usb-live/
@@ -132,7 +132,7 @@ sudo ./scripts/l6-wifi-vfio-test.sh
 
 | Comando | Modelo |
 |---------|--------|
-| `package-usb-live` / `flash-usb-live` (default) | `qwen2.5-coder-3b` (Q4_K_M) |
+| `package-usb-live` / `flash-usb-live` (default) | `qwen27-iq3` (Qwen3.6-27B UD-IQ3_XXS) |
 | `SOSO_LIVE_AUTO_MODEL=1 flash-usb-live …` | escalera por tamaño del stick |
 | `SOSO_LIVE_CAPACITY=32G …` | el mejor que quepa (p. ej. `qwen3.8-27b`) |
 

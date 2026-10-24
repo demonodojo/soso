@@ -8,7 +8,7 @@ import sys
 
 root = Path(__file__).resolve().parents[1]
 source = Path(os.environ.get("SOSO_SAL_SOURCE", root.parent / "sal"))
-files = [source / "Cargo.toml", source / "Cargo.lock"]
+files = [source / "Cargo.toml", source / "Cargo.lock", source / "build.rs"]
 for directory in ["src", "runtime"]:
     files.extend(p for p in (source / directory).rglob("*") if p.is_file())
 digest = hashlib.sha256()

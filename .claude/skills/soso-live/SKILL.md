@@ -269,8 +269,8 @@ Tests: `cargo xtask test-usb` (4 escenarios en paralelo).
 ## Comandos host
 
 ```bash
-cargo xtask package-usb-live              # qwen3-4b-instruct-2507 Q4_K_M (sin medir stick)
-cargo xtask flash-usb-live /dev/sdX --yes # mide, elige GGUF, dd, estira p3
+cargo xtask package-usb-live              # qwen27-iq3 (Qwen3.6-27B UD-IQ3_XXS; sin medir stick)
+cargo xtask flash-usb-live /dev/sdX --yes # qwen27-iq3, dd, estira p3
 SOSO_LIVE_OFFLINE=1 cargo xtask flash-usb-live /dev/sdX --yes
 # incremental (pendrive ya flasheado; no toca p3 modelos):
 cargo xtask flash-usb-live /dev/sdX --yes --skip-models

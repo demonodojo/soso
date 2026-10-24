@@ -187,9 +187,9 @@ NIC loopback (`kernel/src/net/loopback.rs`). `soso-llm run` no usa askd (carga e
 frío). Config en `/etc/llm.conf`, que **no fija modelo por defecto**: se
 usa el primero de `/models`, y el empaquetado live (`package-usb-live` /
 `flash-usb-live`) pone el modelo demo delante de `tiny` sintético — sin
-pendrive `package-usb-live` usa **qwen3-4b-instruct-2507** (Qwen3-4B-Instruct-2507
-Q4_K_M); al flashear elige el mejor GGUF que quepa (tinyllama → qwen2.5-coder-3b
-→ qwen3-4b-instruct-2507 → mistral-7b → qwen3.8-27b en 32 GB+). Las imágenes
+pendrive `package-usb-live` y `flash-usb-live` usan **qwen27-iq3**
+(Qwen3.6-27B UD-IQ3_XXS). La escalera por tamaño del stick solo entra con
+`SOSO_LIVE_AUTO_MODEL` o `SOSO_LIVE_CAPACITY`. Las imágenes
 de prueba QEMU siguen con `synthetic tiny`. Fijar un nombre ahí lo hereda
 toda imagen que se genere, y avisa en cada respuesta si no viaja
 con ella — por eso `ask-modelo` escribe el fichero en el disco de la máquina, no en el

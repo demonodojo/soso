@@ -136,6 +136,14 @@ int gsp_buf_upload_dma(struct gsp_buf *b, uint64_t va, uint64_t offset,
                        const uint64_t *phys, unsigned npages, unsigned src_off,
                        uint64_t size);
 
+/* Copia VRAM → sysmem mapeada en `G6_SRC_VA` (F1 presentación 3D). Espejo de
+ * `upload_dma`: el destino son páginas del shadow del GOP y el origen un RT en
+ * VRAM. `dst_off` es lo que le sobra al búfer del kernel para empezar en
+ * frontera de página. */
+int gsp_buf_download_dma(struct gsp_buf *b, uint64_t src_va, uint64_t src_offset,
+                         const uint64_t *phys, unsigned npages, unsigned dst_off,
+                         uint64_t size);
+
 /* Libera la VA; devuelve 0 si ok, -1 si no existía. */
 int gsp_buf_free(struct gsp_buf *b, uint64_t va);
 

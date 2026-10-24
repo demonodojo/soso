@@ -57,6 +57,10 @@ Docs fuente: `docs/L6-native-autonomy.md` (maestro), `docs/L6-G1-gate.md`,
 subcanal 0 del canal GR0; userspace usa `SYS_GPU_SUBMIT` **`GCLR3`** (RT en VRAM) y
 `GpuInfo._pad[0]` (`gfx3d`). Plan: [docs/PLAN-GRAFICOS-JUEGOS.md](../../docs/PLAN-GRAFICOS-JUEGOS.md).
 
+**F1 (presentación):** `gsp_buf_download_dma` + comando **`GPRES`** (CE VRAM→shadow del
+GOP; una copia WC). `soso-gfx-demo` encadena `GCLR3`+`GPRES`. Hostcheck codifica el PB;
+GO silicio = demo visible en VFIO GB205.
+
 **Pendiente post-G6:** medir tok/s nativo vs CPU en silicio (`bench`, timeout amplio);
 Ampere GA10x/GA107: cadena FWSEC-FRTS + booter escrita — validar `pool VRAM=sí`
 en la ROG (ga107) tras Ethernet vivo.

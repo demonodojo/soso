@@ -6,7 +6,6 @@
 extern crate alloc;
 
 use alloc::string::String;
-use alloc::vec::Vec;
 use libsoso::{println, sys};
 use soso_abi::GpuInfo;
 
@@ -63,12 +62,8 @@ fn main(args: &[String]) -> u8 {
     }
     let rt_h = rt_h as u64;
 
-    let mut readback = Vec::new();
-    readback.resize(fb_bytes as usize, 0);
-
     let t0 = sys::uptime_ms();
     let mut t_clear = 0i64;
-    let mut t_read = 0i64;
     let mut t_present = 0i64;
     let mut ok_frames = 0u32;
 
@@ -92,16 +87,15 @@ fn main(args: &[String]) -> u8 {
             break;
         }
 
-        let tr0 = sys::uptime_ms();
-        if sys::gpu_read(rt_h, readback.as_mut_ptr() as u64, fb_bytes) < 0 {
-            println!("soso-gfx-demo: gpu_read falló");
-            break;
-        }
-        t_read += sys::uptime_ms() - tr0;
-
         let tp0 = sys::uptime_ms();
-        if sys::fb_present(readback.as_ptr() as u64, fb_bytes).is_err() {
-            println!("soso-gfx-demo: fb_present falló");
+        let mut pres = [0u8; 25];
+        pres[..5].copy_from_slice(b"GPRES");
+        pres[5..13].copy_from_slice(&rt_h.to_le_bytes());
+        pres[13..17].copy_from_slice(&w.to_le_bytes());
+        pres[17..21].copy_from_slice(&h.to_le_bytes());
+        pres[21..25].copy_from_slice(&pitch.to_le_bytes());
+        if sys::gpu_submit(&pres) < 0 {
+            println!("soso-gfx-demo: GPRES falló en frame {f}");
             break;
         }
         t_present += sys::uptime_ms() - tp0;
@@ -111,9 +105,8 @@ fn main(args: &[String]) -> u8 {
     let elapsed = (sys::uptime_ms() - t0).max(1);
     let fps = (ok_frames as i64 * 1000) / elapsed;
     println!(
-        "soso-gfx-demo: {fps} FPS ({ok_frames} frames, clear~{}ms read~{}ms present~{}ms)",
+        "soso-gfx-demo: {fps} FPS ({ok_frames} frames, clear~{}ms present~{}ms)",
         t_clear / ok_frames.max(1) as i64,
-        t_read / ok_frames.max(1) as i64,
         t_present / ok_frames.max(1) as i64,
     );
 

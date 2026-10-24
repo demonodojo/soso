@@ -1453,6 +1453,17 @@ int lx_nouveau_buf_upload_dma(uint64_t va, uint64_t offset, const uint64_t *phys
     return gsp_buf_upload_dma(&g_buf, va, offset, phys, npages, src_off, size);
 }
 
+int lx_nouveau_buf_download_dma(uint64_t src_va, uint64_t src_offset,
+                                const uint64_t *phys, unsigned npages,
+                                unsigned dst_off, uint64_t size)
+{
+    if (!g_buf.ready || g_ce.stuck) {
+        return -1;
+    }
+    return gsp_buf_download_dma(&g_buf, src_va, src_offset, phys, npages, dst_off,
+                                size);
+}
+
 int lx_nouveau_buf_free(uint64_t va)
 {
     if (!g_buf.ready) {

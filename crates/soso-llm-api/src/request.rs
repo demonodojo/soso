@@ -281,6 +281,18 @@ pub fn validate_wire_policy(wire: &WireChatCompletion) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// `top_p` cuando la petición no lo trae. 1,0 (OpenAI) salvo que el servidor fije otro con [`fijar_top_p_defecto`]: los Qwen3.x
+/// recomiendan 0,8 y llama.cpp lo aplica por defecto a quien no lo manda.
+static TOP_P_DEFECTO: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0x3f80_0000);
+
+pub fn fijar_top_p_defecto(p: f32) {
+    TOP_P_DEFECTO.store(p.to_bits(), core::sync::atomic::Ordering::Relaxed);
+}
+
+fn top_p_defecto() -> f64 {
+    f32::from_bits(TOP_P_DEFECTO.load(core::sync::atomic::Ordering::Relaxed)) as f64
+}
+
 fn comprobar_finito(campo: &str, v: f64) -> Result<(), ApiError> {
     if v.is_finite() {
         Ok(())
@@ -479,7 +491,7 @@ pub fn prepare_chat_completion(
         .into());
     }
     let temperature = wire.temperature.unwrap_or(1.0);
-    let top_p = wire.top_p.unwrap_or(1.0);
+    let top_p = wire.top_p.unwrap_or_else(top_p_defecto);
     comprobar_finito("temperature", temperature)?;
     comprobar_finito("top_p", top_p)?;
     let include_usage = wire

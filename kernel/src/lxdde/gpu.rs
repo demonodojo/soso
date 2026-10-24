@@ -92,6 +92,14 @@ unsafe extern "C" {
         src_off: u32,
         size: u64,
     ) -> i32;
+    fn lx_nouveau_device_buf_download_dma(
+        src_va: u64,
+        src_offset: u64,
+        phys: *const u64,
+        npages: u32,
+        dst_off: u32,
+        size: u64,
+    ) -> i32;
     fn lx_nouveau_device_buf_free(va: u64) -> i32;
     fn lx_nouveau_device_vram_free() -> u64;
     fn lx_nouveau_device_pool_free() -> u64;
@@ -212,6 +220,30 @@ pub fn device_buf_upload_dma(
             phys.as_ptr(),
             phys.len() as u32,
             src_off,
+            size,
+        )
+    };
+    if rc < 0 { Err(()) } else { Ok(()) }
+}
+
+/// CE VRAM → páginas físicas del shadow del GOP (F1 `GPRES`).
+pub fn device_buf_download_dma(
+    src_va: u64,
+    src_offset: u64,
+    phys: &[u64],
+    dst_off: u32,
+    size: u64,
+) -> Result<(), ()> {
+    if phys.is_empty() || size == 0 || dst_off >= 4096 {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_device_buf_download_dma(
+            src_va,
+            src_offset,
+            phys.as_ptr(),
+            phys.len() as u32,
+            dst_off,
             size,
         )
     };

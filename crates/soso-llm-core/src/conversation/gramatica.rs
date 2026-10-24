@@ -1102,7 +1102,7 @@ pub fn restriccion_de_herramientas(
     let dialecto = match familia {
         "qwen2" | "mellum" => Dialecto::Json,
         "gemma4" | "gemma4-pensar" => Dialecto::Gemma,
-        "qwen3coder" => Dialecto::Xml,
+        "qwen3coder" | "qwen35" | "qwen35-pensar" => Dialecto::Xml,
         _ => return None,
     };
     let definiciones: Vec<&ToolDefinition> = match &entrada.tool_choice {

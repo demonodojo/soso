@@ -35,6 +35,9 @@ extern int lx_nouveau_buf_upload_at(uint64_t va, uint64_t offset, const void *sr
 extern int lx_nouveau_buf_upload_dma(uint64_t va, uint64_t offset,
                                      const uint64_t *phys, unsigned npages,
                                      unsigned src_off, uint64_t size);
+extern int lx_nouveau_buf_download_dma(uint64_t src_va, uint64_t src_offset,
+                                       const uint64_t *phys, unsigned npages,
+                                       unsigned dst_off, uint64_t size);
 extern int lx_nouveau_buf_free(uint64_t va);
 extern uint64_t lx_nouveau_buf_vram_free(void);
 extern uint64_t lx_nouveau_buf_pool_free(void);
@@ -165,6 +168,14 @@ int lx_nouveau_device_buf_upload_dma(uint64_t va, uint64_t offset,
                                      unsigned src_off, uint64_t size)
 {
     return lx_nouveau_buf_upload_dma(va, offset, phys, npages, src_off, size);
+}
+
+int lx_nouveau_device_buf_download_dma(uint64_t src_va, uint64_t src_offset,
+                                       const uint64_t *phys, unsigned npages,
+                                       unsigned dst_off, uint64_t size)
+{
+    return lx_nouveau_buf_download_dma(src_va, src_offset, phys, npages, dst_off,
+                                       size);
 }
 
 int lx_nouveau_device_buf_free(uint64_t va)

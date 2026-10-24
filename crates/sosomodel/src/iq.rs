@@ -236,7 +236,7 @@ pub fn dequant_q3_k(b: &[u8], y: &mut [f32]) {
 }
 
 /// `get_scale_min_k4` de ggml: escala y mínimo de 6 bits del sub-bloque `j` (Q4_K y Q5_K).
-fn escala_y_minimo_k4(j: usize, q: &[u8]) -> (u8, u8) {
+pub fn escala_y_minimo_k4(j: usize, q: &[u8]) -> (u8, u8) {
     if j < 4 {
         (q[j] & 63, q[j + 4] & 63)
     } else {

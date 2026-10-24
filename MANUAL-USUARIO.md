@@ -76,7 +76,7 @@ Este comando compila el kernel, genera la imagen del disco con el contenido de
    ```
 
    Sustituye `/dev/sdX` por tu pendrive (¡comprueba bien el dispositivo!).
-   El empaquetado incluye el mejor modelo GGUF que quepa en el stick.
+   El empaquetado incluye `qwen27-iq3` (Qwen3.6-27B). Hace falta un pendrive de 32 GB o más.
 
 2. Arranca la máquina desde el USB (menú UEFI / F12).
 
@@ -799,8 +799,9 @@ Para QEMU con micrófono emulado: `SOSO_QEMU_AUDIO=1 cargo xtask run`.
 ### soso-gfx-demo — prueba del motor 3D (H1)
 
 Demostración de limpieza de pantalla con el motor 3D NVIDIA (`CLEAR_SURFACE` en VRAM)
-y presentación en el framebuffer GOP. Requiere GPU NVIDIA con GSP en fase `rm_compute`
-y `gfx3d=1` en `GpuInfo` (campo interno `_pad[0]`).
+y presentación en el framebuffer GOP vía `GPRES` (copia CE VRAM→shadow del GOP y
+un volcado WC). Requiere GPU NVIDIA con GSP en fase `rm_compute` y `gfx3d=1` en
+`GpuInfo` (campo interno `_pad[0]`).
 
 ```text
 soso-gfx-demo --frames 120
@@ -844,7 +845,7 @@ pone un turno de sistema: es el agente de soso y puede usar las herramientas
 del sistema (`ls`, `cat`, `grep`, `wifi`, `ip`, `soso-update`, `soso-web`, …).
 Si hace falta un comando, te lo da escrito; no inventa la salida. Con
 `plantilla=crudo` ese turno no se añade. Antes de la respuesta
-verás qué modelo está contestando (`ask: modelo qwen3-4b-instruct-2507 (plantilla chat, GPU)`),
+verás qué modelo está contestando (`ask: modelo qwen27-iq3 (plantilla chat, GPU)`),
 luego `ask: generando...` y, mientras calcula, una ristra de puntos. Cuando
 empieza el texto, los puntos paran: la respuesta no se mezcla con el diagnóstico.
 **Ctrl-C** corta esa respuesta y vuelve al prompt; el modelo sigue cargado.
@@ -1638,12 +1639,13 @@ Los expertos siguen la convención `L{i}.E{e}.ffn_{gate,up,down}` en el índice
 del modelo; el convertidor trocea automáticamente los tensores 3D `ffn_*_exps`
 del GGUF.
 
-### Modelo demo del live: Qwen3-4B-Instruct-2507
+### Modelo demo del live: Qwen3.6-27B
 
-El USB live empaqueta por defecto **Qwen3-4B-Instruct-2507 Q4_K_M**
-(`qwen3-4b-instruct-2507`). `ask` y `soso-llm run qwen3-4b-instruct-2507` lo
-usan igual que el resto. En pendrives de 16 GB+ con `SOSO_LIVE_AUTO_MODEL=1`
-puede escalar a mistral-7b o Qwen3.8-27B.
+El USB live empaqueta por defecto **Qwen3.6-27B UD-IQ3_XXS**
+(`qwen27-iq3`), el modelo denso de la automejora. `ask` y
+`soso-llm run qwen27-iq3` lo usan igual que el resto. Hace falta un pendrive
+de 32 GB o más. Con `SOSO_LIVE_AUTO_MODEL=1` la elección pasa a depender del
+tamaño del stick.
 
 ### Modelos Qwen3.8 (atención híbrida)
 
@@ -2169,9 +2171,9 @@ Añade además `/etc/grub.d/41_soso` (chainload a `BOOTX64.EFI`) y ejecuta
 
 ```sh
 # En la máquina de desarrollo:
-cargo xtask flash-usb-live /dev/sdX --yes   # mide el stick y empaqueta el mejor modelo que quepa
+cargo xtask flash-usb-live /dev/sdX --yes   # mide el stick y empaqueta qwen27-iq3
 
-# Escalera automática (Q4_K_M; Gemma 4 va en Q4_0 de QAT):
+# Escalera automática (solo con SOSO_LIVE_AUTO_MODEL=1; Gemma 4 va en Q4_0 de QAT):
 #   8 GB  → qwen3-4b-instruct-2507
 #  16 GB  → gemma-4-12b
 #  32 GB+ → qwen3.8-27b
@@ -2179,12 +2181,12 @@ cargo xtask flash-usb-live /dev/sdX --yes   # mide el stick y empaqueta el mejor
 # Sin descargas: el mayor ya materializado que quepa en el stick:
 # sudo env SOSO_LIVE_OFFLINE=1 cargo xtask flash-usb-live /dev/sdX --yes
 
-# Sin pendrive conectado (qwen3-4b-instruct-2507 Q4_K_M) o simular capacidad:
+# Sin pendrive conectado (qwen27-iq3) o simular capacidad:
 cargo xtask package-usb-live
 SOSO_LIVE_CAPACITY=64G cargo xtask package-usb-live
 
 # En placa: ask  o  soso-llm run <modelo> --prompt "hola" --max 32
-# (<modelo> = el empaquetado: qwen3-4b-instruct-2507, tinyllama, mistral-7b, gemma-4-12b o qwen3.8-27b)
+# (<modelo> = el empaquetado: qwen27-iq3 por defecto; con escalera, tinyllama, mistral-7b, gemma-4-12b o qwen3.8-27b)
 
 # Override manual:
 # SOSO_MODELS_DIR=target/mi-modelo cargo xtask flash-usb-live /dev/sdX --yes

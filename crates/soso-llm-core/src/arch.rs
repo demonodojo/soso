@@ -353,11 +353,11 @@ pub fn forward_kda_attn<S: TensorSource>(
     ))
 }
 
-fn sigmoid(x: f32) -> f32 {
+pub(crate) fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + libm::expf(-x))
 }
 
-fn softplus(x: f32) -> f32 {
+pub(crate) fn softplus(x: f32) -> f32 {
     if x > 20.0 {
         x
     } else {
@@ -365,7 +365,7 @@ fn softplus(x: f32) -> f32 {
     }
 }
 
-fn l2_normalize(x: &mut [f32], eps: f32) {
+pub(crate) fn l2_normalize(x: &mut [f32], eps: f32) {
     let mut ss = 0.0f32;
     for &v in x.iter() {
         ss += v * v;
@@ -377,7 +377,7 @@ fn l2_normalize(x: &mut [f32], eps: f32) {
 }
 
 /// Un paso Gated DeltaNet (llama.cpp / GDA): `S ← gS + k Δᵀ`, `o = Sᵀ q`.
-fn gdn_step(state: &mut [f32], q: &[f32], k: &[f32], v: &[f32], g: f32, beta: f32, out: &mut [f32]) {
+pub(crate) fn gdn_step(state: &mut [f32], q: &[f32], k: &[f32], v: &[f32], g: f32, beta: f32, out: &mut [f32]) {
     let d = q.len();
     if state.len() < d * d || k.len() < d || v.len() < d || out.len() < d {
         return;
@@ -386,25 +386,33 @@ fn gdn_step(state: &mut [f32], q: &[f32], k: &[f32], v: &[f32], g: f32, beta: f3
     if d > delta.len() {
         return;
     }
+    // Recorridos por filas del estado (contiguos): cada `delta[j]` y `out[j]` se acumula en el mismo orden de `i`
+    // que con el bucle por columnas, así que el resultado es idéntico bit a bit y el compilador puede vectorizar.
     for j in 0..d {
-        let mut kv = 0.0f32;
-        for i in 0..d {
-            kv += state[i * d + j] * k[i];
+        delta[j] = 0.0;
+        out[j] = 0.0;
+    }
+    for i in 0..d {
+        let (fila, ki) = (&state[i * d..(i + 1) * d], k[i]);
+        for j in 0..d {
+            delta[j] += fila[j] * ki;
         }
-        delta[j] = (v[j] - g * kv) * beta;
     }
     for j in 0..d {
-        let mut attn = 0.0f32;
-        for i in 0..d {
-            let ns = g * state[i * d + j] + k[i] * delta[j];
-            state[i * d + j] = ns;
-            attn += ns * q[i];
+        delta[j] = (v[j] - g * delta[j]) * beta;
+    }
+    for i in 0..d {
+        let (ki, qi) = (k[i], q[i]);
+        let fila = &mut state[i * d..(i + 1) * d];
+        for j in 0..d {
+            let ns = g * fila[j] + ki * delta[j];
+            fila[j] = ns;
+            out[j] += ns * qi;
         }
-        out[j] = attn;
     }
 }
 
-fn conv1d_causal_step(x: &[f32], weight: &[f32], kernel: usize, state: &mut [f32], out: &mut [f32]) {
+pub(crate) fn conv1d_causal_step(x: &[f32], weight: &[f32], kernel: usize, state: &mut [f32], out: &mut [f32]) {
     let c = x.len();
     if kernel == 0 || weight.len() < c * kernel || out.len() < c {
         return;
@@ -484,45 +492,11 @@ pub fn forward_gated_attn<S: TensorSource>(
     let name_k = format!("{prefix}.attn_k");
     let name_v = format!("{prefix}.attn_v");
     let name_out = format!("{prefix}.attn_output");
-    matvec_step(
-        use_gpu,
-        gpu,
-        &name_q,
-        source.tensor_view(&name_q)?,
-        q_full,
-        h,
-        hidden,
-        &mut s.q[..q_full],
-        par,
-        planner,
-        layer,
-    )?;
-    matvec_step(
-        use_gpu,
-        gpu,
-        &name_k,
-        source.tensor_view(&name_k)?,
-        kv_dim,
-        h,
-        hidden,
-        &mut s.k[..kv_dim],
-        par,
-        planner,
-        layer,
-    )?;
-    matvec_step(
-        use_gpu,
-        gpu,
-        &name_v,
-        source.tensor_view(&name_v)?,
-        kv_dim,
-        h,
-        hidden,
-        &mut s.v[..kv_dim],
-        par,
-        planner,
-        layer,
-    )?;
+    let mut lote = crate::layer::Lote::nuevo();
+    lote.anadir(layer, &name_q, source.tensor_view(&name_q)?, q_full, h, hidden, &mut s.q[..q_full])?;
+    lote.anadir(layer, &name_k, source.tensor_view(&name_k)?, kv_dim, h, hidden, &mut s.k[..kv_dim])?;
+    lote.anadir(layer, &name_v, source.tensor_view(&name_v)?, kv_dim, h, hidden, &mut s.v[..kv_dim])?;
+    lote.ejecutar(par, gpu, use_gpu)?;
 
     for head in 0..heads {
         let src = head * 2 * head_dim;
@@ -564,25 +538,22 @@ pub fn forward_gated_attn<S: TensorSource>(
     let t_attn0 = tick(clock_ms);
     kv.append_f16(&s.k[..kv_dim], &s.v[..kv_dim]);
     let seq = kv.tokens(kv_dim);
-    s.attn_out[..q_dim].fill(0.0);
-    for head in 0..heads {
-        let q_h = &s.up[head * head_dim..(head + 1) * head_dim];
-        let kv_head = head / group;
-        crate::attn::attention_decode_kv(
-            q_h,
-            kv,
-            head_dim,
-            kv_dim,
-            kv_head,
-            seq,
-            &mut s.head_out[..head_dim],
-            None,
-            false,
-            0,
-        );
-        let gbase = head * head_dim;
-        for d in 0..head_dim {
-            s.attn_out[gbase + d] = s.head_out[d] * sigmoid(s.gate[gbase + d]);
+    if kv.dtype == crate::kv::KvDtype::F16 {
+        // Kernel por grupos GQA (AVX2, repartido entre hilos): el camino de siempre para el resto de modelos.
+        crate::layer::atencion_f16_grupos(par, &s.up[..q_dim], &mut s.attn_out[..q_dim], 1, q_dim, kv, kv_heads, group, head_dim, kv_dim, seq);
+        for i in 0..q_dim {
+            s.attn_out[i] *= sigmoid(s.gate[i]);
+        }
+    } else {
+        s.attn_out[..q_dim].fill(0.0);
+        for head in 0..heads {
+            let q_h = &s.up[head * head_dim..(head + 1) * head_dim];
+            let kv_head = head / group;
+            crate::attn::attention_decode_kv(q_h, kv, head_dim, kv_dim, kv_head, seq, &mut s.head_out[..head_dim], None, false, 0);
+            let gbase = head * head_dim;
+            for d in 0..head_dim {
+                s.attn_out[gbase + d] = s.head_out[d] * sigmoid(s.gate[gbase + d]);
+            }
         }
     }
     let t_attn1 = tick(clock_ms);
@@ -634,7 +605,6 @@ pub fn forward_gdn_attn<S: TensorSource>(
     let qk_dim = n_k * d;
     let v_dim = n_v * d;
     let qkv_dim = qk_dim * 2 + v_dim;
-    let group = if n_k == 0 { 1 } else { n_v / n_k };
     let eps = manifest.rms_eps;
     let conv_len = kernel.saturating_sub(1).saturating_mul(qkv_dim);
     kv.ensure_gdn(n_v, d, conv_len);
@@ -662,58 +632,12 @@ pub fn forward_gdn_attn<S: TensorSource>(
     let name_beta = format!("{prefix}.ssm_beta");
     let name_alpha = format!("{prefix}.ssm_alpha");
     let name_out = format!("{prefix}.ssm_out");
-    matvec_step(
-        use_gpu,
-        gpu,
-        &name_qkv,
-        source.tensor_view(&name_qkv)?,
-        qkv_dim,
-        h,
-        hidden,
-        &mut s.q[..qkv_dim],
-        par,
-        planner,
-        layer,
-    )?;
-    matvec_step(
-        use_gpu,
-        gpu,
-        &name_z,
-        source.tensor_view(&name_z)?,
-        v_dim,
-        h,
-        hidden,
-        &mut s.gate[..v_dim],
-        par,
-        planner,
-        layer,
-    )?;
-    matvec_step(
-        use_gpu,
-        gpu,
-        &name_beta,
-        source.tensor_view(&name_beta)?,
-        n_v,
-        h,
-        hidden,
-        &mut s.router[..n_v],
-        par,
-        planner,
-        layer,
-    )?;
-    matvec_step(
-        use_gpu,
-        gpu,
-        &name_alpha,
-        source.tensor_view(&name_alpha)?,
-        n_v,
-        h,
-        hidden,
-        &mut s.moe_acc[..n_v],
-        par,
-        planner,
-        layer,
-    )?;
+    let mut lote = crate::layer::Lote::nuevo();
+    lote.anadir(layer, &name_qkv, source.tensor_view(&name_qkv)?, qkv_dim, h, hidden, &mut s.q[..qkv_dim])?;
+    lote.anadir(layer, &name_z, source.tensor_view(&name_z)?, v_dim, h, hidden, &mut s.gate[..v_dim])?;
+    lote.anadir(layer, &name_beta, source.tensor_view(&name_beta)?, n_v, h, hidden, &mut s.router[..n_v])?;
+    lote.anadir(layer, &name_alpha, source.tensor_view(&name_alpha)?, n_v, h, hidden, &mut s.moe_acc[..n_v])?;
+    lote.ejecutar(par, gpu, use_gpu)?;
 
     let mut dt = [0.0f32; 256];
     let mut a = [0.0f32; 256];
@@ -784,28 +708,38 @@ pub fn forward_gdn_attn<S: TensorSource>(
 
     let t_attn0 = tick(clock_ms);
     source.load_f32(&format!("{prefix}.ssm_norm"), &mut s.norm_w[..d])?;
-    for vh in 0..n_v {
-        let kh = vh / group;
-        let qh = &s.up[q_off + kh * d..q_off + (kh + 1) * d];
-        let khs = &s.up[k_off + kh * d..k_off + (kh + 1) * d];
-        s.k[..d].copy_from_slice(khs);
-        s.v[..d].copy_from_slice(&s.up[v_off + vh * d..v_off + (vh + 1) * d]);
-        // q vive en s.up; copiar a head_out para no pelear con el estado.
-        s.head_out[..d].copy_from_slice(qh);
-        let st = &mut kv.gdn_s[vh * d * d..(vh + 1) * d * d];
-        gdn_step(
-            st,
-            &s.head_out[..d],
-            &s.k[..d],
-            &s.v[..d],
-            s.moe_acc[vh],
-            s.router[vh],
-            &mut s.attn_out[vh * d..(vh + 1) * d],
-        );
-        rmsnorm(&mut s.attn_out[vh * d..(vh + 1) * d], &s.norm_w[..d], eps);
-        for i in 0..d {
-            s.attn_out[vh * d + i] *= silu(s.gate[vh * d + i]);
-        }
+    // Las cabezas son independientes (estado, salida y puerta propios; q/k/v de solo lectura): se reparten entre hilos.
+    {
+        let up = s.up.as_ptr() as usize;
+        let gate = s.gate.as_ptr() as usize;
+        let decay = s.moe_acc.as_ptr() as usize;
+        let beta = s.router.as_ptr() as usize;
+        let normw = s.norm_w.as_ptr() as usize;
+        let out = s.attn_out.as_mut_ptr() as usize;
+        let state = kv.gdn_s.as_mut_ptr() as usize;
+        par.for_rows(n_v, &move |h0, h1| {
+            for vh in h0..h1 {
+                let kh = vh % n_k; // ggml_repeat: las cabezas q/k se repiten en mosaico, no entrelazadas
+                // SAFETY: cada `vh` toca sólo su porción de `out`, `state` y lee el resto; `for_rows` espera a todos.
+                let (qh, khs, vv, st, o, nw, gt) = unsafe {
+                    (
+                        core::slice::from_raw_parts((up as *const f32).add(q_off + kh * d), d),
+                        core::slice::from_raw_parts((up as *const f32).add(k_off + kh * d), d),
+                        core::slice::from_raw_parts((up as *const f32).add(v_off + vh * d), d),
+                        core::slice::from_raw_parts_mut((state as *mut f32).add(vh * d * d), d * d),
+                        core::slice::from_raw_parts_mut((out as *mut f32).add(vh * d), d),
+                        core::slice::from_raw_parts(normw as *const f32, d),
+                        core::slice::from_raw_parts((gate as *const f32).add(vh * d), d),
+                    )
+                };
+                let (g, b) = unsafe { (*(decay as *const f32).add(vh), *(beta as *const f32).add(vh)) };
+                gdn_step(st, qh, khs, vv, g, b, o);
+                rmsnorm(o, nw, eps);
+                for i in 0..d {
+                    o[i] *= silu(gt[i]);
+                }
+            }
+        });
     }
     let t_attn1 = tick(clock_ms);
 

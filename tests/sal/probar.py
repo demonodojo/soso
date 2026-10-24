@@ -72,9 +72,6 @@ def probar():
         print(text, flush=True)
     try:
         esperar(rb"\$ ", 120)
-        ejecutar("/bin/sal-sonda")
-        ejecutar("/bin/echo visible")
-        ejecutar("/tests/runtime dos")
         ejecutar("/bin/sal-sonda 42 /tests/hello", ["SAL_OK código 42"])
         ejecutar('/bin/sal-sonda 0 /tests/runtime "dos palabras"', ["SAL_OK código 0", "hola ñ"])
         for path, code, wanted in [("vacio",0,"bytes=0 lineas=0"),("utf8",0,"bytes=13 lineas=1"),

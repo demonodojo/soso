@@ -45,7 +45,11 @@ static TALC: Talck<Mutex<()>, ClaimOnOom> =
 /// esto antes que la etiqueta de talc, y el `malloc` siguiente lo dice con
 /// tamaño y dirección de retorno en vez de petar dentro del asignador.
 const CENTINELA_RUST: u64 = 0xA5A5_5A5A_A5A5_5A5A;
-const NOTAS_MAX: usize = 4096;
+/// Tope de reservas vivas anotadas. 4096 se llenaba al montar el catálogo
+/// del live (1056 shards: una `String` y un `Vec` por shard, encima de lo
+/// que el arranque ya tenía). Las notas ocupan `v[..n]`, sin huecos: subir
+/// el tope no alarga el recorrido de las ranuras vacías.
+const NOTAS_MAX: usize = 16384;
 
 #[derive(Clone, Copy)]
 struct Nota {
@@ -209,25 +213,30 @@ fn con_cola(layout: Layout) -> Option<Layout> {
 
 fn anotar(ptr: usize, size: usize, ra: u64) {
     let mut t = TABLA.lock();
-    if let Some(slot) = t.v.iter_mut().find(|n| n.ptr == 0) {
-        *slot = Nota { ptr, size, ra };
-        t.n += 1;
-        return;
+    let n = t.n;
+    if n >= NOTAS_MAX {
+        drop(t);
+        panic!("heap: tabla de centinelas llena ({NOTAS_MAX})");
     }
-    drop(t);
-    panic!("heap: tabla de centinelas llena ({NOTAS_MAX})");
+    t.v[n] = Nota { ptr, size, ra };
+    t.n = n + 1;
 }
 
 fn quitar(ptr: usize) {
     let mut t = TABLA.lock();
-    if let Some(slot) = t.v.iter_mut().find(|n| n.ptr == ptr) {
-        *slot = Nota {
-            ptr: 0,
-            size: 0,
-            ra: 0,
-        };
-        t.n = t.n.saturating_sub(1);
-    }
+    let n = t.n;
+    let Some(i) = t.v[..n].iter().position(|nota| nota.ptr == ptr) else {
+        return;
+    };
+    let last = n - 1;
+    let moved = t.v[last];
+    t.v[i] = moved;
+    t.v[last] = Nota {
+        ptr: 0,
+        size: 0,
+        ra: 0,
+    };
+    t.n = last;
 }
 
 /// Recorre las reservas vivas. Si un centinela cambió, el bloque de `size`
@@ -239,10 +248,7 @@ fn revisar() {
     let roto = {
         let t = TABLA.lock();
         let mut hallado = None;
-        for n in t.v.iter() {
-            if n.ptr == 0 {
-                continue;
-            }
+        for n in t.v[..t.n].iter() {
             let visto = unsafe { core::ptr::read_unaligned((n.ptr + n.size) as *const u64) };
             if visto != CENTINELA_RUST {
                 hallado = Some((*n, visto));
