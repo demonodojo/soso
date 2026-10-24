@@ -66,7 +66,9 @@ impl Default for Politica {
                 "lxdde/firmware/".to_string(),
                 "lxdde/linux/".to_string(),
                 "models/".to_string(),
-                "vendor/".to_string(),
+                // Sólo las fuentes de Rust vendorizadas (enormes, y además en `.gitignore`): `vendor/linked_list_allocator` y compañía son dependencias de
+                // ruta del espacio de trabajo y sin ellas ningún `cargo` de la copia arranca (campaña 62: R51 gastó sus 40 herramientas contra «failed to load manifest»).
+                "vendor/rust/".to_string(),
             ],
             limite_bytes: 8 * 1024 * 1024,
             ignorar: Reglas::default(),

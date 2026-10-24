@@ -1242,6 +1242,21 @@ fn plegar_en_bloques_reescribe_el_principio_de_la_conversacion_muchas_menos_vece
 }
 
 #[test]
+fn una_llamada_con_el_json_roto_no_se_guarda_en_el_historial_y_el_modelo_recibe_el_error() {
+    let rota = json!({"role": "assistant", "content": null, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "read", "arguments": "{\"filePath\": \"README.md\", \"x\": \"000000000000000000"}}]});
+    let mut e = repo();
+    let mut m = Guion(vec![rota, llamada("read", json!({"filePath": "README.md"})), json!({"role": "assistant", "content": "fin"})], vec![]);
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg_base(), "t", &mut |_, _| {});
+    // En el historial va `{}`: la petición siguiente ya no lleva JSON roto.
+    assert_eq!(inf.mensajes[2]["tool_calls"][0]["function"]["arguments"], "{}", "{:?}", inf.mensajes[2]);
+    assert!(!m.1[1].contains("000000000000"), "el JSON roto no debe volver al servidor");
+    let resp = inf.mensajes.iter().find(|x| x["role"] == "tool" && x["tool_call_id"] == "c1").expect("falta la respuesta de la llamada rota");
+    let t = resp["content"].as_str().unwrap();
+    assert!(t.contains("cortados o rotos") && t.contains("MÁS CORTO"), "{t}");
+    assert_eq!(inf.fin, Fin::Terminado, "{:?}", inf.error);
+}
+
+#[test]
 fn un_modulo_de_pruebas_vacio_no_cuenta_como_editar_y_el_atasco_se_redirige() {
     let mut e = repo();
     let mut guion: Vec<Value> = vec![llamada("insertar", json!({"filePath": "src/lib.rs", "linea": -1, "texto": "#[cfg(test)]\nmod pruebas_agente {\n    // pendiente\n}\n"}))];

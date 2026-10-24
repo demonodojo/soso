@@ -371,7 +371,17 @@ pub fn correr_con_originales<E: Entorno, M: Modelo, R: Reloj>(
         let llamadas: Vec<Value> = msg.get("tool_calls").and_then(|t| t.as_array()).cloned().unwrap_or_default();
         let mut asistente = json!({"role": "assistant", "content": texto});
         if !llamadas.is_empty() {
-            asistente["tool_calls"] = Value::Array(llamadas.clone());
+            // Una llamada con el JSON roto (cortada por `max_tokens` o atascada repitiendo un carácter: campaña 59, R43 con Qwen) NO puede quedar en el historial:
+            // llama-server la vuelve a leer en cada petición y contesta 500 «Failed to parse tool call arguments» para siempre. En el historial va `{}`; el
+            // error se le dice al modelo en el resultado de esa llamada.
+            let mut saneadas = llamadas.clone();
+            for ll in saneadas.iter_mut() {
+                let rota = ll.pointer("/function/arguments").and_then(|a| a.as_str()).map_or(false, |a| serde_json::from_str::<Value>(a).is_err());
+                if rota {
+                    ll["function"]["arguments"] = Value::String(String::from("{}"));
+                }
+            }
+            asistente["tool_calls"] = Value::Array(saneadas);
         }
         mensajes.push(asistente);
         if llamadas.is_empty() {
@@ -608,7 +618,10 @@ pub fn correr_con_originales<E: Entorno, M: Modelo, R: Reloj>(
                     ultima = Some((clave.0, clave.1, r.error && !bloqueada_ok));
                     r
                 }
-                None => Respuesta { texto: "Los argumentos de la llamada no son un objeto JSON válido. Vuelve a llamar con JSON correcto.".to_string(), error: true },
+                None => {
+                    let n = crudo.and_then(|v| v.as_str()).map_or(0, |a| a.chars().count());
+                    Respuesta { texto: format!("Los argumentos de la llamada no son un objeto JSON válido (llegaron {n} caracteres, cortados o rotos). Vuelve a llamar con JSON correcto y MÁS CORTO: una sola cosa por llamada y, si escribes código, pocas líneas cada vez (una prueba por `insertar`); escapa las comillas dobles (\\\") y los saltos de línea (\\n). Si te quedas repitiendo un mismo carácter, para y cambia de enfoque."), error: true }
+                }
             };
             mensajes.push(json!({"role": "tool", "tool_call_id": id, "content": r.texto}));
         }
