@@ -1,0 +1,125 @@
+--- a/crates/soso-update-core/src/semver.rs
++++ b/crates/soso-update-core/src/semver.rs
+@@ -30,6 +30,122 @@
+         .then_with(|| a.patch.cmp(&b.patch))
+ }
+ 
++/// Versión completa `MAJOR.MINOR.PATCH[-PRE][+BUILD]` ya validada.
++struct Completa<'a> {
++    nucleo: [u32; 3],
++    pre: Option<&'a str>,
++}
++
++fn ident_ok(id: &str, numerico_sin_ceros: bool) -> bool {
++    !id.is_empty()
++        && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
++        && !(numerico_sin_ceros
++            && id.len() > 1
++            && id.starts_with('0')
++            && id.bytes().all(|c| c.is_ascii_digit()))
++}
++
++fn analizar(s: &str) -> Option<Completa<'_>> {
++    let s = s.trim();
++    let (resto, build) = match s.split_once('+') {
++        Some((r, b)) => (r, Some(b)),
++        None => (s, None),
++    };
++    if let Some(b) = build {
++        if !b.split('.').all(|id| ident_ok(id, false)) {
++            return None;
++        }
++    }
++    let (nucleo, pre) = match resto.split_once('-') {
++        Some((n, p)) => (n, Some(p)),
++        None => (resto, None),
++    };
++    if let Some(p) = pre {
++        if !p.split('.').all(|id| ident_ok(id, true)) {
++            return None;
++        }
++    }
++    let mut it = nucleo.split('.');
++    let mut n = [0u32; 3];
++    for slot in n.iter_mut() {
++        let c = it.next()?;
++        if c.is_empty()
++            || !c.bytes().all(|b| b.is_ascii_digit())
++            || (c.len() > 1 && c.starts_with('0'))
++        {
++            return None;
++        }
++        *slot = c.parse().ok()?;
++    }
++    if it.next().is_some() {
++        return None;
++    }
++    Some(Completa { nucleo: n, pre })
++}
++
++fn cmp_ident(a: &str, b: &str) -> Ordering {
++    let na = a.bytes().all(|c| c.is_ascii_digit());
++    let nb = b.bytes().all(|c| c.is_ascii_digit());
++    match (na, nb) {
++        (true, true) => a.len().cmp(&b.len()).then_with(|| a.cmp(b)),
++        (true, false) => Ordering::Less,
++        (false, true) => Ordering::Greater,
++        (false, false) => a.cmp(b),
++    }
++}
++
++/// Precedencia semver 2.0.0 completa entre dos cadenas de versión.
++///
++/// `None` si alguna no es una versión válida. Los metadatos de build (`+…`)
++/// no cuentan.
++pub fn comparar(a: &str, b: &str) -> Option<Ordering> {
++    let (a, b) = (analizar(a)?, analizar(b)?);
++    let o = a.nucleo.cmp(&b.nucleo);
++    if o != Ordering::Equal {
++        return Some(o);
++    }
++    Some(match (a.pre, b.pre) {
++        (None, None) => Ordering::Equal,
++        (Some(_), None) => Ordering::Less,
++        (None, Some(_)) => Ordering::Greater,
++        (Some(pa), Some(pb)) => {
++            let mut ia = pa.split('.');
++            let mut ib = pb.split('.');
++            loop {
++                match (ia.next(), ib.next()) {
++                    (None, None) => break Ordering::Equal,
++                    (None, Some(_)) => break Ordering::Less,
++                    (Some(_), None) => break Ordering::Greater,
++                    (Some(x), Some(y)) => {
++                        let o = cmp_ident(x, y);
++                        if o != Ordering::Equal {
++                            break o;
++                        }
++                    }
++                }
++            }
++        }
++    })
++}
++
++/// La versión de mayor precedencia de `candidatas`, ignorando las inválidas y,
++/// si `con_prerelease` es `false`, las que llevan pre-release. En un empate de
++/// precedencia gana la que aparece antes en la lista.
++pub fn elegir_mas_nueva<'a>(candidatas: &[&'a str], con_prerelease: bool) -> Option<&'a str> {
++    let mut mejor: Option<&'a str> = None;
++    for &c in candidatas {
++        let Some(v) = analizar(c) else { continue };
++        if v.pre.is_some() && !con_prerelease {
++            continue;
++        }
++        match mejor {
++            Some(m) if comparar(c, m) != Some(Ordering::Greater) => {}
++            _ => mejor = Some(c),
++        }
++    }
++    mejor
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;

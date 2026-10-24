@@ -1,0 +1,65 @@
+--- a/crates/soso-web-core/src/lib.rs
++++ b/crates/soso-web-core/src/lib.rs
+@@ -6,3 +6,62 @@
+ 
+ pub mod decode;
+ pub mod html;
++
++use alloc::string::String;
++use alloc::vec::Vec;
++
++/// Errores de [`percent_decode`].
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum PercentError {
++    /// Un `%` no va seguido de dos dígitos hexadecimales.
++    BadEscape,
++    /// Los bytes decodificados no forman UTF-8 válido.
++    InvalidUtf8,
++}
++
++/// Codifica con `%XX` (mayúsculas) todo byte que no sea `A-Za-z0-9-._~`.
++pub fn percent_encode_component(s: &str) -> String {
++    const HEX: &[u8; 16] = b"0123456789ABCDEF";
++    let mut out = String::with_capacity(s.len());
++    for &b in s.as_bytes() {
++        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
++            out.push(b as char);
++        } else {
++            out.push('%');
++            out.push(HEX[(b >> 4) as usize] as char);
++            out.push(HEX[(b & 15) as usize] as char);
++        }
++    }
++    out
++}
++
++fn hex_val(b: u8) -> Option<u8> {
++    match b {
++        b'0'..=b'9' => Some(b - b'0'),
++        b'a'..=b'f' => Some(b - b'a' + 10),
++        b'A'..=b'F' => Some(b - b'A' + 10),
++        _ => None,
++    }
++}
++
++/// Decodifica `%XX` y valida el resultado como UTF-8 (`+` no se toca).
++pub fn percent_decode(s: &str) -> Result<String, PercentError> {
++    let bytes = s.as_bytes();
++    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
++    let mut i = 0;
++    while i < bytes.len() {
++        if bytes[i] == b'%' {
++            let hi = bytes.get(i + 1).copied().and_then(hex_val);
++            let lo = bytes.get(i + 2).copied().and_then(hex_val);
++            match (hi, lo) {
++                (Some(h), Some(l)) => out.push((h << 4) | l),
++                _ => return Err(PercentError::BadEscape),
++            }
++            i += 3;
++        } else {
++            out.push(bytes[i]);
++            i += 1;
++        }
++    }
++    String::from_utf8(out).map_err(|_| PercentError::InvalidUtf8)
++}

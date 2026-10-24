@@ -1,0 +1,42 @@
+--- a/crates/soso-update-core/src/pack.rs
++++ b/crates/soso-update-core/src/pack.rs
+@@ -132,6 +132,16 @@
+     Ok(writer.build())
+ }
+ 
++
++
++pub fn pack_hash(data: &[u8]) -> String {
++    hex_sha256(data)
++}
++
++pub fn pack_digest(data: &[u8]) -> [u8; 32] {
++    sha256(data)
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::PackWriter;
+@@ -177,11 +187,3 @@
+         assert_eq!(m.validate(), Ok(()));
+     }
+ }
+-
+-pub fn pack_hash(data: &[u8]) -> String {
+-    hex_sha256(data)
+-}
+-
+-pub fn pack_digest(data: &[u8]) -> [u8; 32] {
+-    sha256(data)
+-}
+--- a/crates/soso-update-core/src/txn/punto.rs
++++ b/crates/soso-update-core/src/txn/punto.rs
+@@ -245,7 +245,7 @@
+ /// un A→B→C conviven dos puntos a propósito, y el de A no se toca hasta que C
+ /// esté confirmada y el punto de B acreditado.
+ pub fn recogible(punto: &Punto, referencias: &[TxnId]) -> bool {
+-    !referencias.iter().any(|r| *r == punto.id)
++    !referencias.contains(&punto.id)
+ }
+ 
+ // ─────────────────────────── Creación y conservación (U5b) ───────────────

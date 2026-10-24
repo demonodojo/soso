@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "R42",
+  "clase": "repo",
+  "particion": "ciega",
+  "titulo": "gptdisk: una GPT corrupta o truncada da error, no pánico ni una cabecera válida",
+  "etiqueta": "gptdisk-endurecimiento",
+  "origen": "mejora_especificada (banco ciego 5, 2026-10-23)",
+  "entrada": {
+    "enunciado": "visible/R42/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R42",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R42/aceptacion.rs",
+    "reservado/R42/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R42/enunciado.md": "e808cc1fb075eeeda8f54d01f193648ebbd64350acdd56910264e92dd19ec49e"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/gptdisk/src/lib.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "gptdisk: una GPT corrupta o truncada da error, no pánico ni una cabecera válida",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "gptdisk"
+    ],
+    "prueba_reservada": "reservado/R42/aceptacion.rs",
+    "destino_prueba": "crates/gptdisk/tests/aceptacion_R42.rs",
+    "referencia": "reservado/R42/referencia.patch"
+  }
+}

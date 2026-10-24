@@ -1,0 +1,22 @@
+--- a/crates/gptdisk/src/lib.rs
++++ b/crates/gptdisk/src/lib.rs
+@@ -84,8 +84,8 @@
+         g[5] = byte(4);
+         g[6] = byte(7);
+         g[7] = byte(6);
+-        for i in 8..16 {
+-            g[i] = byte(i);
++        for (i, x) in g.iter_mut().enumerate().skip(8) {
++            *x = byte(i);
+         }
+         Some(Guid(g))
+     }
+@@ -161,7 +161,7 @@
+         }
+         let num_entries = rd32(sec, 80);
+         let entry_size = rd32(sec, 84);
+-        if num_entries == 0 || num_entries > 512 || entry_size < 128 || entry_size % 8 != 0 {
++        if num_entries == 0 || num_entries > 512 || entry_size < 128 || !entry_size.is_multiple_of(8) {
+             return Err(Error::BadHeader);
+         }
+         let mut disk_guid = [0u8; 16];

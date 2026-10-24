@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "R48",
+  "clase": "repo",
+  "particion": "ciega",
+  "titulo": "CachePolicy tipada y consultas sobre ShardEntry y ModelEntry",
+  "etiqueta": "cache-policy-api",
+  "origen": "mejora_especificada (banco ciego 5, 2026-10-23)",
+  "entrada": {
+    "enunciado": "visible/R48/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R48",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R48/aceptacion.rs",
+    "reservado/R48/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R48/enunciado.md": "f9d7a30a3e4fea16964d44d0c4681cf4b97c8d0c0c0b9848dd203231ed650f61"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/sosomfs/src/layout.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "API nueva en sosomfs::layout sin romper la existente",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "sosomfs", "--features", "std"
+    ],
+    "prueba_reservada": "reservado/R48/aceptacion.rs",
+    "destino_prueba": "crates/sosomfs/tests/aceptacion_R48.rs",
+    "referencia": "reservado/R48/referencia.patch"
+  }
+}

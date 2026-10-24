@@ -1,0 +1,97 @@
+--- a/crates/sosomfs/src/layout.rs
++++ b/crates/sosomfs/src/layout.rs
+@@ -79,3 +79,94 @@
+ }
+ 
+ pub const SUPERBLOCK_SLOTS: u64 = 2;
++
++/// Política de caché de un shard, en forma tipada.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum CachePolicy {
++    Normal,
++    Stream,
++    Pin,
++}
++
++impl TryFrom<u8> for CachePolicy {
++    /// El valor que no corresponde a ninguna política.
++    type Error = u8;
++
++    fn try_from(v: u8) -> Result<Self, u8> {
++        match v {
++            CACHE_NORMAL => Ok(CachePolicy::Normal),
++            CACHE_STREAM => Ok(CachePolicy::Stream),
++            CACHE_PIN => Ok(CachePolicy::Pin),
++            otro => Err(otro),
++        }
++    }
++}
++
++impl From<CachePolicy> for u8 {
++    fn from(p: CachePolicy) -> u8 {
++        match p {
++            CachePolicy::Normal => CACHE_NORMAL,
++            CachePolicy::Stream => CACHE_STREAM,
++            CachePolicy::Pin => CACHE_PIN,
++        }
++    }
++}
++
++impl core::fmt::Display for CachePolicy {
++    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
++        f.write_str(match self {
++            CachePolicy::Normal => "normal",
++            CachePolicy::Stream => "stream",
++            CachePolicy::Pin => "pin",
++        })
++    }
++}
++
++/// Error de `CachePolicy::from_str`: el texto no es `normal`, `stream` ni `pin`.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct ParseCachePolicyError;
++
++impl core::str::FromStr for CachePolicy {
++    type Err = ParseCachePolicyError;
++
++    fn from_str(s: &str) -> Result<Self, ParseCachePolicyError> {
++        match s {
++            "normal" => Ok(CachePolicy::Normal),
++            "stream" => Ok(CachePolicy::Stream),
++            "pin" => Ok(CachePolicy::Pin),
++            _ => Err(ParseCachePolicyError),
++        }
++    }
++}
++
++impl ShardEntry {
++    /// Política de caché tipada; `None` si `cache_policy` no es una conocida.
++    pub fn policy(&self) -> Option<CachePolicy> {
++        CachePolicy::try_from(self.cache_policy).ok()
++    }
++
++    /// Suma de los bloques de todos sus extents.
++    pub fn total_blocks(&self) -> u64 {
++        self.extents.iter().fold(0u64, |a, e| a.saturating_add(e.block_count))
++    }
++}
++
++impl ModelEntry {
++    /// Suma de `byte_len` de todos los shards.
++    pub fn total_bytes(&self) -> u64 {
++        self.shards.iter().fold(0u64, |a, s| a.saturating_add(s.byte_len))
++    }
++
++    /// Shard cuya ruta relativa es exactamente `rel_path` (el primero si hay repetidos).
++    pub fn shard(&self, rel_path: &str) -> Option<&ShardEntry> {
++        self.shards.iter().find(|s| s.rel_path == rel_path)
++    }
++
++    /// Shards bajo el directorio `dir`, en el orden del modelo. `""` los devuelve todos.
++    pub fn shards_under<'a>(&'a self, dir: &'a str) -> impl Iterator<Item = &'a ShardEntry> + 'a {
++        self.shards.iter().filter(move |s| {
++            dir.is_empty()
++                || s.rel_path.strip_prefix(dir).is_some_and(|resto| resto.starts_with('/'))
++        })
++    }
++}

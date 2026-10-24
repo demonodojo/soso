@@ -8,6 +8,10 @@
 # rechazo en el enunciado (sin datos de la prueba reservada). El registro de la ronda k>1 se llama Rxx-rk.json.
 # Requiere el servidor del modelo en 127.0.0.1:7441 (SOSO_LLM_API_KEY=clave-host) y /tmp/base-t02 (git archive 6f558f072).
 set -u
+# Tope de memoria de DATOS (heap y mapas anónimos) por proceso, heredado por el agente, `cargo`, las pruebas y el validador: una prueba descontrolada del
+# candidato (R49 de la campaña 59: un binario de `soso-llm-core` llegó a 13,5 GB) hace fallar esa prueba con «memory allocation failed» en vez de llevar la
+# máquina al OOM del kernel, que mataba la campaña entera. LIMITE_DATOS_KB=0 lo desactiva.
+[ "${LIMITE_DATOS_KB:-8388608}" != 0 ] && ulimit -d ${LIMITE_DATOS_KB:-8388608}
 R0=/home/jmdiez/Trabajo/demonodojo/soso
 OUT=$1; shift
 BIN=${SOSO_IMPROVE_BIN:-$R0/target/debug/soso-improve}
@@ -27,6 +31,9 @@ HINT_PREV=""
 for T in $TAREAS; do
 HINT_PREV=""
 for RONDA in $(seq 1 ${ROUNDS:-1}); do
+  # Una carpeta de salida reutilizada tras una ejecución abortada conserva la base publicada por el intento anterior (`refs/base-campana-Rxx.*`); la captura
+  # nueva parte de otra base y el validador contesta «Bloqueado: la base cambió» aunque la solución sea buena (campañas 55 y 58). Se parte de cero en la ronda 1.
+  [ $RONDA -eq 1 ] && rm -f $OUT/refs/base-campana-$T.* 2>/dev/null
   SUF=""; [ $RONDA -gt 1 ] && SUF="-r$RONDA"
   W=$OUT/$T$SUF; rm -rf $W; mkdir -p $W
   eval "$(python3 -I - $CAMP $T <<'P'

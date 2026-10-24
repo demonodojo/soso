@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "id": "R56",
+  "clase": "repo",
+  "particion": "real",
+  "titulo": "soso-web-core: Clippy sin avisos",
+  "etiqueta": "clippy-web-core",
+  "origen": "trabajo_real (avisos de Clippy del repositorio, 2026-10-24)",
+  "entrada": {
+    "enunciado": "visible/R56/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "`cargo clippy -D warnings` sin avisos y las pruebas del crate en verde.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R56",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R56/aceptacion.rs",
+    "reservado/R56/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R56/enunciado.md": "8f7ecc7cff8ab6364eb68cc4009a8e312dd6731d138f70746bc6bfe255dc1556"
+  },
+  "base": {
+    "commit": "7a8db4a26d2873d57c990a26f74075699f1082aa",
+    "rama": "main",
+    "captura": "target/gemma-work/base-real"
+  },
+  "rutas_editables": [
+    "crates/soso-web-core/src/decode.rs",
+    "crates/soso-web-core/src/html.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "soso-web-core: Clippy sin avisos",
+    "argv": [
+      "bash",
+      "-c",
+      "cargo clippy -q -p soso-web-core -- -D warnings -A clippy::result_unit_err && cargo test -q -p soso-web-core"
+    ],
+    "prueba_reservada": "reservado/R56/aceptacion.rs",
+    "destino_prueba": "crates/soso-web-core/tests/aceptacion_R56.rs",
+    "referencia": "reservado/R56/referencia.patch"
+  }
+}

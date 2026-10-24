@@ -1,0 +1,75 @@
+--- a/crates/soso-wpa2/src/eapol.rs
++++ b/crates/soso-wpa2/src/eapol.rs
+@@ -72,6 +72,8 @@
+     NotRsn,
+     /// La longitud declarada no concuerda con lo recibido.
+     BadLength,
++    /// Versión 802.1X (byte 0) distinta de 1, 2 o 3.
++    BadEapolVersion,
+ }
+ 
+ /// Vista de solo lectura sobre un EAPOL-Key ya validado.
+@@ -87,6 +89,9 @@
+         if frame.len() < EAPOL_KEY_LEN {
+             return Err(ParseError::TooShort);
+         }
++        if !(1..=3).contains(&frame[0]) {
++            return Err(ParseError::BadEapolVersion);
++        }
+         if frame[1] != EAPOL_TYPE_KEY {
+             return Err(ParseError::NotKeyFrame);
+         }
+@@ -98,7 +103,7 @@
+             return Err(ParseError::BadLength);
+         }
+         let kd_len = u16::from_be_bytes([frame[OFF_KD_LEN], frame[OFF_KD_LEN + 1]]) as usize;
+-        if EAPOL_BODY_LEN + kd_len > body {
++        if EAPOL_BODY_LEN + kd_len != body {
+             return Err(ParseError::BadLength);
+         }
+         Ok(Self {
+@@ -199,7 +204,7 @@
+ /// `scratch` debe medir al menos `key.bytes().len()`.
+ pub fn verify_mic(kck: &[u8], key: &EapolKey<'_>, scratch: &mut [u8]) -> bool {
+     let raw = key.bytes();
+-    if scratch.len() < raw.len() {
++    if kck.len() != 16 || scratch.len() < raw.len() {
+         return false;
+     }
+     let buf = &mut scratch[..raw.len()];
+--- a/crates/soso-wpa2/src/kde.rs
++++ b/crates/soso-wpa2/src/kde.rs
+@@ -47,22 +47,29 @@
+     }
+ }
+ 
+-/// Busca el KDE de la GTK. `None` si no está o si la clave no mide 16 bytes.
++/// Busca el KDE de la GTK. `None` si no está o si el primer KDE de GTK está
++/// mal formado (carga distinta de 18 bytes o Key ID fuera de 1..=3).
+ pub fn find_gtk(key_data: &[u8]) -> Option<Gtk> {
++    let mut seen = false;
+     let mut found = None;
+     for_each_rsn_kde(key_data, |data_type, payload| {
+-        if data_type != KDE_DATA_TYPE_GTK || found.is_some() {
++        if data_type != KDE_DATA_TYPE_GTK || seen {
+             return;
+         }
++        seen = true;
+         // payload = keyid|tx (1) ‖ reservado (1) ‖ GTK
+-        if payload.len() < 2 + 16 {
++        if payload.len() != 2 + 16 {
++            return;
++        }
++        let key_id = payload[0] & 0x03;
++        if key_id == 0 {
+             return;
+         }
+         let mut key = [0u8; 16];
+         key.copy_from_slice(&payload[2..2 + 16]);
+         found = Some(Gtk {
+             key,
+-            key_id: payload[0] & 0x03,
++            key_id,
+             tx: payload[0] & 0x04 != 0,
+         });
+     });

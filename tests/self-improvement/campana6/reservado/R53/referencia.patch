@@ -1,0 +1,211 @@
+--- a/crates/soso-http/src/lib.rs
++++ b/crates/soso-http/src/lib.rs
+@@ -55,7 +55,7 @@
+ }
+ 
+ fn map_transport_err(e: i64, other: HttpError) -> HttpError {
+-    if e == -(soso_abi::EINTR as i64) {
++    if e == -(soso_abi::EINTR) {
+         HttpError::Interrupted
+     } else {
+         other
+@@ -187,7 +187,7 @@
+     fn read_more(&mut self, timeout_ms: u64) -> Result<(), HttpError> {
+         let mut buf = [0u8; 4096];
+         let n = self.transport.read_timeout(self.fd, &mut buf, timeout_ms);
+-        if n == -(soso_abi::EINTR as i64) {
++        if n == -(soso_abi::EINTR) {
+             return Err(HttpError::Interrupted);
+         }
+         if n > 0 {
+@@ -199,7 +199,7 @@
+                 "el par cerró TCP antes de completar el handshake TLS",
+             ));
+         }
+-        if n == -(soso_abi::EAGAIN as i64) {
++        if n == -(soso_abi::EAGAIN) {
+             return Err(HttpError::Io(
+                 "plazo agotado esperando bytes del handshake TLS",
+             ));
+@@ -226,8 +226,8 @@
+         let mut out_buf = [0u8; 8192];
+         loop {
+             let discard = {
+-                let mut scratch = self.incoming.as_mut_slice();
+-                let status = self.conn.process_tls_records(&mut scratch);
++                let scratch = self.incoming.as_mut_slice();
++                let status = self.conn.process_tls_records(scratch);
+                 let discard = status.discard;
+                 match status.state {
+                     // Un error aquí **es** un error de TLS (certificado,
+@@ -267,8 +267,8 @@
+         let mut off = 0;
+         while off < data.len() {
+             let discard = {
+-                let mut scratch = self.incoming.as_mut_slice();
+-                let status = self.conn.process_tls_records(&mut scratch);
++                let scratch = self.incoming.as_mut_slice();
++                let status = self.conn.process_tls_records(scratch);
+                 let discard = status.discard;
+                 match status.state {
+                     Err(_) => {
+@@ -279,7 +279,6 @@
+                             let n = wt
+                                 .encrypt(&data[off..], &mut out_buf)
+                                 .map_err(|e| HttpError::Tls(alloc::format!("{e}")))?;
+-                            drop(wt);
+                             self.outgoing_pending.extend_from_slice(&out_buf[..n]);
+                             self.flush_pending()?;
+                             off = data.len();
+@@ -317,8 +316,8 @@
+         let mut out_buf = [0u8; 8192];
+         loop {
+             let discard = {
+-                let mut scratch = self.incoming.as_mut_slice();
+-                let status = self.conn.process_tls_records(&mut scratch);
++                let scratch = self.incoming.as_mut_slice();
++                let status = self.conn.process_tls_records(scratch);
+                 let discard = status.discard;
+                 match status.state {
+                     Err(_) => {
+@@ -358,7 +357,8 @@
+                             // la petición, sin traza ninguna y sin vencer plazo,
+                             // que es lo más parecido a un cuelgue del kernel que
+                             // puede hacer un proceso (2026-09-20).
+-                            if !self.read_more_body(timeout_ms)? {
++                            let sigue = self.read_more_body(timeout_ms)?;
++                            if !sigue {
+                                 return Ok(());
+                             }
+                         }
+@@ -396,7 +396,7 @@
+ /// Interpretación de `read_timeout` mientras se lee el cuerpo HTTP.
+ /// `Ok(Some)` = llegaron datos; `Ok(None)` = cierre TCP. Un plazo es error.
+ fn classify_body_transport_read(n: i64) -> Result<Option<()>, HttpError> {
+-    if n == -(soso_abi::EINTR as i64) {
++    if n == -(soso_abi::EINTR) {
+         return Err(HttpError::Interrupted);
+     }
+     if n > 0 {
+@@ -405,7 +405,7 @@
+     if n == 0 {
+         return Ok(None);
+     }
+-    if n == -(soso_abi::EAGAIN as i64) {
++    if n == -(soso_abi::EAGAIN) {
+         return Err(HttpError::Io(BODY_READ_TIMEOUT_MSG));
+     }
+     Err(HttpError::Io("lectura TLS falló esperando el cuerpo HTTP"))
+@@ -452,10 +452,10 @@
+             self.status = Some(status);
+             self.headers = headers.clone();
+             self.discard_body = (300..400).contains(&status);
+-            if !self.discard_body {
+-                if let Some(cl) = header_value(&headers, "content-length") {
+-                    self.content_length = cl.parse().ok();
+-                }
++            if !self.discard_body
++                && let Some(cl) = header_value(&headers, "content-length")
++            {
++                self.content_length = cl.parse().ok();
+             }
+             self.headers_done = true;
+             let body = self.header_buf[sep + 4..].to_vec();
+@@ -475,12 +475,11 @@
+ 
+     fn finish(self) -> Result<(u16, Vec<(String, String)>), HttpError> {
+         if let Some(status) = self.status {
+-            if !self.discard_body {
+-                if let Some(expected) = self.content_length {
+-                    if self.body_received != expected {
+-                        return Err(HttpError::Io(BODY_INCOMPLETE_MSG));
+-                    }
+-                }
++            if !self.discard_body
++                && let Some(expected) = self.content_length
++                && self.body_received != expected
++            {
++                return Err(HttpError::Io(BODY_INCOMPLETE_MSG));
+             }
+             return Ok((status, self.headers));
+         }
+@@ -622,7 +621,7 @@
+ /// Sin esto, `EAGAIN` se veía como un fallo de transporte genérico y no se
+ /// reintentaba la conexión.
+ fn map_tls_write_err(e: i64) -> HttpError {
+-    if e == -(soso_abi::EAGAIN as i64) {
++    if e == -(soso_abi::EAGAIN) {
+         HttpError::Io("plazo agotado escribiendo el handshake TLS")
+     } else {
+         map_transport_err(e, HttpError::Io("write_all del transporte"))
+@@ -647,9 +646,7 @@
+     port: u16,
+     origin: Option<&AuthOrigin>,
+ ) -> Option<&'a str> {
+-    let Some(tok) = auth else {
+-        return None;
+-    };
++    let tok = auth?;
+     let Some(orig) = origin else {
+         return Some(tok);
+     };
+@@ -806,18 +803,18 @@
+         drop(guard);
+         transport.close(session_fd);
+         let (status, headers) = stream.finish()?;
+-        if (300..400).contains(&status) {
+-            if let Some(loc) = header_value(&headers, "location") {
+-                current = resolve_redirect(&current, loc);
+-                if auth.is_some() {
+-                    let (_, new_host, new_port, _) = parse_url(&current)?;
+-                    auth_origin = Some(AuthOrigin {
+-                        host: new_host.to_string(),
+-                        port: new_port,
+-                    });
+-                }
+-                continue;
++        if (300..400).contains(&status)
++            && let Some(loc) = header_value(&headers, "location")
++        {
++            current = resolve_redirect(&current, loc);
++            if auth.is_some() {
++                let (_, new_host, new_port, _) = parse_url(&current)?;
++                auth_origin = Some(AuthOrigin {
++                    host: new_host.to_string(),
++                    port: new_port,
++                });
+             }
++            continue;
+         }
+         return Ok((status, headers));
+     }
+@@ -931,7 +928,10 @@
+ }
+ 
+ #[cfg(test)]
+-fn parse_response(raw: &[u8]) -> Result<(u16, Vec<(String, String)>, Vec<u8>), HttpError> {
++type RespuestaCompleta = (u16, Vec<(String, String)>, Vec<u8>);
++
++#[cfg(test)]
++fn parse_response(raw: &[u8]) -> Result<RespuestaCompleta, HttpError> {
+     let sep = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or(HttpError::Parse)?;
+     let (status, headers) = parse_response_head(&raw[..sep])?;
+     let body = raw[sep + 4..].to_vec();
+@@ -1162,7 +1162,7 @@
+ 
+     #[test]
+     fn handshake_write_timeout_is_retryable() {
+-        let err = map_tls_write_err(-(soso_abi::EAGAIN as i64));
++        let err = map_tls_write_err(-(soso_abi::EAGAIN));
+         assert!(tls_handshake_io_retryable(&err));
+         assert!(!tls_handshake_io_retryable(&HttpError::Io(
+             "write_all del transporte"
+@@ -1172,7 +1172,7 @@
+     #[test]
+     fn body_read_timeout_is_error_not_eof() {
+         assert_eq!(
+-            classify_body_transport_read(-(soso_abi::EAGAIN as i64)),
++            classify_body_transport_read(-(soso_abi::EAGAIN)),
+             Err(HttpError::Io(BODY_READ_TIMEOUT_MSG))
+         );
+         assert_eq!(classify_body_transport_read(0), Ok(None));

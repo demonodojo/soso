@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "id": "R54",
+  "clase": "repo",
+  "particion": "real",
+  "titulo": "soso-log-core y soso-red-core: Clippy sin avisos",
+  "etiqueta": "clippy-log-red",
+  "origen": "trabajo_real (avisos de Clippy del repositorio, 2026-10-24)",
+  "entrada": {
+    "enunciado": "visible/R54/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "`cargo clippy -D warnings` sin avisos y las pruebas del crate en verde.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R54",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R54/aceptacion.rs",
+    "reservado/R54/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R54/enunciado.md": "8291c68d8bb892d8b26fc5b7a4d8090588aa0d94a757ae8cb66345a6c3aad5af"
+  },
+  "base": {
+    "commit": "7a8db4a26d2873d57c990a26f74075699f1082aa",
+    "rama": "main",
+    "captura": "target/gemma-work/base-real"
+  },
+  "rutas_editables": [
+    "crates/soso-log-core/src/texto.rs",
+    "crates/soso-red-core/src/estatica.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "soso-log-core y soso-red-core: Clippy sin avisos",
+    "argv": [
+      "bash",
+      "-c",
+      "cargo clippy -q -p soso-log-core --features std -- -D warnings -A clippy::result_unit_err && cargo clippy -q -p soso-red-core --features std -- -D warnings -A clippy::result_unit_err && cargo test -q -p soso-log-core --features std && cargo test -q -p soso-red-core --features std"
+    ],
+    "prueba_reservada": "reservado/R54/aceptacion.rs",
+    "destino_prueba": "crates/soso-log-core/tests/aceptacion_R54.rs",
+    "referencia": "reservado/R54/referencia.patch"
+  }
+}

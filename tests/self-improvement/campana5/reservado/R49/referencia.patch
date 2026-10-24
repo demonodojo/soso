@@ -1,0 +1,100 @@
+--- a/crates/soso-llm-core/src/tokenizer.rs
++++ b/crates/soso-llm-core/src/tokenizer.rs
+@@ -89,7 +89,12 @@
+     pub fn decode(&self, tokens: &[u32]) -> String {
+         match self {
+             Tokenizer::ByteLevel => {
+-                let bytes: Vec<u8> = tokens.iter().map(|&t| t as u8).collect();
++                // Un id >= 256 no es un byte: no emite nada.
++                let bytes: Vec<u8> = tokens
++                    .iter()
++                    .filter(|&&t| t < 256)
++                    .map(|&t| t as u8)
++                    .collect();
+                 String::from_utf8_lossy(&bytes).into_owned()
+             }
+             Tokenizer::Vocab(v) => v.decode(tokens),
+@@ -100,7 +105,11 @@
+     /// emiten nada.
+     pub fn token_bytes(&self, t: u32, out: &mut Vec<u8>) {
+         match self {
+-            Tokenizer::ByteLevel => out.push(t as u8),
++            Tokenizer::ByteLevel => {
++                if t < 256 {
++                    out.push(t as u8);
++                }
++            }
+             Tokenizer::Vocab(v) => v.token_bytes(t, out),
+         }
+     }
+@@ -250,7 +259,12 @@
+             self.token_bytes(t, &mut bytes);
+         }
+         let text = String::from_utf8_lossy(&bytes).into_owned();
+-        String::from(text.strip_prefix(' ').unwrap_or(&text))
++        // Sólo SentencePiece añade un espacio de cortesía al codificar.
++        if self.leading_space {
++            String::from(text.strip_prefix(' ').unwrap_or(&text))
++        } else {
++            text
++        }
+     }
+ }
+ 
+@@ -270,24 +284,33 @@
+     /// Añade un token y devuelve el texto listo para imprimir.
+     pub fn push(&mut self, tok: &Tokenizer, t: u32) -> String {
+         tok.token_bytes(t, &mut self.pending);
+-        match core::str::from_utf8(&self.pending) {
+-            Ok(s) => {
+-                let out = String::from(s);
+-                self.pending.clear();
+-                out
+-            }
+-            Err(e) => {
+-                let n = e.valid_up_to();
+-                let out = String::from_utf8_lossy(&self.pending[..n]).into_owned();
+-                self.pending.drain(..n);
+-                // secuencia inválida (no solo incompleta): descartarla para
+-                // no acumular basura indefinidamente
+-                if self.pending.len() > 4 {
++        let mut out = String::new();
++        loop {
++            match core::str::from_utf8(&self.pending) {
++                Ok(s) => {
++                    out.push_str(s);
+                     self.pending.clear();
++                    break;
++                }
++                Err(e) => {
++                    let n = e.valid_up_to();
++                    out.push_str(&String::from_utf8_lossy(&self.pending[..n]));
++                    match e.error_len() {
++                        // bytes inválidos: U+FFFD ya, y seguimos con lo que haya detrás
++                        Some(k) => {
++                            out.push('\u{FFFD}');
++                            self.pending.drain(..n + k);
++                        }
++                        // prefijo incompleto: esperar al siguiente token
++                        None => {
++                            self.pending.drain(..n);
++                            break;
++                        }
++                    }
+                 }
+-                out
+             }
+         }
++        out
+     }
+ 
+     /// Restos al terminar (secuencia incompleta → lossy).
+@@ -322,7 +345,7 @@
+ /// Reconoce piezas byte-fallback `<0xXX>`.
+ fn parse_byte_piece(piece: &str) -> Option<u8> {
+     let hex = piece.strip_prefix("<0x")?.strip_suffix('>')?;
+-    if hex.len() != 2 {
++    if hex.len() != 2 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+         return None;
+     }
+     u8::from_str_radix(hex, 16).ok()

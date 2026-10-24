@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "id": "R53",
+  "clase": "repo",
+  "particion": "real",
+  "titulo": "soso-http: Clippy sin avisos",
+  "etiqueta": "clippy-soso-http",
+  "origen": "trabajo_real (avisos de Clippy del repositorio, 2026-10-24)",
+  "entrada": {
+    "enunciado": "visible/R53/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "`cargo clippy -D warnings` sin avisos y las pruebas del crate en verde.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R53",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R53/aceptacion.rs",
+    "reservado/R53/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R53/enunciado.md": "5880c998e20587355c5367948823aceb31c9e537e5a70923d5991bae4a7981b9"
+  },
+  "base": {
+    "commit": "7a8db4a26d2873d57c990a26f74075699f1082aa",
+    "rama": "main",
+    "captura": "target/gemma-work/base-real"
+  },
+  "rutas_editables": [
+    "crates/soso-http/src/lib.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "soso-http: Clippy sin avisos",
+    "argv": [
+      "bash",
+      "-c",
+      "cargo clippy -q -p soso-http --features std -- -D warnings -A clippy::result_unit_err && cargo test -q -p soso-http --features std"
+    ],
+    "prueba_reservada": "reservado/R53/aceptacion.rs",
+    "destino_prueba": "crates/soso-http/tests/aceptacion_R53.rs",
+    "referencia": "reservado/R53/referencia.patch"
+  }
+}

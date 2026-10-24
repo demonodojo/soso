@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "id": "R52",
+  "clase": "repo",
+  "particion": "real",
+  "titulo": "gptdisk: Clippy sin avisos",
+  "etiqueta": "clippy-gptdisk",
+  "origen": "trabajo_real (avisos de Clippy del repositorio, 2026-10-24)",
+  "entrada": {
+    "enunciado": "visible/R52/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "`cargo clippy -D warnings` sin avisos y las pruebas del crate en verde.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R52",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R52/aceptacion.rs",
+    "reservado/R52/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R52/enunciado.md": "1beccd4ca9f7cc1edf38433c68bd280579bd9348df9fa59f49cf28ef4b2537f3"
+  },
+  "base": {
+    "commit": "7a8db4a26d2873d57c990a26f74075699f1082aa",
+    "rama": "main",
+    "captura": "target/gemma-work/base-real"
+  },
+  "rutas_editables": [
+    "crates/gptdisk/src/lib.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "gptdisk: Clippy sin avisos",
+    "argv": [
+      "bash",
+      "-c",
+      "cargo clippy -q -p gptdisk -- -D warnings -A clippy::result_unit_err && cargo test -q -p gptdisk"
+    ],
+    "prueba_reservada": "reservado/R52/aceptacion.rs",
+    "destino_prueba": "crates/gptdisk/tests/aceptacion_R52.rs",
+    "referencia": "reservado/R52/referencia.patch"
+  }
+}

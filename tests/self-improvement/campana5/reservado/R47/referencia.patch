@@ -1,0 +1,25 @@
+--- a/crates/sosofs/src/fs.rs
++++ b/crates/sosofs/src/fs.rs
+@@ -272,12 +272,20 @@
+             return Ok(());
+         }
+ 
+-        let (min, max) = Key::range(ino, KIND_EXTENT);
++        // Sólo los extents que pueden solaparse con [offset, end): empiezan
++        // como mucho en `end - 1` y, al medir <= EXTENT_MAX_BLOCKS bloques,
++        // no empiezan antes de `offset - EXTENT_MAX_BLOCKS * BLOCK_SIZE`.
++        let end = offset + len;
++        let min = Key {
++            inode: ino,
++            kind: KIND_EXTENT,
++            offset: offset.saturating_sub(EXTENT_MAX_BLOCKS as usize * BLOCK_SIZE) as u64,
++        };
++        let max = Key { inode: ino, kind: KIND_EXTENT, offset: (end - 1) as u64 };
+         let mut extents = Vec::new();
+         self.scan_range(min, max, &mut extents)?;
+ 
+         let mut written = 0usize;
+-        let end = offset + len;
+         for (key, payload) in &extents {
+             let (ext, _) = ExtentItem::read_from_prefix(payload).map_err(|_| FsError::Corrupt)?;
+             let nblocks = ext.block_count.get() as usize;

@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "id": "R43",
+  "clase": "repo",
+  "particion": "ciega",
+  "titulo": "EAPOL-Key y KDE de GTK rechazan tramas manipuladas o mal formadas",
+  "etiqueta": "eapol-gtk-endurecimiento",
+  "origen": "mejora_especificada (banco ciego 5, 2026-10-23)",
+  "entrada": {
+    "enunciado": "visible/R43/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R43",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R43/aceptacion.rs",
+    "reservado/R43/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R43/enunciado.md": "53d6e6b95092b38ea620816d97d9db1aeab24f92db496362333cf9499b0f4ced"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/soso-wpa2/src/eapol.rs",
+    "crates/soso-wpa2/src/kde.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "EAPOL-Key y KDE de GTK rechazan tramas manipuladas o mal formadas",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "soso-wpa2"
+    ],
+    "prueba_reservada": "reservado/R43/aceptacion.rs",
+    "destino_prueba": "crates/soso-wpa2/tests/aceptacion_R43.rs",
+    "referencia": "reservado/R43/referencia.patch"
+  }
+}

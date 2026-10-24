@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "R47",
+  "clase": "repo",
+  "particion": "ciega",
+  "titulo": "read_file_range lee sólo los extents que solapan con el rango",
+  "etiqueta": "read-file-range-extents",
+  "origen": "mejora_especificada (banco ciego 5, 2026-10-23)",
+  "entrada": {
+    "enunciado": "visible/R47/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R47",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R47/aceptacion.rs",
+    "reservado/R47/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R47/enunciado.md": "9f8cdab1b12c80a118ca1645eb4bf8b4ca1fe9c068cf21ea7e1fee079801eee9"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/sosofs/src/fs.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "read_file_range consulta sólo los extents del rango y conserva resultado y errores",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "sosofs", "--features", "std"
+    ],
+    "prueba_reservada": "reservado/R47/aceptacion.rs",
+    "destino_prueba": "crates/sosofs/tests/aceptacion_R47.rs",
+    "referencia": "reservado/R47/referencia.patch"
+  }
+}

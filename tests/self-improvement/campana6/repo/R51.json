@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "id": "R51",
+  "clase": "repo",
+  "particion": "real",
+  "titulo": "block-dev: Clippy sin avisos",
+  "etiqueta": "clippy-block-dev",
+  "origen": "trabajo_real (avisos de Clippy del repositorio, 2026-10-24)",
+  "entrada": {
+    "enunciado": "visible/R51/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "`cargo clippy -D warnings` sin avisos y las pruebas del crate en verde.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R51",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R51/aceptacion.rs",
+    "reservado/R51/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R51/enunciado.md": "89bad0ff91db4393740669ae21b7a15d64b0cf536cb442bc276aefffb8870642"
+  },
+  "base": {
+    "commit": "7a8db4a26d2873d57c990a26f74075699f1082aa",
+    "rama": "main",
+    "captura": "target/gemma-work/base-real"
+  },
+  "rutas_editables": [
+    "crates/block-dev/src/lib.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "block-dev: Clippy sin avisos",
+    "argv": [
+      "bash",
+      "-c",
+      "cargo clippy -q -p block-dev --features std -- -D warnings -A clippy::result_unit_err && cargo test -q -p block-dev --features std"
+    ],
+    "prueba_reservada": "reservado/R51/aceptacion.rs",
+    "destino_prueba": "crates/block-dev/tests/aceptacion_R51.rs",
+    "referencia": "reservado/R51/referencia.patch"
+  }
+}

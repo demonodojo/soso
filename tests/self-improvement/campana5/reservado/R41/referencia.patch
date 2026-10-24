@@ -1,0 +1,28 @@
+--- a/crates/gptdisk/src/lib.rs
++++ b/crates/gptdisk/src/lib.rs
+@@ -66,8 +66,8 @@
+         }
+         let mut nib = [0u8; 32];
+         let mut n = 0;
+-        for &c in b {
+-            if c == b'-' {
++        for (i, &c) in b.iter().enumerate() {
++            if matches!(i, 8 | 13 | 18 | 23) {
+                 continue;
+             }
+             nib[n] = hex_val(c)?;
+@@ -409,9 +409,13 @@
+ /// Ajusta el MBR protector al tamaño del disco (campo de 32 bits, saturado a
+ /// 0xFFFFFFFF en discos de más de 2 TiB, como hace sgdisk).
+ pub fn protective_mbr_fix(mbr: &mut [u8; SECTOR], disk_sectors: u64) {
+-    let size = (disk_sectors - 1).min(0xFFFF_FFFF) as u32;
++    let size = disk_sectors.saturating_sub(1).min(0xFFFF_FFFF) as u32;
++    // Una MBR protectora tiene una sola entrada: las otras tres se vacían.
++    mbr[446..510].fill(0);
+     mbr[446] = 0x00; // no arrancable
++    mbr[446 + 1..446 + 4].copy_from_slice(&[0x00, 0x02, 0x00]); // CHS inicial
+     mbr[446 + 4] = 0xEE; // tipo: GPT protective
++    mbr[446 + 5..446 + 8].copy_from_slice(&[0xFF, 0xFF, 0xFF]); // CHS final
+     wr32(mbr, 446 + 8, 1); // primer LBA
+     wr32(mbr, 446 + 12, size);
+     mbr[510] = 0x55;

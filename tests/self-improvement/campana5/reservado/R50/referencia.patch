@@ -1,0 +1,53 @@
+--- a/crates/soso-resize-core/src/lib.rs
++++ b/crates/soso-resize-core/src/lib.rs
+@@ -15,6 +15,8 @@
+               set_entry_last_lba};
+ 
+ pub const SECTOR: usize = 512;
++/// Sectores de 512 B por bloque de 4 KiB: el delta de un resize es múltiplo.
++const ALIGN_SECTORS: u64 = 8;
+ pub const MAGIC: &[u8; 7] = b"SOSORES";
+ 
+ pub const JOURNAL_IDLE: u8 = 0;
+@@ -141,7 +143,7 @@
+     pub fn from_lba(first: u64, last: u64) -> Self {
+         Self {
+             first,
+-            sectors: last.saturating_sub(first) + 1,
++            sectors: last.saturating_sub(first).saturating_add(1),
+             last,
+         }
+     }
+@@ -216,14 +218,28 @@
+     let p2 = read_part(disk, GPT_ROOT)?;
+     let p3 = read_part(disk, GPT_MODELS)?;
+     let p4 = read_part(disk, GPT_INSTALL)?;
++    // Un resize sin delta no es un resize, y el delta va en bloques de 4 KiB.
++    if delta_sectors == 0 || delta_sectors % ALIGN_SECTORS != 0 {
++        return Err(Error::InvalidGeometry);
++    }
++    for p in [p2, p3, p4] {
++        if p.last < p.first {
++            return Err(Error::InvalidGeometry);
++        }
++    }
++    // Orden p2 < p3 < p4 sin solapes.
++    if p2.last >= p3.first || p3.last >= p4.first {
++        return Err(Error::InvalidGeometry);
++    }
+     if p3.sectors <= delta_sectors {
+         return Err(Error::InvalidGeometry);
+     }
+-    let new_p2_last = p2.last + delta_sectors;
+-    let new_p3_first = p3.first + delta_sectors;
++    let bad = || Error::InvalidGeometry;
++    let new_p2_last = p2.last.checked_add(delta_sectors).ok_or_else(bad)?;
++    let new_p3_first = p3.first.checked_add(delta_sectors).ok_or_else(bad)?;
+     let new_p3_last = p3.last;
+-    let new_p4_first = p4.first + delta_sectors;
+-    let new_p4_last = p4.last + delta_sectors;
++    let new_p4_first = p4.first.checked_add(delta_sectors).ok_or_else(bad)?;
++    let new_p4_last = p4.last.checked_add(delta_sectors).ok_or_else(bad)?;
+ 
+     let mut hdr_sec = [0u8; SECTOR];
+     disk.read_sector(1, &mut hdr_sec)?;

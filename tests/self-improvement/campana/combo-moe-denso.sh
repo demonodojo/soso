@@ -5,8 +5,8 @@ R0=/home/jmdiez/Trabajo/demonodojo/soso
 C=$R0/tests/self-improvement/campana; W=$R0/target/gemma-work; Mw=$R0/target/mellum-work
 N=${1:-combo}
 A=$C/ejecucion-$N-a-moe; B=$C/ejecucion-$N-b-denso
-export ROUNDS=1 MAX_TURNOS=40 TEMP_BASE=0.7 SOSO_IMPROVE_BIN=$W/target-v41/debug/soso-improve BASE_INICIAL=$W/base0 \
-  CARGO_TARGET_DIR=$Mw/campana-target CAMPANA_JSON=$R0/tests/self-improvement/campaign-15.json
+export ROUNDS=1 MAX_TURNOS=40 TEMP_BASE=0.7 SOSO_IMPROVE_BIN=${SOSO_IMPROVE_BIN:-$W/target-v41/debug/soso-improve} BASE_INICIAL=${BASE_INICIAL:-$W/base0} \
+  CARGO_TARGET_DIR=$Mw/campana-target CAMPANA_JSON=${CAMPANA_JSON:-$R0/tests/self-improvement/campaign-15.json}
 espera() { until curl -s -m 3 http://127.0.0.1:$1/health 2>/dev/null | grep -q ok; do sleep 5; done; }
 echo "[$(date +%T)] PASADA A: Qwen3.6-35B-A3B"
 bash $C/qwen36-servir.sh >$Mw/combo-servidor-a.log 2>&1 &

@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "id": "R41",
+  "clase": "repo",
+  "particion": "ciega",
+  "titulo": "Guid::parse acepta cadenas que no son GUID y el MBR protector sale incompleto",
+  "etiqueta": "gptdisk-guid-mbr",
+  "origen": "mejora_especificada (banco ciego 5, 2026-10-23)",
+  "entrada": {
+    "enunciado": "visible/R41/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R41",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R41/aceptacion.rs",
+    "reservado/R41/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R41/enunciado.md": "8234a80207bde9a9fea0d7bb0405bc51abfd6d5f57955df45331a1af5dbda569"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/gptdisk/src/lib.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "Guid::parse acepta cadenas que no son GUID y el MBR protector sale incompleto",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "gptdisk"
+    ],
+    "prueba_reservada": "reservado/R41/aceptacion.rs",
+    "destino_prueba": "crates/gptdisk/tests/aceptacion_R41.rs",
+    "referencia": "reservado/R41/referencia.patch"
+  }
+}

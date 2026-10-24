@@ -1,0 +1,87 @@
+--- a/crates/soso-http/src/lib.rs
++++ b/crates/soso-http/src/lib.rs
+@@ -638,25 +638,72 @@
+     Ok((status, headers, body))
+ }
+ 
++/// Valor de la primera cabecera cuyo nombre coincide (sin distinguir mayúsculas).
+ pub fn header_value<'a>(headers: &'a [(String, String)], key: &str) -> Option<&'a str> {
+     headers
+         .iter()
+-        .find(|(k, _)| k == key)
++        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+         .map(|(_, v)| v.as_str())
+ }
+ 
+-fn resolve_redirect(base: &str, loc: &str) -> String {
+-    if loc.starts_with("https://") {
+-        loc.to_string()
+-    } else if loc.starts_with('/') {
+-        let host = base
+-            .strip_prefix("https://")
+-            .and_then(|r| r.split('/').next())
+-            .unwrap_or("huggingface.co");
+-        format!("https://{host}{loc}")
+-    } else {
+-        loc.to_string()
++/// Quita los segmentos `.` y `..` de una ruta absoluta (empieza por `/`).
++fn remove_dot_segments(path: &str) -> String {
++    let mut out: Vec<&str> = Vec::new();
++    let mut trailing = false;
++    for seg in path.split('/').skip(1) {
++        trailing = false;
++        match seg {
++            "." => trailing = true,
++            ".." => {
++                out.pop();
++                trailing = true;
++            }
++            s => out.push(s),
++        }
+     }
++    let mut res = String::new();
++    for s in &out {
++        res.push('/');
++        res.push_str(s);
++    }
++    if res.is_empty() || trailing {
++        res.push('/');
++    }
++    res
++}
++
++/// Normaliza los segmentos punto de la parte de ruta de `s` (hasta `?` o `#`).
++fn normalize_path_part(s: &str) -> String {
++    let end = s.find(['?', '#']).unwrap_or(s.len());
++    let mut r = remove_dot_segments(&s[..end]);
++    r.push_str(&s[end..]);
++    r
++}
++
++/// Resuelve el `Location` de una redirección contra la URL base.
++pub fn resolve_redirect(base: &str, loc: &str) -> String {
++    let loc = loc.trim();
++    if loc.starts_with("https://") || loc.starts_with("http://") {
++        return loc.to_string();
++    }
++    if loc.starts_with("//") {
++        return format!("https:{loc}");
++    }
++    let rest = base.strip_prefix("https://").unwrap_or(base);
++    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
++    let authority = &rest[..auth_end];
++    let after = &rest[auth_end..];
++    let path_end = after.find(['?', '#']).unwrap_or(after.len());
++    let base_path = if path_end == 0 { "/" } else { &after[..path_end] };
++    if loc.starts_with('/') {
++        return format!("https://{authority}{}", normalize_path_part(loc));
++    }
++    if loc.starts_with('?') {
++        return format!("https://{authority}{base_path}{loc}");
++    }
++    let dir = &base_path[..base_path.rfind('/').map_or(0, |i| i + 1)];
++    let joined = format!("{dir}{loc}");
++    format!("https://{authority}{}", normalize_path_part(&joined))
+ }
+ 
+ #[cfg(test)]

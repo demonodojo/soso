@@ -22,7 +22,7 @@ trap 'systemctl --user stop claude-proxy 2>/dev/null || true' EXIT
 until curl -s -m 3 http://127.0.0.1:$PUERTO/v1/models >/dev/null 2>&1; do sleep 1; done
 W=$R0/target/gemma-work
 export ROUNDS=1 MAX_TURNOS=40 SOSO_IMPROVE_BIN=${SOSO_IMPROVE_BIN:-$W/target-v36/debug/soso-improve} BASE_INICIAL=$W/base0 \
-  CARGO_TARGET_DIR=$R0/target/mellum-work/campana-target CAMPANA_JSON=$R0/tests/self-improvement/campaign-14.json \
+  CARGO_TARGET_DIR=$R0/target/mellum-work/campana-target CAMPANA_JSON=${CAMPANA_JSON:-$R0/tests/self-improvement/campaign-14.json} \
   MODELO=${CLAUDE_MODELO:-claude-sonnet-5-5} PUERTO=$PUERTO MAX_TOKENS=2048
 bash $C/correr.sh $OUT $TAREAS
 echo "listo: registros en $OUT/registros · consumo en $OUT/consumo.jsonl"

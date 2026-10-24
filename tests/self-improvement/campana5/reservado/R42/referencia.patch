@@ -1,0 +1,110 @@
+--- a/crates/gptdisk/src/lib.rs
++++ b/crates/gptdisk/src/lib.rs
+@@ -161,7 +161,23 @@
+         }
+         let num_entries = rd32(sec, 80);
+         let entry_size = rd32(sec, 84);
+-        if num_entries == 0 || num_entries > 512 || entry_size < 128 || entry_size % 8 != 0 {
++        if num_entries == 0
++            || num_entries > 512
++            || !(128..=4096).contains(&entry_size)
++            || !entry_size.is_power_of_two()
++        {
++            return Err(Error::BadHeader);
++        }
++        // CRC de la cabecera: sobre `header_size` bytes con el campo a cero.
++        let mut copy = [0u8; SECTOR];
++        copy.copy_from_slice(&sec[..SECTOR]);
++        wr32(&mut copy, 16, 0);
++        if crc32_ieee(&copy[..header_size as usize]) != rd32(sec, 16) {
++            return Err(Error::BadHeader);
++        }
++        let (my_lba, entries_lba) = (rd64(sec, 24), rd64(sec, 72));
++        let (first_usable, last_usable) = (rd64(sec, 40), rd64(sec, 48));
++        if my_lba == 0 || entries_lba == 0 || first_usable > last_usable {
+             return Err(Error::BadHeader);
+         }
+         let mut disk_guid = [0u8; 16];
+@@ -219,45 +235,59 @@
+ pub fn entry<'a>(entries: &'a [u8], hdr: &Header, i: usize) -> Option<&'a [u8]> {
+     let sz = hdr.entry_size as usize;
+     let off = i.checked_mul(sz)?;
+-    entries.get(off..off + sz)
++    entries.get(off..off.checked_add(sz)?)
+ }
+ 
+ pub fn set_entry_first_lba(e: &mut [u8], lba: u64) {
+-    wr64(e, 32, lba);
++    if e.len() >= 40 {
++        wr64(e, 32, lba);
++    }
+ }
+ 
+ pub fn set_entry_last_lba(e: &mut [u8], lba: u64) {
+-    wr64(e, 40, lba);
++    if e.len() >= 48 {
++        wr64(e, 40, lba);
++    }
+ }
+ 
+ /// Entrada mutable `i` del array GPT.
+ pub fn entry_mut<'a>(entries: &'a mut [u8], hdr: &Header, i: usize) -> Option<&'a mut [u8]> {
+     let sz = hdr.entry_size as usize;
+     let off = i.checked_mul(sz)?;
+-    entries.get_mut(off..off + sz)
++    entries.get_mut(off..off.checked_add(sz)?)
+ }
+ 
+ pub fn entry_used(e: &[u8]) -> bool {
+-    e[0..16].iter().any(|&b| b != 0)
++    e.len() >= 16 && e[0..16].iter().any(|&b| b != 0)
+ }
+ 
+ pub fn entry_type(e: &[u8]) -> Guid {
+     let mut g = [0u8; 16];
+-    g.copy_from_slice(&e[0..16]);
++    if e.len() >= 16 {
++        g.copy_from_slice(&e[0..16]);
++    }
+     Guid(g)
+ }
+ 
+ pub fn entry_unique(e: &[u8]) -> Guid {
+     let mut g = [0u8; 16];
+-    g.copy_from_slice(&e[16..32]);
++    if e.len() >= 32 {
++        g.copy_from_slice(&e[16..32]);
++    }
+     Guid(g)
+ }
+ 
+ pub fn entry_first_lba(e: &[u8]) -> u64 {
++    if e.len() < 40 {
++        return 0;
++    }
+     rd64(e, 32)
+ }
+ 
+ pub fn entry_last_lba(e: &[u8]) -> u64 {
++    if e.len() < 48 {
++        return 0;
++    }
+     rd64(e, 40)
+ }
+ 
+@@ -328,6 +358,15 @@
+     if entries.len() < hdr.entries_bytes() {
+         return Err(Error::ShortEntries);
+     }
++    // Una partición usada que acaba antes de empezar es una tabla corrupta.
++    for i in 0..hdr.num_entries as usize {
++        let Some(e) = entry(entries, hdr, i) else {
++            break;
++        };
++        if entry_used(e) && entry_first_lba(e) > entry_last_lba(e) {
++            return Err(Error::BadHeader);
++        }
++    }
+     let esec = hdr.entries_sectors();
+     // Falta sitio para MBR + cabecera + tabla en los dos extremos.
+     if disk_sectors < 2 * esec + 4 {

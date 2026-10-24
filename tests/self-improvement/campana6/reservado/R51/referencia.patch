@@ -1,0 +1,26 @@
+--- a/crates/block-dev/src/lib.rs
++++ b/crates/block-dev/src/lib.rs
+@@ -71,11 +71,11 @@
+     /// 4 KiB costaba un viaje completo al dispositivo** (medido: 178 us, o sea
+     /// 22 MB/s, en un disco que no existe).
+     fn read_blocks(&mut self, start: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+-        if buf.len() % BLOCK_SIZE != 0 {
++        if !buf.len().is_multiple_of(BLOCK_SIZE) {
+             return Err(BlockError::OutOfRange);
+         }
+-        for (i, trozo) in buf.chunks_exact_mut(BLOCK_SIZE).enumerate() {
+-            let b: &mut Block = trozo.try_into().map_err(|_| BlockError::OutOfRange)?;
++        let (bloques, _) = buf.as_chunks_mut::<BLOCK_SIZE>();
++        for (i, b) in bloques.iter_mut().enumerate() {
+             self.read_block(start + i as u64, b)?;
+         }
+         Ok(())
+@@ -151,7 +151,7 @@
+     /// **peticiones** y no bloques, y por tanto lo que permite a los tests de
+     /// host afirmar que la agrupación ocurre de verdad.
+     fn read_blocks(&mut self, start: u64, buf: &mut [u8]) -> Result<(), BlockError> {
+-        if buf.len() % BLOCK_SIZE != 0 {
++        if !buf.len().is_multiple_of(BLOCK_SIZE) {
+             return Err(BlockError::OutOfRange);
+         }
+         #[cfg(feature = "std")]

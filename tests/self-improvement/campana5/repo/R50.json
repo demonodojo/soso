@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "id": "R50",
+  "clase": "repo",
+  "particion": "ciega",
+  "titulo": "validate_geometry rechaza deltas y geometrías incoherentes sin pánico",
+  "etiqueta": "validate-geometry",
+  "origen": "mejora_especificada (banco ciego 5, 2026-10-23)",
+  "entrada": {
+    "enunciado": "visible/R50/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R50",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R50/aceptacion.rs",
+    "reservado/R50/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R50/enunciado.md": "d704355796b027cfb612b860f96832dc97e3a589022b3eba58a1548defb51830"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/soso-resize-core/src/lib.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "validate_geometry devuelve InvalidGeometry ante delta 0 o no alineado, particiones invertidas, solapadas o con desbordes",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "soso-resize-core",
+      "--features",
+      "std"
+    ],
+    "prueba_reservada": "reservado/R50/aceptacion.rs",
+    "destino_prueba": "crates/soso-resize-core/tests/aceptacion_R50.rs",
+    "referencia": "reservado/R50/referencia.patch"
+  }
+}

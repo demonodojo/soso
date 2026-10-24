@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "id": "R45",
+  "clase": "repo",
+  "particion": "ciega",
+  "titulo": "Las redirecciones relativas y las cabeceras en mayúsculas fallan en soso-http",
+  "etiqueta": "redireccion-relativa",
+  "origen": "mejora_especificada (banco ciego 5, 2026-10-23)",
+  "entrada": {
+    "enunciado": "visible/R45/enunciado.md",
+    "archivos": []
+  },
+  "resultado_observable": "La suite del crate, con la prueba reservada incluida, termina con código 0.",
+  "comprobador": {
+    "argv": [
+      "soso-improve",
+      "verificar",
+      "repo",
+      "--caso",
+      "R45",
+      "--arbol",
+      "{arbol}"
+    ],
+    "timeout_s": 900
+  },
+  "recursos": {
+    "cpu": 4,
+    "memoria_mb": 4096,
+    "red": false,
+    "escritura": [
+      "{arbol}"
+    ],
+    "herramientas": [
+      "cargo",
+      "rustc",
+      "git"
+    ]
+  },
+  "reservado": [
+    "reservado/R45/aceptacion.rs",
+    "reservado/R45/referencia.patch"
+  ],
+  "hashes_entrada": {
+    "visible/R45/enunciado.md": "f25c64171937545d52b16e3d5a2a2453e8e4d08cf623a5314acf72259cbe1ed4"
+  },
+  "base": {
+    "commit": "6f558f072bcc3ce46763994c377f1161d6411698",
+    "rama": "main",
+    "captura": "target/self-improvement/base-T02"
+  },
+  "rutas_editables": [
+    "crates/soso-http/src/lib.rs"
+  ],
+  "aceptacion": {
+    "descripcion": "Las redirecciones relativas y las cabeceras en mayúsculas fallan en soso-http",
+    "argv": [
+      "cargo",
+      "test",
+      "-q",
+      "-p",
+      "soso-http",
+      "--features",
+      "std"
+    ],
+    "prueba_reservada": "reservado/R45/aceptacion.rs",
+    "destino_prueba": "crates/soso-http/tests/aceptacion_R45.rs",
+    "referencia": "reservado/R45/referencia.patch"
+  }
+}
