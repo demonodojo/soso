@@ -357,7 +357,12 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_FB_INFO => sys_fb_info(a1),
         abi::SYS_FB_SET_MODE => sys_fb_set_mode(a1),
         abi::SYS_FB_PRESENT => sys_fb_present(a1, a2),
+        abi::SYS_FB_PRESENT_RECT => sys_fb_present_rect(a1, a2, a3, a4),
         abi::SYS_INPUT_POLL => sys_input_poll(a1, a2),
+        abi::SYS_PTY_OPEN => sys_pty_open(),
+        abi::SYS_SHM_CREATE => sys_shm_create(a1),
+        abi::SYS_SHM_MAP => sys_shm_map(a1),
+        abi::SYS_SHM_FREE => sys_shm_free(a1),
         abi::SYS_VERSION => sys_version(a1, a2),
         abi::SYS_UPD_WRITE => sys_upd_write(a1, a2, a3, a4),
         abi::SYS_UPD_READ => sys_upd_read(a1, a2, a3, a4),
@@ -870,6 +875,7 @@ pub fn drop_fd(fd: Fd) -> Result<(), i64> {
         Fd::PipeRead(id) => pipe::close_reader(id),
         Fd::PipeWrite(id) => pipe::close_writer(id),
         Fd::Tcp { slot } => crate::net::tcp_close(slot),
+        Fd::PtyMaster(slot) => super::pty::close_master(slot),
         _ => {}
     }
     Ok(())
@@ -979,6 +985,16 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
         return Ok(len);
     }
     let data = user_slice(buf, len)?;
+    let pty_slot = with_fd(fd, |slot| {
+        Ok(match slot {
+            Fd::PtyMaster(s) => Some(*s),
+            _ => None,
+        })
+    })?;
+    if let Some(slot) = pty_slot {
+        super::pty::master_write(slot, data);
+        return Ok(len);
+    }
     // La consola se lee fuera de with_fd (que ya tiene tomado PROCS).
     let console = super::with_current(|p| p.console);
     with_fd(fd, |f| match f {
@@ -1043,6 +1059,22 @@ fn sys_read(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i6
             _ => None,
         })
     })?;
+    let pty_slot = with_fd(fd, |slot| {
+        Ok(match slot {
+            Fd::PtyMaster(s) => Some(*s),
+            _ => None,
+        })
+    })?;
+    if let Some(slot) = pty_slot {
+        if len == 0 {
+            return Ok(0);
+        }
+        let n = super::pty::master_try_read(slot, dst);
+        if n > 0 {
+            return Ok(n as u64);
+        }
+        return Err(-abi::EAGAIN);
+    }
     if let Some(id) = pipe_id {
         if len == 0 {
             return Ok(0);
@@ -1546,6 +1578,8 @@ fn sys_spawn_io(opts_ptr: u64) -> Result<u64, i64> {
     // SSH de todos modos (2026-08-31).
     let console = if stdio.iter().any(|&f| f == abi::FD_SERIAL_TTY) {
         super::Console::Serial
+    } else if let Some(slot) = stdio.iter().find_map(|&f| abi::pty_stdio_slot(f)) {
+        super::Console::Pty(slot)
     } else {
         super::with_current(|p| p.console)
     };
@@ -1772,6 +1806,7 @@ fn sys_mmap(addr: u64, len: u64, fd: u64, offset: u64) -> Result<u64, i64> {
                 file_len,
                 writable,
                 sin_acceso: false,
+                shm_id: 0,
             });
             if virt >= book.next {
                 book.next = virt + len_aligned;
@@ -1792,13 +1827,38 @@ fn sys_munmap(addr: u64, len: u64) -> Result<u64, i64> {
     let len_aligned = len.next_multiple_of(4096);
     super::with_current(|p| {
         let space = p.space.as_ref().ok_or(-abi::ENOMEM)?;
+        let end = addr.saturating_add(len_aligned);
+        let shm_touch: alloc::vec::Vec<super::mmap::MmapRegion> = space.with_mmap_mut(|book| {
+            book.regions
+                .iter()
+                .filter(|r| r.shm_id != 0 && r.virt_start < end && r.virt_start.saturating_add(r.len) > addr)
+                .cloned()
+                .collect()
+        });
         let ok = space.with_mmap_mut(|book| {
             super::mmap::remove_region(&mut book.regions, addr, len_aligned)
         });
         if !ok {
             return Err(-abi::EINVAL);
         }
-        space.unmap_range(addr, len_aligned);
+        let mut va = addr;
+        while va < end {
+            let len_page = 4096.min(end - va);
+            let is_shm = shm_touch.iter().any(|r| {
+                r.shm_id != 0 && va >= r.virt_start && va < r.virt_start.saturating_add(r.len)
+            });
+            if is_shm {
+                space.unmap_range_keep_frames(va, len_page);
+            } else {
+                space.unmap_range(va, len_page);
+            }
+            va += len_page;
+        }
+        for r in &shm_touch {
+            if r.virt_start >= addr && r.virt_start.saturating_add(r.len) <= end {
+                super::shm::drop_ref(r.shm_id);
+            }
+        }
         // Y darlas de baja en el reclaim: si no, la cola se queda con VAs que ya
         // no existen y que el asignador de mmap puede reutilizar para otra cosa
         // (`mmap::next_addr` es first-fit). Además es lo que mantiene la cola del
@@ -2853,7 +2913,8 @@ fn sys_fb_info(out: u64) -> Result<u64, i64> {
 }
 
 fn sys_fb_set_mode(mode: u64) -> Result<u64, i64> {
-    crate::drivers::fb::set_graphics_mode(mode == abi::FB_MODE_GRAPHICS);
+    let pid = super::current_pid();
+    crate::drivers::fb::set_graphics_mode_for(pid, mode == abi::FB_MODE_GRAPHICS)?;
     Ok(0)
 }
 
@@ -2871,6 +2932,51 @@ fn sys_fb_present(buf: u64, len: u64) -> Result<u64, i64> {
         Ok(())
     })?;
     crate::drivers::fb::present_from_user(&kbuf).map_err(|_| -abi::EIO)?;
+    Ok(0)
+}
+
+fn sys_fb_present_rect(buf: u64, len: u64, xy: u64, wh: u64) -> Result<u64, i64> {
+    if len == 0 || len > 32 * 1024 * 1024 {
+        return Err(-abi::EINVAL);
+    }
+    if !user_range_ok(buf, len, false) {
+        return Err(-abi::EFAULT);
+    }
+    let x = (xy & 0xffff) as u32;
+    let y = ((xy >> 16) & 0xffff) as u32;
+    let w = (wh & 0xffff) as u32;
+    let h = ((wh >> 16) & 0xffff) as u32;
+    let mut kbuf = alloc::vec![0u8; len as usize];
+    super::with_current(|p| -> Result<(), i64> {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        space.read(buf, &mut kbuf).ok_or(-abi::EFAULT)?;
+        Ok(())
+    })?;
+    crate::drivers::fb::present_from_user_rect(&kbuf, x, y, w, h).map_err(|_| -abi::EIO)?;
+    Ok(0)
+}
+
+fn sys_pty_open() -> Result<u64, i64> {
+    let slot = super::pty::alloc_slot()?;
+    super::with_current(|p| {
+        let fd = alloc_fd(p, Fd::PtyMaster(slot))?;
+        Ok(fd as u64)
+    })
+}
+
+fn sys_shm_create(len: u64) -> Result<u64, i64> {
+    super::shm::create(len)
+}
+
+fn sys_shm_map(id: u64) -> Result<u64, i64> {
+    super::with_current(|p| {
+        let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        super::shm::map(id, space.clone())
+    })
+}
+
+fn sys_shm_free(id: u64) -> Result<u64, i64> {
+    super::shm::free(id, super::current_pid())?;
     Ok(0)
 }
 
@@ -3032,11 +3138,18 @@ fn clone_fd(f: &Fd) -> Fd {
             entries: entries.clone(),
             pos: *pos,
         },
-        Fd::PipeRead(id) => Fd::PipeRead(*id),
-        Fd::PipeWrite(id) => Fd::PipeWrite(*id),
+        Fd::PipeRead(id) => {
+            pipe::add_reader(*id);
+            Fd::PipeRead(*id)
+        }
+        Fd::PipeWrite(id) => {
+            pipe::add_writer(*id);
+            Fd::PipeWrite(*id)
+        }
         Fd::Tcp { slot } => Fd::Tcp { slot: *slot },
         Fd::Tty => Fd::Tty,
         Fd::Log => Fd::Log,
+        Fd::PtyMaster(s) => Fd::PtyMaster(*s),
     }
 }
 
@@ -3333,6 +3446,13 @@ fn sys_mprotect(addr: u64, len: u64, prot: u64) -> Result<u64, i64> {
     super::with_current(|p| {
         let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
         let end = addr.saturating_add(len);
+        if space.with_mmap_mut(|book| {
+            book.regions.iter().any(|r| {
+                r.shm_id != 0 && r.virt_start < end && r.virt_start.saturating_add(r.len) > addr
+            })
+        }) {
+            return Err(-abi::EINVAL);
+        }
         let mut va = addr & !0xfff;
         while va < end {
             let in_mmap = space.find_mmap_region(va).is_some();
@@ -3378,6 +3498,14 @@ fn sys_mremap(addr: u64, old_len: u64, new_len: u64, flags: u64) -> Result<u64, 
     }
     super::with_current(|p| {
         let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
+        let end = addr.saturating_add(old);
+        if space.with_mmap_mut(|book| {
+            book.regions.iter().any(|r| {
+                r.shm_id != 0 && r.virt_start < end && r.virt_start.saturating_add(r.len) > addr
+            })
+        }) {
+            return Err(-abi::EINVAL);
+        }
         space.grow_anon(addr, old, new).ok_or(-abi::ENOMEM)
     })
 }

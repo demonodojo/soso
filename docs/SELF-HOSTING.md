@@ -1,5 +1,8 @@
 # Self-hosting de soso — ruta A
 
+El port de **Sal** tiene su propio [plan y guía](PLAN-SAL.md): compilador Rust,
+LLVM y SDK para compilar utilidades Sal dentro de soso sin Forja ni red.
+
 ## Hito 0 — Bucle remoto ✓
 
 Tres caminos distintos (no mezclarlos):

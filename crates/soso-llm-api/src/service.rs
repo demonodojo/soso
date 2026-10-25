@@ -220,6 +220,8 @@ pub struct CpuBackend {
     tokenizer: Tokenizer,
     /// Bytes de cada token, para restringir las llamadas a herramienta por gramática (se calcula una vez).
     tabla_bytes: Arc<TablaBytes>,
+    /// Prompt de la petición anterior (sólo para el diagnóstico de cuánto prefijo se comparte).
+    ultimo_prompt: Vec<u32>,
 }
 
 pub fn load_cpu_backend(model_dir: &str, profile: ModelProfile) -> Result<CpuBackend, LoadError> {
@@ -277,6 +279,7 @@ pub fn load_cpu_backend(model_dir: &str, profile: ModelProfile) -> Result<CpuBac
 
     let tabla_bytes = Arc::new(tokenizer.tabla_bytes());
     Ok(CpuBackend {
+        ultimo_prompt: Vec::new(),
         rt,
         parallel: None,
         gpu: None,
@@ -352,7 +355,14 @@ impl ChatBackend for CpuBackend {
         let mut gpu: Option<&mut dyn soso_llm_core::gpu::GpuDispatch> =
             self.gpu.as_mut().map(|b| &mut **b as &mut dyn soso_llm_core::gpu::GpuDispatch);
         let t_inicio = std::time::Instant::now();
-        eprintln!("[soso] petición: prompt de {} tokens, hasta {} nuevos", prompt_ids.len(), prepared.max_new_tokens);
+        let comun = self.ultimo_prompt.iter().zip(prompt_ids).take_while(|(a, b)| a == b).count();
+        eprintln!(
+            "[soso] petición: prompt de {} tokens ({} en común con la anterior), hasta {} nuevos",
+            prompt_ids.len(),
+            comun,
+            prepared.max_new_tokens
+        );
+        self.ultimo_prompt = prompt_ids.to_vec();
         let (secuencia, report) = self.rt.generate_stream_par_observed(
             &mut self.source,
             prompt_ids,

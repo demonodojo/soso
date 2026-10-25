@@ -180,17 +180,10 @@ struct Token {
     word: String,
     /// Descriptor destino (1–3) para redirecciones; 0 en palabras y pipes.
     fd: u64,
-    /// La palabra llevaba comillas o escapes (T64).
-    ///
-    /// Importa por dos cosas: una palabra entrecomillada **nunca** es un
-    /// operador —`">"` es un nombre de fichero, no una redirección— y `""` es
-    /// un argumento vacío, que no es lo mismo que ningún argumento.
-    entrecomillada: bool,
     /// La palabra traía `*` o `?` **fuera** de comillas: hay que expandirla.
     ///
     /// Se marca en el tokenizador y no se mira el texto después, porque
-    /// después ya no se sabe si el `*` venía entrecomillado. Es el mismo
-    /// motivo por el que existe `entrecomillada` (T64).
+    /// después ya no se sabe si el `*` venía entrecomillado (T64).
     con_comodin: bool,
 }
 
@@ -250,7 +243,6 @@ struct CmdSpec {
 /// de verdad quieres el carácter, `"a;b"` lo da.
 const SEGUNDO_PLANO: &str = "no sé ejecutar en segundo plano (&); cada comando termina antes del siguiente";
 const DUPLICAR: &str = "tras >& sólo entiendo un dígito (2>&1) o un guion (>&-)";
-const COMODINES: &str = "no expando comodines (*); entrecomíllalo si es literal";
 const VARIABLES: &str = "no expando variables ($); entrecomíllalo si es literal";
 
 fn tokenize(line: &str) -> Result<Vec<Token>, &'static str> {
@@ -269,7 +261,6 @@ fn tokenize(line: &str) -> Result<Vec<Token>, &'static str> {
                         word: String::new(),
                         fd: 0,
                         con_comodin: false,
-                    entrecomillada: false,
                     });
                 } else {
                     tokens.push(Token {
@@ -277,7 +268,6 @@ fn tokenize(line: &str) -> Result<Vec<Token>, &'static str> {
                         word: String::new(),
                         fd: 0,
                         con_comodin: false,
-                    entrecomillada: false,
                     });
                 }
             }
@@ -289,7 +279,6 @@ fn tokenize(line: &str) -> Result<Vec<Token>, &'static str> {
                         word: String::new(),
                         fd: 0,
                         con_comodin: false,
-                    entrecomillada: false,
                     });
                 } else {
                     return Err(SEGUNDO_PLANO);
@@ -300,7 +289,6 @@ fn tokenize(line: &str) -> Result<Vec<Token>, &'static str> {
                 word: String::new(),
                 fd: 0,
                 con_comodin: false,
-                    entrecomillada: false,
             }),
             '>' => {
                 let mut destino_dup = 0u64;
@@ -331,7 +319,6 @@ fn tokenize(line: &str) -> Result<Vec<Token>, &'static str> {
                         String::new()
                     },
                     fd: 1,
-                    entrecomillada: false,
                     con_comodin: false,
                 });
             }
@@ -340,7 +327,6 @@ fn tokenize(line: &str) -> Result<Vec<Token>, &'static str> {
                 word: String::new(),
                 fd: 0,
                 con_comodin: false,
-                    entrecomillada: false,
             }),
             _ => {
                 let mut word = String::new();
@@ -451,7 +437,6 @@ fn tokenize(line: &str) -> Result<Vec<Token>, &'static str> {
                                     String::new()
                                 },
                                 fd,
-                                entrecomillada: false,
                                 con_comodin: false,
                             });
                             continue;
@@ -462,7 +447,6 @@ fn tokenize(line: &str) -> Result<Vec<Token>, &'static str> {
                     kind: TokenKind::Word,
                     word,
                     fd: 0,
-                    entrecomillada,
                     con_comodin,
                 });
             }
@@ -636,7 +620,6 @@ fn expandir_comodines(tokens: Vec<Token>) -> Result<Vec<Token>, String> {
                 kind: TokenKind::Word,
                 word: format!("{dir}{nombre}"),
                 fd: 0,
-                entrecomillada: false,
                 con_comodin: false,
             });
         }

@@ -7,13 +7,16 @@
 #include <stddef.h>
 extern void sal_llc_message(const char *, int);
 #include <string.h>
+#ifndef SAL_LLC_ID
+#define SAL_LLC_ID "development"
+#endif
 
 int herramienta_main(int argc, const char **argv) {
     const char *input = NULL, *output = NULL;
     LLVMCodeGenOptLevel opt = LLVMCodeGenLevelNone;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
-        if (!strcmp(a, "--version")) { sal_llc_message("sal-llc 1 (LLVM 19, x86_64 soso)", 0); return 0; }
+        if (!strcmp(a, "--version")) { sal_llc_message("sal-llc 1 (LLVM 19, x86_64 soso) " SAL_LLC_ID, 0); return 0; }
         if (!strcmp(a, "-o") && i + 1 < argc) { output = argv[++i]; continue; }
         if (!strcmp(a, "-x") && i + 1 < argc && !strcmp(argv[i+1], "ir")) { i++; continue; }
         if (!strcmp(a, "-O3")) { opt = LLVMCodeGenLevelAggressive; continue; }

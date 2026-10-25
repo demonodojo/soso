@@ -1,8 +1,9 @@
 //! Ratón PS/2 (puerto aux i8042).
 
-use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use x86_64::instructions::port::Port;
 
+use super::fb;
 use super::input;
 
 const DATA: u16 = 0x60;
@@ -15,6 +16,7 @@ const ST_IN_FULL: u8 = 2;
 static OK: AtomicBool = AtomicBool::new(false);
 static X: AtomicI32 = AtomicI32::new(0);
 static Y: AtomicI32 = AtomicI32::new(0);
+static BTNS: AtomicU32 = AtomicU32::new(0);
 
 static mut PKT: [u8; 3] = [0; 3];
 static mut PKT_I: u8 = 0;
@@ -77,6 +79,19 @@ fn flush_out() {
     }
 }
 
+fn clamp_xy(nx: i32, ny: i32) -> (i32, i32) {
+    let (mut max_w, mut max_h) = (1920i32, 1080i32);
+    let mut info = soso_abi::FbInfo::default();
+    if fb::user_info(&mut info) && info.present != 0 {
+        max_w = info.width as i32;
+        max_h = info.height as i32;
+    }
+    (
+        nx.clamp(0, max_w.saturating_sub(1)),
+        ny.clamp(0, max_h.saturating_sub(1)),
+    )
+}
+
 pub fn on_byte(b: u8) {
     if !present() {
         return;
@@ -93,11 +108,17 @@ pub fn on_byte(b: u8) {
         let dy = -(PKT[2] as i8 as i32);
         let nx = X.load(Ordering::Relaxed) + dx;
         let ny = Y.load(Ordering::Relaxed) + dy;
-        X.store(nx.max(0), Ordering::Relaxed);
-        Y.store(ny.max(0), Ordering::Relaxed);
-        input::push_mouse_move(nx.max(0), ny.max(0));
-        let left = flags & 1 != 0;
-        input::push_mouse_btn(1, left);
+        let (cx, cy) = clamp_xy(nx, ny);
+        X.store(cx, Ordering::Relaxed);
+        Y.store(cy, Ordering::Relaxed);
+        input::push_mouse_move(cx, cy);
+        let mask = ((flags & 1) != 0) as u32
+            | (((flags & 2) != 0) as u32) << 1
+            | (((flags & 4) != 0) as u32) << 2;
+        let prev = BTNS.swap(mask, Ordering::Relaxed);
+        if mask != prev {
+            input::push_mouse_btn(mask);
+        }
     }
 }
 

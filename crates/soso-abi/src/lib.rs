@@ -97,6 +97,16 @@ pub const SYS_FB_SET_MODE: u64 = 63;
 pub const SYS_FB_PRESENT: u64 = 64;
 /// Lee eventos de ratón/teclado pendientes.
 pub const SYS_INPUT_POLL: u64 = 65;
+/// Copia un rectángulo del búfer lógico al GOP. `(buf, len, x|y<<16, w|h<<16)`.
+pub const SYS_FB_PRESENT_RECT: u64 = 97;
+/// Abre un pseudo-terminal: devuelve `(fd_maestro << 32) | ranura`.
+pub const SYS_PTY_OPEN: u64 = 98;
+/// Reserva memoria compartida (`len` alineado); devuelve `id`.
+pub const SYS_SHM_CREATE: u64 = 99;
+/// Mapea un segmento compartido; devuelve la dirección virtual.
+pub const SYS_SHM_MAP: u64 = 100;
+/// Libera la referencia del creador sobre `id`.
+pub const SYS_SHM_FREE: u64 = 101;
 /// Espera a que termine un QMD encolado con `GPU_SUBMIT_ASYNC` (arg1 = fence).
 pub const SYS_GPU_WAIT: u64 = 66;
 /// Copia la versión del kernel a un buffer de usuario (`buf`, `len`). Devuelve bytes escritos.
@@ -315,6 +325,22 @@ pub struct InputEvent {
     pub pressed: u8,
     pub _pad: [u8; 3],
 }
+
+/// Máscara de modificadores en `InputEvent.button` para `INPUT_KEY`.
+pub const INPUT_MOD_SHIFT: u32 = 1 << 0;
+pub const INPUT_MOD_CTRL: u32 = 1 << 1;
+pub const INPUT_MOD_ALT: u32 = 1 << 2;
+pub const INPUT_MOD_ALTGR: u32 = 1 << 3;
+pub const INPUT_MOD_SUPER: u32 = 1 << 4;
+
+const _: () = {
+    use core::mem::{offset_of, size_of};
+    assert!(size_of::<FbInfo>() == 24);
+    assert!(size_of::<InputEvent>() == 24);
+    assert!(offset_of!(FbInfo, width) == 4);
+    assert!(offset_of!(InputEvent, kind) == 0);
+    assert!(offset_of!(InputEvent, key) == 16);
+};
 
 /// Formato de captura para `SYS_AUDIO_OPEN`.
 #[derive(Clone, Copy, Default)]
@@ -683,6 +709,7 @@ pub struct DiskInfo {
 
 // ---- errnos (el kernel devuelve -errno) ----
 
+pub const EPERM: i64 = 1;
 pub const ENOENT: i64 = 2;
 pub const ESRCH: i64 = 3;
 pub const EINTR: i64 = 4;
@@ -747,6 +774,8 @@ pub const FD_INHERIT_TTY: u64 = u64::MAX;
 /// acaba en el puerto serie, no mezclado con la sesión remota. El diagnóstico
 /// de askd va por fd 3 (`logln!`), no por estos fds.
 pub const FD_SERIAL_TTY: u64 = u64::MAX - 1;
+/// Stdio atado a `Console::Pty(slot)`: `FD_PTY_TTY_BASE - slot` (slot 0..7).
+pub const FD_PTY_TTY_BASE: u64 = u64::MAX - 3;
 /// Canal de registro del kernel (fd 3 por defecto); sólo válido en el slot `log_fd`.
 pub const FD_KERNEL_LOG: u64 = u64::MAX - 2;
 /// Deja el slot vacío (`write` devuelve `EBADF`).
@@ -765,7 +794,16 @@ pub const LOG_MSG_MAX: usize = 1024;
 
 /// ¿`spec` de stdio es un centinela (no un fd del padre)?
 pub fn stdio_es_tty(spec: u64) -> bool {
-    spec == FD_INHERIT_TTY || spec == FD_SERIAL_TTY
+    spec == FD_INHERIT_TTY || spec == FD_SERIAL_TTY || pty_stdio_slot(spec).is_some()
+}
+
+/// Si `spec` es un centinela de pty, devuelve la ranura 0..7.
+pub fn pty_stdio_slot(spec: u64) -> Option<u8> {
+    if spec > FD_PTY_TTY_BASE || spec < FD_PTY_TTY_BASE - 7 {
+        None
+    } else {
+        Some((FD_PTY_TTY_BASE - spec) as u8)
+    }
 }
 
 /// ¿`spec` es un centinela de spawn (tty, log del kernel o cerrado)?

@@ -1,7 +1,6 @@
 //! Lógica de un nodo de pipeline (responde mensajes del head).
 
 use alloc::string::String;
-use alloc::vec::Vec;
 
 use crate::layer::TensorSource;
 use crate::parallel::RowParallel;

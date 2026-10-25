@@ -24,6 +24,8 @@ pub struct MmapRegion {
     /// manejador de faltas se niega a mapearla. Por eso una guarda no cuesta ni
     /// un marco de memoria.
     pub sin_acceso: bool,
+    /// Segmento compartido (`SYS_SHM_*`); 0 si no aplica.
+    pub shm_id: u64,
 }
 
 /// Alineación de mapeos grandes: permite servir faults con páginas de 2 MiB
@@ -102,6 +104,7 @@ pub fn split_prot(
                 file_len: r.file_len,
                 writable: r.writable,
                 sin_acceso: r.sin_acceso,
+                shm_id: r.shm_id,
             });
         }
         let mid_start = r.virt_start.max(addr);
@@ -115,6 +118,7 @@ pub fn split_prot(
                 file_len: r.file_len,
                 writable,
                 sin_acceso,
+                shm_id: r.shm_id,
             });
         }
         if rend > end {
@@ -126,6 +130,7 @@ pub fn split_prot(
                 file_len: r.file_len,
                 writable: r.writable,
                 sin_acceso: r.sin_acceso,
+                shm_id: r.shm_id,
             });
         }
     }

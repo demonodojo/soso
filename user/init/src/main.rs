@@ -635,11 +635,23 @@ fn suite() -> u8 {
             return 1;
         }
     };
-    check!(sys::write(w, b"abc") == 3, "pipe write");
+    check!(sys::dup2(r, 21) == 21, "dup2 del lector de pipe");
+    sys::close(r);
+    let r = 21;
+    check!(sys::write(w, b"abc") == 3, "pipe write tras cerrar lector original");
     let mut pbuf = [0u8; 8];
     let pn = sys::read(r, &mut pbuf);
     check!(pn == 3 && &pbuf[..3] == b"abc", "pipe read ({pn} bytes)");
+    // dup2 mantiene vivo el escritor: cerrar el original no puede dar EOF.
+    check!(sys::dup2(w, 20) == 20, "dup2 del escritor de pipe");
     sys::close(w);
+    let pending = sys::read_timeout(r, &mut pbuf, 10);
+    check!(pending < 0, "pipe duplicado espera datos, no EOF ({pending})");
+    check!(sys::write(20, b"dup") == 3, "escribir por pipe duplicado");
+    let pn = sys::read(r, &mut pbuf);
+    check!(pn == 3 && &pbuf[..3] == b"dup", "leer pipe duplicado");
+    sys::close(20);
+    check!(sys::read(r, &mut pbuf) == 0, "EOF al cerrar último escritor");
     sys::close(r);
 
     // O_APPEND: segunda escritura concatena.

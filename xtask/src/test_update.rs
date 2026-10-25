@@ -44,7 +44,7 @@ pub fn run(filtro: Option<&str>) {
         // escribir, arrancar y, en la fase del disco ajeno, **clonar**—. Si
         // alguien pide otro por entorno, se respeta.
         if std::env::var_os("SOSO_MODELS_DIR").is_none() {
-            unsafe { std::env::set_var("SOSO_MODELS_DIR", root.join("target/tiny-model")) };
+            std::env::set_var("SOSO_MODELS_DIR", root.join("target/tiny-model"));
         }
     }
     crate::package_live::run();

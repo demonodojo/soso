@@ -903,9 +903,9 @@ fn volcar(objs: &[Obj], image: &mut [u8]) -> Result<(), String> {
 
 struct Resuelto {
     va: u64,
-    tls: bool,
-    /// Es una dirección de la imagen (no un `SHN_ABS` ni un débil indefinido):
-    /// en un objeto compartido hay que anotarla para que el cargador la ajuste.
+    /// Es una dirección de la imagen (no un `SHN_ABS`, ni TLS, ni un débil
+    /// indefinido): en un objeto compartido hay que anotarla para que el
+    /// cargador la ajuste.
     reubicable: bool,
 }
 
@@ -920,7 +920,7 @@ fn resolver(
         .and_then(|o| o.syms.get(sym_i as usize))
         .ok_or_else(|| String::from("reubicación con símbolo inválido"))?;
     if sym.shndx == SHN_ABS {
-        return Ok(Resuelto { va: sym.value, tls: false, reubicable: false });
+        return Ok(Resuelto { va: sym.value, reubicable: false });
     }
     if sym.shndx != SHN_UNDEF {
         let sec = objs[oi]
@@ -934,17 +934,20 @@ fn resolver(
             ));
         }
         let tls = sec.flags & SHF_TLS != 0 || (sym.info & 0xf) == STT_TLS;
-        return Ok(Resuelto { va: sec.out_addr + sym.value, tls, reubicable: !tls });
+        return Ok(Resuelto {
+            va: sec.out_addr + sym.value,
+            reubicable: !tls,
+        });
     }
     let bind = sym.info >> 4;
     let Some(def) = global.get(&sym.name) else {
         if bind == STB_WEAK {
-            return Ok(Resuelto { va: 0, tls: false, reubicable: false });
+            return Ok(Resuelto { va: 0, reubicable: false });
         }
         return Err(alloc::format!("indefinido: {}", sym.name));
     };
     match def {
-        Def::Abs(v) => Ok(Resuelto { va: *v, tls: false, reubicable: true }),
+        Def::Abs(v) => Ok(Resuelto { va: *v, reubicable: true }),
         Def::Sym { obj, sym: si } => resolver(objs, global, *obj as usize, *si),
     }
 }

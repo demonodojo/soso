@@ -43,11 +43,9 @@ pub const HTTP_PORT_DEFAULT: u16 = 7422;
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum GuestServiceError {
     Api(ApiError),
-    Unauthorized,
     NotFound,
     MethodNotAllowed,
     Http(HttpError),
-    Busy,
     Inferencia,
     Encode(EncodeError),
     Io,
@@ -268,10 +266,8 @@ fn atender_http(rt: &mut ServeRuntime, mut conn: TcpFd) {
 fn mensaje_error(err: &GuestServiceError) -> String {
     match err {
         GuestServiceError::Api(e) => e.message(),
-        GuestServiceError::Unauthorized => String::from("autenticacion invalida"),
         GuestServiceError::NotFound => String::from("ruta desconocida"),
         GuestServiceError::MethodNotAllowed => String::from("metodo no permitido"),
-        GuestServiceError::Busy => String::from("generacion en curso"),
         GuestServiceError::Inferencia => String::from("inferencia fallo"),
         _ => String::from("error interno"),
     }
@@ -280,10 +276,8 @@ fn mensaje_error(err: &GuestServiceError) -> String {
 fn codigo_error(err: &GuestServiceError) -> &'static str {
     match err {
         GuestServiceError::Api(e) => e.code(),
-        GuestServiceError::Unauthorized => "invalid_api_key",
         GuestServiceError::NotFound => "not_found",
         GuestServiceError::MethodNotAllowed => "method_not_allowed",
-        GuestServiceError::Busy => "busy",
         _ => "internal",
     }
 }
@@ -710,7 +704,6 @@ fn error_response(err: &GuestServiceError) -> Vec<u8> {
             &[("Content-Type", "application/json")],
             &encode_api_error_json(e),
         ),
-        GuestServiceError::Unauthorized => unauthorized_body(),
         GuestServiceError::NotFound => format_response(
             404,
             &[("Content-Type", "application/json")],
@@ -721,7 +714,6 @@ fn error_response(err: &GuestServiceError) -> Vec<u8> {
             &[("Content-Type", "application/json")],
             br#"{"error":{"message":"metodo no permitido","type":"invalid_request_error","code":"method_not_allowed"}}"#,
         ),
-        GuestServiceError::Busy => busy_body(),
         GuestServiceError::Inferencia => format_response(
             500,
             &[("Content-Type", "application/json")],

@@ -373,6 +373,7 @@ mod avx2 {
     /// token es el mismo f32 que con un solo vector (mismos enteros, mismas operaciones en coma flotante y en el mismo orden).
     #[target_feature(enable = "avx2,fma")]
     pub unsafe fn matvec_tokens(ggml: u32, bytes: &[u8], rows: usize, cols: usize, q8k: &[u8], n: usize, outs: &mut [f32], stride: usize) {
+        unsafe {
         let bb = sosomodel::iq::bytes_de_bloque(ggml).unwrap_or(1);
         let blocks = cols / Q8_K_BLOCK_ELEMS;
         let (row_bytes, q8_row) = (blocks * bb, blocks * Q8_K_BLOCK_BYTES);
@@ -441,6 +442,7 @@ mod avx2 {
             for j in 0..n {
                 outs[j * stride + r] = f * acc[j];
             }
+        }
         }
     }
 

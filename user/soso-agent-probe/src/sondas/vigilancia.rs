@@ -241,7 +241,7 @@ pub fn ejecutar() -> Vec<Caso> {
     // acceso a cada inodo, y una cifra que sólo se toma una vez no distingue
     // «stat es caro» de «la primera vez es cara». La segunda es la que dice
     // cuánto cuesta sondear *repetidamente*, que es lo que hace un vigilante.
-    let mut medir = || {
+    let medir = || {
         let t0 = ciclos();
         let mut vistos = 0usize;
         for r in &rutas {

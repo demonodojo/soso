@@ -34,19 +34,20 @@ pub fn push_mouse_move(x: i32, y: i32) {
     });
 }
 
-pub fn push_mouse_btn(button: u32, pressed: bool) {
+pub fn push_mouse_btn(buttons: u32) {
     push(InputEvent {
         kind: INPUT_MOUSE_BTN,
-        button,
-        pressed: pressed as u8,
+        button: buttons,
+        pressed: 1,
         ..InputEvent::default()
     });
 }
 
-pub fn push_key(key: u32, pressed: bool) {
+pub fn push_key(key: u32, pressed: bool, mods: u32) {
     push(InputEvent {
         kind: INPUT_KEY,
         key,
+        button: mods,
         pressed: pressed as u8,
         ..InputEvent::default()
     });

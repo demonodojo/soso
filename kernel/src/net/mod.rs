@@ -849,47 +849,6 @@ pub fn poll() {
     }
 }
 
-/// Sondeo con el candado de `NET` ya tomado. Lo usa DNS para avanzar también
-/// los TCP de usuario (TLS) mientras espera UDP/53.
-pub(crate) fn poll_locked(n: &mut NetStack) {
-    let NetStack {
-        iface,
-        sockets,
-        echo,
-        ssh,
-        dhcp,
-        configured,
-        dhcp_enabled,
-        dhcp_started,
-        dev,
-        mac,
-        backend,
-        dns,
-        dhcp_expires_at,
-        user_tcp,
-        ..
-    } = n;
-    let t = now();
-    iface.poll(t, dev, sockets);
-    if let (true, Some(dhcp)) = (*dhcp_enabled, *dhcp) {
-        poll_dhcp(
-            iface,
-            sockets,
-            echo,
-            ssh,
-            dhcp,
-            configured,
-            dns,
-            dhcp_expires_at,
-        );
-        try_static_fallback(iface, *mac, *backend, dev, *dhcp_started, configured);
-    }
-    poll_tcp_services(sockets, echo, ssh, *configured);
-    poll_user_tcp(iface, sockets, user_tcp, *configured);
-    iface.poll(t, dev, sockets);
-    user_tcp.purgar_cerrados(sockets);
-}
-
 fn poll_user_tcp(
     iface: &mut Interface,
     sockets: &mut SocketSet<'static>,
@@ -1454,7 +1413,7 @@ pub fn tcp_listener_ready(slot: usize) -> bool {
     };
     // Loopback **o** conexión externa establecida: un listener de userspace
     // sirve a las dos (T54). Un slot puramente de loopback no tiene socket
-    // smoltcp en uso, así que `is_established` es false y no confunde.
+    // smoltcp en uso; `tiene_conexion` no lo toma por una conexión real.
     if entry.loop_listener && loopback::has_pending(slot) {
         return true;
     }

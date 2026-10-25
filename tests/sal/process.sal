@@ -1,0 +1,11 @@
+fn main() -> Int ! io, alloc
+    entorno = getenv(d"SAL_PRUEBA")
+    salida = exec_capture(d"/bin/echo", d"proceso correcto")
+    _p = print_str(salida)
+    if str_eq(entorno, d"valor con espacios") == 0
+        11
+    else
+        if str_eq(salida, d"proceso correcto\n") == 0
+            12
+        else
+            0

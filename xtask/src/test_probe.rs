@@ -38,7 +38,7 @@ pub fn run(filtro: Option<&str>) {
         // los 2,2 GB del modelo real habría que escribirlos y arrancarlos dos
         // veces por sonda.
         if std::env::var_os("SOSO_MODELS_DIR").is_none() {
-            unsafe { std::env::set_var("SOSO_MODELS_DIR", root.join("target/tiny-model")) };
+            std::env::set_var("SOSO_MODELS_DIR", root.join("target/tiny-model"));
         }
     }
     crate::package_live::run();

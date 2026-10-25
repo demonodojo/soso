@@ -122,7 +122,7 @@ enum ResolveFail {
     NxDomain,
 }
 
-pub fn resolve_a(
+fn resolve_a(
     host: &str,
     deadline: Instant,
     servidores: &[Ipv4Address],

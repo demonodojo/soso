@@ -16,6 +16,8 @@ pub mod futex;
 pub mod mmap;
 pub mod path;
 pub mod pipe;
+pub mod pty;
+pub mod shm;
 pub mod syscall;
 
 use crate::arch::gdt;
@@ -95,6 +97,8 @@ pub enum Console {
     Serial,
     /// Canal de una sesión SSH (sunset). El índice es la ranura del socket.
     Ssh(u8),
+    /// Pseudo-terminal (`SYS_PTY_OPEN`).
+    Pty(u8),
 }
 
 impl Console {
@@ -103,6 +107,7 @@ impl Console {
         match self {
             Console::Serial => crate::drivers::serial::has_input(),
             Console::Ssh(slot) => crate::net::ssh::rx_has_data(slot as usize),
+            Console::Pty(slot) => pty::rx_has_data(slot),
         }
     }
 
@@ -111,6 +116,7 @@ impl Console {
         match self {
             Console::Serial => crate::drivers::serial::read_byte(),
             Console::Ssh(slot) => crate::net::ssh::rx_pop(slot as usize),
+            Console::Pty(slot) => pty::rx_pop(slot),
         }
     }
 
@@ -119,6 +125,7 @@ impl Console {
         match self {
             Console::Serial => crate::drivers::serial::write_bytes(data),
             Console::Ssh(slot) => crate::net::ssh::tx_push(slot as usize, data),
+            Console::Pty(slot) => pty::tx_push(slot, data),
         }
     }
 
@@ -131,6 +138,7 @@ impl Console {
                     .map(|a| a.load(Ordering::Relaxed))
                     .unwrap_or(0)
             }
+            Console::Pty(slot) => pty::fg_pgid(slot),
         }
     }
 
@@ -142,6 +150,7 @@ impl Console {
                     a.store(pgid, Ordering::Relaxed);
                 }
             }
+            Console::Pty(slot) => pty::set_fg_pgid(slot, pgid),
         }
     }
 }
@@ -220,6 +229,8 @@ pub enum Fd {
     Tcp { slot: usize },
     /// Canal de registro del kernel (fd 3 por defecto).
     Log,
+    /// Maestro de pseudo-terminal (`SYS_PTY_OPEN`).
+    PtyMaster(u8),
 }
 
 pub struct Process {
@@ -461,6 +472,7 @@ fn deliver_death(procs: &mut Vec<Process>, pid: u64, code: u8, orphan: bool) {
     // la leía (cargo esperando a un rustc que ya había salido) hasta que
     // alguien lo recogiera con `wait`.
     syscall::close_all_fds(&mut procs[idx].fds);
+    crate::drivers::fb::release_owner_if(pid);
     if procs[idx].is_thread {
         // Un hilo no se espera: se retira y suelta su referencia al espacio.
         procs.remove(idx);
@@ -1126,6 +1138,9 @@ pub fn spawn_console_io_cwd(
         is_thread: false,
         join_uaddr: 0,
     });
+    if matches!(console, Console::Pty(_)) {
+        session_leader(pid, console);
+    }
     crate::arch::apic::kick_idle_cpus();
     Ok(pid)
 }
@@ -2204,6 +2219,7 @@ fn desalojar_si_toca(f: &mut TrapFrame, cur: u64, bsp_fpu: bool) -> u64 {
             let pid = procs[idx].pid;
             let parent = procs[idx].parent;
             syscall::close_all_fds(&mut procs[idx].fds);
+            crate::drivers::fb::release_owner_if(pid);
             procs[idx].kill_pending = false;
             procs[idx].kill_orphan = false;
             if orphan {

@@ -131,6 +131,7 @@ pub fn inspect_kev_gguf(path: &std::path::Path) -> Result<KevGgufInspect, String
     inspect_kev_from_gguf(&gguf)
 }
 
+#[cfg(feature = "std")]
 fn inspect_kev_from_gguf(gguf: &GgufFile) -> Result<KevGgufInspect, String> {
     let head_q = ["dec.head.q.weight", "dec.head_q.weight"]
         .into_iter()

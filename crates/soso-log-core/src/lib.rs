@@ -9,10 +9,12 @@
 pub mod flujo;
 pub mod ring;
 pub mod rotacion;
+pub mod sectores;
 pub mod texto;
 
 pub use flujo::{Estado, Flujo, Trabajo, LOTE_MAX, MAX_FALLOS, REINTENTO_MS};
 pub use ring::{Lectura, Ring};
+pub use sectores::{por_cada_tramo_cambiado, Tramo};
 pub use rotacion::{Accion, Paso, MAX_ACTIVO, ROTACIONES, TECHO_POR_FLUJO};
 pub use texto::{cabecera, marca_fallo, marca_perdida, Cabecera, EscritorSlice};
 

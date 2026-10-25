@@ -56,6 +56,9 @@ fn main() {
     if perfil {
         soso_llm_core::layer::perfil_activar(Some(reloj_ns));
     }
+    if std::env::var("SOSO_SIN_PARTIR").is_ok() {
+        soso_llm_core::layer::SIN_PARTIR.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     if std::env::var("SOSO_IQ_F32").is_ok() {
         soso_llm_core::gemm::iq_q8k_activar(false);
     }
@@ -65,6 +68,9 @@ fn main() {
         rt.reset_sequence();
         rt.prefill_prompt(&mut source, &ids, par, &mut gpu, None).expect("prefill");
         eprintln!("prefill previo {r}: {:.2?}", t.elapsed());
+    }
+    if perfil {
+        soso_llm_core::layer::perfil_activar(Some(reloj_ns));
     }
     let t0 = Instant::now();
     rt.reset_sequence();
@@ -80,6 +86,7 @@ fn main() {
         .and_then(|v| v.parse::<usize>().ok())
     {
         let mut tok = Runtime::argmax(&logits);
+        let mut generados = alloc_vec_ids(tok);
         let t = Instant::now();
         let (mut t_fwd, mut t_log) = (0.0f64, 0.0f64);
         for _ in 0..pasos {
@@ -90,9 +97,11 @@ fn main() {
             let b = Instant::now();
             let l = rt.logits_gpu(&mut source, par, &mut gpu).expect("logits");
             tok = Runtime::argmax(l);
+            generados.push(tok);
             t_log += b.elapsed().as_secs_f64();
         }
         let tot = t.elapsed().as_secs_f64();
+        eprintln!("ids generados: {:?}", generados);
         eprintln!(
             "decodificar {pasos}: {:.2} ms/token ({:.0} tok/s); capas {:.2} ms, logits {:.2} ms",
             tot * 1e3 / pasos as f64,
@@ -134,4 +143,8 @@ fn main() {
     for &i in orden.iter().take(top) {
         println!("{} {:.5} {:.6}", i, logits[i], ((logits[i] - max) as f64).exp() / suma);
     }
+}
+
+fn alloc_vec_ids(primero: u32) -> Vec<u32> {
+    vec![primero]
 }

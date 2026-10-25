@@ -197,3 +197,225 @@ extern "C" __global__ void iq_matvec(const unsigned char *w, const float *x, flo
         y[row] = acc;
     }
 }
+
+/* ---------------------------------------------------------------------------------------------------------------------
+ * Prefill por bloques: varios tokens por lectura de pesos.
+ *
+ * `iq_decodificar` deja en `o` los 32 pesos (ya con escala) de la unidad `u` de una fila; el producto con cualquier x es entonces
+ * un FMA por elemento, y la decodificación (tablas, signos, escalas) se paga una vez para todos los tokens del tile.
+ * ------------------------------------------------------------------------------------------------------------------ */
+__device__ __forceinline__ void iq_decodificar(int dtype, const unsigned char *w, int u, float *o)
+{
+    int sb = u >> 3;
+    int ib = u & 7;
+    switch (dtype) {
+    case IQ_GGML_IQ3_XXS: {
+        const unsigned char *b = w + (long)sb * 98;
+        float d = iq_f16(b);
+        const unsigned char *qs = b + 2;
+        const unsigned char *ga = qs + 64 + 4 * ib;
+        unsigned int aux = (unsigned int)ga[0] | ((unsigned int)ga[1] << 8) | ((unsigned int)ga[2] << 16) | ((unsigned int)ga[3] << 24);
+        float db = d * (0.5f + (float)(aux >> 28)) * 0.5f;
+        for (int l = 0; l < 4; l++) {
+            unsigned char sg = KSIGNS_IQ2XS_D[(aux >> (7 * l)) & 127];
+            unsigned int g1 = IQ3XXS_GRID_D[qs[ib * 8 + 2 * l]];
+            unsigned int g2 = IQ3XXS_GRID_D[qs[ib * 8 + 2 * l + 1]];
+#pragma unroll
+            for (int j = 0; j < 4; j++) {
+                o[8 * l + j] = db * (float)((g1 >> (8 * j)) & 0xffu) * iq_sg(sg, j);
+                o[8 * l + j + 4] = db * (float)((g2 >> (8 * j)) & 0xffu) * iq_sg(sg, j + 4);
+            }
+        }
+        break;
+    }
+    case IQ_GGML_IQ2_S: {
+        const unsigned char *b = w + (long)sb * 82;
+        float d = iq_f16(b);
+        const unsigned char *qs = b + 2;
+        const unsigned char *qh = b + 66;
+        unsigned char s = b[74 + ib];
+        float db0 = d * (0.5f + (float)(s & 0xf)) * 0.25f;
+        float db1 = d * (0.5f + (float)(s >> 4)) * 0.25f;
+        for (int l = 0; l < 4; l++) {
+            unsigned long long g = IQ2S_GRID_D[qs[ib * 4 + l] | (((int)qh[ib] << (8 - 2 * l)) & 0x300)];
+            unsigned char sg = qs[32 + ib * 4 + l];
+            float db = l < 2 ? db0 : db1;
+#pragma unroll
+            for (int j = 0; j < 8; j++) {
+                o[8 * l + j] = db * (float)((g >> (8 * j)) & 0xffu) * iq_sg(sg, j);
+            }
+        }
+        break;
+    }
+    case IQ_GGML_IQ3_S: {
+        const unsigned char *b = w + (long)sb * 110;
+        float d = iq_f16(b);
+        const unsigned char *qs = b + 2;
+        const unsigned char *qh = b + 66;
+        const unsigned char *sgn = b + 74;
+        const unsigned char *sc = b + 106;
+        float db = d * (float)(1 + 2 * ((sc[ib >> 1] >> (4 * (ib & 1))) & 0xf));
+        for (int l = 0; l < 4; l++) {
+            int i1 = qs[ib * 8 + 2 * l] | (((int)qh[ib] << (8 - 2 * l)) & 256);
+            int i2 = qs[ib * 8 + 2 * l + 1] | (((int)qh[ib] << (7 - 2 * l)) & 256);
+            unsigned int g1 = IQ3S_GRID_D[i1], g2 = IQ3S_GRID_D[i2];
+            unsigned char sg = sgn[ib * 4 + l];
+#pragma unroll
+            for (int j = 0; j < 4; j++) {
+                o[8 * l + j] = db * (float)((g1 >> (8 * j)) & 0xffu) * iq_sg(sg, j);
+                o[8 * l + j + 4] = db * (float)((g2 >> (8 * j)) & 0xffu) * iq_sg(sg, j + 4);
+            }
+        }
+        break;
+    }
+    case IQ_GGML_IQ4_XS: {
+        const unsigned char *b = w + (long)sb * 136;
+        float d = iq_f16(b);
+        unsigned int sh = b[2] | (b[3] << 8);
+        int ls = ((b[4 + (ib >> 1)] >> (4 * (ib & 1))) & 0xf) | (((sh >> (2 * ib)) & 3) << 4);
+        float dl = d * (float)(ls - 32);
+        const unsigned char *qs = b + 8 + ib * 16;
+#pragma unroll
+        for (int j = 0; j < 16; j++) {
+            o[j] = dl * (float)KVALUES_IQ4NL_D[qs[j] & 0xf];
+            o[j + 16] = dl * (float)KVALUES_IQ4NL_D[qs[j] >> 4];
+        }
+        break;
+    }
+    case IQ_GGML_Q5_K: {
+        const unsigned char *b = w + (long)sb * 176;
+        float d = iq_f16(b);
+        float dmin = iq_f16(b + 2);
+        int sc, mn;
+        iq_scale_min_k4(ib, b + 4, &sc, &mn);
+        const unsigned char *qh = b + 16;
+        const unsigned char *qs = b + 48 + 32 * (ib >> 1);
+        int alto = ib & 1;
+        float ds = d * (float)sc, dm = dmin * (float)mn;
+#pragma unroll
+        for (int l = 0; l < 32; l++) {
+            int q = (alto ? (qs[l] >> 4) : (qs[l] & 0xf)) + ((qh[l] >> ib) & 1) * 16;
+            o[l] = ds * (float)q - dm;
+        }
+        break;
+    }
+    default:
+#pragma unroll
+        for (int l = 0; l < 32; l++) {
+            o[l] = 0.0f;
+        }
+        break;
+    }
+}
+
+#define IQ_TILE 16
+
+/* Gate y up de un experto para `cnt` tokens y SwiGLU: act[(abase + t) * ffn + fila] = silu(gate·x_t) · (up·x_t).
+ * `xs` son los `n` vectores del bloque (h floats cada uno); `tok[t]` dice qué vector es el token `t` del experto.
+ * grid = (ceil(ffn / 8), ceil(cnt / IQ_TILE)); 256 hilos = 8 warps = 8 filas; cada warp calcula IQ_TILE tokens a la vez. */
+extern "C" __global__ void iq_gateup_n(const unsigned char *wg, const unsigned char *wu, const float *xs, const int *tok, float *act,
+                                       int ffn, int h, int cnt, int abase, int dg, int du, long rbg, long rbu)
+{
+    int warp = (int)threadIdx.x >> 5;
+    int lane = (int)threadIdx.x & 31;
+    int fila = (int)blockIdx.x * 8 + warp;
+    if (fila >= ffn) {
+        return;
+    }
+    int t0 = (int)blockIdx.y * IQ_TILE;
+    int nt = cnt - t0 < IQ_TILE ? cnt - t0 : IQ_TILE;
+    const unsigned char *rg = wg + (long)fila * rbg;
+    const unsigned char *ru = wu + (long)fila * rbu;
+    float ag[IQ_TILE], au[IQ_TILE];
+#pragma unroll
+    for (int t = 0; t < IQ_TILE; t++) {
+        ag[t] = 0.0f;
+        au[t] = 0.0f;
+    }
+    int units = h >> 5;
+    for (int u = lane; u < units; u += 32) {
+        float vg[32], vu[32];
+        iq_decodificar(dg, rg, u, vg);
+        iq_decodificar(du, ru, u, vu);
+#pragma unroll
+        for (int t = 0; t < IQ_TILE; t++) {
+            if (t < nt) {
+                const float4 *xp = (const float4 *)(xs + (long)tok[t0 + t] * h + (long)u * 32);
+                float sg = 0.0f, su = 0.0f;
+#pragma unroll
+                for (int i = 0; i < 8; i++) {
+                    float4 x = xp[i];
+                    sg += vg[4 * i] * x.x + vg[4 * i + 1] * x.y + vg[4 * i + 2] * x.z + vg[4 * i + 3] * x.w;
+                    su += vu[4 * i] * x.x + vu[4 * i + 1] * x.y + vu[4 * i + 2] * x.z + vu[4 * i + 3] * x.w;
+                }
+                ag[t] += sg;
+                au[t] += su;
+            }
+        }
+    }
+#pragma unroll
+    for (int t = 0; t < IQ_TILE; t++) {
+        float g = iq_warp_sum(ag[t]);
+        float up = iq_warp_sum(au[t]);
+        if (lane == 0 && t < nt) {
+            act[(long)(abase + t0 + t) * ffn + fila] = (g / (1.0f + expf(-g))) * up;
+        }
+    }
+}
+
+/* y[(abase + t) * rows + fila] = W[fila] · act[(abase + t) * cols] para los `cnt` tokens del experto. grid = (ceil(rows / 8), ceil(cnt / IQ_TILE)). */
+__device__ __forceinline__ void iq_down_dev(const unsigned char *w, const float *act, float *y, int rows, int cols, int cnt, int abase, int dtype,
+                                          long rb)
+{
+    int warp = (int)threadIdx.x >> 5;
+    int lane = (int)threadIdx.x & 31;
+    int fila = (int)blockIdx.x * 8 + warp;
+    if (fila >= rows) {
+        return;
+    }
+    int t0 = (int)blockIdx.y * IQ_TILE;
+    int nt = cnt - t0 < IQ_TILE ? cnt - t0 : IQ_TILE;
+    const unsigned char *r = w + (long)fila * rb;
+    float a[IQ_TILE];
+#pragma unroll
+    for (int t = 0; t < IQ_TILE; t++) {
+        a[t] = 0.0f;
+    }
+    int units = cols >> 5;
+    for (int u = lane; u < units; u += 32) {
+        float v[32];
+        iq_decodificar(dtype, r, u, v);
+#pragma unroll
+        for (int t = 0; t < IQ_TILE; t++) {
+            if (t < nt) {
+                const float4 *xp = (const float4 *)(act + (long)(abase + t0 + t) * cols + (long)u * 32);
+                float s = 0.0f;
+#pragma unroll
+                for (int i = 0; i < 8; i++) {
+                    float4 x = xp[i];
+                    s += v[4 * i] * x.x + v[4 * i + 1] * x.y + v[4 * i + 2] * x.z + v[4 * i + 3] * x.w;
+                }
+                a[t] += s;
+            }
+        }
+    }
+#pragma unroll
+    for (int t = 0; t < IQ_TILE; t++) {
+        float s = iq_warp_sum(a[t]);
+        if (lane == 0 && t < nt) {
+            y[(long)(abase + t0 + t) * rows + fila] = s;
+        }
+    }
+}
+
+extern "C" __global__ void iq_down_n(const unsigned char *w, const float *act, float *y, int rows, int cols, int cnt, int abase, int dtype,
+                                     long rb)
+{
+    iq_down_dev(w, act, y, rows, cols, cnt, abase, dtype, rb);
+}
+
+/* Matriz densa por bloque: y[t * rows + fila] = W[fila] · xs[t * cols] para t < n (sin lista de tokens). Mismo reparto que `iq_down_n`. */
+extern "C" __global__ void iq_matmul_n(const unsigned char *w, const float *xs, float *y, int rows, int cols, int n, int dtype, long rb)
+{
+    iq_down_dev(w, xs, y, rows, cols, n, 0, dtype, rb);
+}

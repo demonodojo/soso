@@ -185,6 +185,8 @@ pub struct Runtime {
     /// Instantáneas del estado de las capas Gated DeltaNet al final de cada prompt (las más recientes primero). El estado
     /// recurrente no se puede recortar como un KV: para reutilizar un prefijo hay que volver a un punto guardado.
     gdn_instantaneas: Vec<InstantaneaGdn>,
+    /// Posición a partir de la cual se toma la siguiente instantánea intermedia durante el prefill.
+    proxima_marca_gdn: usize,
     /// Buffers del prefill por bloques (T82); se crean la primera vez que hacen falta.
     block: Option<BlockScratch>,
     /// Prefill por bloques activado (por defecto sí). Apagarlo fuerza el camino token
@@ -263,6 +265,7 @@ impl Runtime {
             pos: 0,
             cached_tokens: Vec::new(),
             gdn_instantaneas: Vec::new(),
+            proxima_marca_gdn: Self::INTERVALO_INSTANTANEAS_GDN,
             block: None,
             prefill_por_bloques: true,
             tokens_en_bloque: 0,
@@ -487,6 +490,7 @@ impl Runtime {
         self.pos = 0;
         self.cached_tokens.clear();
         self.gdn_instantaneas.clear();
+        self.proxima_marca_gdn = Self::INTERVALO_INSTANTANEAS_GDN;
         for layer in &mut self.kv {
             layer.reset();
         }
@@ -580,6 +584,37 @@ impl Runtime {
         p
     }
 
+    /// Cada cuántos tokens de prefill se guarda una instantánea intermedia del estado GDN, y cuántas se conservan como mucho. Si el
+    /// arnés cambia el principio de la conversación (pliega mensajes antiguos), sólo se puede volver a una instantánea anterior al
+    /// primer token distinto: con sólo la del final del prompt había que reprocesar todo (8 min con 20 000 tokens).
+    pub const INTERVALO_INSTANTANEAS_GDN: usize = 2048;
+    const MAX_INSTANTANEAS_GDN: usize = 16;
+
+    fn acotar_instantaneas(&mut self) {
+        while self.gdn_instantaneas.len() > Self::MAX_INSTANTANEAS_GDN {
+            self.gdn_instantaneas.sort_by_key(|i| i.tokens.len());
+            // Se quita una de cada dos, salvo la primera y la última.
+            let mut k = 0usize;
+            let n = self.gdn_instantaneas.len();
+            self.gdn_instantaneas.retain(|_| {
+                k += 1;
+                k == 1 || k == n || k % 2 == 1
+            });
+        }
+    }
+
+    /// Instantánea intermedia durante el prefill (`ctx` son todos los tokens del prompt).
+    fn instantanea_intermedia_gdn(&mut self, ctx: Option<&[u32]>) {
+        if self.pos < self.proxima_marca_gdn || !self.hay_gdn() {
+            return;
+        }
+        self.proxima_marca_gdn = (self.pos / Self::INTERVALO_INSTANTANEAS_GDN + 1) * Self::INTERVALO_INSTANTANEAS_GDN;
+        if let Some(c) = ctx.filter(|c| c.len() >= self.pos) {
+            let tokens = c[..self.pos].to_vec();
+            self.guardar_instantanea_gdn(&tokens);
+        }
+    }
+
     fn hay_gdn(&self) -> bool {
         (0..self.manifest.num_layers).any(|l| self.manifest.layer(l).is_some_and(|sp| sp.attn_kind == AttnKind::Gdn))
     }
@@ -608,7 +643,7 @@ impl Runtime {
             .collect();
         self.gdn_instantaneas.retain(|i| i.tokens != prompt);
         self.gdn_instantaneas.insert(0, InstantaneaGdn { tokens: prompt.to_vec(), capas });
-        self.gdn_instantaneas.truncate(3);
+        self.acotar_instantaneas();
     }
 
     /// Empieza una secuencia reaprovechando el prefijo de la anterior. Devuelve
@@ -625,6 +660,9 @@ impl Runtime {
                 return 0;
             };
             let snap = self.gdn_instantaneas[i].clone();
+            // Las instantáneas más allá de `p` son de la continuación que se abandona.
+            self.gdn_instantaneas.retain(|x| x.tokens.len() <= p);
+            self.proxima_marca_gdn = (p / Self::INTERVALO_INSTANTANEAS_GDN + 1) * Self::INTERVALO_INSTANTANEAS_GDN;
             for (l, s, c) in &snap.capas {
                 self.kv[*l].gdn_s.clone_from(s);
                 self.kv[*l].gdn_conv.clone_from(c);
@@ -1265,6 +1303,7 @@ impl Runtime {
                     return Ok(());
                 }
                 i += n;
+                self.instantanea_intermedia_gdn(hash_context);
                 continue;
             }
             let tok = prompt[i];
@@ -1309,6 +1348,7 @@ impl Runtime {
                 return Ok(());
             }
             i += 1;
+            self.instantanea_intermedia_gdn(hash_context);
         }
         Ok(())
     }

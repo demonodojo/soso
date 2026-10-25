@@ -155,6 +155,8 @@ unsafe impl Send for FbState {}
 
 static FB: Mutex<Option<FbState>> = Mutex::new(None);
 static GRAPHICS_MODE: AtomicBool = AtomicBool::new(false);
+/// Proceso dueño del modo gráfico (0 = consola del kernel).
+static FB_OWNER: AtomicU64 = AtomicU64::new(0);
 /// Páginas del GOP remapeadas a write-combining (`usize::MAX` = no se pudo).
 static WC_PAGES: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// Dirección física del GOP, para el log de arranque.
@@ -915,18 +917,61 @@ impl Write for FbWriter {
 }
 
 pub fn set_graphics_mode(on: bool) {
-    GRAPHICS_MODE.store(on, Ordering::Relaxed);
-    if !on {
-        let mut guard = FB.lock();
-        if let Some(st) = guard.as_mut() {
-            erase_cursor(st);
-            draw_cursor(st);
+    let _ = set_graphics_mode_for(crate::task::current_pid(), on);
+}
+
+/// Entra o sale del modo gráfico. Solo un proceso vivo puede ser dueño.
+pub fn set_graphics_mode_for(pid: u64, on: bool) -> Result<(), i64> {
+    use soso_abi::EBUSY;
+    if on {
+        let owner = FB_OWNER.load(Ordering::Acquire);
+        if owner != 0 && owner != pid && crate::task::exists(owner) {
+            return Err(-EBUSY);
         }
+        FB_OWNER.store(pid, Ordering::Release);
+        GRAPHICS_MODE.store(true, Ordering::Relaxed);
+        return Ok(());
     }
+    let owner = FB_OWNER.load(Ordering::Acquire);
+    if owner != 0 && owner != pid {
+        return Err(-EBUSY);
+    }
+    FB_OWNER.store(0, Ordering::Release);
+    GRAPHICS_MODE.store(false, Ordering::Relaxed);
+    let mut guard = FB.lock();
+    if let Some(st) = guard.as_mut() {
+        erase_cursor(st);
+        draw_cursor(st);
+    }
+    Ok(())
 }
 
 pub fn graphics_mode() -> bool {
     GRAPHICS_MODE.load(Ordering::Relaxed)
+}
+
+pub fn fb_input_exclusive() -> bool {
+    FB_OWNER.load(Ordering::Relaxed) != 0
+}
+
+/// Al morir el dueño, vuelve la consola de texto del kernel.
+pub fn release_owner_if(pid: u64) {
+    if FB_OWNER.swap(0, Ordering::AcqRel) != pid {
+        return;
+    }
+    GRAPHICS_MODE.store(false, Ordering::Relaxed);
+    let mut guard = FB.lock();
+    if let Some(st) = guard.as_mut() {
+        erase_cursor(st);
+        draw_cursor(st);
+    }
+}
+
+pub fn kill_framebuffer_owner() {
+    let pid = FB_OWNER.load(Ordering::Relaxed);
+    if pid != 0 {
+        crate::task::kill_pid(pid);
+    }
 }
 
 fn pixel_format_tag(fmt: PixelFormat) -> u8 {
@@ -966,6 +1011,44 @@ pub fn present_from_user(buf: &[u8]) -> Result<(), ()> {
     let want = st.shadow.len().min(buf.len());
     st.shadow[..want].copy_from_slice(&buf[..want]);
     flush_all(st);
+    Ok(())
+}
+
+/// Copia un rectángulo del búfer lógico (misma geometría que `user_info`) al shadow y vuelca.
+pub fn present_from_user_rect(buf: &[u8], x: u32, y: u32, w: u32, h: u32) -> Result<(), ()> {
+    let mut guard = FB.lock();
+    let Some(st) = guard.as_mut() else {
+        return Err(());
+    };
+    let bpp = st.info.bytes_per_pixel;
+    if bpp == 0 {
+        return Err(());
+    }
+    let bpl = st.log_w * bpp;
+    let x0 = x as usize;
+    let y0 = y as usize;
+    let rw = w as usize;
+    let rh = h as usize;
+    if rw == 0 || rh == 0 {
+        return Ok(());
+    }
+    let row_bytes = rw * bpp;
+    for row in 0..rh {
+        let sy = y0 + row;
+        if sy >= st.log_h {
+            break;
+        }
+        let src_off = row * row_bytes;
+        if src_off + row_bytes > buf.len() {
+            return Err(());
+        }
+        let dst_off = sy * bpl + x0 * bpp;
+        if dst_off + row_bytes > st.shadow.len() {
+            return Err(());
+        }
+        st.shadow[dst_off..dst_off + row_bytes].copy_from_slice(&buf[src_off..src_off + row_bytes]);
+    }
+    flush_rect(st, x0, y0, rw, rh);
     Ok(())
 }
 

@@ -29,6 +29,16 @@ unsafe extern "C" {
     fn munmap(addr: *mut c_void, len: usize) -> c_int;
 }
 
+/// Rangos que son mapas de fichero de sólo lectura de este módulo (inicio → longitud). Sirve para saber si es seguro soltar sus páginas con
+/// `madvise(MADV_DONTNEED)`: en un mapa de fichero se vuelven a leer del disco; en memoria anónima (un `Vec`) esa llamada la **pone a ceros**.
+static MAPAS: std::sync::Mutex<std::collections::BTreeMap<usize, usize>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// ¿Está `[ptr, ptr + len)` dentro de un mapa de fichero de [`MmapMapper`]?
+pub fn es_mapa_de_fichero(ptr: usize, len: usize) -> bool {
+    let Ok(m) = MAPAS.lock() else { return false };
+    m.range(..=ptr).next_back().is_some_and(|(&ini, &l)| ptr >= ini && ptr + len <= ini + l)
+}
+
 #[derive(Default)]
 pub struct MmapMapper {
     mapas: HashMap<u64, usize>,
@@ -56,11 +66,17 @@ impl FileMapper for MmapMapper {
         }
         let addr = p as u64;
         self.mapas.insert(addr, len);
+        if let Ok(mut m) = MAPAS.lock() {
+            m.insert(addr as usize, len);
+        }
         Ok(MappedShard { addr, len })
     }
 
     fn unmap_file(&mut self, shard: &MappedShard) {
         if let Some(len) = self.mapas.remove(&shard.addr) {
+            if let Ok(mut m) = MAPAS.lock() {
+                m.remove(&(shard.addr as usize));
+            }
             unsafe { munmap(shard.addr as *mut c_void, len) };
         }
     }
@@ -69,6 +85,9 @@ impl FileMapper for MmapMapper {
 impl Drop for MmapMapper {
     fn drop(&mut self) {
         for (addr, len) in self.mapas.drain() {
+            if let Ok(mut m) = MAPAS.lock() {
+                m.remove(&(addr as usize));
+            }
             unsafe { munmap(addr as *mut c_void, len) };
         }
     }

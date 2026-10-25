@@ -1,18 +1,15 @@
 //! Sesión distribuida en estrella (protocolo v4): head muestrea; nodos ejecutan tramos.
 
 use crate::net::{parse_sock_addr, TcpFd};
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use libsoso::{print, println, sys};
 use soso_llm_core::generation::{GenerationOptions, GenerationObserver, GenCheckpoint};
 use soso_llm_core::parallel::RowParallel;
 use soso_llm_core::pipeline::{
-    self, AckPayload, AssignPayload, BeginPayload, FramedTransport, HelloPayload, Message,
-    NodeCaps, PipelinePlan, RecvError, StepPayload, StepReplyPayload, TruncatePayload,
-    DEFAULT_HANDSHAKE_TIMEOUT_MS, DEFAULT_PING_IDLE_MS, DEFAULT_PING_INTERVAL_MS,
-    DEFAULT_STANDBY_RETRY_MS, DEFAULT_STEP_TIMEOUT_MS, ERR_NODE_DOWN, ROLE_HEAD, ROLE_NODE,
-    WIRE_F32,
+    self, AckPayload, BeginPayload, FramedTransport, HelloPayload, Message, NodeCaps, PipelinePlan,
+    RecvError, DEFAULT_HANDSHAKE_TIMEOUT_MS, DEFAULT_PING_IDLE_MS, DEFAULT_PING_INTERVAL_MS,
+    DEFAULT_STANDBY_RETRY_MS, DEFAULT_STEP_TIMEOUT_MS, ERR_NODE_DOWN, WIRE_F32,
 };
 use soso_llm_core::cluster::{
     Conector, EstrellaConfig, EstrellaHead, NodoConfig, NodoPipeline, PendingEnlace,
@@ -317,31 +314,6 @@ pub fn run_head(
     }
 }
 
-impl DistributedConfig {
-    fn clone_wire(&self) -> Self {
-        DistributedConfig {
-            plan: self.plan.clone(),
-            remotes: self.remotes.clone(),
-            listen_port: self.listen_port,
-            layer_start: self.layer_start,
-            layer_end: self.layer_end,
-            model_name: self.model_name.clone(),
-            manifest_crc: self.manifest_crc,
-            index_crc: self.index_crc,
-            step_timeout_ms: self.step_timeout_ms,
-            handshake_timeout_ms: self.handshake_timeout_ms,
-            accept_timeout_ms: self.accept_timeout_ms,
-            ping_interval_ms: self.ping_interval_ms,
-            ping_idle_ms: self.ping_idle_ms,
-            standby: self.standby,
-            standby_retry_ms: self.standby_retry_ms,
-            wire: self.wire,
-            node_auto: self.node_auto,
-            salir_tras_steps: self.salir_tras_steps,
-        }
-    }
-}
-
 fn abort_estrella(estrella: &mut EstrellaHead<TcpConector>, code: u16, msg: &str) {
     for link in estrella.links.iter_mut() {
         let _ = link.tx.send(&Message::Error(pipeline::ErrorPayload {
@@ -349,19 +321,6 @@ fn abort_estrella(estrella: &mut EstrellaHead<TcpConector>, code: u16, msg: &str
             message: String::from(msg),
         }));
     }
-}
-
-fn hello_matches_node(
-    h: &HelloPayload,
-    cfg: &DistributedConfig,
-    _seg: soso_llm_core::pipeline::PipelineSegment,
-    num_layers: u32,
-) -> bool {
-    h.role == ROLE_NODE
-        && h.num_layers == num_layers
-        && h.model_name == cfg.model_name
-        && h.manifest_crc == cfg.manifest_crc
-        && h.index_crc == cfg.index_crc
 }
 
 /// Nodo `--auto`: catálogo al arrancar; carga pesos al recibir `Assign`.
@@ -422,7 +381,7 @@ fn run_node_session_auto(
     par: Option<&dyn RowParallel>,
     stream: TcpFd,
 ) -> Result<(), ()> {
-    let mut stub = Runtime::new(manifest.clone(), index.clone(), 32 * 1024 * 1024, 0);
+    let stub = Runtime::new(manifest.clone(), index.clone(), 32 * 1024 * 1024, 0);
     let _ = (manifest_crc, index_crc);
     let hs_to = cfg.handshake_timeout_ms;
     let step_to = cfg.step_timeout_ms;
@@ -573,8 +532,8 @@ fn run_node_session(
 ) -> Result<(), ()> {
     let hs_to = cfg.handshake_timeout_ms;
     let step_to = cfg.step_timeout_ms;
-    let mut layer_start = cfg.layer_start;
-    let mut layer_end = cfg.layer_end;
+    let layer_start = cfg.layer_start;
+    let layer_end = cfg.layer_end;
     let mut rx = FramedTransport::new(stream);
     let mut nodo = NodoPipeline::new(NodoConfig {
         layer_start,
@@ -620,8 +579,6 @@ fn run_node_session(
             return Err(());
         }
     }
-    layer_start = nodo.cfg.layer_start;
-    layer_end = nodo.cfg.layer_end;
     rx.send(&Message::Ack(AckPayload { pos: 0 }))?;
 
     let begin = match recv_msg(&mut rx, hs_to, true, cfg, "begin")? {
@@ -646,8 +603,6 @@ fn run_node_session(
                 return Err(());
             }
             other => {
-                layer_start = nodo.cfg.layer_start;
-                layer_end = nodo.cfg.layer_end;
                 let es_step = matches!(other, Message::Step(_));
                 match nodo.atender(rt, source, par, other)? {
                     Some(reply) => rx.send(&reply)?,
@@ -813,7 +768,7 @@ pub(crate) fn montar_head_enlaces(
         salir_tras_steps: 0,
     };
     let splits_eff = if splits.is_empty() { "auto" } else { splits };
-    let (plan, mut estrella) = if splits_eff == "auto" {
+    let (plan, estrella) = if splits_eff == "auto" {
         let (mut est, pending) = sondeo_caps_enlaces(&probe_cfg, &remotes, hidden_dim, num_layers)
             .map_err(|_| {
                 println!("soso-llm: handshake de capacidades falló");
@@ -917,75 +872,4 @@ pub fn completar_enlaces_auto(
 ) -> Result<(), ()> {
     est.set_plan(plan);
     est.assignar_pending(pending, kv_pos, prefix_hash)
-}
-
-/// Sondeo ligero: Hello → Hello+Caps (sin Assign/Begin). Obsoleto: usar `enlazar_auto_caps`.
-pub fn probe_remote_caps(
-    remote: &str,
-    hs_to: u64,
-    model_name: &str,
-    manifest_crc: u32,
-    index_crc: u32,
-    num_layers: u32,
-    hidden_dim: u32,
-    layer_start: u32,
-    layer_end: u32,
-) -> Result<NodeCaps, ()> {
-    let addr = parse_sock_addr(remote).ok_or(())?;
-    let stream = TcpFd::connect(&addr, hs_to).map_err(|_| ())?;
-    let mut tx = FramedTransport::new(stream);
-    tx.send(&Message::Hello(HelloPayload {
-        role: ROLE_HEAD,
-        layer_start,
-        layer_end,
-        num_layers,
-        hidden_dim,
-        vocab_size: 0,
-        model_name: String::from(model_name),
-        manifest_crc,
-        index_crc,
-        kv_pos: 0,
-        prefix_hash: soso_llm_core::prefix_hash_tokens(&[]),
-    }))?;
-    let mut caps = NodeCaps {
-        ram_free_mb: 512,
-        workers: 1,
-        bw_score: 1000,
-    };
-    let mut have_hello = false;
-    for _ in 0..4 {
-        if have_hello {
-            break;
-        }
-        let cfg = DistributedConfig {
-            plan: PipelinePlan { segments: Vec::new() },
-            remotes: Vec::new(),
-            listen_port: 0,
-            layer_start: 0,
-            layer_end: 0,
-            model_name: String::from(model_name),
-            manifest_crc,
-            index_crc,
-            step_timeout_ms: hs_to,
-            handshake_timeout_ms: hs_to,
-            accept_timeout_ms: hs_to,
-            ping_interval_ms: 0,
-            ping_idle_ms: 0,
-            standby: false,
-            standby_retry_ms: 0,
-            wire: WIRE_F32,
-            node_auto: false,
-            salir_tras_steps: 0,
-        };
-        match recv_msg(&mut tx, hs_to, false, &cfg, "probe")? {
-            Message::Hello(_) => have_hello = true,
-            Message::Caps(c) => caps = c,
-            _ => return Err(()),
-        }
-    }
-    if have_hello {
-        Ok(caps)
-    } else {
-        Err(())
-    }
 }

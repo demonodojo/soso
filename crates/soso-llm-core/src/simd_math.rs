@@ -11,29 +11,27 @@ pub(crate) mod avx {
     #[inline]
     #[target_feature(enable = "avx2,fma")]
     pub(crate) unsafe fn exp256(x: __m256) -> __m256 {
-        unsafe {
-            let x = _mm256_min_ps(_mm256_max_ps(x, _mm256_set1_ps(-87.0)), _mm256_set1_ps(88.0));
-            let fx = _mm256_round_ps(
-                _mm256_mul_ps(x, _mm256_set1_ps(core::f32::consts::LOG2_E)),
-                _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC,
-            );
-            // r = x - fx·ln2 en dos pasos (ln2 alto y bajo) para no perder precisión.
-            let r = _mm256_fmadd_ps(fx, _mm256_set1_ps(-0.693_145_75), x);
-            let r = _mm256_fmadd_ps(fx, _mm256_set1_ps(-1.428_606_8e-6), r);
-            // Horner de Taylor hasta grado 7 en |r| ≤ ln2/2.
-            let mut p = _mm256_set1_ps(1.0 / 5040.0);
-            p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0 / 720.0));
-            p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0 / 120.0));
-            p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0 / 24.0));
-            p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0 / 6.0));
-            p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(0.5));
-            p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0));
-            p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0));
-            // 2^fx por el exponente.
-            let n = _mm256_cvtps_epi32(fx);
-            let pot = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_add_epi32(n, _mm256_set1_epi32(127)), 23));
-            _mm256_mul_ps(p, pot)
-        }
+        let x = _mm256_min_ps(_mm256_max_ps(x, _mm256_set1_ps(-87.0)), _mm256_set1_ps(88.0));
+        let fx = _mm256_round_ps(
+            _mm256_mul_ps(x, _mm256_set1_ps(core::f32::consts::LOG2_E)),
+            _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC,
+        );
+        // r = x - fx·ln2 en dos pasos (ln2 alto y bajo) para no perder precisión.
+        let r = _mm256_fmadd_ps(fx, _mm256_set1_ps(-0.693_145_75), x);
+        let r = _mm256_fmadd_ps(fx, _mm256_set1_ps(-1.428_606_8e-6), r);
+        // Horner de Taylor hasta grado 7 en |r| ≤ ln2/2.
+        let mut p = _mm256_set1_ps(1.0 / 5040.0);
+        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0 / 720.0));
+        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0 / 120.0));
+        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0 / 24.0));
+        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0 / 6.0));
+        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(0.5));
+        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0));
+        p = _mm256_fmadd_ps(p, r, _mm256_set1_ps(1.0));
+        // 2^fx por el exponente.
+        let n = _mm256_cvtps_epi32(fx);
+        let pot = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_add_epi32(n, _mm256_set1_epi32(127)), 23));
+        _mm256_mul_ps(p, pot)
     }
 
     /// silu(x) = x / (1 + exp(−x)).

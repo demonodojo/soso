@@ -38,6 +38,7 @@ impl std::fmt::Display for LlmPortError {
 impl std::error::Error for LlmPortError {}
 
 /// Host distinto por shard de test (no usar 7422 global en paralelo).
+#[cfg(test)]
 pub fn test_shard_llm_host_port(shard_index: u8) -> u16 {
     17_222 + 10 * u16::from(shard_index)
 }

@@ -10,7 +10,7 @@ use soso_red_core::parsear_red_conf;
 
 use crate::net::{parse_sock_addr, TcpFd};
 
-const SONdeo_MS: u64 = 40;
+const SONDEO_MS: u64 = 40;
 const HILOS: usize = 16;
 
 struct ScanJob {
@@ -35,7 +35,7 @@ extern "C" fn scan_worker(arg: u64) -> ! {
         let Some(sock) = parse_sock_addr(&addr_s) else {
             continue;
         };
-        if TcpFd::connect(&sock, SONdeo_MS).is_ok() {
+        if TcpFd::connect(&sock, SONDEO_MS).is_ok() {
             job.found.push(addr_s);
         }
     }

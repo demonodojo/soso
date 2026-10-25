@@ -100,11 +100,11 @@ pub unsafe fn attention_f16_tokens_raw(
                 let q = qs.add(i0 * stride);
                 let o = outs.add(i0 * stride);
                 if head_dim == 256 {
-                    avx::multi::<32>(q, o, stride, nt, g, seq_primero + i0, k_f16, v_f16, kv_dim, kv_head);
+                    avx::multi::<32>(q, o, stride, nt, g, seq_primero + i0, k_f16, v_f16, kv_dim, kv_head, 0, core::ptr::null_mut());
                 } else if head_dim == 128 {
-                    avx::multi::<16>(q, o, stride, nt, g, seq_primero + i0, k_f16, v_f16, kv_dim, kv_head);
+                    avx::multi::<16>(q, o, stride, nt, g, seq_primero + i0, k_f16, v_f16, kv_dim, kv_head, 0, core::ptr::null_mut());
                 } else {
-                    avx::multi::<8>(q, o, stride, nt, g, seq_primero + i0, k_f16, v_f16, kv_dim, kv_head);
+                    avx::multi::<8>(q, o, stride, nt, g, seq_primero + i0, k_f16, v_f16, kv_dim, kv_head, 0, core::ptr::null_mut());
                 }
             }
             i0 += nt;
@@ -122,6 +122,80 @@ pub unsafe fn attention_f16_tokens_raw(
                 )
             };
             attention_decode_f16_tiled_scalar(q, k_f16, v_f16, head_dim, kv_dim, kv_head, seq_primero + i, o);
+        }
+    }
+}
+
+/// ¿Hay kernel AVX2 para atención partida en trozos con esta forma?
+pub fn puede_partir(head_dim: usize, g: usize) -> bool {
+    AVX2 && (head_dim == 64 || head_dim == 128 || head_dim == 256) && g >= 1 && g <= MAX_Q
+}
+
+/// Trozo `[lo, hi)` del contexto para UN token (decodificación) con `g` cabezas de consulta que comparten `kv_head`. Escribe en `outs`
+/// (`g * head_dim`) la suma ponderada **sin normalizar** y en `ml` (`2 * g`) el máximo y la suma de cada consulta; `combinar_trozos`
+/// reúne los trozos. Partir el contexto reparte un solo token entre todos los hilos (sin esto, con 2 cabezas KV sólo trabajaban 2).
+///
+/// # Safety
+/// Como [`attention_f16_tokens_raw`]; `lo < hi`; `outs` y `ml` de uso exclusivo de este trozo.
+pub unsafe fn attention_f16_trozo_raw(
+    qs: *const f32,
+    outs: *mut f32,
+    ml: *mut f32,
+    g: usize,
+    lo: usize,
+    hi: usize,
+    k_f16: &[u16],
+    v_f16: &[u16],
+    head_dim: usize,
+    kv_dim: usize,
+    kv_head: usize,
+) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "fma"))]
+    unsafe {
+        let stride = g * head_dim;
+        match head_dim {
+            256 => avx::multi::<32>(qs, outs, stride, 1, g, hi, k_f16, v_f16, kv_dim, kv_head, lo, ml),
+            128 => avx::multi::<16>(qs, outs, stride, 1, g, hi, k_f16, v_f16, kv_dim, kv_head, lo, ml),
+            _ => avx::multi::<8>(qs, outs, stride, 1, g, hi, k_f16, v_f16, kv_dim, kv_head, lo, ml),
+        }
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2", target_feature = "fma")))]
+    {
+        let _ = (qs, outs, ml, g, lo, hi, k_f16, v_f16, head_dim, kv_dim, kv_head);
+    }
+}
+
+/// Une los `n` trozos de una cabeza KV: `partes[i]` son `g * head_dim` floats sin normalizar y `ml[i]` `2 * g` (máximo y suma). Deja
+/// en `out` (`g * head_dim`) la atención normalizada. El orden de las sumas es fijo (trozo 0, 1, …), así que el resultado no depende
+/// de cómo se repartieron los trozos entre hilos.
+pub fn combinar_trozos(partes: &[f32], ml: &[f32], n: usize, g: usize, head_dim: usize, out: &mut [f32]) {
+    for j in 0..g {
+        let mut mmax = f32::NEG_INFINITY;
+        for i in 0..n {
+            if ml[i * 2 * g + 2 * j + 1] > 0.0 {
+                mmax = mmax.max(ml[i * 2 * g + 2 * j]);
+            }
+        }
+        let o = &mut out[j * head_dim..(j + 1) * head_dim];
+        o.fill(0.0);
+        let mut l = 0.0f32;
+        for i in 0..n {
+            let (mi, li) = (ml[i * 2 * g + 2 * j], ml[i * 2 * g + 2 * j + 1]);
+            if li <= 0.0 {
+                continue;
+            }
+            let w = libm::expf(mi - mmax);
+            l += w * li;
+            let src = &partes[(i * g + j) * head_dim..(i * g + j + 1) * head_dim];
+            for d in 0..head_dim {
+                o[d] += w * src[d];
+            }
+        }
+        if l > 0.0 {
+            let inv = 1.0 / l;
+            for d in 0..head_dim {
+                o[d] *= inv;
+            }
         }
     }
 }
@@ -177,14 +251,12 @@ mod avx {
     #[inline]
     #[target_feature(enable = "avx2,fma")]
     unsafe fn hsum(v: __m256) -> f32 {
-        unsafe {
-            let lo = _mm256_castps256_ps128(v);
-            let hi = _mm256_extractf128_ps(v, 1);
-            let s = _mm_add_ps(lo, hi);
-            let s = _mm_add_ps(s, _mm_movehl_ps(s, s));
-            let s = _mm_add_ss(s, _mm_shuffle_ps(s, s, 1));
-            _mm_cvtss_f32(s)
-        }
+        let lo = _mm256_castps256_ps128(v);
+        let hi = _mm256_extractf128_ps(v, 1);
+        let s = _mm_add_ps(lo, hi);
+        let s = _mm_add_ps(s, _mm_movehl_ps(s, s));
+        let s = _mm_add_ss(s, _mm_shuffle_ps(s, s, 1));
+        _mm_cvtss_f32(s)
     }
 
     /// Q·K de 8 tokens a la vez (`kbuf[(t0 + u) * hd ..]` es la fila convertida del token `u`): 8
@@ -233,12 +305,10 @@ mod avx {
     #[inline]
     #[target_feature(enable = "avx2,fma")]
     unsafe fn hmax(v: __m256) -> f32 {
-        unsafe {
-            let m = _mm_max_ps(_mm256_castps256_ps128(v), _mm256_extractf128_ps(v, 1));
-            let m = _mm_max_ps(m, _mm_movehl_ps(m, m));
-            let m = _mm_max_ss(m, _mm_shuffle_ps(m, m, 1));
-            _mm_cvtss_f32(m)
-        }
+        let m = _mm_max_ps(_mm256_castps256_ps128(v), _mm256_extractf128_ps(v, 1));
+        let m = _mm_max_ps(m, _mm_movehl_ps(m, m));
+        let m = _mm_max_ss(m, _mm_shuffle_ps(m, m, 1));
+        _mm_cvtss_f32(m)
     }
 
     /// # Safety
@@ -256,6 +326,8 @@ mod avx {
         v_f16: &[u16],
         kv_dim: usize,
         kv_head: usize,
+        t_ini: usize,
+        ml_out: *mut f32,
     ) {
         unsafe {
             let hd = NCH * 8;
@@ -272,7 +344,7 @@ mod avx {
             }
             let max_limite = seq_primero + ntok - 1;
 
-            let mut t0 = 0usize;
+            let mut t0 = t_ini;
             while t0 < max_limite {
                 let tn_max = (max_limite - t0).min(GT);
                 // K y V del tile a f32, una vez para todas las consultas.
@@ -351,6 +423,14 @@ mod avx {
                     m[idx] = m_new;
                 }
                 t0 += tn_max;
+            }
+            if !ml_out.is_null() {
+                // Modo parcial (atención partida por trozos de contexto): sin normalizar, con el máximo y la suma de cada consulta.
+                for idx in 0..nq {
+                    *ml_out.add(2 * idx) = m[idx];
+                    *ml_out.add(2 * idx + 1) = l[idx];
+                }
+                return;
             }
             for idx in 0..nq {
                 if l[idx] > 0.0 {

@@ -20,6 +20,7 @@ mod sal;
 
 fn main() {
     as_user::restore_invoking_env();
+    apartar_temporales();
     let cmd = std::env::args().nth(1).unwrap_or_else(|| "run".into());
     match cmd.as_str() {
         "sal-build" => sal::build(&std::env::args().skip(2).collect::<Vec<_>>()),
@@ -253,6 +254,19 @@ fn convert_gguf(args: &[String]) {
 fn project_root() -> PathBuf {
     // xtask vive en <root>/xtask
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+}
+
+/// `/tmp` tiene cuota por usuario (~12 GiB) y ya está llena. `cc`, la FAT del
+/// bootloader (`NamedTempFile`) y el empaquetado live escriben ahí si
+/// `TMPDIR` no dice otra cosa.
+fn apartar_temporales() {
+    let actual = std::env::temp_dir();
+    if actual != Path::new("/tmp") && actual != Path::new("/var/tmp") {
+        return;
+    }
+    let tmp = project_root().join("target/tmp");
+    std::fs::create_dir_all(&tmp).expect("no se pudo crear target/tmp");
+    unsafe { std::env::set_var("TMPDIR", &tmp) };
 }
 
 /// Copia el último `cargo xtask release` a `rootfs/var/forja-out/` (bucle OTA local).
@@ -637,10 +651,6 @@ fn ovmf_vars_writable_named(src: &Path, name: &str) -> PathBuf {
     dst
 }
 
-fn ovmf_vars_writable(src: &Path) -> PathBuf {
-    ovmf_vars_writable_named(src, "OVMF_VARS.fd")
-}
-
 /// Compila el kernel y genera imágenes BIOS + UEFI. Devuelve la que
 /// corresponda a `SOSO_FIRMWARE` (BIOS por defecto; si se pide UEFI y no
 /// hay OVMF, avisa y cae a BIOS).
@@ -910,7 +920,13 @@ pub(crate) fn build_user() -> bool {
     let mut cmd = Command::new("cargo");
     as_user::apply_invoking_user(&mut cmd);
     apply_heap_debug_env(&mut cmd);
+    // /tmp tiene cuota por usuario (~12 GiB) y cc deja ahí el .s intermedio.
+    // Con la cuota llena, ring falla con «Disk quota exceeded» aunque el
+    // disco del proyecto tenga sitio.
+    let tmp = root.join("target/tmp");
+    std::fs::create_dir_all(&tmp).expect("no se pudo crear target/tmp");
     let status = cmd
+        .env("TMPDIR", &tmp)
         .current_dir(root.join("user"))
         .args(["build", "--release", "--target-dir"])
         .arg(root.join("target/user"))

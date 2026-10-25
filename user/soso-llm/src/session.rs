@@ -526,10 +526,6 @@ impl PropietarioSesion {
         }
     }
 
-    pub fn necesita_carga(&self, want: &str) -> bool {
-        self.necesita_carga_con_firma(want, "")
-    }
-
     pub fn necesita_carga_con_firma(&self, want: &str, cluster_firma: &str) -> bool {
         self.sesion.as_ref().map_or(true, |s| {
             s.modelo != want || self.cluster_firma != cluster_firma

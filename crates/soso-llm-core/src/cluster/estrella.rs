@@ -4,9 +4,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::pipeline::{
-    AckPayload, AssignPayload, BeginPayload, FramedTransport, HelloPayload, Message, NodeCaps,
-    PipelinePlan, PipelineSegment, RecvError, StepPayload, StepReplyPayload, TruncatePayload,
-    Transport, NowMs, ROLE_HEAD, ROLE_NODE, WIRE_F16,
+    AssignPayload, BeginPayload, FramedTransport, HelloPayload, Message, NodeCaps, PipelinePlan,
+    PipelineSegment, StepPayload, TruncatePayload, Transport, NowMs, ROLE_HEAD, ROLE_NODE,
+    WIRE_F16,
 };
 use crate::remoto::{JournalActivaciones, TramoRemoto};
 
@@ -64,8 +64,6 @@ pub struct PendingEnlace<T: Transport> {
 struct InflightStep {
     pos: usize,
     n: usize,
-    prefix_hash: u32,
-    hidden: Vec<f32>,
 }
 
 pub trait Conector {
@@ -571,12 +569,7 @@ impl<C: Conector> TramoRemoto for EstrellaHead<C> {
                 hidden: hidden.clone(),
             }))?;
             if i + 1 == remote_count {
-                self.inflight[i] = Some(InflightStep {
-                    pos,
-                    n,
-                    prefix_hash,
-                    hidden: hidden.clone(),
-                });
+                self.inflight[i] = Some(InflightStep { pos, n });
                 break;
             }
             let cfg = self.cfg.clone();

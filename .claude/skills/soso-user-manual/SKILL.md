@@ -77,6 +77,7 @@ Referencia rápida — ampliar el manual si cambian:
 - **Coreutils:** `uname`, `ls`, `cat`, `echo`, `mkdir`, `rm`, `hexdump`, `grep`, `ip`, `ps`, `ping`, `halt`, `reboot`, `notifybug`. `uname` muestra versión, kernel, CPUs, tiempo encendido, memoria, disco, arranque y red (`-a` es lo mismo). `rm [-r|-R|--recursive] <ruta>...` borra ficheros y directorios vacíos; con `-r` también el contenido, de dentro hacia fuera. No borra `/` ni una ruta que sea la raíz (`rm -r ..`). El `rm` de la kernel-shell no es recursivo. `cat`/`grep`/`hexdump` leen stdin sin argumentos (`log | grep askd`); `-` sigue valiendo. `grep` es subcadena (0/1/2), con `-i/-n/-l/-r/-F/-m`, `--include`/`--exclude` y `-a` para binarios. **`notifybug`**: issue en GitHub con colas de `/var/log` (`/etc/notifybug.conf`, `--ver`)
 - **LLM:** `soso-llm run …`; modelos en `/models/`; live escala modelo según tamaño del stick
 - **Red:** `ip` (IPv4); `ping` (ICMP); echo TCP `nc localhost 7777`; live: Realtek 8168 o WiFi AX211/AX200
+- **Sal (paquete opcional):** `sal build fuente.sal -o programa`, `sal run fuente.sal -- argumentos`, `sal-contar archivo`; uso en el manual y construcción/estado en `docs/PLAN-SAL.md`.
 
 ## Skills compartidas
 

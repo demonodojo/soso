@@ -56,6 +56,8 @@ Estado y matriz hardware: [`docs/ESTADO.md`](../../docs/ESTADO.md), [`docs/HW-MA
 | `cargo xtask gdb` | Frozen at boot; `gdb -ex 'target remote :1234'` |
 | `cargo xtask mkfs` | Force-regenerate sosofs data image from `rootfs/` |
 | `cargo xtask test` | Full integration: sosofs, boot, TCP, SSH, soso-llm, halt |
+| `cargo xtask sal-build [--cross-only]` | Prepara el SDK/utilidad Sal y, sin `--cross-only`, el compilador nativo; pin del checkout en `config/sal-source.lock` |
+| `cargo xtask test-sal` | Banco offline Sal en QEMU aislado: compilar desde fuentes, ejecutar y recompilar. Guía y estado en `docs/PLAN-SAL.md` |
 | `cargo xtask bench-llm` | Medir tok/s decode (modelo `bench`, SMP configurable) |
 | `cargo xtask package-usb` | Artefactos clásicos (UEFI + data + models separados) |
 | `cargo xtask package-usb-live` | Imagen live GPT única (`soso-live.img`, modelo demo **qwen27-iq3**, Qwen3.6-27B UD-IQ3_XXS; ver `docs/L5c-on-box.md`) |

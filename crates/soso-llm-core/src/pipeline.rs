@@ -408,22 +408,6 @@ fn read_name(data: &[u8], off: &mut usize) -> Result<String, CodecError> {
         .map_err(|_| CodecError::InvalidUtf8)
 }
 
-fn read_hidden_f32(data: &[u8], off: &mut usize) -> Result<Vec<f32>, CodecError> {
-    let hidden_len = read_u32(data, off)? as usize;
-    let mut hidden = Vec::with_capacity(hidden_len);
-    for _ in 0..hidden_len {
-        hidden.push(read_f32(data, off)?);
-    }
-    Ok(hidden)
-}
-
-fn write_hidden_f32(out: &mut Vec<u8>, hidden: &[f32]) {
-    write_u32(out, hidden.len() as u32);
-    for v in hidden {
-        write_f32(out, *v);
-    }
-}
-
 /// Lee un bloque `n_tokens × hidden_dim` en el formato de cable indicado.
 pub fn decode_hidden_wire(
     data: &[u8],

@@ -38,12 +38,13 @@ def preparar():
 
 def probar():
     preparar()
+    shutil.copy2(REPO / "target/soso-uefi.img", OUT / "boot.img")
     shutil.copy2("/usr/share/OVMF/OVMF_VARS_4M.fd", OUT / "vars.fd")
     cmd = ["qemu-system-x86_64", "-machine", "q35", "-cpu", "max", "-m", "2048", "-smp", "2",
            "-accel", "kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg",
            "-drive", "if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd",
            "-drive", f"if=pflash,format=raw,file={OUT}/vars.fd",
-           "-drive", f"format=raw,snapshot=on,file={REPO}/target/soso-uefi.img",
+           "-drive", f"format=raw,file={OUT}/boot.img",
            "-drive", f"if=none,id=root,format=raw,file={OUT}/data.img",
            "-device", "virtio-blk-pci,drive=root", "-nic", "none", "-display", "none",
            "-serial", "stdio", "-monitor", "none", "-no-reboot"]
@@ -87,9 +88,16 @@ def probar():
         ejecutar("/bin/sal-sonda 0 /tmp/imports", ["respuesta=42", "SAL_OK código 0"])
         ejecutar("/bin/sal-sonda 0 /bin/sal build /tests/runtime.sal -o /tmp/runtime", ["SAL_OK código 0"], 300)
         ejecutar('/bin/sal-sonda 0 /tmp/runtime "dos palabras"', ["hola ñ", "SAL_OK código 0"])
+        ejecutar('/bin/sal-sonda 3 /tmp/runtime incorrecto', ["SAL_OK código 3"])
+        ejecutar('/bin/sal-sonda 0 /bin/sal run /tests/runtime.sal -- "dos palabras"', ["hola ñ", "SAL_OK código 0"], 300)
+        ejecutar("/bin/sal-sonda 0 /bin/sal build /tests/process.sal -o /tmp/process", ["SAL_OK código 0"], 300)
+        ejecutar("/bin/sal-sonda 0 /tmp/process", ["proceso correcto", "SAL_OK código 0"])
+        ejecutar("/bin/sal-sonda 0 /bin/sal build /tests/read_error.sal -o /tmp/read-error", ["SAL_OK código 0"], 300)
+        ejecutar("/bin/sal-sonda 1 /tmp/read-error", ["SAL_OK código 1"])
         ejecutar("/bin/sal-sonda 1 /bin/sal build /tests/error.sal -o /tmp/error", ["SAL_OK código 1"])
         ejecutar("/bin/sal-sonda 0 /bin/sal build /tests/sal-contar.sal -o /tmp/contar", ["SAL_OK código 0"], 300)
         ejecutar("/bin/sal-sonda 0 /tmp/contar /tests/utf8", ["bytes=13 lineas=1", "SAL_OK código 0"])
+        ejecutar("/bin/sal-sonda 1 /tmp/contar /tests/nul", ["UTF-8 sin NUL", "SAL_OK código 1"])
         ejecutar('echo "fn main() -> Int" > /tmp/edit.sal')
         ejecutar('echo "    7" >> /tmp/edit.sal')
         ejecutar("/bin/sal-sonda 0 /bin/sal build /tmp/edit.sal -o /tmp/edit", ["SAL_OK código 0"], 300)

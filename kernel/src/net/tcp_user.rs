@@ -283,11 +283,6 @@ pub fn listen_start(
 /// el crate entero sólo para nombrarlos.
 pub use smoltcp::socket::tcp::State as EstadoSmoltcp;
 
-pub fn is_established(sockets: &smoltcp::iface::SocketSet<'static>, handle: SocketHandle) -> bool {
-    let s = sockets.get::<tcp::Socket>(handle);
-    s.state() == tcp::State::Established
-}
-
 /// ¿Hay una conexión entrante que entregar al usuario en este listener?
 ///
 /// **No basta con `Established`.** Un cliente que manda su petición y cierra

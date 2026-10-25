@@ -22,19 +22,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use ask::{resto_tras, run_ask};
-use distributed::{
-    crc_bytes, default_keepalive, default_timeouts, DistributedConfig, PrelinkedHead,
-};
+use distributed::{default_keepalive, default_timeouts, DistributedConfig, PrelinkedHead};
 use libsoso::{println, sys};
 use pool::ThreadPool;
 use soso_abi::{self as abi, O_RDONLY};
-use soso_llm_core::layer::TensorSource;
 use soso_llm_core::parallel::RowParallel;
-use soso_llm_core::plan::{
-    bytes_por_capa, MemSnapshot, MemoryPlanConfig, MemoryPreset, ResourcePlanner,
-};
+use soso_llm_core::plan::{bytes_por_capa, MemSnapshot, MemoryPlanConfig, MemoryPreset};
 use soso_llm_core::pipeline::{NodeCaps, PipelinePlan, PipelineRole, WIRE_F16, WIRE_F32};
-use soso_llm_core::runtime::{Backend, Runtime};
 use soso_llm_core::conversation::ModelProfile;
 use soso_llm_core::generation::{
     stops_from_eos, GenCheckpoint, GenerationObserver, GenerationOptions, GenerationReport,

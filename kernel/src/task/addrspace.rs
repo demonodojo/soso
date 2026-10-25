@@ -56,6 +56,18 @@ struct AddrSpaceInner {
 
 impl Drop for AddrSpaceInner {
     fn drop(&mut self) {
+        let shm_regions: Vec<MmapRegion> = self
+            .mmap
+            .lock()
+            .regions
+            .iter()
+            .filter(|r| r.shm_id != 0)
+            .cloned()
+            .collect();
+        for r in &shm_regions {
+            unmap_keep_frames(self.pml4, r.virt_start, r.len);
+            super::shm::drop_ref(r.shm_id);
+        }
         // El CR3 activo NO debe ser este espacio.
         free_user_tree(self.pml4);
     }
@@ -88,6 +100,30 @@ impl WeakAddrSpace {
 
 fn table_mut(frame: PhysFrame) -> &'static mut PageTable {
     unsafe { &mut *mm::phys_to_virt(frame.start_address().as_u64()).as_mut_ptr() }
+}
+
+/// Desmapea un rango de usuario sin devolver los frames físicos (p. ej. shm).
+fn unmap_keep_frames(pml4: PhysFrame, start: u64, len: u64) {
+    const HUGE: u64 = 2 * 1024 * 1024;
+    let phys_offset = mm::phys_to_virt(0);
+    let mut mapper = unsafe { OffsetPageTable::new(table_mut(pml4), phys_offset) };
+    let end = start + len;
+    let mut va = start & !0xfff;
+    while va < end {
+        if va % HUGE == 0 && va + HUGE <= end {
+            let page2m = Page::<Size2MiB>::containing_address(VirtAddr::new(va));
+            if let Ok((_, flush)) = mapper.unmap(page2m) {
+                flush.flush();
+                va += HUGE;
+                continue;
+            }
+        }
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
+        if let Ok((_, flush)) = mapper.unmap(page) {
+            flush.flush();
+        }
+        va += 4096;
+    }
 }
 
 fn free_user_tree(pml4: PhysFrame) {
@@ -319,6 +355,11 @@ impl AddrSpace {
                 fa.deallocate_frame(frame);
             }
         }
+    }
+
+    /// Desmapea sin liberar frames (shm u otros dueños externos del físico).
+    pub fn unmap_range_keep_frames(&self, start: u64, len: u64) {
+        unmap_keep_frames(self.inner.pml4, start, len);
     }
 
     /// Desmapea un rango de páginas (4 KiB o 2 MiB) y libera sus frames.

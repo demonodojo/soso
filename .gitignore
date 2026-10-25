@@ -8,6 +8,8 @@
 # Userspace: binarios ELF copiados por `cargo xtask` desde user/
 /rootfs/bin/
 /rootfs/lib/rustlib/
+/rootfs/lib/sal/
+/rootfs/usr/share/sal/
 
 # Artefactos de `cargo xtask test-update` (release de prueba y su marcador)
 /rootfs/etc/actualiza-marca.txt

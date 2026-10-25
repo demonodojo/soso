@@ -28,6 +28,17 @@ pub struct GpuStats {
     pub samples: [u64; N_TRAMOS],
 }
 
+/// Un experto de un bloque de prefill MoE: sus tres matrices y los tokens que lo eligen.
+pub struct ExpertoBloque<'a> {
+    /// Claves estables de `ffn_gate`, `ffn_up` y `ffn_down` (para tenerlas residentes).
+    pub claves: [&'a str; 3],
+    pub vistas: [&'a TensorView<'a>; 3],
+    /// Índice (dentro del bloque) de cada token que elige este experto.
+    pub tokens: &'a [u32],
+    /// `tokens.len() × h` floats: salida de la proyección `down` de cada token.
+    pub salida: &'a mut [f32],
+}
+
 /// Una operación matvec dentro de un lote.
 pub struct MatvecOp<'a> {
     pub key: &'a str,
@@ -295,6 +306,22 @@ pub trait GpuDispatch {
     ) -> Result<bool, ()> {
         let _ = (key, view, rows, cols, n, x, out);
         Ok(false)
+    }
+
+    /// Expertos de un bloque de `n` tokens (`xs`: `n` vectores de `h`) con los tokens agrupados por experto: gate, up, SwiGLU y down de
+    /// cada uno en el dispositivo, con una sola espera. `hecho[i]` queda a `true` para los resueltos (`exps[i].salida` rellena); el resto
+    /// los hace quien llama. Por defecto no resuelve ninguno.
+    fn expertos_bloque(
+        &mut self,
+        xs: &[f32],
+        n: usize,
+        h: usize,
+        ffn: usize,
+        exps: &mut [ExpertoBloque<'_>],
+        hecho: &mut [bool],
+    ) -> Result<(), ()> {
+        let _ = (xs, n, h, ffn, exps, hecho);
+        Ok(())
     }
 
     /// Varios matvec de **un** vector con una sola espera al final. `hecho[i]` queda a `true` para los que el

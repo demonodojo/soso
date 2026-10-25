@@ -815,6 +815,48 @@ pub(crate) fn atencion_f16_grupos(
     let v = kv.v_f16_slice();
     let q_ptr = qs.as_ptr() as usize;
     let o_ptr = outs.as_mut_ptr() as usize;
+    // Decodificación con contexto largo: el contexto se parte en trozos de `TROZO_CONTEXTO` posiciones (el reparto depende sólo de la
+    // longitud, no de los hilos) y cada (cabeza KV, trozo) es una tarea; sin esto un solo token usaba tantos hilos como cabezas KV.
+    if n == 1 && seq_primero >= 2 * TROZO_CONTEXTO && !SIN_PARTIR.load(Ordering::Relaxed) && crate::attn_grupo::puede_partir(head_dim, group) {
+        let nt = seq_primero.div_ceil(TROZO_CONTEXTO);
+        let tareas = kv_heads * nt;
+        let mut partes = alloc::vec![0.0f32; tareas * group * head_dim];
+        let mut ml = alloc::vec![0.0f32; tareas * 2 * group];
+        let (p_ptr, m_ptr) = (partes.as_mut_ptr() as usize, ml.as_mut_ptr() as usize);
+        par.for_rows(tareas, &move |t0, t1| {
+            for t in t0..t1 {
+                let (kvh, c) = (t / nt, t % nt);
+                let (lo, hi) = (c * TROZO_CONTEXTO, ((c + 1) * TROZO_CONTEXTO).min(seq_primero));
+                unsafe {
+                    crate::attn_grupo::attention_f16_trozo_raw(
+                        (q_ptr as *const f32).add(kvh * group * head_dim),
+                        (p_ptr as *mut f32).add(t * group * head_dim),
+                        (m_ptr as *mut f32).add(t * 2 * group),
+                        group,
+                        lo,
+                        hi,
+                        k,
+                        v,
+                        head_dim,
+                        kv_dim,
+                        kvh,
+                    );
+                }
+            }
+        });
+        for kvh in 0..kv_heads {
+            let o = &mut outs[kvh * group * head_dim..(kvh + 1) * group * head_dim];
+            crate::attn_grupo::combinar_trozos(
+                &partes[kvh * nt * group * head_dim..(kvh + 1) * nt * group * head_dim],
+                &ml[kvh * nt * 2 * group..(kvh + 1) * nt * 2 * group],
+                nt,
+                group,
+                head_dim,
+                o,
+            );
+        }
+        return;
+    }
     // Cada tarea: una cabeza KV y hasta `TOKENS_POR_TAREA` tokens seguidos, que comparten la
     // conversión de K/V (hasta 4 × 7 cabezas por fila convertida).
     let trozos = n.div_ceil(TOKENS_POR_TAREA);
@@ -852,6 +894,10 @@ pub(crate) fn atencion_f16_grupos(
 
 /// Tokens consecutivos del bloque que una tarea de atención procesa juntos.
 const TOKENS_POR_TAREA: usize = 4;
+/// Diagnóstico: `true` desactiva la atención partida por trozos (decodificación con el kernel de siempre).
+pub static SIN_PARTIR: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// Posiciones de contexto por tarea en la decodificación partida (ver `atencion_f16_grupos`).
+const TROZO_CONTEXTO: usize = 1024;
 
 /// `up[i] = silu(gate[i]) * up[i]` repartido entre hilos. Es elemento a elemento, así que el
 /// reparto no cambia el resultado.
@@ -1394,7 +1440,7 @@ impl<'a> LayerExecutor<'a> {
         use_gpu: bool,
     ) -> Result<(), ()> {
         if crate::bloque35::soporta(self, layer, kv) {
-            return crate::bloque35::forward_layer_block_q35(self, layer, pos0, n, hs, bs, s, kv, source);
+            return crate::bloque35::forward_layer_block_q35(self, layer, pos0, n, hs, bs, s, kv, source, gpu, use_gpu);
         }
         if crate::gemma::es_capa_gemma(self.manifest.layer(layer).map_or(0, |l| l.flags)) {
             return crate::gemma::forward_layer_gemma_block(self, layer, pos0, n, hs, bs, s, kv, source, gpu, use_gpu);

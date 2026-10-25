@@ -8,15 +8,20 @@ out="$repo/target/sal/native"
 mkdir -p "$out/sysroot/lib/rustlib"
 rustc="$vendor/build-soso/x86_64-unknown-linux-gnu/stage1/bin/rustc"
 syslib="$vendor/build-soso/x86_64-unknown-linux-gnu/ci-rustc-sysroot/lib/rustlib/x86_64-unknown-soso"
-test -x "$rustc"
-test -d "$syslib/lib"
+if [ ! -x "$rustc" ] || [ ! -d "$syslib/lib" ]; then
+    echo 'Falta la toolchain Rust de soso: consulta docs/SELF-HOSTING.md (rust-bootstrap / rust-build-std).' >&2
+    exit 1
+fi
+command -v wild >/dev/null || { echo 'Falta el enlazador wild del host (docs/SELF-HOSTING.md).' >&2; exit 1; }
+cargo build --release --manifest-path "$repo/Cargo.toml" -p wild-soso
 ln -sfn "$syslib" "$out/sysroot/lib/rustlib/x86_64-unknown-soso"
 export PATH="$repo/target/release:$PATH"
 export RUST_TARGET_PATH="$vendor"
 llvm=${SAL_LLVM_CONFIG:-/usr/lib/llvm-19/bin/llvm-config}
 test -x "$llvm"
 test "$("$llvm" --version | cut -d. -f1)" = 19
-clang $("$llvm" --cflags) -O2 -c "$repo/tools/sal-llc/main.c" -o "$out/llc.o"
+driver_id=$(cat "$repo/tools/sal-llc/main.c" "$repo/tools/sal-llc/main.rs" "$repo/tests/self-improvement/native/llvm/shims.rs" | sha256sum | cut -d' ' -f1)
+clang $("$llvm" --cflags) "-DSAL_LLC_ID=\"$driver_id\"" -O2 -c "$repo/tools/sal-llc/main.c" -o "$out/llc.o"
 ar rcs "$out/libsal_llc.a" "$out/llc.o"
 cp "$repo/tests/self-improvement/native/llvm/shims.rs" "$out/"
 cp "$repo/tools/sal-llc/main.rs" "$out/lanzador.rs"

@@ -75,6 +75,8 @@ pub struct KeymapState {
     shift: bool,
     caps: bool,
     altgr: bool,
+    alt_left: bool,
+    super_left: bool,
     ctrl: bool,
     dead: Option<Dead>,
     /// Tras un acento no combinable, queda la tecla siguiente por emitir.
@@ -87,6 +89,8 @@ impl KeymapState {
             shift: false,
             caps: false,
             altgr: false,
+            alt_left: false,
+            super_left: false,
             ctrl: false,
             dead: None,
             pending: None,
@@ -107,6 +111,42 @@ impl KeymapState {
 
     pub fn ctrl(&self) -> bool {
         self.ctrl
+    }
+
+    pub fn shift(&self) -> bool {
+        self.shift
+    }
+
+    pub fn alt_left(&self) -> bool {
+        self.alt_left
+    }
+
+    pub fn alt_left_press(&mut self, down: bool) {
+        self.alt_left = down;
+    }
+
+    pub fn super_left_press(&mut self, down: bool) {
+        self.super_left = down;
+    }
+
+    pub fn input_mod_mask(&self) -> u32 {
+        let mut m = 0u32;
+        if self.shift {
+            m |= 1;
+        }
+        if self.ctrl {
+            m |= 2;
+        }
+        if self.alt_left {
+            m |= 4;
+        }
+        if self.altgr {
+            m |= 8;
+        }
+        if self.super_left {
+            m |= 16;
+        }
+        m
     }
 
     pub fn caps_toggle(&mut self) {
@@ -140,6 +180,8 @@ impl KeymapState {
         match sc {
             0x48 => return KeyOutput::Csi(b'A'),
             0x50 => return KeyOutput::Csi(b'B'),
+            0x4B => return KeyOutput::Csi(b'D'),
+            0x4D => return KeyOutput::Csi(b'C'),
             _ => {}
         }
         match layout() {

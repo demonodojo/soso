@@ -765,6 +765,44 @@ pub fn fb_present(ptr: u64, len: u64) -> Result<(), i64> {
     if r < 0 { Err(r) } else { Ok(()) }
 }
 
+pub fn fb_present_rect(buf: u64, len: u64, x: u32, y: u32, w: u32, h: u32) -> Result<(), i64> {
+    let xy = (x as u64) | ((y as u64) << 16);
+    let wh = (w as u64) | ((h as u64) << 16);
+    let r = syscall4(abi::SYS_FB_PRESENT_RECT, buf, len, xy, wh);
+    if r < 0 { Err(r) } else { Ok(()) }
+}
+
+/// Abre un pseudo-terminal. Devuelve `(fd_maestro, ranura_pty)`.
+pub fn pty_open() -> Result<(u64, u8), i64> {
+    let r = syscall1(abi::SYS_PTY_OPEN, 0);
+    if r < 0 {
+        return Err(r);
+    }
+    let fd = (r >> 32) as u64;
+    let slot = (r & 0xff) as u8;
+    Ok((fd, slot))
+}
+
+pub fn shm_create(len: u64) -> Result<u64, i64> {
+    let r = syscall1(abi::SYS_SHM_CREATE, len);
+    if r < 0 { Err(r) } else { Ok(r as u64) }
+}
+
+pub fn shm_map(id: u64) -> Result<u64, i64> {
+    let r = syscall1(abi::SYS_SHM_MAP, id);
+    if r < 0 { Err(r) } else { Ok(r as u64) }
+}
+
+pub fn shm_free(id: u64) -> Result<(), i64> {
+    let r = syscall1(abi::SYS_SHM_FREE, id);
+    if r < 0 { Err(r) } else { Ok(()) }
+}
+
+/// Stdio atado a `Console::Pty(slot)` para `spawn_io_full`.
+pub fn fd_pty_stdio(slot: u8) -> u64 {
+    abi::FD_PTY_TTY_BASE - slot as u64
+}
+
 pub fn input_poll(out: &mut [abi::InputEvent]) -> i64 {
     syscall4(
         abi::SYS_INPUT_POLL,

@@ -83,11 +83,6 @@ pub fn abrir(ino: u64, dir: u64, name: &str, cargar: impl FnOnce() -> Vec<u8>) {
     }
 }
 
-/// `true` si ese inodo está en la caché.
-pub fn tiene(ino: u64) -> bool {
-    CACHE.lock().contains_key(&ino)
-}
-
 /// Longitud actual, o `None` si no está.
 pub fn largo(ino: u64) -> Option<usize> {
     CACHE.lock().get(&ino).map(|e| e.data.len())
@@ -229,14 +224,4 @@ pub fn soltar_todos(pid: u64) {
             e.exclusivo = false;
         }
     }
-}
-
-/// Quién tiene el cerrojo y en qué modo. Para diagnóstico y pruebas.
-pub fn cerrojo(ino: u64) -> Option<(usize, bool)> {
-    let c = CACHE.lock();
-    let e = c.get(&ino)?;
-    if e.titulares.is_empty() {
-        return None;
-    }
-    Some((e.titulares.len(), e.exclusivo))
 }

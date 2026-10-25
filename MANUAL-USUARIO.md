@@ -29,6 +29,7 @@ el [`README.md`](README.md) (en inglés). Guía operativa de desarrollo:
 | Instalación | **soso-install** | Copiar el live a un disco NVMe desde soso, sin Linux |
 | Actualización | **soso-update** | Bajar e instalar releases nuevas (programas + kernel) |
 | Desarrollo | **soso-ed**, **soso-forja** | Editar fuentes en `/src/soso`; bucle remoto o plan local (`docs/SELF-HOSTING.md`) |
+| Programación | **sal**, **sal-contar** (paquete opcional) | Compilar utilidades Sal sin red; contar bytes y saltos de línea |
 | Utilidades | **cp**, **mv**, **grep**, **diff**, **find**, **wc**, **head**, **tail**, **stat** | Coreutils mínimas para editar y depurar en el guest |
 | Red | **ip**, **ping**, **dns**, **wifi** (builtin) | Ver la IPv4; comprobar alcance ICMP; resolver un nombre; escanear y conectar redes WiFi Intel en placa real |
 | Sistema | **uname**, **ps**, **halt**, **reboot**, **exit** | Versión y estado del equipo; ver procesos; apagar, reiniciar o salir de la shell |
@@ -1200,6 +1201,38 @@ Detalle en [Descargar desde Hugging Face (guest)](#descargar-desde-hugging-face-
 
 ---
 
+### Sal — programar utilidades
+
+Las imágenes preparadas con `cargo xtask sal-build` incluyen **sal** y
+**sal-contar**. Puedes compilar y ejecutar programas dentro de soso sin red:
+
+```sh
+cd /tmp
+echo "fn main() -> Int" > hola.sal
+echo "    42" >> hola.sal
+sal build hola.sal -o /tmp/hola
+/tmp/hola
+sal run hola.sal
+```
+
+El ejemplo devuelve `42`; la shell muestra ese código. Edita `hola.sal` con
+`soso-ed` y repite `sal build` o `sal run` para recompilarlo. Para pasar argumentos,
+usa `sal run programa.sal -- "dos palabras"`. Los ejemplos están en
+`/usr/share/sal/` y el SDK en `/lib/sal/`.
+
+```sh
+echo hola > nota.txt
+sal-contar nota.txt
+```
+
+Muestra `bytes=5 lineas=1`. El segundo total cuenta saltos de línea LF; una
+última línea sin salto no lo incrementa. Acepta texto UTF-8 sin NUL. Un archivo
+inexistente, ilegible o inválido devuelve error; sin el argumento de ruta
+muestra la sintaxis. Esta versión usa CPU; GPU, TPU e instrumentación producen
+un diagnóstico de opción no soportada.
+
+Construcción desde Linux y seguimiento del port: [PLAN-SAL.md](docs/PLAN-SAL.md).
+
 ## Estructura del disco
 
 Tras el arranque, el filesystem **sosofs** expone al menos:
@@ -2245,6 +2278,7 @@ pwd
 cd /tmp
 echo hola > nota.txt
 cat nota.txt
+sal-contar nota.txt          # si está incluido el paquete Sal
 ls /
 ls /models
 

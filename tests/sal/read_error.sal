@@ -1,0 +1,2 @@
+fn main() -> Int ! io, alloc
+    print_str(read_file(d"/no-existe-sal"))

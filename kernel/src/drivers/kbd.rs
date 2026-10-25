@@ -304,6 +304,21 @@ fn emit_tty_byte_try(b: u8) -> bool {
     true
 }
 
+fn emit_key_bytes(km: &KeymapState, buf: &[u8]) {
+    let mods = km.input_mod_mask();
+    let exclusive = crate::drivers::fb::fb_input_exclusive();
+    for &b in buf {
+        if exclusive {
+            crate::drivers::input::push_key(b as u32, true, mods);
+        } else {
+            emit_tty_byte(b);
+            if crate::drivers::fb::graphics_mode() {
+                crate::drivers::input::push_key(b as u32, true, mods);
+            }
+        }
+    }
+}
+
 fn enqueue_output(km: &mut KeymapState, out: keymap::KeyOutput) {
     let out = if km.ctrl() { ctrl_byte(out) } else { out };
     let mut buf = [0u8; 4];
@@ -311,12 +326,7 @@ fn enqueue_output(km: &mut KeymapState, out: keymap::KeyOutput) {
     if n == 0 {
         return;
     }
-    for &b in &buf[..n] {
-        emit_tty_byte(b);
-        if crate::drivers::fb::graphics_mode() {
-            crate::drivers::input::push_key(b as u32, true);
-        }
-    }
+    emit_key_bytes(km, &buf[..n]);
     while let Some(pending) = km.take_pending() {
         let pending = if km.ctrl() {
             ctrl_byte(pending)
@@ -324,14 +334,11 @@ fn enqueue_output(km: &mut KeymapState, out: keymap::KeyOutput) {
             pending
         };
         let n2 = keymap::output_bytes(pending, &mut buf);
-        for &b in &buf[..n2] {
-            emit_tty_byte(b);
-            if crate::drivers::fb::graphics_mode() {
-                crate::drivers::input::push_key(b as u32, true);
-            }
-        }
+        emit_key_bytes(km, &buf[..n2]);
     }
-    crate::task::kick_if_tty_waiting();
+    if !crate::drivers::fb::fb_input_exclusive() {
+        crate::task::kick_if_tty_waiting();
+    }
 }
 
 fn enqueue_output_try(km: &mut KeymapState, out: keymap::KeyOutput) {
@@ -341,12 +348,15 @@ fn enqueue_output_try(km: &mut KeymapState, out: keymap::KeyOutput) {
     if n == 0 {
         return;
     }
+    let mods = km.input_mod_mask();
+    let exclusive = crate::drivers::fb::fb_input_exclusive();
     for &b in &buf[..n] {
-        if !emit_tty_byte_try(b) {
+        if exclusive {
+            crate::drivers::input::push_key(b as u32, true, mods);
+        } else if !emit_tty_byte_try(b) {
             return;
-        }
-        if crate::drivers::fb::graphics_mode() {
-            crate::drivers::input::push_key(b as u32, true);
+        } else if crate::drivers::fb::graphics_mode() {
+            crate::drivers::input::push_key(b as u32, true, mods);
         }
     }
     while let Some(pending) = km.take_pending() {
@@ -357,15 +367,18 @@ fn enqueue_output_try(km: &mut KeymapState, out: keymap::KeyOutput) {
         };
         let n2 = keymap::output_bytes(pending, &mut buf);
         for &b in &buf[..n2] {
-            if !emit_tty_byte_try(b) {
+            if exclusive {
+                crate::drivers::input::push_key(b as u32, true, mods);
+            } else if !emit_tty_byte_try(b) {
                 return;
-            }
-            if crate::drivers::fb::graphics_mode() {
-                crate::drivers::input::push_key(b as u32, true);
+            } else if crate::drivers::fb::graphics_mode() {
+                crate::drivers::input::push_key(b as u32, true, mods);
             }
         }
     }
-    crate::task::kick_if_tty_waiting();
+    if !exclusive {
+        crate::task::kick_if_tty_waiting();
+    }
 }
 
 fn handle_make_scancode(sc: u8) {
@@ -400,6 +413,8 @@ fn handle_scancode(sc: u8) {
             0x2A | 0x36 => km.shift_press(false),
             0x1D => km.ctrl_press(false),
             0x38 if extended => km.altgr_press(false),
+            0x38 => km.alt_left_press(false),
+            0x5B if extended => km.super_left_press(false),
             _ => {}
         }
         return;
@@ -420,7 +435,15 @@ fn handle_scancode(sc: u8) {
             return;
         }
         0x38 => {
-            // Left Alt: no activa AltGr en layout ES.
+            km.alt_left_press(true);
+            return;
+        }
+        0x5B if extended => {
+            km.super_left_press(true);
+            return;
+        }
+        0x0E if km.ctrl() && km.alt_left() => {
+            crate::drivers::fb::kill_framebuffer_owner();
             return;
         }
         0x3A => {
@@ -454,6 +477,8 @@ fn handle_scancode_try(sc: u8) {
             0x2A | 0x36 => km.shift_press(false),
             0x1D => km.ctrl_press(false),
             0x38 if extended => km.altgr_press(false),
+            0x38 => km.alt_left_press(false),
+            0x5B if extended => km.super_left_press(false),
             _ => {}
         }
         return;
@@ -475,7 +500,18 @@ fn handle_scancode_try(sc: u8) {
             km.altgr_press(true);
             return;
         }
-        0x38 => return,
+        0x38 => {
+            km.alt_left_press(true);
+            return;
+        }
+        0x5B if extended => {
+            km.super_left_press(true);
+            return;
+        }
+        0x0E if km.ctrl() && km.alt_left() => {
+            crate::drivers::fb::kill_framebuffer_owner();
+            return;
+        }
         0x3A => {
             km.caps_toggle();
             return;
