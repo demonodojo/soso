@@ -63,6 +63,8 @@ pub fn forward_layer_block_q35<S: TensorSource>(
     if hs.len() != n * h || n == 0 || n > bs.cap {
         return Err(());
     }
+    #[cfg(feature = "std")]
+    let t_capa = std::time::Instant::now();
     let prefix = format!("L{layer:02}");
     let residual: Vec<f32> = hs.to_vec();
     source.load_f32(&format!("{prefix}.attn_norm"), &mut s.norm_w[..h])?;
@@ -94,6 +96,10 @@ pub fn forward_layer_block_q35<S: TensorSource>(
     }
     for i in 0..n {
         add_f32(&residual2[i * h..(i + 1) * h], &salida_ffn[i * h..(i + 1) * h], &mut hs[i * h..(i + 1) * h]);
+    }
+    #[cfg(feature = "std")]
+    if std::env::var_os("SOSO_TRAZA_CAPAS").is_some() {
+        std::eprintln!("[capa] L{layer} n={n} {:?}: {:.1} ms", spec.attn_kind, t_capa.elapsed().as_secs_f64() * 1e3);
     }
     Ok(())
 }

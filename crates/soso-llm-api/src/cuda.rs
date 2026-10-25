@@ -787,6 +787,9 @@ impl CudaGpu {
     ) -> Result<bool, String> {
         let (n_k, n_v, d, ker) = (c.n_k, c.n_v, c.d, c.kernel);
         if d != 128 || n < ker || ker < 2 || n_k == 0 || n_v % n_k != 0 {
+            if std::env::var_os("SOSO_TRAZA_GPU").is_some() {
+                eprintln!("[gpu] gdn_capa rechazada: d {d} n {n} ker {ker} n_k {n_k} n_v {n_v}");
+            }
             return Ok(false);
         }
         let (qkv_dim, v_dim, prev) = (2 * n_k * d + n_v * d, n_v * d, ker - 1);
@@ -801,7 +804,12 @@ impl CudaGpu {
         let mut w = [0u64; 3];
         let mut cod = [(0i32, 0i64); 3];
         for k in 0..3 {
-            let Some(cr) = codigo_mma(c.vistas[k].dtype, dims[k].1) else { return Ok(false) };
+            let Some(cr) = codigo_mma(c.vistas[k].dtype, dims[k].1) else {
+                if std::env::var_os("SOSO_TRAZA_GPU").is_some() {
+                    eprintln!("[gpu] gdn_capa: sin código para {} dtype {} cols {}", c.claves[k], c.vistas[k].dtype, dims[k].1);
+                }
+                return Ok(false);
+            };
             cod[k] = cr;
             if !self.pesos.contains_key(c.claves[k]) {
                 let p = self.subir_peso(c.vistas[k], dims[k].0, dims[k].1)?;
@@ -809,7 +817,12 @@ impl CudaGpu {
             }
             match self.pesos.get(c.claves[k]) {
                 Some(Some(p)) if p.dtype == c.vistas[k].dtype && p.rows == dims[k].0 && p.cols == dims[k].1 => w[k] = p.d,
-                _ => return Ok(false),
+                _ => {
+                    if std::env::var_os("SOSO_TRAZA_GPU").is_some() {
+                        eprintln!("[gpu] gdn_capa: {} no residente", c.claves[k]);
+                    }
+                    return Ok(false);
+                }
             }
         }
         let f = |v: &[f32]| unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) };
@@ -1302,6 +1315,9 @@ impl CudaGpu {
             self.pesos.insert(key.to_string(), p);
         }
         let Some(Some(p)) = self.pesos.get(key) else {
+            if std::env::var_os("SOSO_TRAZA_GPU").is_some() {
+                eprintln!("[gpu] no residente: {key} dtype {} {}x{} n={n}", view.dtype, rows, cols);
+            }
             // Sin sitio en VRAM: con varios tokens por lectura (prefill por bloques) compensa subir los pesos de paso y usar los tensor cores
             // (una matriz de la FFN del 27B son ~34 MB: 6 ms de bus frente a cientos de ms en CPU).
             if n >= 16 && (es_iq_gpu(view.dtype) || view.dtype == DTYPE_Q8_0 || view.dtype == DTYPE_Q4_K) && cols % 256 == 0 {
