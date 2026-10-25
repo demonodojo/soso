@@ -1,0 +1,167 @@
+import "mate.sal"
+import "ventanas.sal"
+import "soso.sal"
+
+fn tab_cap() -> Int
+    16
+
+fn tab_slot_bytes() -> Int
+    128
+
+fn tab_tipo() -> Int
+    0
+
+fn tab_fd() -> Int
+    8
+
+fn tab_pid() -> Int
+    16
+
+fn tab_shm_id() -> Int
+    24
+
+fn tab_shm_ptr() -> Int
+    32
+
+fn tab_cw() -> Int
+    40
+
+fn tab_ch() -> Int
+    48
+
+fn tab_wx() -> Int
+    56
+
+fn tab_wy() -> Int
+    64
+
+fn tab_ww() -> Int
+    72
+
+fn tab_wh() -> Int
+    80
+
+fn tab_fase() -> Int
+    88
+
+fn tab_fwx() -> Int
+    96
+
+fn tab_fwy() -> Int
+    104
+
+fn tab_acc_len() -> Int
+    112
+
+fn tab_term_pos() -> Int
+    120
+
+fn tab_base(tab: Int, i: Int) -> Int
+    tab + i * tab_slot_bytes()
+
+fn tab_get(tab: Int, i: Int, off: Int) -> Int ! alloc
+    b = bytes_view(tab_base(tab, i), tab_slot_bytes())
+    bytes_get_i64(b, off)
+
+fn tab_set(tab: Int, i: Int, off: Int, v: Int) -> Int ! alloc
+    b = bytes_view(tab_base(tab, i), tab_slot_bytes())
+    bytes_set_i64(b, off, v)
+    0
+
+fn tab_tipo_libre() -> Int
+    0
+
+fn tab_tipo_term() -> Int
+    1
+
+fn tab_tipo_cli() -> Int
+    2
+
+fn tab_buscar_libre(tab: Int) -> Int
+    i = 0
+    found = -1
+    while i < tab_cap()
+        if found < 0
+            if tab_get(tab, i, tab_tipo()) == tab_tipo_libre()
+                found = i
+        i = i + 1
+    found
+
+fn tab_slot_activo(tab: Int, i: Int) -> Int
+    if i < 0
+        0
+    else
+        if i >= tab_cap()
+            0
+        else
+            if tab_get(tab, i, tab_tipo()) == tab_tipo_libre()
+                0
+            else
+                1
+
+fn tab_cerrar_slot(tab: Int, i: Int) -> Int ! io, alloc
+    if tab_slot_activo(tab, i) == 0
+        0
+    else
+        fd = tab_get(tab, i, tab_fd())
+        if fd > 0
+            _c = close_fd(fd)
+        sid = tab_get(tab, i, tab_shm_id())
+        if sid > 0
+            _f = shm_free(sid)
+        _z = tab_set(tab, i, tab_tipo(), tab_tipo_libre())
+        _a = tab_set(tab, i, tab_fd(), 0)
+        _p = tab_set(tab, i, tab_pid(), 0)
+        _s = tab_set(tab, i, tab_shm_id(), 0)
+        _m = tab_set(tab, i, tab_fase(), 0)
+        _l = tab_set(tab, i, tab_acc_len(), 0)
+        1
+
+fn tab_zorder_size() -> Int
+    tab_cap() * 8
+
+fn z_get(z: Int, k: Int) -> Int ! alloc
+    b = bytes_view(z, tab_zorder_size())
+    bytes_get_i64(b, k * 8)
+
+fn z_set(z: Int, k: Int, v: Int) -> Int ! alloc
+    b = bytes_view(z, tab_zorder_size())
+    bytes_set_i64(b, k * 8, v)
+    0
+
+fn z_subir(z: Int, n: Int, idx: Int) -> Int ! alloc
+    if n <= 1
+        n
+    else
+        k = 0
+        while k < n
+            if z_get(z, k) == idx
+                if k + 1 < n
+                    otro = z_get(z, k + 1)
+                    _a = z_set(z, k, otro)
+                    _b = z_set(z, k + 1, idx)
+                n
+            else
+                k = k + 1
+        n
+
+fn z_quitar(z: Int, n: Int, idx: Int) -> Int ! alloc
+    k = 0
+    while k < n
+        if z_get(z, k) == idx
+            j = k
+            while j + 1 < n
+                _m = z_set(z, j, z_get(z, j + 1))
+                j = j + 1
+            _t = z_set(z, n - 1, -1)
+            n - 1
+        else
+            k = k + 1
+    n
+
+fn z_anadir(z: Int, n: Int, idx: Int) -> Int ! alloc
+    if n >= tab_cap()
+        n
+    else
+        _a = z_set(z, n, idx)
+        n + 1

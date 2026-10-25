@@ -61,6 +61,8 @@ pub fn build(args: &[String]) {
         .join("lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld");
     for (source_file, name) in [
         ("user/sal/sal-contar.sal", "sal-contar"),
+        ("user/sal/escritorio/soso-wm.sal", "soso-wm"),
+        ("user/sal/escritorio/demo-cliente.sal", "demo-cliente"),
         ("tests/sal/hello.sal", "hello"),
         ("tests/sal/runtime.sal", "runtime"),
     ] {
@@ -95,6 +97,8 @@ pub fn build(args: &[String]) {
     elf.current_dir(&root).args([
         "scripts/sal-elf.py",
         "target/sal/sal-contar",
+        "target/sal/soso-wm",
+        "target/sal/demo-cliente",
         "target/sal/hello",
         "target/sal/runtime",
     ]);
@@ -143,6 +147,14 @@ pub fn install(root: &Path) -> bool {
         &prepared.join("sal-contar"),
         &root.join("rootfs/bin/sal-contar"),
     );
+    changed |= copiar(
+        &prepared.join("soso-wm"),
+        &root.join("rootfs/bin/soso-wm"),
+    );
+    changed |= copiar(
+        &prepared.join("demo-cliente"),
+        &root.join("rootfs/bin/demo-cliente"),
+    );
     for file in [
         "runtime.o",
         "kernels.o",
@@ -174,6 +186,15 @@ pub fn install(root: &Path) -> bool {
             &root.join("rootfs/usr/share/sal").join(file),
         );
     }
+    let share_esc = root.join("rootfs/usr/share/sal/escritorio");
+    if let Ok(entries) = fs::read_dir(root.join("user/sal/escritorio")) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "sal") {
+                changed |= copiar(&path, &share_esc.join(path.file_name().unwrap()));
+            }
+        }
+    }
     if fs::read(prepared.join("native/source.lock")).ok()
         == fs::read(prepared.join("source.lock")).ok()
     {
@@ -192,6 +213,11 @@ pub fn install(root: &Path) -> bool {
 pub fn test() {
     let root = super::project_root();
     build(&[]);
+    ejecutar(
+        Command::new("python3")
+            .current_dir(&root)
+            .arg("tests/sal/escritorio/probar_host.py"),
+    );
     super::build_image();
     super::build_user();
     ejecutar(Command::new("cargo").current_dir(root.join("user")).args([

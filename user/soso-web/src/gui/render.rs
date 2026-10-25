@@ -104,7 +104,7 @@ fn fill_bg(fb: &mut Framebuffer, r: u8, g: u8, b: u8) {
     for y in 0..h {
         for x in 0..w {
             let off = y * stride * bpp + x * bpp;
-            if off + bpp > fb.back.len() {
+            if off + bpp > fb.back_mut().len() {
                 continue;
             }
             put_px(fb, off, bpp, r, g, b);
@@ -113,22 +113,24 @@ fn fill_bg(fb: &mut Framebuffer, r: u8, g: u8, b: u8) {
 }
 
 fn put_px(fb: &mut Framebuffer, off: usize, bpp: usize, r: u8, g: u8, b: u8) {
-    if off + bpp > fb.back.len() {
+    if off + bpp > fb.back_mut().len() {
         return;
     }
     match fb.info.pixel_format {
         soso_abi::FB_FMT_BGR => {
-            fb.back[off] = b;
-            fb.back[off + 1] = g;
-            fb.back[off + 2] = r;
+            let back = fb.back_mut();
+            back[off] = b;
+            back[off + 1] = g;
+            back[off + 2] = r;
         }
         _ => {
-            fb.back[off] = r;
+            let back = fb.back_mut();
+            back[off] = r;
             if bpp > 1 {
-                fb.back[off + 1] = g;
+                back[off + 1] = g;
             }
             if bpp > 2 {
-                fb.back[off + 2] = b;
+                back[off + 2] = b;
             }
         }
     }
@@ -152,9 +154,10 @@ fn put_px_alpha(fb: &mut Framebuffer, x: i32, y: i32, r: u8, g: u8, b: u8, alpha
     }
     let a = alpha as u16;
     let inv = 255 - a;
-    let br = fb.back[off] as u16;
-    let bg = if bpp > 1 { fb.back[off + 1] as u16 } else { br };
-    let bb = if bpp > 2 { fb.back[off + 2] as u16 } else { br };
+    let back = fb.back_mut();
+    let br = back[off] as u16;
+    let bg = if bpp > 1 { back[off + 1] as u16 } else { br };
+    let bb = if bpp > 2 { back[off + 2] as u16 } else { br };
     let nr = ((r as u16 * a + br * inv) / 255) as u8;
     let ng = ((g as u16 * a + bg * inv) / 255) as u8;
     let nb = ((b as u16 * a + bb * inv) / 255) as u8;

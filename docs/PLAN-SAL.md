@@ -13,6 +13,11 @@ La revisión integrada es `ed3bc6dc47d0e29dcde5ddc32f10e3635afdfaa6`.
 `base`) y el SHA-256 del contenido de `Cargo.toml`, `Cargo.lock`, `build.rs`,
 `src/` y `runtime/`. Se verifica antes y después del build.
 
+**Escritorio (S0):** el pin `sha256=9f394405…` incluye operadores Int (`% & | ^ << >>`),
+tipo `Bytes`, builtin `syscall` → `sal_os_syscall` en `user/sal-runtime`, y el
+benchmark 1080p en `benches/framebuffer/`. Siguen abiertos `exec_dyn` y
+`selfhost_ir`; el autohospedado no aprende la sintaxis nueva (desfase en `SPEC.md`).
+
 El port ya está registrado en el commit `0f900ff` de Sal, disponible en
 `origin/main` al comprobarlo el 25 de octubre. `ed3bc6d` añade un cambio en
 `examples/infer/tiny_prefill.sal`; está en el checkout local y todavía no en

@@ -83,7 +83,28 @@ static ACTIVO: AtomicBool = AtomicBool::new(false);
 /// Escritor en pausa: nadie escribe en sosofs desde aquí.
 static PAUSADO: AtomicBool = AtomicBool::new(false);
 static ULTIMO_POLL_MS: AtomicU64 = AtomicU64::new(0);
+static ULTIMO_PASADA_MS: AtomicU64 = AtomicU64::new(0);
+static MAX_PASADA_MS: AtomicU64 = AtomicU64::new(0);
 static BOOT_ID: AtomicU64 = AtomicU64::new(0);
+
+pub fn ultimo_pasada_ms() -> u64 {
+    ULTIMO_PASADA_MS.load(Ordering::Relaxed)
+}
+
+pub fn max_pasada_ms() -> u64 {
+    MAX_PASADA_MS.load(Ordering::Relaxed)
+}
+
+fn registrar_duracion_pasada(ms: u64) {
+    ULTIMO_PASADA_MS.store(ms, Ordering::Relaxed);
+    let mut max = MAX_PASADA_MS.load(Ordering::Relaxed);
+    while ms > max {
+        match MAX_PASADA_MS.compare_exchange_weak(max, ms, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(v) => max = v,
+        }
+    }
+}
 
 pub fn activo() -> bool {
     ACTIVO.load(Ordering::Relaxed) && !PAUSADO.load(Ordering::Relaxed)
@@ -214,6 +235,7 @@ pub fn drenar_todo() {
 }
 
 fn pasada_global(max_pasadas: usize) {
+    let t0 = crate::arch::tsc::uptime_ms();
     // `try_lock`: si otro core ya está volcando, esta vuelta no hace nada. El
     // log nunca es motivo para que el planificador se quede esperando.
     let Some(mut guard) = ESCRITOR.try_lock() else {
@@ -228,6 +250,7 @@ fn pasada_global(max_pasadas: usize) {
             }
         }
     }
+    registrar_duracion_pasada(crate::arch::tsc::uptime_ms().saturating_sub(t0));
 }
 
 /// Una pasada de un flujo. Devuelve `true` si queda material pendiente.

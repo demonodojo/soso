@@ -2887,6 +2887,9 @@ fn sys_wifi_connect(ssid_ptr: u64, ssid_len: u64, psk_ptr: u64, psk_len: u64) ->
         if rc != 0 {
             return Err(-abi::EIO);
         }
+        if let Some(ref pass) = psk {
+            crate::drivers::logbuf::tachar(pass.as_bytes());
+        }
         crate::net::wifi_wpa::persist_credentials(ssid, psk);
         crate::net::on_wifi_connected_explicito();
         Ok(0)

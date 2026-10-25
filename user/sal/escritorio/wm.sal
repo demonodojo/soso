@@ -1,0 +1,497 @@
+import "soso.sal"
+import "superficie.sal"
+import "proto.sal"
+import "ventanas.sal"
+import "tabla.sal"
+
+fn st_size() -> Int
+    176
+
+fn st_cli_fd() -> Int
+    0
+
+fn st_fase() -> Int
+    8
+
+fn st_shm_id() -> Int
+    16
+
+fn st_shm_ptr() -> Int
+    24
+
+fn st_cw() -> Int
+    32
+
+fn st_ch() -> Int
+    40
+
+fn st_wx() -> Int
+    48
+
+fn st_wy() -> Int
+    56
+
+fn st_ww() -> Int
+    64
+
+fn st_wh() -> Int
+    72
+
+fn st_dx0() -> Int
+    80
+
+fn st_dy0() -> Int
+    88
+
+fn st_dx1() -> Int
+    96
+
+fn st_dy1() -> Int
+    104
+
+fn st_salir() -> Int
+    112
+
+fn st_msg_buf() -> Int
+    120
+
+fn st_evt_buf() -> Int
+    128
+
+fn st_tab() -> Int
+    136
+
+fn st_z() -> Int
+    144
+
+fn st_nz() -> Int
+    152
+
+fn st_focus() -> Int
+    160
+
+fn st_mosaic() -> Int
+    168
+
+fn mod_alt() -> Int
+    4
+
+fn mods_tiene(mods: Int, bit: Int) -> Int
+    mod_pos(mods / bit, 2)
+
+fn wm_st_desde_tab(st: Int, tab: Int, i: Int) -> Int ! alloc
+    _a = st_set(st, st_cli_fd(), tab_get(tab, i, tab_fd()))
+    _b = st_set(st, st_fase(), tab_get(tab, i, tab_fase()))
+    _c = st_set(st, st_shm_id(), tab_get(tab, i, tab_shm_id()))
+    _d = st_set(st, st_shm_ptr(), tab_get(tab, i, tab_shm_ptr()))
+    _e = st_set(st, st_cw(), tab_get(tab, i, tab_cw()))
+    _f = st_set(st, st_ch(), tab_get(tab, i, tab_ch()))
+    _g = st_set(st, st_wx(), tab_get(tab, i, tab_wx()))
+    _h = st_set(st, st_wy(), tab_get(tab, i, tab_wy()))
+    _i = st_set(st, st_ww(), tab_get(tab, i, tab_ww()))
+    _j = st_set(st, st_wh(), tab_get(tab, i, tab_wh()))
+    0
+
+fn wm_tab_desde_st(st: Int, tab: Int, i: Int) -> Int ! alloc
+    _a = tab_set(tab, i, tab_fd(), st_get(st, st_cli_fd()))
+    _b = tab_set(tab, i, tab_fase(), st_get(st, st_fase()))
+    _c = tab_set(tab, i, tab_shm_id(), st_get(st, st_shm_id()))
+    _d = tab_set(tab, i, tab_shm_ptr(), st_get(st, st_shm_ptr()))
+    _e = tab_set(tab, i, tab_cw(), st_get(st, st_cw()))
+    _f = tab_set(tab, i, tab_ch(), st_get(st, st_ch()))
+    _g = tab_set(tab, i, tab_wx(), st_get(st, st_wx()))
+    _h = tab_set(tab, i, tab_wy(), st_get(st, st_wy()))
+    _i = tab_set(tab, i, tab_ww(), st_get(st, st_ww()))
+    _j = tab_set(tab, i, tab_wh(), st_get(st, st_wh()))
+    0
+
+fn st_get(st: Int, off: Int) -> Int ! alloc
+    b = bytes_view(st, st_size())
+    bytes_get_i64(b, off)
+
+fn st_set(st: Int, off: Int, v: Int) -> Int ! alloc
+    b = bytes_view(st, st_size())
+    bytes_set_i64(b, off, v)
+    0
+
+fn st_nuevo(evt_buf: Int, msg_buf: Int) -> Int ! alloc
+    p = bytes_ptr(bytes_new(st_size()))
+    tab = bytes_ptr(bytes_new(tab_cap() * tab_slot_bytes()))
+    z = bytes_ptr(bytes_new(tab_zorder_size()))
+    _z = st_set(p, st_cli_fd(), 0)
+    _f = st_set(p, st_fase(), 0)
+    _s = st_set(p, st_salir(), 0)
+    _e = st_set(p, st_evt_buf(), evt_buf)
+    _m = st_set(p, st_msg_buf(), msg_buf)
+    _t = st_set(p, st_tab(), tab)
+    _z0 = st_set(p, st_z(), z)
+    _n = st_set(p, st_nz(), 0)
+    _fo = st_set(p, st_focus(), -1)
+    _mo = st_set(p, st_mosaic(), 0)
+    p
+
+fn wm_marcar_dirty(st: Int, x0: Int, y0: Int, x1: Int, y1: Int) -> Int ! alloc
+    if st_get(st, st_dx1()) <= st_get(st, st_dx0())
+        _a = st_set(st, st_dx0(), x0)
+        _b = st_set(st, st_dy0(), y0)
+        _c = st_set(st, st_dx1(), x1)
+        _d = st_set(st, st_dy1(), y1)
+    else
+        ox0 = st_get(st, st_dx0())
+        oy0 = st_get(st, st_dy0())
+        ox1 = st_get(st, st_dx1())
+        oy1 = st_get(st, st_dy1())
+        _a = st_set(st, st_dx0(), min(ox0, x0))
+        _b = st_set(st, st_dy0(), min(oy0, y0))
+        _c = st_set(st, st_dx1(), max(ox1, x1))
+        _d = st_set(st, st_dy1(), max(oy1, y1))
+    0
+
+fn wm_color_fondo() -> Int
+    color_rgb(32, 32, 48)
+
+fn wm_color_barra() -> Int
+    color_rgb(48, 48, 64)
+
+fn wm_repintar_ventana(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
+    wx = st_get(st, st_wx())
+    wy = st_get(st, st_wy())
+    ww = st_get(st, st_ww())
+    wh = st_get(st, st_wh())
+    cw = st_get(st, st_cw())
+    ch = st_get(st, st_ch())
+    shm = st_get(st, st_shm_ptr())
+    slen = cw * ch * 4
+    _m = wm_pintar_marco(compos, clen, sw, sh, stride, bpp, fmt, wx, wy, ww, wh)
+    _b = wm_blit_cliente(compos, clen, stride, bpp, fmt, wx, wy, cw, ch, shm, slen, 0, 0, cw, ch)
+    _d = wm_marcar_dirty(st, wx, wy, wx + ww, wy + wh)
+    0
+
+fn wm_pintar_marco(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, wx: Int, wy: Int, ww: Int, wh: Int) -> Int ! alloc
+    rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, wx, wy, wx + ww, wy + wh, wm_color_barra())
+    rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, wx, wy + barra_alto(), wx + ww, wy + wh, color_rgb(20, 20, 28))
+
+fn wm_blit_cliente(compos: Int, clen: Int, cstride: Int, bpp: Int, fmt: Int, wx: Int, wy: Int, cw: Int, ch: Int, shm: Int, slen: Int, sx: Int, sy: Int, w: Int, h: Int) -> Int ! alloc
+    copiar_rect(compos, clen, cstride, shm, slen, cw, bpp, fmt, wx + sx, wy + barra_alto() + sy, sx, sy, w, h)
+
+fn wm_flush_dirty(st: Int, compos: Int, clen: Int) -> Int ! io, alloc
+    x0 = st_get(st, st_dx0())
+    y0 = st_get(st, st_dy0())
+    x1 = st_get(st, st_dx1())
+    y1 = st_get(st, st_dy1())
+    if x1 <= x0
+        0
+    else
+        if y1 <= y0
+            0
+        else
+            _p = fb_present_rect(compos, clen, x0, y0, x1 - x0, y1 - y0)
+            _r = st_set(st, st_dx0(), 0)
+            _s = st_set(st, st_dy0(), 0)
+            _t = st_set(st, st_dx1(), 0)
+            _u = st_set(st, st_dy1(), 0)
+            0
+
+fn wm_cerrar_cliente(st: Int) -> Int ! io, alloc
+    fd = st_get(st, st_cli_fd())
+    if fd > 0
+        _c = close_fd(fd)
+    sid = st_get(st, st_shm_id())
+    if sid > 0
+        _f = shm_free(sid)
+    _a = st_set(st, st_cli_fd(), 0)
+    _b = st_set(st, st_fase(), 0)
+    _c = st_set(st, st_shm_id(), 0)
+    0
+
+fn wm_enviar_ventana(fd: Int, id: Int, shm: Int, cw: Int, ch: Int, fmt: Int) -> Int ! io, alloc
+    m = msg_nuevo()
+    _e = msg_encode_ventana(m, id, shm, cw, ch, fmt)
+    write_fd(fd, m, msg_len())
+
+fn wm_enviar_foco(fd: Int) -> Int ! io, alloc
+    m = msg_nuevo()
+    _e = msg_set_op(m, op_foco())
+    write_fd(fd, m, msg_len())
+
+fn wm_on_crear(st: Int, fd: Int, msg: Int, fmt: Int, sw: Int, sh: Int) -> Int ! io, alloc
+    cw = msg_get_u32(msg, 4)
+    ch = msg_get_u32(msg, 8)
+    if cw <= 0
+        0
+    else
+        if ch <= 0
+            0
+        else
+            slen = cw * ch * 4
+            sid = shm_create(slen)
+            if sid < 0
+                0
+            else
+                sptr = shm_map(sid)
+                if sptr < 0
+                    0
+                else
+                    wx = max(0, (sw - cw) / 2)
+                    wy = max(0, (sh - ch - barra_alto()) / 2)
+                    ww = cw
+                    wh = ch + barra_alto()
+                    _v = wm_enviar_ventana(fd, 1, sid, cw, ch, fmt)
+                    _a = st_set(st, st_shm_id(), sid)
+                    _b = st_set(st, st_shm_ptr(), sptr)
+                    _c = st_set(st, st_cw(), cw)
+                    _d = st_set(st, st_ch(), ch)
+                    _e = st_set(st, st_wx(), wx)
+                    _f = st_set(st, st_wy(), wy)
+                    _g = st_set(st, st_ww(), ww)
+                    _h = st_set(st, st_wh(), wh)
+                    _i = st_set(st, st_fase(), 2)
+                    1
+
+fn wm_on_crear_repintar(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
+    fd = st_get(st, st_cli_fd())
+    _r = wm_repintar_ventana(st, compos, clen, sw, sh, stride, bpp, fmt)
+    wm_enviar_foco(fd)
+
+fn wm_on_danio(st: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int, msg: Int) -> Int ! io, alloc
+    if st_get(st, st_fase()) != 2
+        0
+    else
+        dx = msg_get_u32(msg, 4)
+        dy = msg_get_u32(msg, 8)
+        dw = msg_get_u32(msg, 12)
+        dh = msg_get_u32(msg, 16)
+        wx = st_get(st, st_wx())
+        wy = st_get(st, st_wy())
+        cw = st_get(st, st_cw())
+        ch = st_get(st, st_ch())
+        shm = st_get(st, st_shm_ptr())
+        slen = cw * ch * 4
+        _b = wm_blit_cliente(compos, clen, stride, bpp, fmt, wx, wy, cw, ch, shm, slen, dx, dy, dw, dh)
+        _d = wm_marcar_dirty(st, wx + dx, wy + barra_alto() + dy, wx + dx + dw, wy + barra_alto() + dy + dh)
+        0
+
+fn wm_leer_msg(fd: Int, buf: Int) -> Int ! io, alloc
+    read_timeout_fd(fd, buf, msg_len(), 1)
+
+fn wm_atender_cliente(st: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int, sw: Int, sh: Int) -> Int ! io, alloc
+    fd = st_get(st, st_cli_fd())
+    if fd <= 0
+        0
+    else
+        m = st_get(st, st_msg_buf())
+        n = wm_leer_msg(fd, m)
+        if n == 0
+            wm_cerrar_cliente(st)
+        else
+            if n != msg_len()
+                0
+            else
+                op = msg_get_op(m)
+                if op == op_hola()
+                    _f = st_set(st, st_fase(), 1)
+                    0
+                else
+                    if op == op_crear()
+                        if st_get(st, st_fase()) == 1
+                            ok = wm_on_crear(st, fd, m, fmt, sw, sh)
+                            if ok != 0
+                                wm_on_crear_repintar(st, compos, clen, sw, sh, stride, bpp, fmt)
+                            else
+                                0
+                        else
+                            0
+                    else
+                        if op == op_danio()
+                            wm_on_danio(st, compos, clen, stride, bpp, fmt, m)
+                        else
+                            if op == op_cerrar_cli()
+                                wm_cerrar_cliente(st)
+                            else
+                                0
+
+fn wm_reenviar_raton(st: Int, x: Int, y: Int, botones: Int) -> Int ! io, alloc
+    if st_get(st, st_fase()) != 2
+        0
+    else
+        wx = st_get(st, st_wx())
+        wy = st_get(st, st_wy())
+        ww = st_get(st, st_ww())
+        wh = st_get(st, st_wh())
+        cw = st_get(st, st_cw())
+        ch = st_get(st, st_ch())
+        if ventana_contiene(x, y, wx, wy, ww, wh) == 0
+            0
+        else
+            lx = x - wx
+            ly = y - wy - barra_alto()
+            if lx < 0
+                0
+            else
+                if ly < 0
+                    0
+                else
+                    if lx >= cw
+                        0
+                    else
+                        if ly >= ch
+                            0
+                        else
+                            fd = st_get(st, st_cli_fd())
+                            msg = st_get(st, st_msg_buf())
+                            _e = msg_encode_raton(msg, lx, ly, botones)
+                            write_fd(fd, msg, msg_len())
+
+fn wm_reenviar_tecla(st: Int, key: Int, mods: Int) -> Int ! io, alloc
+    if st_get(st, st_fase()) != 2
+        0
+    else
+        fd = st_get(st, st_cli_fd())
+        msg = st_get(st, st_msg_buf())
+        _e = msg_encode_tecla(msg, key, mods)
+        write_fd(fd, msg, msg_len())
+
+fn wm_cerrar_foco(st: Int) -> Int ! io, alloc
+    tab = st_get(st, st_tab())
+    fi = st_get(st, st_focus())
+    if fi >= 0
+        _s = wm_st_desde_tab(st, tab, fi)
+        _c = wm_cerrar_cliente(st)
+        _t = tab_cerrar_slot(tab, fi)
+    0
+
+fn wm_foco_siguiente(st: Int) -> Int ! alloc
+    tab = st_get(st, st_tab())
+    z = st_get(st, st_z())
+    nz = st_get(st, st_nz())
+    fi = st_get(st, st_focus())
+    if nz <= 1
+        fi
+    else
+        k = 0
+        nfi = fi
+        while k < nz
+            if z_get(z, k) == fi
+                if k + 1 < nz
+                    nfi = z_get(z, k + 1)
+                else
+                    nfi = z_get(z, 0)
+            k = k + 1
+        _f = st_set(st, st_focus(), nfi)
+        _u = z_subir(z, nz, nfi)
+        nfi
+
+fn wm_abrir_terminal(st: Int, sw: Int, sh: Int) -> Int ! io, alloc
+    tab = st_get(st, st_tab())
+    z = st_get(st, st_z())
+    si = tab_buscar_libre(tab)
+    if si < 0
+        0
+    else
+        pv = pty_open()
+        if pv < 0
+            0
+        else
+            ma = pty_fd_maestro(pv)
+            sl = pty_slot(pv)
+            pid = spawn_io_full(d"/bin/sosh", fd_pty_stdio(sl), fd_pty_stdio(sl), fd_pty_stdio(sl), fd_kernel_log())
+            _t = tab_set(tab, si, tab_tipo(), tab_tipo_term())
+            _f = tab_set(tab, si, tab_fd(), ma)
+            _p = tab_set(tab, si, tab_pid(), pid)
+            _x = tab_set(tab, si, tab_wx(), 40)
+            _y = tab_set(tab, si, tab_wy(), 40 + barra_alto())
+            _w = tab_set(tab, si, tab_ww(), 640)
+            _h = tab_set(tab, si, tab_wh(), 400 + barra_alto())
+            nz = st_get(st, st_nz())
+            nn = z_anadir(z, nz, si)
+            _n = st_set(st, st_nz(), nn)
+            _fo = st_set(st, st_focus(), si)
+            1
+
+fn wm_input(st: Int, evt: Int, evt_len: Int, n: Int) -> Int ! io, alloc
+    i = 0
+    while i < n
+        k = input_event_kind(evt, evt_len, i)
+        if k == input_mouse_move()
+            _r = wm_reenviar_raton(st, input_event_x(evt, evt_len, i), input_event_y(evt, evt_len, i), 0)
+        if k == input_mouse_btn()
+            _r = wm_reenviar_raton(st, input_event_x(evt, evt_len, i), input_event_y(evt, evt_len, i), input_event_button(evt, evt_len, i))
+        if k == input_key()
+            if input_event_pressed(evt, evt_len, i) != 0
+                key = input_event_key(evt, evt_len, i)
+                mods = input_event_button(evt, evt_len, i)
+                if mods_tiene(mods, mod_alt()) != 0
+                    if key == 28
+                        _term = wm_abrir_terminal(st, 1024, 768)
+                    else
+                        if key == 16
+                            _q = wm_cerrar_foco(st)
+                        else
+                            if key == 15
+                                _f = wm_foco_siguiente(st)
+                            else
+                                _t = wm_reenviar_tecla(st, key, mods)
+                else
+                    _t = wm_reenviar_tecla(st, key, mods)
+        i = i + 1
+    0
+
+fn wm_slot_atender(st: Int, tab: Int, i: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int, sw: Int, sh: Int) -> Int ! io, alloc
+    if tab_slot_activo(tab, i) == 0
+        0
+    else
+        if tab_get(tab, i, tab_tipo()) != tab_tipo_cli()
+            0
+        else
+            _s = wm_st_desde_tab(st, tab, i)
+            _a = wm_atender_cliente(st, compos, clen, stride, bpp, fmt, sw, sh)
+            _w = wm_tab_desde_st(st, tab, i)
+            if tab_get(tab, i, tab_fase()) == 0
+                if tab_get(tab, i, tab_fd()) <= 0
+                    _c = tab_cerrar_slot(tab, i)
+            0
+
+fn wm_aceptar_cliente(st: Int, acc: Int) -> Int ! io, alloc
+    tab = st_get(st, st_tab())
+    z = st_get(st, st_z())
+    si = tab_buscar_libre(tab)
+    if si < 0
+        _x = close_fd(acc)
+        0
+    else
+        _t = tab_set(tab, si, tab_tipo(), tab_tipo_cli())
+        _f = tab_set(tab, si, tab_fd(), acc)
+        _p = tab_set(tab, si, tab_fase(), 0)
+        nz = st_get(st, st_nz())
+        nn = z_anadir(z, nz, si)
+        _n = st_set(st, st_nz(), nn)
+        _fo = st_set(st, st_focus(), si)
+        1
+
+fn wm_atender_todos(st: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int, sw: Int, sh: Int) -> Int ! io, alloc
+    tab = st_get(st, st_tab())
+    i = 0
+    while i < tab_cap()
+        _a = wm_slot_atender(st, tab, i, compos, clen, stride, bpp, fmt, sw, sh)
+        i = i + 1
+    0
+
+fn wm_tick(st: Int, listener: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
+    evt = st_get(st, st_evt_buf())
+    en = input_poll(evt, 24 * 8, 8)
+    fi = st_get(st, st_focus())
+    if en > 0
+        if fi >= 0
+            _ld = wm_st_desde_tab(st, st_get(st, st_tab()), fi)
+            _i = wm_input(st, evt, 24 * 8, en)
+            _sv = wm_tab_desde_st(st, st_get(st, st_tab()), fi)
+        else
+            _i = wm_input(st, evt, 24 * 8, en)
+    acc = tcp_accept(listener, 1)
+    if acc > 0
+        if acc != listener
+            _ac = wm_aceptar_cliente(st, acc)
+    _c = wm_atender_todos(st, compos, clen, stride, bpp, fmt, sw, sh)
+    _f = wm_flush_dirty(st, compos, clen)
+    sleep_ms(10)
+    0

@@ -21,6 +21,32 @@ impl Default for InputState {
     }
 }
 
+pub fn poll_input_from_wm(st: &mut InputState, fb: &mut super::fb::Framebuffer) -> bool {
+    let Ok(Some(ev)) = fb.poll_wm_event() else {
+        return false;
+    };
+    use libsoso::ventana::Evento;
+    match ev {
+        Evento::Raton { x, y, botones } => {
+            st.mouse_x = x;
+            st.mouse_y = y;
+            st.btn_left = botones & 1 != 0;
+        }
+        Evento::Tecla { key, .. } => {
+            st.key = Some(key);
+        }
+        Evento::CerrarPedido => {
+            st.key = Some(0x01);
+        }
+        Evento::Redimensionar { w, h, shm_id } => {
+            let _ = fb.inner_mut().aplicar_redimension(w, h, shm_id);
+            fb.info = fb.inner_mut().fb_info();
+        }
+        Evento::Foco => {}
+    }
+    true
+}
+
 pub fn poll_input(st: &mut InputState) {
     let mut buf = [InputEvent::default(); 8];
     let n = sys::input_poll(&mut buf);

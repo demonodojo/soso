@@ -90,6 +90,34 @@ impl<const CAP: usize> Ring<CAP> {
     /// Si el ring ya sobrescribió lo que faltaba por leer, `perdidos` lo dice y
     /// la lectura se reanuda en el byte más antiguo disponible: se marca el
     /// hueco, no se inventan datos ni se duplican los que sí quedan.
+    /// Sustituye cada ocurrencia de `secreto` en el ring por `*`.
+    pub fn tachar(&mut self, secreto: &[u8]) {
+        if secreto.is_empty() || self.len == 0 {
+            return;
+        }
+        let n = self.len;
+        let mut i = 0usize;
+        while i + secreto.len() <= n {
+            let mut coincide = true;
+            for (j, &b) in secreto.iter().enumerate() {
+                let idx = (self.start() + i + j) % CAP;
+                if self.data[idx] != b {
+                    coincide = false;
+                    break;
+                }
+            }
+            if coincide {
+                for j in 0..secreto.len() {
+                    let idx = (self.start() + i + j) % CAP;
+                    self.data[idx] = b'*';
+                }
+                i += secreto.len();
+            } else {
+                i += 1;
+            }
+        }
+    }
+
     pub fn leer_desde(&self, cursor: u64, out: &mut [u8]) -> Lectura {
         let minimo = self.cursor_minimo();
         let (mut cursor, perdidos) = if cursor < minimo {

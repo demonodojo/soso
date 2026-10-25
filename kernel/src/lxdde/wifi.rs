@@ -110,6 +110,15 @@ static ULTIMO_MANTENER_MS: core::sync::atomic::AtomicU64 =
 static POLL_TRY_FAIL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static SONDEO_GAP_MAX_MS: core::sync::atomic::AtomicU32 =
     core::sync::atomic::AtomicU32::new(0);
+static SONDEO_FAILS_AL_AVISO: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+static SONDEO_RESUMEN_DESDE_MS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+static SONDEO_EVENTOS_EN_VENTANA: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+static SONDEO_MAX_EN_VENTANA: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+const SONDEO_RESUMEN_MS: u64 = 30_000;
 
 /// Llamado desde [`super::net::wifi_wpa::mantener`].
 pub fn poll_lock_fallo() {
@@ -131,6 +140,19 @@ pub fn mantener_atrasado(limite_ms: u64) -> bool {
     crate::arch::pit::uptime_ms().saturating_sub(last) > limite_ms
 }
 
+fn causa_parada_sondeo(fails_ahora: u32, fails_al_inicio: u32) -> (&'static str, u64) {
+    if fails_ahora > fails_al_inicio {
+        return ("transporte iwlwifi ocupado", 0);
+    }
+    let fat = crate::drivers::fatlog::ultimo_volcado_ms();
+    let logfs = crate::drivers::logfs::ultimo_pasada_ms();
+    let ms = fat.max(logfs);
+    if ms >= 200 {
+        return ("volcado del log", ms);
+    }
+    ("planificador BSP", 0)
+}
+
 fn vigilar_sondeo_gaps(now: u64, es_poll_wifi: bool) {
     const LIMITE: u64 = 500;
     let (prev, label) = if es_poll_wifi {
@@ -144,20 +166,73 @@ fn vigilar_sondeo_gaps(now: u64, es_poll_wifi: bool) {
             "mantener",
         )
     };
-    if prev != 0 {
-        let gap = now.saturating_sub(prev);
-        if gap > LIMITE {
-            let pid = crate::arch::percpu::current_pid();
-            let fails = POLL_TRY_FAIL.load(core::sync::atomic::Ordering::Relaxed);
+    if prev == 0 {
+        return;
+    }
+    let gap = now.saturating_sub(prev);
+    if gap <= LIMITE {
+        return;
+    }
+    let prev_max = SONDEO_GAP_MAX_MS.load(core::sync::atomic::Ordering::Relaxed);
+    if gap > prev_max as u64 {
+        SONDEO_GAP_MAX_MS.store(gap as u32, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    let fails_al_inicio = SONDEO_FAILS_AL_AVISO.load(core::sync::atomic::Ordering::Relaxed);
+    let fails = POLL_TRY_FAIL.load(core::sync::atomic::Ordering::Relaxed);
+    let ventana_desde = SONDEO_RESUMEN_DESDE_MS.load(core::sync::atomic::Ordering::Relaxed);
+    if ventana_desde == 0 {
+        SONDEO_RESUMEN_DESDE_MS.store(now, core::sync::atomic::Ordering::Relaxed);
+        SONDEO_EVENTOS_EN_VENTANA.store(1, core::sync::atomic::Ordering::Relaxed);
+        SONDEO_MAX_EN_VENTANA.store(gap as u32, core::sync::atomic::Ordering::Relaxed);
+        SONDEO_FAILS_AL_AVISO.store(fails, core::sync::atomic::Ordering::Relaxed);
+        let pid = crate::arch::percpu::current_pid();
+        let (causa, extra) = causa_parada_sondeo(fails, fails_al_inicio);
+        if extra > 0 {
             crate::println!(
-                "wifi: sondeo parado {gap} ms ({label}, pid={pid}, poll_try_lock_fallos={fails})"
+                "wifi: sondeo parado {gap} ms ({label}, pid={pid}, causa={causa} ~{extra} ms)"
             );
-            let prev_max = SONDEO_GAP_MAX_MS.load(core::sync::atomic::Ordering::Relaxed);
-            if gap > prev_max as u64 {
-                SONDEO_GAP_MAX_MS.store(gap as u32, core::sync::atomic::Ordering::Relaxed);
-            }
+        } else {
+            crate::println!(
+                "wifi: sondeo parado {gap} ms ({label}, pid={pid}, causa={causa})"
+            );
+        }
+        return;
+    }
+
+    let n = SONDEO_EVENTOS_EN_VENTANA.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
+    let mut max_v = SONDEO_MAX_EN_VENTANA.load(core::sync::atomic::Ordering::Relaxed);
+    while (gap as u32) > max_v {
+        match SONDEO_MAX_EN_VENTANA.compare_exchange_weak(
+            max_v,
+            gap as u32,
+            core::sync::atomic::Ordering::Relaxed,
+            core::sync::atomic::Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(v) => max_v = v,
         }
     }
+
+    if now.saturating_sub(ventana_desde) < SONDEO_RESUMEN_MS {
+        return;
+    }
+
+    let max_gap = SONDEO_MAX_EN_VENTANA.load(core::sync::atomic::Ordering::Relaxed);
+    let (causa, extra) = causa_parada_sondeo(fails, fails_al_inicio);
+    if extra > 0 {
+        crate::println!(
+            "wifi: sondeo parado {n} veces en {SONDEO_RESUMEN_MS} ms (max {max_gap} ms, causa={causa} ~{extra} ms)"
+        );
+    } else {
+        crate::println!(
+            "wifi: sondeo parado {n} veces en {SONDEO_RESUMEN_MS} ms (max {max_gap} ms, causa={causa})"
+        );
+    }
+    SONDEO_RESUMEN_DESDE_MS.store(now, core::sync::atomic::Ordering::Relaxed);
+    SONDEO_EVENTOS_EN_VENTANA.store(0, core::sync::atomic::Ordering::Relaxed);
+    SONDEO_MAX_EN_VENTANA.store(0, core::sync::atomic::Ordering::Relaxed);
+    SONDEO_FAILS_AL_AVISO.store(fails, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Una línea en el log cuando cambia alguna pérdida, como mucho cada 10 s.

@@ -388,6 +388,36 @@ pub unsafe extern "C" fn sal_os_capture(bin: *const c_char, arg: *const c_char) 
 pub unsafe extern "C" fn sal_os_clock_gettime(id: c_int, out: *mut abi::Timespec) -> c_int {
     sys::clock_gettime(id as u64, &mut *out) as c_int
 }
+
+/// Puerta genérica de syscalls para Sal (`syscall(...)`). No preserva XMM/YMM.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sal_os_syscall(
+    n: i64,
+    a0: i64,
+    a1: i64,
+    a2: i64,
+    a3: i64,
+    a4: i64,
+    a5: i64,
+) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") n => ret,
+            inlateout("rdi") a0 => _,
+            inlateout("rsi") a1 => _,
+            inlateout("rdx") a2 => _,
+            inlateout("r10") a3 => _,
+            inlateout("r8") a4 => _,
+            inlateout("r9") a5 => _,
+            lateout("rcx") _,
+            lateout("r11") _,
+            clobber_abi("C"),
+        );
+    }
+    ret
+}
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sal_os_format_f64(value: f64, out: *mut u8, cap: usize) -> usize {
     let mut s = alloc::format!("{value}");

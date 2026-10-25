@@ -230,17 +230,18 @@ fn linea_err(e: &fetch::FetchError) -> String {
 fn modo_grafico(a: Args) -> u8 {
     use soso_web::gui::{fb, input, layout, render};
 
-    let url = match a.url {
+    let url = match a.url.clone().or(a.local.clone()) {
         Some(u) => u,
         None => {
-            println!("soso-web: --grafico requiere URL");
+            println!("soso-web: --grafico requiere URL o --local");
             return 2;
         }
     };
-    let mut fb = match fb::Framebuffer::open() {
+    let titulo = if url.len() > 16 { &url[..16] } else { url.as_str() };
+    let mut fb = match fb::Framebuffer::open_with_title(1024, 768, titulo) {
         Ok(f) => f,
         Err(e) => {
-            println!("soso-web: framebuffer no disponible ({})", libsoso::errno_str(e));
+            println!("soso-web: superficie gráfica no disponible ({})", libsoso::errno_str(e));
             return 1;
         }
     };
@@ -255,11 +256,21 @@ fn modo_grafico(a: Args) -> u8 {
             return 1;
         }
     };
-    let (html, base) = match fetch::fetch_https(&url) {
-        Ok(x) => x,
-        Err(e) => {
-            println!("soso-web: {}", e.mensaje());
-            return 1;
+    let (html, base) = if let Some(ref local) = a.local {
+        match fetch::fetch_local(local) {
+            Ok(html) => (html, alloc::string::String::from("file://local/")),
+            Err(e) => {
+                println!("soso-web: {}", e.mensaje());
+                return 1;
+            }
+        }
+    } else {
+        match fetch::fetch_https(&url) {
+            Ok(x) => x,
+            Err(e) => {
+                println!("soso-web: {}", e.mensaje());
+                return 1;
+            }
         }
     };
     let doc = layout::layout_html(&html, &base);
@@ -269,10 +280,25 @@ fn modo_grafico(a: Args) -> u8 {
     let mut hist: Vec<String> = vec![url];
     let mut cur_doc = doc;
     let mut cur_boxes = boxes;
-    let hover: Option<usize> = None;
+    let mut hover: Option<usize> = None;
+    let mut dirty = true;
+    let mut last_scroll = scroll;
+    let mut last_mx = input_st.mouse_x;
+    let mut last_my = input_st.mouse_y;
 
+    let wm = fb.es_wm();
     loop {
-        input::poll_input(&mut input_st);
+        input_st.key = None;
+        if wm {
+            let _ = input::poll_input_from_wm(&mut input_st, &mut fb);
+        } else {
+            input::poll_input(&mut input_st);
+        }
+        if input_st.mouse_x != last_mx || input_st.mouse_y != last_my {
+            dirty = true;
+            last_mx = input_st.mouse_x;
+            last_my = input_st.mouse_y;
+        }
         if let Some(key) = input_st.key {
             match key {
                 0x01 => return 0,
@@ -302,15 +328,26 @@ fn modo_grafico(a: Args) -> u8 {
                     }
                 }
             }
-            if let Some(href) = destino {
+                if let Some(href) = destino {
                 hist.push(href.clone());
                 let _ = recargar_grafico(&href, &mut cur_doc, &mut cur_boxes, fb.info.width as f32);
                 scroll = 0.0;
+                dirty = true;
             }
         }
         scroll = (scroll - input_st.mouse_y as f32 * 0.0).max(0.0);
-        renderer.draw_document(&mut fb, &cur_doc, &cur_boxes, scroll, hover);
-        let _ = fb.present();
+        if scroll != last_scroll {
+            dirty = true;
+            last_scroll = scroll;
+        }
+        if input_st.key.is_some() {
+            dirty = true;
+        }
+        if dirty || !wm {
+            renderer.draw_document(&mut fb, &cur_doc, &cur_boxes, scroll, hover);
+            let _ = fb.present();
+            dirty = false;
+        }
         libsoso::sys::sleep_ms(16);
     }
 }

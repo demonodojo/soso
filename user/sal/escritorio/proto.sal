@@ -1,0 +1,112 @@
+import "mate.sal"
+
+fn msg_len() -> Int
+    32
+
+fn op_hola() -> Int
+    1
+
+fn op_crear() -> Int
+    2
+
+fn op_danio() -> Int
+    3
+
+fn op_titulo() -> Int
+    4
+
+fn op_cerrar_cli() -> Int
+    5
+
+fn op_ventana() -> Int
+    16
+
+fn op_tecla() -> Int
+    17
+
+fn op_raton() -> Int
+    18
+
+fn op_foco() -> Int
+    19
+
+fn op_redim() -> Int
+    20
+
+fn op_cerrar_wm() -> Int
+    21
+
+fn op_fotograma() -> Int
+    22
+
+fn msg_nuevo() -> Int ! alloc
+    bytes_ptr(bytes_new(msg_len()))
+
+fn msg_set_u32(ptr: Int, off: Int, v: Int) -> Int ! alloc
+    b = bytes_view(ptr, msg_len())
+    bytes_set_u32(b, off, v)
+    0
+
+fn msg_get_u32(ptr: Int, off: Int) -> Int ! alloc
+    b = bytes_view(ptr, msg_len())
+    bytes_get_u32(b, off)
+
+fn msg_set_op(ptr: Int, op: Int) -> Int ! alloc
+    msg_set_u32(ptr, 0, op)
+
+fn msg_get_op(ptr: Int) -> Int ! alloc
+    msg_get_u32(ptr, 0)
+
+fn msg_encode_hola(ptr: Int, version: Int) -> Int ! alloc
+    msg_set_op(ptr, op_hola())
+    msg_set_u32(ptr, 4, version)
+    0
+
+fn msg_encode_crear(ptr: Int, w: Int, h: Int, titulo_off: Int) -> Int ! alloc
+    msg_set_op(ptr, op_crear())
+    msg_set_u32(ptr, 4, w)
+    msg_set_u32(ptr, 8, h)
+    msg_set_u32(ptr, 12, titulo_off)
+    0
+
+fn msg_encode_ventana(ptr: Int, id: Int, shm: Int, w: Int, h: Int, fmt: Int) -> Int ! alloc
+    msg_set_op(ptr, op_ventana())
+    msg_set_u32(ptr, 4, id)
+    msg_set_u32(ptr, 8, shm)
+    msg_set_u32(ptr, 12, w)
+    msg_set_u32(ptr, 16, h)
+    msg_set_u32(ptr, 20, fmt)
+    0
+
+fn msg_encode_tecla(ptr: Int, key: Int, mods: Int) -> Int ! alloc
+    msg_set_op(ptr, op_tecla())
+    msg_set_u32(ptr, 4, key)
+    msg_set_u32(ptr, 8, mods)
+    0
+
+fn msg_encode_raton(ptr: Int, x: Int, y: Int, botones: Int) -> Int ! alloc
+    msg_set_op(ptr, op_raton())
+    msg_set_u32(ptr, 4, x)
+    msg_set_u32(ptr, 8, y)
+    msg_set_u32(ptr, 12, botones)
+    0
+
+fn msg_encode_danio(ptr: Int, x: Int, y: Int, w: Int, h: Int) -> Int ! alloc
+    msg_set_op(ptr, op_danio())
+    msg_set_u32(ptr, 4, x)
+    msg_set_u32(ptr, 8, y)
+    msg_set_u32(ptr, 12, w)
+    msg_set_u32(ptr, 16, h)
+    0
+
+fn msg_titulo_copiar(ptr: Int, off: Int, titulo: String) -> Int ! alloc
+    b = bytes_view(ptr, msg_len())
+    i = 0
+    n = str_len(titulo)
+    while i < 16
+        if i < n
+            bytes_set_u8(b, off + i, str_char(titulo, i))
+        else
+            bytes_set_u8(b, off + i, 0)
+        i = i + 1
+    0

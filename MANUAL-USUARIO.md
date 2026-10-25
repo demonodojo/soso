@@ -198,8 +198,8 @@ Enchufa un cable en el RJ45 o configura WiFi; tras DHCP, SSH escucha en el
 wifi scan
 wifi status
 wifi setup                    # mismo asistente que al arrancar
-wifi connect MiRed            # red abierta
-wifi connect MiRed MiClaveWPA2
+wifi connect MiRed            # pide la contraseña sin eco (Enter = abierta)
+wifi connect MiRed MiClaveWPA2  # aviso: la clave en la línea queda en el log
 ```
 
 Si la conexión termina bien, soso guarda el SSID y la clave (red abierta: solo el SSID) en `SOSOWIFI.TXT` de la ESP (USB live) y en `/etc/wifi.conf`. El siguiente arranque conecta solo y pide DHCP; no hace falta volver a escribir la clave.
@@ -489,7 +489,7 @@ El **código de salida** distingue las tres cosas:
 | `wifi scan` | Lista redes WiFi (Intel AX211/AX200) |
 | `wifi status` | Estado del adaptador WiFi |
 | `wifi setup` | Escanea, eliges red por número y contraseña (WPA sin eco); guarda credenciales |
-| `wifi connect <ssid> [psk]` | Asocia a una red (sin `psk` = abierta; con clave = WPA2) y guarda las credenciales para el próximo arranque |
+| `wifi connect <ssid> [psk]` | Asocia a una red; sin `psk` pide la clave sin eco (Enter = abierta). Con clave en la línea funciona pero queda en el log |
 
 Ejemplos:
 
@@ -810,6 +810,31 @@ soso-gfx-demo --frames 120
 
 Sin motor 3D imprime un mensaje y sale con código 1. En VFIO GB205 el log de serie debe
 incluir `3D clear verificado (H1 GO)` tras el arranque.
+
+### soso-wm — escritorio gráfico
+
+```text
+soso-wm                 # gestor de ventanas (terminales y clientes gráficos)
+soso-wm --prueba        # autoprueba sin tomar la pantalla (CI)
+```
+
+Atajos habituales: **Alt+Intro** (terminal nueva), **Alt+Tab** (cambiar ventana),
+**Alt+Q** (cerrar), **Alt+T** (flotante / mosaico), **Alt+Mayús+E** (volver a consola).
+**Ctrl+Alt+Retroceso** recupera la consola si el gestor deja de responder.
+
+Arranque recomendado para navegar en ventana:
+
+```text
+soso-wm --ejecutar /bin/soso-web --grafico --local /etc/web-prueba.html
+soso-web --grafico --local /etc/web-prueba.html
+# o: soso-web --grafico https://example.com
+```
+
+`soso-web` intenta primero una ventana en `127.0.0.1:7430`; si no hay gestor, usa
+pantalla completa. Teclas en ventana: **q** salir, **b** atrás (igual que sin WM).
+
+Sal en el escritorio admite operadores `% & | ^ << >>`, el tipo `Bytes` y
+`syscall(...)` en programas compilados para soso (véase [PLAN-SAL.md](docs/PLAN-SAL.md)).
 
 ### soso-web — navegador mínimo
 

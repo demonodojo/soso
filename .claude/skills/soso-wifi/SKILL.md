@@ -194,10 +194,12 @@ QEMU nic: `SOSO_QEMU_NIC=vfio:<BDF>` + `SOSO_LXDDE_MODE=iwlwifi`.
 - **Anillo RX gen2 = 256 RBD (2026-10-24).** Linux 22000 usa hasta 2048;
   soso pasó de 32 a 256 (`IWL_GEN2_RX_N`, context-info `RB_CB_SIZE` 2^8).
 - **Huecos de sondeo (2026-10-24).** Si `wifi::poll` o `mantener` llevan >500 ms
-  sin correr, `wifi: sondeo parado …` (pid, fallos de `try_lock`). La línea
-  `wifi: pérdidas` incluye `sondeo_max`. En la BSP, `lx_mdelay` bombea red cada
-  ms y el tick fuerza `schedule_inner` si `mantener` lleva >100 ms (inferencia
-  GPU sin matar la WiFi). Ver también **`soso-gpu`** (`launch_wait_sem`).
+  sin correr, el kernel avisa (`wifi: sondeo parado …` con causa: volcado del
+  log, transporte ocupado o planificador BSP). Tras el primer aviso, resume cada
+  30 s en lugar de inundar la consola. La línea `wifi: pérdidas` incluye
+  `sondeo_max`. En la BSP, `lx_mdelay` bombea red cada ms y el tick fuerza
+  `schedule_inner` si `mantener` lleva >100 ms (inferencia GPU sin matar la
+  WiFi). Ver también **`soso-gpu`** (`launch_wait_sem`).
 - **Reconexión visible (2026-10-24).** Tras caída: `wifi: enlace perdido …`,
   `wifi: reconectando … (recover + scan/assoc/4-way)`, `iwlwifi: etapa recover …`,
   y cada 60 s sin enlace una línea de estado. `parse-logs` marca `reconexion: ok`

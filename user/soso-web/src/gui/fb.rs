@@ -1,37 +1,45 @@
-//! Acceso al framebuffer vía syscalls.
+//! Superficie gráfica: ventana vía soso-wm o framebuffer a pantalla completa.
 
-use libsoso::sys;
+use libsoso::ventana::{Evento, Superficie};
 use soso_abi::FbInfo;
 
 pub struct Framebuffer {
     pub info: FbInfo,
-    pub back: alloc::vec::Vec<u8>,
+    inner: Superficie,
 }
 
 impl Framebuffer {
     pub fn open() -> Result<Self, i64> {
-        let mut info = FbInfo::default();
-        if sys::fb_info(&mut info) < 0 {
-            return Err(-soso_abi::ENOTSUP);
-        }
-        if info.present == 0 {
-            return Err(-soso_abi::ENOTSUP);
-        }
-        sys::fb_set_mode(soso_abi::FB_MODE_GRAPHICS)?;
-        let bytes = info.byte_len as usize;
-        Ok(Self {
-            info,
-            back: alloc::vec![0u8; bytes],
-        })
+        Self::open_size(1024, 768, "")
+    }
+
+    pub fn open_with_title(w: u32, h: u32, titulo: &str) -> Result<Self, i64> {
+        let inner = Superficie::abrir_con_titulo(w, h, titulo)?;
+        let info = inner.fb_info();
+        Ok(Self { info, inner })
+    }
+
+    fn open_size(w: u32, h: u32, titulo: &str) -> Result<Self, i64> {
+        Self::open_with_title(w, h, titulo)
+    }
+
+    pub fn back_mut(&mut self) -> &mut [u8] {
+        self.inner.back_mut()
+    }
+
+    pub fn es_wm(&self) -> bool {
+        self.inner.es_wm()
+    }
+
+    pub(crate) fn inner_mut(&mut self) -> &mut Superficie {
+        &mut self.inner
     }
 
     pub fn present(&self) -> Result<(), i64> {
-        sys::fb_present(self.back.as_ptr() as u64, self.back.len() as u64)
+        self.inner.commit()
     }
-}
 
-impl Drop for Framebuffer {
-    fn drop(&mut self) {
-        let _ = sys::fb_set_mode(soso_abi::FB_MODE_CONSOLE);
+    pub fn poll_wm_event(&self) -> Result<Option<Evento>, i64> {
+        self.inner.poll_event()
     }
 }

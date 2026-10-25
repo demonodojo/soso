@@ -910,6 +910,21 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 );
             },
         );
+        filter.if_step(sid, "soso-wm: prueba", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "soso-wm: prueba", || {
+                ssh_soso_wm_prueba(key, port)
+            });
+        });
+        filter.if_step(sid, "soso-wm: demo-cliente", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "soso-wm: demo-cliente", || {
+                ssh_soso_wm_demo_cliente(key, port)
+            });
+        });
+        filter.if_step(sid, "soso-wm: soso-web gráfico", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "soso-wm: soso-web gráfico", || {
+                ssh_soso_wm_soso_web(key, port)
+            });
+        });
         filter.if_step(sid, "forja: hola-std remoto", || {
             report.paso_ssh_sys(&mut qemu, slot, sid, "forja: hola-std remoto", || {
                 ssh_forja_hola(key, port)
@@ -2775,6 +2790,54 @@ fn ssh_init_test(key: &Path, ssh_port: u16) -> Result<(), String> {
         return Err(format!(
             "init test no llegó al final (¿timeout?); stdout: {texto:?}"
         ));
+    }
+    Ok(())
+}
+
+fn ssh_soso_wm_prueba(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let texto = ssh_guion_inner(
+        key,
+        ssh_port,
+        "soso-wm --prueba; echo WM_EXIT=$?\nexit\n",
+        Duration::from_secs(120),
+        true,
+        None,
+    )?;
+    if !texto.contains("WM_EXIT=0") {
+        return Err(format!("soso-wm --prueba no devolvió 0: {texto:?}"));
+    }
+    Ok(())
+}
+
+fn ssh_soso_wm_demo_cliente(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let texto = ssh_guion_inner(
+        key,
+        ssh_port,
+        "soso-wm --prueba; echo DEMO=$?\nexit\n",
+        Duration::from_secs(180),
+        true,
+        None,
+    )?;
+    if !texto.contains("DEMO=0") {
+        return Err(format!("soso-wm --prueba (demo) falló: {texto:?}"));
+    }
+    Ok(())
+}
+
+fn ssh_soso_wm_soso_web(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let texto = ssh_guion_inner(
+        key,
+        ssh_port,
+        "soso-wm --prueba-web; echo WEB=$?\nexit\n",
+        Duration::from_secs(240),
+        true,
+        None,
+    )?;
+    if texto.contains("superficie gráfica no disponible") {
+        return Err(format!("soso-web no pudo abrir ventana con WM activo: {texto:?}"));
+    }
+    if !texto.contains("WEB=0") {
+        return Err(format!("soso-wm --prueba-web falló: {texto:?}"));
     }
     Ok(())
 }

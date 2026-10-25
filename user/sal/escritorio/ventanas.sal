@@ -1,0 +1,110 @@
+import "mate.sal"
+
+fn tipo_terminal() -> Int
+    1
+
+fn tipo_cliente() -> Int
+    2
+
+fn barra_alto() -> Int
+    24
+
+fn ventana_contiene(x: Int, y: Int, wx: Int, wy: Int, ww: Int, wh: Int) -> Int
+    if x < wx
+        0
+    else
+        if y < wy
+            0
+        else
+            if x >= wx + ww
+                0
+            else
+                if y >= wy + wh
+                    0
+                else
+                    1
+
+fn ventana_hit_titulo(x: Int, y: Int, wx: Int, wy: Int, ww: Int) -> Int
+    if ventana_contiene(x, y, wx, wy, ww, barra_alto()) == 0
+        0
+    else
+        1
+
+fn ventana_hit_cerrar(x: Int, y: Int, wx: Int, wy: Int, ww: Int) -> Int
+    cx = wx + ww - 20
+    if x >= cx
+        if x < cx + 16
+            if y >= wy
+                if y < wy + barra_alto()
+                    1
+                else
+                    0
+            else
+                0
+        else
+            0
+    else
+        0
+
+fn ventana_hit_resize(x: Int, y: Int, wx: Int, wy: Int, ww: Int, wh: Int) -> Int
+    if x >= wx + ww - 12
+        if y >= wy + wh - 12
+            if x < wx + ww
+                if y < wy + wh
+                    1
+                else
+                    0
+            else
+                0
+        else
+            0
+    else
+        0
+
+fn ventana_mosaico_ix(i: Int, total: Int, pantalla_w: Int, pantalla_h: Int) -> Int
+    # Devuelve wx*1e9 + wy*1e6 + ww*1e3 + wh aprox — listas paralelas en el WM.
+    if total <= 0
+        0
+    else
+        if total == 1
+            pantalla_w * 1000000000 + barra_alto() * 1000000 + pantalla_w * 1000 + (pantalla_h - barra_alto())
+        else
+            mw = pantalla_w / 2
+            if i == 0
+                mw * 1000000000 + barra_alto() * 1000000 + mw * 1000 + (pantalla_h - barra_alto())
+            else
+                mw * 1000000000 + barra_alto() * 1000000 + (pantalla_w - mw) * 1000 + (pantalla_h - barra_alto())
+
+fn ventana_pack(wx: Int, wy: Int, ww: Int, wh: Int) -> Int
+    wx * 1000000000 + wy * 1000000 + ww * 1000 + wh
+
+fn ventana_wx(p: Int) -> Int
+    p / 1000000000
+
+fn ventana_wy(p: Int) -> Int
+    mod_pos(p / 1000000, 1000)
+
+fn ventana_ww(p: Int) -> Int
+    mod_pos(p / 1000, 1000)
+
+fn ventana_wh(p: Int) -> Int
+    mod_pos(p, 1000)
+
+fn rect_unir(x0: Int, y0: Int, x1: Int, y1: Int, nx0: Int, ny0: Int, nx1: Int, ny1: Int) -> Int
+    ax0 = min(x0, nx0)
+    ay0 = min(y0, ny0)
+    ax1 = max(x1, nx1)
+    ay1 = max(y1, ny1)
+    ax0 * 1000000000 + ay0 * 1000000 + ax1 * 1000 + ay1
+
+fn rect_x0(r: Int) -> Int
+    r / 1000000000
+
+fn rect_y0(r: Int) -> Int
+    mod_pos(r / 1000000, 1000)
+
+fn rect_x1(r: Int) -> Int
+    mod_pos(r / 1000, 1000)
+
+fn rect_y1(r: Int) -> Int
+    mod_pos(r, 1000)

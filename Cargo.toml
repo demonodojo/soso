@@ -36,6 +36,7 @@ members = [
     "crates/soso-improve-core",
     "crates/soso-log-core",
     "crates/soso-notify-core",
+    "crates/soso-wm-proto",
     "crates/espfat-core",
     "tools/soso-improve",
 ]

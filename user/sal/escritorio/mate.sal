@@ -1,0 +1,49 @@
+fn mod_pos(v: Int, m: Int) -> Int
+    if m <= 0
+        0
+    else
+        r = v
+        while r >= m
+            r = r - m
+        while r < 0
+            r = r + m
+        r
+
+fn u8(v: Int) -> Int
+    mod_pos(v, 256)
+
+fn u32_le(b0: Int, b1: Int, b2: Int, b3: Int) -> Int
+    u8(b0) + u8(b1) * 256 + u8(b2) * 65536 + u8(b3) * 16777216
+
+fn u32_b0(v: Int) -> Int
+    u8(v)
+
+fn u32_b1(v: Int) -> Int
+    u8(v / 256)
+
+fn u32_b2(v: Int) -> Int
+    u8(v / 65536)
+
+fn u32_b3(v: Int) -> Int
+    u8(v / 16777216)
+
+fn i32_desde_u32(v: Int) -> Int
+    if v >= 2147483648
+        v - 4294967296
+    else
+        v
+
+fn min(a: Int, b: Int) -> Int
+    if a < b
+        a
+    else
+        b
+
+fn max(a: Int, b: Int) -> Int
+    if a > b
+        a
+    else
+        b
+
+fn clamp(v: Int, lo: Int, hi: Int) -> Int
+    min(max(v, lo), hi)

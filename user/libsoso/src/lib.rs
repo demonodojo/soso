@@ -9,6 +9,7 @@ pub mod glob;
 pub mod linea;
 pub mod sys;
 pub mod thread;
+pub mod ventana;
 
 pub use soso_abi as abi;
 

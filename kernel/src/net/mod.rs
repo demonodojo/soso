@@ -78,7 +78,29 @@ struct NetStack {
     dns: [Option<smoltcp::wire::Ipv4Address>; 3],
     /// Fin de lease según la última concesión DHCP (opción 51).
     dhcp_expires_at: Option<Instant>,
+    /// Dirección QEMU 10.0.2.x por timeout DHCP; no confundir con un lease real.
+    respaldo: bool,
     user_tcp: tcp_user::TcpTable,
+}
+
+static mut DHCP_RX_BUF: [u8; 1500] = [0u8; 1500];
+
+fn dhcp_rx_slice() -> &'static mut [u8] {
+    // SAFETY: un solo socket DHCP usa este búfer; `preparar_socket_dhcp` no
+    // mantiene referencias cruzadas entre sockets distintos.
+    unsafe {
+        core::slice::from_raw_parts_mut(core::ptr::addr_of_mut!(DHCP_RX_BUF).cast(), 1500)
+    }
+}
+
+fn preparar_socket_dhcp(s: &mut dhcpv4::Socket) {
+    s.set_receive_packet_buffer(dhcp_rx_slice());
+}
+
+fn nuevo_socket_dhcp() -> dhcpv4::Socket<'static> {
+    let mut s = dhcpv4::Socket::new();
+    preparar_socket_dhcp(&mut s);
+    s
 }
 
 static NET: Once<Mutex<NetStack>> = Once::new();
@@ -254,7 +276,7 @@ fn attach_stack(mac: [u8; 6], mut dev: NicDev, backend: BackendKind, dhcp_now: b
     let iface = Interface::new(config, &mut dev, now());
 
     let mut sockets = SocketSet::new(Vec::new());
-    let dhcp = Some(sockets.add(dhcpv4::Socket::new()));
+    let dhcp = Some(sockets.add(nuevo_socket_dhcp()));
     let echo = (0..ECHO_SOCKETS)
         .map(|_| {
             sockets.add(tcp::Socket::new(
@@ -300,6 +322,7 @@ fn attach_stack(mac: [u8; 6], mut dev: NicDev, backend: BackendKind, dhcp_now: b
             estatica,
             pref_wifi: false,
             dhcp_expires_at: None,
+            respaldo: false,
             user_tcp: tcp_user::TcpTable::new(),
         })
     });
@@ -416,11 +439,16 @@ fn cambiar_dispositivo(n: &mut NetStack, mac: [u8; 6], dev: NicDev, backend: Bac
 /// si una dirección fija lo había retirado.
 fn arrancar_dhcp(n: &mut NetStack) {
     match n.dhcp {
-        Some(h) => n.sockets.get_mut::<dhcpv4::Socket>(h).reset(),
-        None => n.dhcp = Some(n.sockets.add(dhcpv4::Socket::new())),
+        Some(h) => {
+            let s = n.sockets.get_mut::<dhcpv4::Socket>(h);
+            s.reset();
+            preparar_socket_dhcp(s);
+        }
+        None => n.dhcp = Some(n.sockets.add(nuevo_socket_dhcp())),
     }
     n.dhcp_enabled = true;
     n.dhcp_started = now();
+    n.respaldo = false;
 }
 
 /// Con dirección fija nadie debe pedir lease: un socket DHCP vivo seguiría
@@ -453,6 +481,7 @@ fn aplicar_estatica(n: &mut NetStack, e: RedEstatica) {
 fn reiniciar_ip(n: &mut NetStack) {
     n.configured = false;
     n.dhcp_expires_at = None;
+    n.respaldo = false;
     clear_ipv4_config(&mut n.iface);
     close_tcp_services(&mut n.sockets, &n.echo, &n.ssh);
     match n.estatica {
@@ -466,6 +495,7 @@ fn soltar_ip(n: &mut NetStack) {
     n.configured = false;
     n.dhcp_enabled = false;
     n.dhcp_expires_at = None;
+    n.respaldo = false;
     clear_ipv4_config(&mut n.iface);
     close_tcp_services(&mut n.sockets, &n.echo, &n.ssh);
     if let Some(h) = n.dhcp {
@@ -649,6 +679,26 @@ pub fn on_wifi_lost() -> bool {
     true
 }
 
+fn ipv4_en_iface(iface: &Interface) -> Option<Ipv4Cidr> {
+    iface
+        .ip_addrs()
+        .first()
+        .and_then(|c| match c {
+            IpCidr::Ipv4(v) => Some(*v),
+        })
+}
+
+fn dns_cambiaron(
+    actual: &[Option<smoltcp::wire::Ipv4Address>; 3],
+    nuevos: &[Ipv4Address],
+) -> bool {
+    let mut vistos = [None; 3];
+    for (i, s) in nuevos.iter().take(3).enumerate() {
+        vistos[i] = Some(*s);
+    }
+    vistos != *actual
+}
+
 fn poll_dhcp(
     iface: &mut Interface,
     sockets: &mut SocketSet<'static>,
@@ -658,36 +708,42 @@ fn poll_dhcp(
     configured: &mut bool,
     dns: &mut [Option<smoltcp::wire::Ipv4Address>; 3],
     dhcp_expires_at: &mut Option<Instant>,
+    respaldo: &mut bool,
 ) {
     let event = sockets.get_mut::<dhcpv4::Socket>(dhcp).poll();
     match event {
         None => {}
         Some(dhcpv4::Event::Configured(config)) => {
-            set_ipv4_addr(iface, config.address);
-            iface.routes_mut().remove_default_ipv4_route();
-            if let Some(router) = config.router {
-                iface.routes_mut().add_default_ipv4_route(router).unwrap();
-                println!(
-                    "net: dhcp {}/{} gw {}",
-                    config.address.address(),
-                    config.address.prefix_len(),
-                    router
-                );
-            } else {
-                println!(
-                    "net: dhcp {}/{}",
-                    config.address.address(),
-                    config.address.prefix_len()
-                );
+            *dhcp_expires_at = dhcp_lease_expires(&config, now());
+            *respaldo = false;
+            let prev = ipv4_en_iface(iface);
+            let cambio_ip = prev != Some(config.address) || !*configured;
+            if cambio_ip {
+                set_ipv4_addr(iface, config.address);
+                iface.routes_mut().remove_default_ipv4_route();
+                if let Some(router) = config.router {
+                    iface.routes_mut().add_default_ipv4_route(router).unwrap();
+                    println!(
+                        "net: dhcp {}/{} gw {}",
+                        config.address.address(),
+                        config.address.prefix_len(),
+                        router
+                    );
+                } else {
+                    println!(
+                        "net: dhcp {}/{}",
+                        config.address.address(),
+                        config.address.prefix_len()
+                    );
+                }
             }
-            if !config.dns_servers.is_empty() {
+            if !config.dns_servers.is_empty() && dns_cambiaron(dns, &config.dns_servers) {
                 *dns = [None; 3];
                 for (hueco, servidor) in dns.iter_mut().zip(config.dns_servers.iter()) {
                     *hueco = Some(*servidor);
                     println!("net: dns {servidor}");
                 }
             }
-            *dhcp_expires_at = dhcp_lease_expires(&config, now());
             *configured = true;
         }
         Some(dhcpv4::Event::Deconfigured) => {
@@ -697,6 +753,7 @@ fn poll_dhcp(
             let motivo = dhcp_deconfig_motivo(now(), *dhcp_expires_at);
             println!("net: dhcp perdido ({motivo})");
             *dhcp_expires_at = None;
+            *respaldo = false;
             clear_ipv4_config(iface);
             close_tcp_services(sockets, echo, ssh);
             *configured = false;
@@ -711,6 +768,7 @@ fn try_static_fallback(
     dev: &NicDev,
     dhcp_started: Instant,
     configured: &mut bool,
+    respaldo: &mut bool,
 ) {
     if backend == BackendKind::Wifi || !dev.fallback_slirp() {
         return;
@@ -720,6 +778,7 @@ fn try_static_fallback(
     }
     apply_static_fallback(iface, mac);
     *configured = true;
+    *respaldo = true;
     let addr = tcp_user::fallback_addr_from_mac(mac);
     println!("net: sin dhcp, ip estática {addr}/24");
 }
@@ -818,6 +877,7 @@ pub fn poll() {
         backend,
         dns,
         dhcp_expires_at,
+        respaldo,
         user_tcp,
         ..
     } = &mut *n;
@@ -836,8 +896,17 @@ pub fn poll() {
             configured,
             dns,
             dhcp_expires_at,
+            respaldo,
         );
-        try_static_fallback(iface, *mac, *backend, dev, *dhcp_started, configured);
+        try_static_fallback(
+            iface,
+            *mac,
+            *backend,
+            dev,
+            *dhcp_started,
+            configured,
+            respaldo,
+        );
     }
     poll_tcp_services(sockets, echo, ssh, *configured);
     poll_user_tcp(iface, sockets, user_tcp, *configured);
@@ -1218,10 +1287,10 @@ pub fn detalle() -> soso_abi::NetDetalle {
     } else if n.configured {
         if n.estatica.is_some() {
             soso_abi::NET_MOTIVO_ESTATICA
-        } else if n.dhcp_expires_at.is_some() {
-            soso_abi::NET_MOTIVO_DHCP
-        } else {
+        } else if n.respaldo {
             soso_abi::NET_MOTIVO_RESPALDO
+        } else {
+            soso_abi::NET_MOTIVO_DHCP
         }
     } else if !enlace && n.backend == BackendKind::Wifi {
         soso_abi::NET_MOTIVO_WIFI_SIN_AUTORIZAR

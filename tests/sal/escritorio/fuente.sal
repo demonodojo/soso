@@ -1,0 +1,14 @@
+import "../../../user/sal/escritorio/fuente.sal"
+
+fn main() -> Int ! alloc
+    buf = bytes_ptr(bytes_new(64))
+    b = bytes_view(buf, 64)
+    bytes_set_u32(b, 0, 2252299634)
+    bytes_set_u32(b, 16, 16)
+    bytes_set_u32(b, 20, 16)
+    bytes_set_u32(b, 24, 8)
+    bytes_set_u32(b, 28, 128)
+    if psf2_magic_ok(buf, 64) == 0
+        1
+    else
+        0

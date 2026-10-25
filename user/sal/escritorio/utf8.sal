@@ -1,0 +1,68 @@
+import "mate.sal"
+
+fn utf8_reempl() -> Int
+    65533
+
+fn utf8_inicio() -> Int
+    0
+
+fn utf8_feed(st: Int, c: Int) -> Int
+    b = u8(c)
+    if st == 0
+        if b < 128
+            b
+        else
+            if b >= 194
+                if b <= 223
+                    256 + b
+                else
+                    if b <= 239
+                        65536 + b
+                    else
+                        if b <= 244
+                            16777216 + b
+                        else
+                            utf8_reempl()
+            else
+                utf8_reempl()
+    else
+        if st >= 16777216
+            lead = st - 16777216
+            if b >= 128
+                if b <= 191
+                    lead * 65536 + b
+                else
+                    utf8_reempl()
+            else
+                utf8_reempl()
+        else
+            if st >= 65536
+                lead = st - 65536
+                if b >= 128
+                    if b <= 191
+                        lead * 256 + b
+                    else
+                        utf8_reempl()
+                else
+                    utf8_reempl()
+            else
+                if st >= 256
+                    lead = st - 256
+                    if b >= 128
+                        if b <= 191
+                            (lead - 192) * 64 + (b - 128)
+                        else
+                            utf8_reempl()
+                    else
+                        utf8_reempl()
+                else
+                    utf8_reempl()
+
+fn utf8_final(st: Int) -> Int
+    if st < 0
+        -1
+    else
+        if st < 128
+            st
+        else
+            -1

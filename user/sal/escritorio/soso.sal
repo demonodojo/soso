@@ -1,0 +1,317 @@
+import "mate.sal"
+
+fn sys_read() -> Int
+    1
+
+fn sys_write() -> Int
+    2
+
+fn sys_close() -> Int
+    4
+
+fn sys_sleep_ms() -> Int
+    13
+
+fn sys_uptime_ms() -> Int
+    28
+
+fn sys_read_timeout() -> Int
+    32
+
+fn sys_tcp_listen() -> Int
+    30
+
+fn sys_tcp_accept() -> Int
+    31
+
+fn sys_tcp_connect() -> Int
+    29
+
+fn sockaddr_size() -> Int
+    8
+
+fn sys_kill() -> Int
+    52
+
+fn sig_probe() -> Int
+    0
+
+fn sys_spawn_io() -> Int
+    22
+
+fn sys_fb_info() -> Int
+    62
+
+fn sys_fb_set_mode() -> Int
+    63
+
+fn sys_fb_present_rect() -> Int
+    97
+
+fn sys_input_poll() -> Int
+    65
+
+fn sys_pty_open() -> Int
+    98
+
+fn sys_shm_create() -> Int
+    99
+
+fn sys_shm_map() -> Int
+    100
+
+fn sys_shm_free() -> Int
+    101
+
+fn fb_mode_consola() -> Int
+    0
+
+fn fb_mode_graficos() -> Int
+    1
+
+fn input_key() -> Int
+    2
+
+fn fd_kernel_log() -> Int
+    -3
+
+fn fd_pty_stdio(slot: Int) -> Int
+    -4 - slot
+
+fn fb_info_size() -> Int
+    24
+
+fn fb_off_present() -> Int
+    0
+
+fn fb_off_format() -> Int
+    1
+
+fn fb_off_bpp() -> Int
+    2
+
+fn fb_off_width() -> Int
+    4
+
+fn fb_off_height() -> Int
+    8
+
+fn fb_off_stride() -> Int
+    12
+
+fn input_off_kind() -> Int
+    0
+
+fn input_off_x() -> Int
+    4
+
+fn input_off_y() -> Int
+    8
+
+fn input_off_button() -> Int
+    12
+
+fn input_off_key() -> Int
+    16
+
+fn input_off_pressed() -> Int
+    20
+
+fn input_mouse_move() -> Int
+    0
+
+fn input_mouse_btn() -> Int
+    1
+
+fn spawnio_size() -> Int
+    112
+
+fn spawnio_off_path_ptr() -> Int
+    0
+
+fn spawnio_off_path_len() -> Int
+    8
+
+fn spawnio_off_stdin() -> Int
+    32
+
+fn spawnio_off_stdout() -> Int
+    40
+
+fn spawnio_off_stderr() -> Int
+    48
+
+fn spawnio_off_argv_ptr() -> Int
+    56
+
+fn spawnio_off_argv_count() -> Int
+    64
+
+fn spawnio_off_log_fd() -> Int
+    88
+
+fn fb_info_leer(ptr: Int) -> Int ! alloc
+    b = bytes_view(ptr, fb_info_size())
+    bytes_get_u8(b, fb_off_present())
+
+fn fb_info_ancho(ptr: Int) -> Int ! alloc
+    b = bytes_view(ptr, fb_info_size())
+    bytes_get_u32(b, fb_off_width())
+
+fn fb_info_alto(ptr: Int) -> Int ! alloc
+    b = bytes_view(ptr, fb_info_size())
+    bytes_get_u32(b, fb_off_height())
+
+fn fb_info_stride(ptr: Int) -> Int ! alloc
+    b = bytes_view(ptr, fb_info_size())
+    bytes_get_u32(b, fb_off_stride())
+
+fn fb_info_bpp(ptr: Int) -> Int ! alloc
+    b = bytes_view(ptr, fb_info_size())
+    bytes_get_u8(b, fb_off_bpp())
+
+fn fb_info_formato(ptr: Int) -> Int ! alloc
+    b = bytes_view(ptr, fb_info_size())
+    bytes_get_u8(b, fb_off_format())
+
+fn input_event_kind(evt_ptr: Int, evt_len: Int, i: Int) -> Int ! alloc
+    b = bytes_view(evt_ptr, evt_len)
+    bytes_get_u32(b, i * 24 + input_off_kind())
+
+fn input_event_key(evt_ptr: Int, evt_len: Int, i: Int) -> Int ! alloc
+    b = bytes_view(evt_ptr, evt_len)
+    bytes_get_u32(b, i * 24 + input_off_key())
+
+fn input_event_pressed(evt_ptr: Int, evt_len: Int, i: Int) -> Int ! alloc
+    b = bytes_view(evt_ptr, evt_len)
+    bytes_get_u8(b, i * 24 + input_off_pressed())
+
+fn input_event_x(evt_ptr: Int, evt_len: Int, i: Int) -> Int ! alloc
+    b = bytes_view(evt_ptr, evt_len)
+    v = bytes_get_u32(b, i * 24 + input_off_x())
+    i32_desde_u32(v)
+
+fn input_event_y(evt_ptr: Int, evt_len: Int, i: Int) -> Int ! alloc
+    b = bytes_view(evt_ptr, evt_len)
+    v = bytes_get_u32(b, i * 24 + input_off_y())
+    i32_desde_u32(v)
+
+fn input_event_button(evt_ptr: Int, evt_len: Int, i: Int) -> Int ! alloc
+    b = bytes_view(evt_ptr, evt_len)
+    bytes_get_u32(b, i * 24 + input_off_button())
+
+fn fb_info_nuevo() -> Int ! alloc
+    bytes_ptr(bytes_new(fb_info_size()))
+
+fn fb_info(out_ptr: Int) -> Int ! io, alloc
+    syscall(sys_fb_info(), out_ptr, fb_info_size(), 0, 0, 0, 0)
+
+fn fb_set_mode(mode: Int) -> Int ! io
+    syscall(sys_fb_set_mode(), mode, 0, 0, 0, 0, 0)
+
+fn fb_present_rect(buf_ptr: Int, buf_len: Int, x: Int, y: Int, w: Int, h: Int) -> Int ! io
+    xy = x + y * 65536
+    wh = w + h * 65536
+    syscall(sys_fb_present_rect(), buf_ptr, buf_len, xy, wh, 0, 0)
+
+fn input_poll(out_ptr: Int, out_len: Int, max_evt: Int) -> Int ! io
+    syscall(sys_input_poll(), out_ptr, max_evt, 0, 0, 0, 0)
+
+fn pty_open() -> Int ! io
+    syscall(sys_pty_open(), 0, 0, 0, 0, 0, 0)
+
+fn pty_fd_maestro(v: Int) -> Int
+    v / 4294967296
+
+fn pty_slot(v: Int) -> Int
+    mod_pos(v, 256)
+
+fn read_fd(fd: Int, buf_ptr: Int, len: Int) -> Int ! io
+    syscall(sys_read(), fd, buf_ptr, len, 0, 0, 0)
+
+fn write_fd(fd: Int, buf_ptr: Int, len: Int) -> Int ! io
+    syscall(sys_write(), fd, buf_ptr, len, 0, 0, 0)
+
+fn close_fd(fd: Int) -> Int ! io
+    syscall(sys_close(), fd, 0, 0, 0, 0, 0)
+
+fn read_timeout_fd(fd: Int, buf_ptr: Int, len: Int, ms: Int) -> Int ! io
+    syscall(sys_read_timeout(), fd, buf_ptr, len, ms, 0, 0)
+
+fn tcp_listen(port: Int) -> Int ! io
+    syscall(sys_tcp_listen(), port, 0, 0, 0, 0, 0)
+
+fn tcp_accept(fd: Int, ms: Int) -> Int ! io
+    syscall(sys_tcp_accept(), fd, ms, 0, 0, 0, 0)
+
+fn sockaddr_loopback(port: Int) -> Int ! alloc
+    sa = bytes_new(sockaddr_size())
+    sap = bytes_ptr(sa)
+    b = bytes_view(sap, sockaddr_size())
+    bytes_set_u8(b, 0, 127)
+    bytes_set_u8(b, 1, 0)
+    bytes_set_u8(b, 2, 0)
+    bytes_set_u8(b, 3, 1)
+    bytes_set_u8(b, 4, u32_b2(port))
+    bytes_set_u8(b, 5, u32_b0(port))
+    bytes_set_u8(b, 6, 0)
+    bytes_set_u8(b, 7, 0)
+    sap
+
+fn tcp_connect(port: Int, timeout_ms: Int) -> Int ! io, alloc
+    sa = sockaddr_loopback(port)
+    syscall(sys_tcp_connect(), sa, timeout_ms, 0, 0, 0, 0)
+
+fn shm_create(len: Int) -> Int ! io
+    syscall(sys_shm_create(), len, 0, 0, 0, 0, 0)
+
+fn shm_map(id: Int) -> Int ! io
+    syscall(sys_shm_map(), id, 0, 0, 0, 0, 0)
+
+fn shm_free(id: Int) -> Int ! io
+    syscall(sys_shm_free(), id, 0, 0, 0, 0, 0)
+
+fn kill_pid(pid: Int, sig: Int) -> Int ! io
+    syscall(sys_kill(), pid, sig, 0, 0, 0, 0)
+
+fn sleep_ms(ms: Int) -> Int ! io
+    syscall(sys_sleep_ms(), ms, 0, 0, 0, 0, 0)
+
+fn uptime_ms() -> Int ! io
+    syscall(sys_uptime_ms(), 0, 0, 0, 0, 0, 0)
+
+fn spawn_argv_slot(tab: Int, i: Int, s: String) -> Int ! alloc
+    bytes_set_i64(tab, i * 16, str_bytes(s))
+    bytes_set_i64(tab, i * 16 + 8, str_len(s))
+    0
+
+fn spawn_io_full(path: String, stdin: Int, stdout: Int, stderr: Int, log_fd: Int) -> Int ! io, alloc
+    tab = bytes_new(16)
+    _a = spawn_argv_slot(tab, 0, path)
+    opts = bytes_new(spawnio_size())
+    bytes_set_i64(opts, spawnio_off_path_ptr(), str_bytes(path))
+    bytes_set_i64(opts, spawnio_off_path_len(), str_len(path))
+    bytes_set_i64(opts, spawnio_off_stdin(), stdin)
+    bytes_set_i64(opts, spawnio_off_stdout(), stdout)
+    bytes_set_i64(opts, spawnio_off_stderr(), stderr)
+    bytes_set_i64(opts, spawnio_off_argv_ptr(), bytes_ptr(tab))
+    bytes_set_i64(opts, spawnio_off_argv_count(), 1)
+    bytes_set_i64(opts, spawnio_off_log_fd(), log_fd)
+    syscall(sys_spawn_io(), bytes_ptr(opts), 0, 0, 0, 0, 0)
+
+fn spawn_io_4(path: String, a1: String, a2: String, a3: String, stdin: Int, stdout: Int, stderr: Int, log_fd: Int) -> Int ! io, alloc
+    tab = bytes_new(64)
+    _p = spawn_argv_slot(tab, 0, path)
+    _1 = spawn_argv_slot(tab, 1, a1)
+    _2 = spawn_argv_slot(tab, 2, a2)
+    _3 = spawn_argv_slot(tab, 3, a3)
+    opts = bytes_new(spawnio_size())
+    bytes_set_i64(opts, spawnio_off_path_ptr(), str_bytes(path))
+    bytes_set_i64(opts, spawnio_off_path_len(), str_len(path))
+    bytes_set_i64(opts, spawnio_off_stdin(), stdin)
+    bytes_set_i64(opts, spawnio_off_stdout(), stdout)
+    bytes_set_i64(opts, spawnio_off_stderr(), stderr)
+    bytes_set_i64(opts, spawnio_off_argv_ptr(), bytes_ptr(tab))
+    bytes_set_i64(opts, spawnio_off_argv_count(), 4)
+    bytes_set_i64(opts, spawnio_off_log_fd(), log_fd)
+    syscall(sys_spawn_io(), bytes_ptr(opts), 0, 0, 0, 0, 0)

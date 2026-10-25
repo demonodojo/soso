@@ -1199,10 +1199,28 @@ fn ejecutar_wifi(args: &str) {
             return;
         }
         let (ssid, psk) = match rest.split_once(char::is_whitespace) {
-            Some((s, p)) => (s, Some(p.trim())),
+            Some((s, p)) => {
+                println!("wifi: aviso: la contraseña en la línea de comandos queda en el log");
+                (s, Some(p.trim()))
+            }
             None => (rest, None),
         };
-        let r = sys::wifi_connect(ssid, psk);
+        let psk = match psk {
+            Some(p) if !p.is_empty() => Some(p.to_string()),
+            Some(_) | None => {
+                print!("wifi: contraseña para '{ssid}' (Enter = red abierta): ");
+                match Lector::new().sin_eco().siguiente() {
+                    Ok(Some(p)) if !p.trim().is_empty() => Some(p.trim().to_string()),
+                    Ok(Some(_)) | Ok(None) => None,
+                    Err(e) => {
+                        println!("sosh: tty: {}", errno_str(e));
+                        return;
+                    }
+                }
+            }
+        };
+        let psk_ref = psk.as_deref();
+        let r = sys::wifi_connect(ssid, psk_ref);
         if r < 0 {
             println!("sosh: wifi connect: {}", errno_str(r));
         } else {

@@ -123,7 +123,7 @@ un hueco en blanco se leería como live.
 |---------|--------|---------------|----------|
 | `BOOTMARK.TXT` | — | boot-shim | UEFI nos ejecutó; si sigue vacío, el firmware no arrancó el USB |
 | `SOSOHASH.TXT` | 4 KiB | `package-usb-live` | identidad de lo flasheado (versión, sha256 kernel/rootfs) |
-| `SOSOLOG.TXT` | 256 KiB | kernel `fatlog` (~2 s) | log serie persistente |
+| `SOSOLOG.TXT` | 256 KiB | kernel `fatlog` (~2 s) | log serie persistente (volcado incremental por sectores; bombea red en `poll`) |
 | `SOSODRV.TXT` | 16 KiB | `hwscan` / `drvlog` | informe PCI |
 | `SOSOBOOT.TXT` | 4 KiB | `soso-install` → shim | `INSTALL <guid-ESP>` → `Boot####` |
 | `SOSOWIFI.TXT` | 4 KiB | usuario en host | `ssid=` / `psk=` |
@@ -270,7 +270,7 @@ Tests: `cargo xtask test-usb` (4 escenarios en paralelo).
 
 ```bash
 cargo xtask package-usb-live              # qwen27-iq3 (Qwen3.6-27B UD-IQ3_XXS; sin medir stick)
-cargo xtask flash-usb-live /dev/sdX --yes # qwen27-iq3, dd, estira p3
+cargo xtask flash-usb-live /dev/sdX --yes # qwen27-iq3, dd, estira p3; conserva SOSOWIFI.TXT si ya tenía ssid=
 SOSO_LIVE_OFFLINE=1 cargo xtask flash-usb-live /dev/sdX --yes
 # incremental (pendrive ya flasheado; no toca p3 modelos):
 cargo xtask flash-usb-live /dev/sdX --yes --skip-models

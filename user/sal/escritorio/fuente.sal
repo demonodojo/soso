@@ -1,0 +1,61 @@
+import "mate.sal"
+import "superficie.sal"
+
+fn psf2_magic_ok(ptr: Int, len: Int) -> Int ! alloc
+    if len < 32
+        0
+    else
+        1
+
+fn psf2_ancho(ptr: Int, len: Int) -> Int ! alloc
+    bytes_get_u32(bytes_view(ptr, len), 24)
+
+fn psf2_alto(ptr: Int, len: Int) -> Int ! alloc
+    bytes_get_u32(bytes_view(ptr, len), 20)
+
+fn psf2_num(ptr: Int, len: Int) -> Int ! alloc
+    bytes_get_u32(bytes_view(ptr, len), 28)
+
+fn psf2_bytes_glifo(ptr: Int, len: Int) -> Int ! alloc
+    bytes_get_u32(bytes_view(ptr, len), 16)
+
+fn psf2_offset_glifo(ptr: Int, len: Int, cp: Int) -> Int ! alloc
+    n = psf2_num(ptr, len)
+    if cp < 0
+        -1
+    else
+        if cp >= n
+            -1
+        else
+            32 + cp * psf2_bytes_glifo(ptr, len)
+
+fn fuente_dibujar(psf_ptr: Int, psf_len: Int, pix_ptr: Int, pix_len: Int, stride: Int, bpp: Int, fmt: Int, cp: Int, fg: Int, bg: Int, cx: Int, cy: Int) -> Int ! alloc
+    if psf2_magic_ok(psf_ptr, psf_len) == 0
+        1
+    else
+        off = psf2_offset_glifo(psf_ptr, psf_len, cp)
+        if off < 0
+            2
+        else
+            gw = psf2_ancho(psf_ptr, psf_len)
+            gh = psf2_alto(psf_ptr, psf_len)
+            psf = bytes_view(psf_ptr, psf_len)
+            row = 0
+            while row < gh
+                col = 0
+                while col < gw
+                    byte_i = row * ((gw + 7) / 8) + col / 8
+                    bit = 7 - mod_pos(col, 8)
+                    v = bytes_get_u8(psf, off + byte_i)
+                    mask = 1
+                    t = 0
+                    while t < bit
+                        mask = mask * 2
+                        t = t + 1
+                    if mod_pos(v, mask * 2) >= mask
+                        _p = pixel_escribir(pix_ptr, pix_len, stride, bpp, fmt, cx + col, cy + row, fg)
+                    else
+                        _p = pixel_escribir(pix_ptr, pix_len, stride, bpp, fmt, cx + col, cy + row, bg)
+                    col = col + 1
+                row = row + 1
+            0

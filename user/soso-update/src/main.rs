@@ -217,12 +217,7 @@ fn cmd_comprobar(args: &[String]) -> u8 {
         Some(r) => println!("local:  {} ({}, {})", r.version, r.build, r.fecha),
         None => println!("local:  ?"),
     }
-    let pendientes: Vec<FileEntry> = man
-        .files
-        .iter()
-        .filter(|f| file_needs_update(f))
-        .cloned()
-        .collect();
+    let pendientes = listar_pendientes(&man.files);
     let hay_trabajo = !pendientes.is_empty() || kernel_necesita_actualizar(&man);
     match oferta_de(&man, release.as_ref(), hay_trabajo) {
         Oferta::Nueva => println!("hay actualización disponible"),
@@ -982,6 +977,11 @@ fn kernel_necesita_actualizar(man: &Manifest) -> bool {
 }
 
 fn file_needs_update(entry: &manifest::FileEntry) -> bool {
+    let mut _bytes = 0u64;
+    file_needs_update_contando(entry, &mut _bytes)
+}
+
+fn file_needs_update_contando(entry: &manifest::FileEntry, bytes_leidos: &mut u64) -> bool {
     let path = format!("/{}", entry.path);
     // El tamaño descarta la mayoría de los casos sin tocar el contenido: leer
     // los 63 MB de un firmware GSP sólo para descubrir que ha cambiado sería
@@ -989,8 +989,39 @@ fn file_needs_update(entry: &manifest::FileEntry) -> bool {
     match file_size(&path) {
         None => true,
         Some(size) if size != entry.size => true,
-        Some(_) => hash_file(&path).map(|h| h != entry.hash_hex).unwrap_or(true),
+        Some(size) => {
+            *bytes_leidos += size;
+            hash_file(&path)
+                .map(|h| h != entry.hash_hex)
+                .unwrap_or(true)
+        }
     }
+}
+
+fn listar_pendientes(files: &[manifest::FileEntry]) -> Vec<FileEntry> {
+    let n = files.len();
+    if n > 0 {
+        println!("comprobando {n} ficheros locales…");
+    }
+    let mut pendientes = Vec::new();
+    let mut bytes_leidos = 0u64;
+    let mut ultimo_prog = sys::uptime_ms();
+    for (i, entry) in files.iter().enumerate() {
+        if file_needs_update_contando(entry, &mut bytes_leidos) {
+            pendientes.push(entry.clone());
+        }
+        let now = sys::uptime_ms();
+        if n > 0 && now.saturating_sub(ultimo_prog) >= 3000 {
+            println!(
+                "  … {}/{} ficheros, {} leídos",
+                i + 1,
+                n,
+                humano(bytes_leidos)
+            );
+            ultimo_prog = now;
+        }
+    }
+    pendientes
 }
 
 fn file_size(path: &str) -> Option<u64> {

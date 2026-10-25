@@ -1,0 +1,14 @@
+import "../../../user/sal/escritorio/utf8.sal"
+
+fn main() -> Int ! alloc
+    st = utf8_inicio()
+    st = utf8_feed(st, 195)
+    cp = utf8_feed(st, 161)
+    if cp != 225
+        1
+    else
+        bad = utf8_feed(utf8_inicio(), 255)
+        if bad != 65533
+            2
+        else
+            0

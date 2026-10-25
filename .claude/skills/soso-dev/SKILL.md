@@ -32,6 +32,10 @@ Automejora (Txx, SI-*, OpenCode, `soso-improve`): skill
 **[`soso-self-improvement`](../soso-self-improvement/SKILL.md)**. No arrancar
 esa ruta desde aquí.
 
+Escritorio: `cargo xtask sal-build` ( `soso-wm`, `demo-cliente` ); pruebas guest
+`soso-wm --prueba` / `--prueba-web` (sin `&` en sosh). Host:
+`python3 tests/sal/escritorio/probar_host.py`.
+
 Guía operativa: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md).
 Estado y matriz hardware: [`docs/ESTADO.md`](../../docs/ESTADO.md), [`docs/HW-MATRIX.md`](../../docs/HW-MATRIX.md).
 

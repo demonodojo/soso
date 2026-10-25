@@ -94,6 +94,9 @@ fn main(args: &[String]) -> u8 {
     if cmd == "env-check" {
         return env_check();
     }
+    if cmd == "shm-check" {
+        return shm_check(op);
+    }
     if cmd == "log" {
         libsoso::logln!("{}", args[1..].join(" "));
         return 0;
@@ -121,6 +124,22 @@ fn env_check() -> u8 {
     if n != 1 || val[0] != b'y' {
         return 1;
     }
+    0
+}
+
+fn shm_check(id_str: &str) -> u8 {
+    let id: u64 = id_str.bytes().fold(0u64, |acc, b| {
+        acc.saturating_mul(10).saturating_add((b - b'0') as u64)
+    });
+    let va = match sys::shm_map(id) {
+        Ok(v) => v,
+        Err(_) => return 1,
+    };
+    let magic = unsafe { core::ptr::read_volatile(va as *const u64) };
+    if magic != 0x1122_3344_5566_7788 {
+        return 2;
+    }
+    let _ = sys::munmap(va, 4096);
     0
 }
 
@@ -1914,6 +1933,78 @@ fn suite() -> u8 {
         let _ = sys::close(9);
         let _ = sys::close(fd2 as u64);
         let _ = sys::unlink("/tmp/sh-test/b");
+    }
+
+    // Escritorio: pseudo-terminal y memoria compartida.
+    {
+        let Ok((master, slot)) = sys::pty_open() else {
+            check!(false, "SYS_PTY_OPEN");
+            return 1;
+        };
+        let tty = sys::fd_pty_stdio(slot);
+        let fds = [tty, tty, tty, abi::FD_KERNEL_LOG];
+        let pid = sys::spawn_io_full("/bin/sosh", &["-c", "echo pty-eco"], &[], fds);
+        check!(pid > 0, "spawn sosh en pty (pid {pid})");
+        let mut out = [0u8; 64];
+        let mut got = 0usize;
+        for _ in 0..200 {
+            let n = sys::read(master, &mut out[got..]);
+            if n > 0 {
+                got += n as usize;
+                if core::str::from_utf8(&out[..got])
+                    .ok()
+                    .is_some_and(|s| s.contains("pty-eco"))
+                {
+                    break;
+                }
+            }
+            let _ = sys::sleep_ms(10);
+        }
+        check!(
+            core::str::from_utf8(&out[..got])
+                .ok()
+                .is_some_and(|s| s.contains("pty-eco")),
+            "eco por pty"
+        );
+        check!(sys::wait() == Ok((pid as u64, 0)), "sosh eco en pty termina");
+        let sleeper = sys::spawn_io_full("/bin/sosh", &["-c", "sleep 600"], &[], fds);
+        check!(sleeper > 0, "spawn sleep en pty");
+        let _ = sys::write(master, &[0x03]);
+        check!(
+            sys::wait() == Ok((sleeper as u64, abi::exit_by_signal(abi::SIGINT as u8))),
+            "Ctrl-C vía maestro pty"
+        );
+        check!(sys::close(master) == 0, "close maestro pty");
+
+        let id = match sys::shm_create(4096) {
+            Ok(i) => i,
+            Err(e) => {
+                check!(false, "shm_create ({e})");
+                return 1;
+            }
+        };
+        let va = match sys::shm_map(id) {
+            Ok(v) => v,
+            Err(e) => {
+                check!(false, "shm_map ({e})");
+                return 1;
+            }
+        };
+        unsafe {
+            core::ptr::write_volatile(va as *mut u64, 0x1122_3344_5566_7788);
+        }
+        let arg = alloc::format!("shm-check {id}");
+        let child = sys::spawn("/bin/init", &arg);
+        check!(child > 0, "spawn shm-check");
+        check!(sys::wait() == Ok((child as u64, 0)), "shm-check ok");
+        unsafe {
+            check!(
+                core::ptr::read_volatile(va as *const u64) == 0x1122_3344_5566_7788,
+                "shm sigue visible tras hijo"
+            );
+        }
+        check!(sys::munmap(va, 4096) == 0, "munmap shm");
+        check!(sys::shm_free(id).is_ok(), "shm_free");
     }
 
     // Hito 2: humo soso-std en guest.

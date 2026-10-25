@@ -1,0 +1,5 @@
+import "../../../user/sal/escritorio/proto.sal"
+
+fn main() -> Int ! alloc
+    b = msg_nuevo()
+    msg_encode_tecla(b, 65, 1)

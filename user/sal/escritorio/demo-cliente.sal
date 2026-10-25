@@ -1,0 +1,39 @@
+import "soso.sal"
+import "proto.sal"
+import "superficie.sal"
+
+fn main() -> Int ! io, alloc
+    sock = tcp_connect(7430, 5000)
+    if sock < 0
+        1
+    else
+        m = msg_nuevo()
+        _h = msg_encode_hola(m, 1)
+        _w1 = write_fd(sock, m, msg_len())
+        m2 = msg_nuevo()
+        _c = msg_encode_crear(m2, 320, 200, 0)
+        _w2 = write_fd(sock, m2, msg_len())
+        rep = msg_nuevo()
+        n = read_fd(sock, rep, msg_len())
+        if n != msg_len()
+            2
+        else
+            if msg_get_op(rep) != op_ventana()
+                3
+            else
+                sid = msg_get_u32(rep, 8)
+                cw = msg_get_u32(rep, 12)
+                ch = msg_get_u32(rep, 16)
+                ptr = shm_map(sid)
+                if ptr < 0
+                    4
+                else
+                    slen = cw * ch * 4
+                    fmt = msg_get_u32(rep, 20)
+                    _f = rellenar_rect(ptr, slen, cw, ch, cw, 4, fmt, 0, 0, cw, ch, color_rgb(40, 80, 200))
+                    md = msg_nuevo()
+                    _d = msg_encode_danio(md, 0, 0, cw, ch)
+                    _w3 = write_fd(sock, md, msg_len())
+                    _s = sleep_ms(50)
+                    _x = close_fd(sock)
+                    0

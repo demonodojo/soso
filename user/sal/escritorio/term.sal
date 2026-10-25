@@ -1,0 +1,129 @@
+import "mate.sal"
+
+fn celda_bytes() -> Int
+    8
+
+fn attr_inv() -> Int
+    1
+
+fn col_default_fg() -> Int
+    7
+
+fn col_default_bg() -> Int
+    0
+
+fn term_capa(w: Int, h: Int) -> Int ! alloc
+    bytes_ptr(bytes_new(w * h * celda_bytes()))
+
+fn term_idx(w: Int, col: Int, row: Int) -> Int
+    (row * w + col) * celda_bytes()
+
+fn term_leer_cp(ptr: Int, len: Int, w: Int, col: Int, row: Int) -> Int ! alloc
+    b = bytes_view(ptr, len)
+    bytes_get_u32(b, term_idx(w, col, row))
+
+fn term_escribir(ptr: Int, len: Int, w: Int, col: Int, row: Int, cp: Int, fg: Int, bg: Int, attr: Int) -> Int ! alloc
+    if col < 0
+        0
+    else
+        if row < 0
+            0
+        else
+            b = bytes_view(ptr, len)
+            o = term_idx(w, col, row)
+            bytes_set_u32(b, o, cp)
+            bytes_set_u8(b, o + 4, u8(fg))
+            bytes_set_u8(b, o + 5, u8(bg))
+            bytes_set_u8(b, o + 6, u8(attr))
+            0
+
+fn term_limpiar(ptr: Int, len: Int, w: Int, h: Int) -> Int ! alloc
+    row = 0
+    while row < h
+        col = 0
+        while col < w
+            _t = term_escribir(ptr, len, w, col, row, 32, col_default_fg(), col_default_bg(), 0)
+            col = col + 1
+        row = row + 1
+    0
+
+fn term_nueva_linea(ptr: Int, len: Int, w: Int, h: Int, col: Int, row: Int) -> Int ! alloc
+    nr = row + 1
+    if nr >= h
+        r = 1
+        while r < h
+            c = 0
+            while c < w
+                o0 = term_idx(w, c, r - 1)
+                o1 = term_idx(w, c, r)
+                b = bytes_view(ptr, len)
+                bytes_set_u32(b, o0, bytes_get_u32(b, o1))
+                bytes_set_u8(b, o0 + 4, bytes_get_u8(b, o1 + 4))
+                bytes_set_u8(b, o0 + 5, bytes_get_u8(b, o1 + 5))
+                bytes_set_u8(b, o0 + 6, bytes_get_u8(b, o1 + 6))
+                c = c + 1
+            r = r + 1
+        c = 0
+        while c < w
+            _t = term_escribir(ptr, len, w, c, h - 1, 32, col_default_fg(), col_default_bg(), 0)
+            c = c + 1
+        nr = h - 1
+    term_pack_cursor(0, nr)
+
+fn term_cursor_scale() -> Int
+    4096
+
+fn term_pack_cursor(col: Int, row: Int) -> Int
+    row * term_cursor_scale() + col
+
+fn term_put(ptr: Int, len: Int, w: Int, h: Int, col: Int, row: Int, cp: Int, fg: Int, bg: Int, attr: Int) -> Int ! alloc
+    if cp == 10
+        term_nueva_linea(ptr, len, w, h, col, row)
+    else
+        if cp == 13
+            term_pack_cursor(0, row)
+        else
+            if cp == 8
+                nc = col - 1
+                if nc < 0
+                    term_pack_cursor(0, row)
+                else
+                    _t = term_escribir(ptr, len, w, nc, row, 32, fg, bg, attr)
+                    term_pack_cursor(nc, row)
+            else
+                if cp == 9
+                    nc = col + 8 - mod_pos(col, 8)
+                    term_pack_cursor(nc, row)
+                else
+                    _t = term_escribir(ptr, len, w, col, row, cp, fg, bg, attr)
+                    term_pack_cursor(col + 1, row)
+
+fn term_cursor_col(pos: Int) -> Int
+    mod_pos(pos, term_cursor_scale())
+
+fn term_cursor_row(pos: Int) -> Int
+    pos / term_cursor_scale()
+
+fn term_feed_byte(ptr: Int, len: Int, w: Int, h: Int, pos: Int, byte: Int, fg: Int, bg: Int, attr: Int) -> Int ! alloc
+    col = term_cursor_col(pos)
+    row = term_cursor_row(pos)
+    term_put(ptr, len, w, h, col, row, u8(byte), fg, bg, attr)
+
+fn term_feed_esc(ptr: Int, len: Int, w: Int, h: Int, pos: Int, seq: String, fg: Int, bg: Int, attr: Int) -> Int ! alloc
+    if str_len(seq) >= 4
+        if str_char(seq, 0) == 27
+            if str_char(seq, 1) == 91
+                if str_char(seq, 2) == 50
+                    if str_char(seq, 3) == 74
+                        _t = term_limpiar(ptr, len, w, h)
+                        0
+                    else
+                        pos
+                else
+                    pos
+            else
+                pos
+        else
+            pos
+    else
+        pos

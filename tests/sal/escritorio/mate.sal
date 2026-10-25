@@ -1,0 +1,10 @@
+import "../../../user/sal/escritorio/mate.sal"
+
+fn main() -> Int
+    if mod_pos(10, 3) != 1
+        1
+    else
+        if u32_le(1, 2, 0, 0) != 513
+            2
+        else
+            0

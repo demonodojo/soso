@@ -197,6 +197,14 @@ fn write_full(usb: &Path) {
     let live = package_live::live_image_path();
     let out_dir = package_live::out_dir();
 
+    let wifi_backup = package_live::validate_live_usb(usb)
+        .ok()
+        .and_then(|_| package_live::read_esp_wificonf(usb))
+        .filter(|data| package_live::wificonf_tiene_ssid(data));
+    if wifi_backup.is_some() {
+        println!("flash-usb-live: conservaré SOSOWIFI.TXT tras el dd");
+    }
+
     println!("flash-usb-live: escribiendo {} → {}", live.display(), usb.display());
     install_disk::run_cmd(
         Command::new("dd")
@@ -213,6 +221,15 @@ fn write_full(usb: &Path) {
     );
     crate::fat32_write::drop_path_cache(usb);
     install_disk::run_cmd(&mut Command::new("sync"), "sync");
+
+    if let Some(data) = wifi_backup.as_deref() {
+        match package_live::write_esp_wificonf(usb, data) {
+            Ok(()) => println!("flash-usb-live: SOSOWIFI.TXT restaurado"),
+            Err(e) => eprintln!("flash-usb-live: aviso: no restauré SOSOWIFI.TXT: {e}"),
+        }
+        crate::fat32_write::drop_path_cache(usb);
+        install_disk::run_cmd(&mut Command::new("sync"), "sync");
+    }
 
     install_disk::expand_models_partition(usb, &live);
     install_disk::repair_gpt_backup(usb);

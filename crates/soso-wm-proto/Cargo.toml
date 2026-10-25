@@ -1,0 +1,7 @@
+[package]
+name = "soso-wm-proto"
+version = "0.1.0"
+edition = "2021"
+description = "Protocolo binario cliente ↔ soso-wm (32 bytes LE)"
+
+[dependencies]

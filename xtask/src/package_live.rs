@@ -877,7 +877,6 @@ pub(crate) fn pad_live_kernel_slot(live: &Path) {
     }
 }
 
-#[allow(dead_code)] // SOSOWIFI.TXT; el camino in situ ya no reescribe la FAT
 fn esp_wifi_name11() -> [u8; 11] {
     let mut name11 = [0u8; 11];
     name11[..8].copy_from_slice(b"SOSOWIFI");
@@ -885,15 +884,24 @@ fn esp_wifi_name11() -> [u8; 11] {
     name11
 }
 
+/// `ssid=` no vacío en un hueco SOSOWIFI.TXT.
+pub(crate) fn wificonf_tiene_ssid(data: &[u8]) -> bool {
+    let Ok(texto) = core::str::from_utf8(data) else {
+        return false;
+    };
+    texto.lines().any(|l| {
+        let l = l.trim();
+        l.starts_with("ssid=") && l.len() > "ssid=".len()
+    })
+}
+
 /// Lee `SOSOWIFI.TXT` de la ESP si existe (para preservarlo al reflashear p1).
-#[allow(dead_code)]
 pub(crate) fn read_esp_wificonf(dev: &Path) -> Option<Vec<u8>> {
     let p1 = partition_first_sector(dev, 1)?;
     crate::fat32_write::read_root_file(dev, p1, &esp_wifi_name11()).ok()
 }
 
 /// Restaura credenciales WiFi en la ESP tras actualizar p1.
-#[allow(dead_code)]
 pub(crate) fn write_esp_wificonf(dev: &Path, data: &[u8]) -> Result<(), String> {
     let p1 = partition_first_sector(dev, 1)
         .ok_or_else(|| String::from("sin partición ESP (p1)"))?;

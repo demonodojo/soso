@@ -5,7 +5,7 @@
 //! bytes escritos por `print!`/`println!`/`serial::write_bytes` para
 //! recuperarlos con el comando `dmesg` del kshell.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use spin::Mutex;
 
 pub use soso_log_core::ring::{Lectura, Ring};
@@ -14,8 +14,10 @@ pub use soso_log_core::ring::{Lectura, Ring};
 const CAP: usize = 256 * 1024;
 
 static BUF: Mutex<Ring<CAP>> = Mutex::new(Ring::new());
-/// Evita reentrar al buffer mientras `dmesg` vuelca (no duplicar el dump).
-static QUIET: AtomicBool = AtomicBool::new(false);
+/// Durante `with_read` / copia completa: ninguna CPU debe escribir.
+static QUIET_ALL: AtomicBool = AtomicBool::new(false);
+/// CPU cuya salida se suprime (`u32::MAX` = ninguna).
+static QUIET_CPU: AtomicU32 = AtomicU32::new(u32::MAX);
 
 /// Solo panic handler: suelta el lock si el contexto interrumpido lo tenía.
 ///
@@ -26,10 +28,25 @@ pub unsafe fn force_unlock() {
 }
 
 pub fn append(bytes: &[u8]) {
-    if bytes.is_empty() || QUIET.load(Ordering::Relaxed) {
+    if bytes.is_empty() || QUIET_ALL.load(Ordering::Relaxed) {
         return;
     }
+    let q = QUIET_CPU.load(Ordering::Relaxed);
+    if q != u32::MAX {
+        let cpu = crate::arch::percpu::cpu_index() as u32;
+        if cpu == q {
+            return;
+        }
+    }
     BUF.lock().append(bytes);
+}
+
+/// Borra del ring una contraseña u otro secreto que haya quedado en el eco.
+pub fn tachar(secreto: &[u8]) {
+    if secreto.is_empty() {
+        return;
+    }
+    BUF.lock().tachar(secreto);
 }
 
 pub fn len() -> usize {
@@ -79,10 +96,10 @@ pub fn copy_log_into(dest: &mut [u8]) -> (usize, usize) {
 fn with_read<R>(f: impl FnOnce(&Ring<CAP>) -> R) -> R {
     // Igual que `_print`: evita que una IRQ intercale bytes mientras copiamos.
     x86_64::instructions::interrupts::without_interrupts(|| {
-        QUIET.store(true, Ordering::Relaxed);
+        QUIET_ALL.store(true, Ordering::Relaxed);
         let b = BUF.lock();
         let r = f(&b);
-        QUIET.store(false, Ordering::Relaxed);
+        QUIET_ALL.store(false, Ordering::Relaxed);
         r
     })
 }
@@ -92,11 +109,12 @@ pub fn copy_from(offset: usize, out: &mut [u8]) -> usize {
     with_read(|log| log.copy_from(offset, out))
 }
 
-/// Ejecuta `f` sin capturar sus `print!` en el ring (p. ej. volcado FAT).
+/// Ejecuta `f` sin capturar en el ring la salida **de esta CPU** (p. ej. volcado FAT).
 /// Devuelve el valor de `f`.
 pub fn run_without_capture<T>(f: impl FnOnce() -> T) -> T {
-    QUIET.store(true, Ordering::Relaxed);
+    let cpu = crate::arch::percpu::cpu_index() as u32;
+    let prev = QUIET_CPU.swap(cpu, Ordering::Relaxed);
     let r = f();
-    QUIET.store(false, Ordering::Relaxed);
+    QUIET_CPU.store(prev, Ordering::Relaxed);
     r
 }

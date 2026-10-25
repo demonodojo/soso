@@ -1,0 +1,4 @@
+import "../../../user/sal/escritorio/term.sal"
+
+fn main() -> Int ! alloc
+    term_limpiar(term_capa(4, 2), 64, 4, 2)

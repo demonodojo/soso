@@ -1,0 +1,92 @@
+import "mate.sal"
+
+fn fmt_rgb() -> Int
+    0
+
+fn fmt_bgr() -> Int
+    1
+
+fn pix_idx(stride_px: Int, bpp: Int, x: Int, y: Int) -> Int
+    (y * stride_px + x) * bpp
+
+fn color_rgb(r: Int, g: Int, b: Int) -> Int
+    u8(r) * 65536 + u8(g) * 256 + u8(b)
+
+fn pixel_leer(ptr: Int, len: Int, stride: Int, bpp: Int, fmt: Int, x: Int, y: Int) -> Int ! alloc
+    if bpp != 4
+        0
+    else
+        b = bytes_view(ptr, len)
+        o = pix_idx(stride, bpp, x, y)
+        rr = 0
+        gg = 0
+        bb = 0
+        if fmt == fmt_bgr()
+            bb = bytes_get_u8(b, o)
+            gg = bytes_get_u8(b, o + 1)
+            rr = bytes_get_u8(b, o + 2)
+        else
+            rr = bytes_get_u8(b, o)
+            gg = bytes_get_u8(b, o + 1)
+            bb = bytes_get_u8(b, o + 2)
+        color_rgb(rr, gg, bb)
+
+fn pixel_escribir(ptr: Int, len: Int, stride: Int, bpp: Int, fmt: Int, x: Int, y: Int, rgb: Int) -> Int ! alloc
+    if bpp != 4
+        0
+    else
+        b = bytes_view(ptr, len)
+        o = pix_idx(stride, bpp, x, y)
+        r = u32_b2(rgb)
+        g = u32_b1(rgb)
+        bb = u32_b0(rgb)
+        if fmt == fmt_bgr()
+            bytes_set_u8(b, o, bb)
+            bytes_set_u8(b, o + 1, g)
+            bytes_set_u8(b, o + 2, r)
+            bytes_set_u8(b, o + 3, 255)
+        else
+            bytes_set_u8(b, o, r)
+            bytes_set_u8(b, o + 1, g)
+            bytes_set_u8(b, o + 2, bb)
+            bytes_set_u8(b, o + 3, 255)
+        0
+
+fn copiar_fila_bytes(dptr: Int, dlen: Int, doff: Int, sptr: Int, slen: Int, soff: Int, n: Int) -> Int ! alloc
+    db = bytes_view(dptr, dlen)
+    sb = bytes_view(sptr, slen)
+    i = 0
+    while i < n
+        bytes_set_u8(db, doff + i, bytes_get_u8(sb, soff + i))
+        i = i + 1
+    0
+
+fn rellenar_rect(ptr: Int, len: Int, ancho: Int, alto: Int, stride_px: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, rgb: Int) -> Int ! alloc
+    ya = max(0, y0)
+    yb = min(alto, y1)
+    xa = max(0, x0)
+    xb = min(ancho, x1)
+    y = ya
+    while y < yb
+        x = xa
+        while x < xb
+            _p = pixel_escribir(ptr, len, stride_px, bpp, fmt, x, y, rgb)
+            x = x + 1
+        y = y + 1
+    0
+
+fn copiar_rect(dptr: Int, dlen: Int, dstride_px: Int, sptr: Int, slen: Int, sstride_px: Int, bpp: Int, fmt: Int, dx: Int, dy: Int, sx: Int, sy: Int, w: Int, h: Int) -> Int ! alloc
+    if w <= 0
+        0
+    else
+        if h <= 0
+            0
+        else
+            row = 0
+            nb = w * bpp
+            while row < h
+                doff = pix_idx(dstride_px, bpp, dx, dy + row)
+                soff = pix_idx(sstride_px, bpp, sx, sy + row)
+                _c = copiar_fila_bytes(dptr, dlen, doff, sptr, slen, soff, nb)
+                row = row + 1
+            0
