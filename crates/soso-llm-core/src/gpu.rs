@@ -28,6 +28,25 @@ pub struct GpuStats {
     pub samples: [u64; N_TRAMOS],
 }
 
+/// Capa Gated DeltaNet de Qwen3.5/3.6 para un despacho que la haga entera en el dispositivo (proyecciones, conv, recurrencia, norma con
+/// puerta y proyección de salida), sin pasar las activaciones intermedias por el bus.
+pub struct GdnCapa<'a> {
+    pub claves: [&'a str; 3], // qkv, z (attn_gate), salida (ssm_out)
+    pub vistas: [&'a TensorView<'a>; 3],
+    /// `ssm_beta` y `ssm_alpha` (`n_v × h` f32), pesos de la conv (`qkv_dim × kernel`), `ssm_dt`, `ssm_a` (`n_v`) y `ssm_norm` (`d`).
+    pub beta_w: &'a [f32],
+    pub alpha_w: &'a [f32],
+    pub conv_w: &'a [f32],
+    pub dt: &'a [f32],
+    pub a: &'a [f32],
+    pub norma: &'a [f32],
+    pub n_k: usize,
+    pub n_v: usize,
+    pub d: usize,
+    pub kernel: usize,
+    pub eps: f32,
+}
+
 /// Un experto de un bloque de prefill MoE: sus tres matrices y los tokens que lo eligen.
 pub struct ExpertoBloque<'a> {
     /// Claves estables de `ffn_gate`, `ffn_up` y `ffn_down` (para tenerlas residentes).
@@ -35,8 +54,8 @@ pub struct ExpertoBloque<'a> {
     pub vistas: [&'a TensorView<'a>; 3],
     /// Índice (dentro del bloque) de cada token que elige este experto.
     pub tokens: &'a [u32],
-    /// `tokens.len() × h` floats: salida de la proyección `down` de cada token.
-    pub salida: &'a mut [f32],
+    /// Índice `token * top_k + posición en su ranking` de cada uno de esos tokens.
+    pub destinos: &'a [u32],
 }
 
 /// Una operación matvec dentro de un lote.
@@ -309,7 +328,8 @@ pub trait GpuDispatch {
     }
 
     /// Expertos de un bloque de `n` tokens (`xs`: `n` vectores de `h`) con los tokens agrupados por experto: gate, up, SwiGLU y down de
-    /// cada uno en el dispositivo, con una sola espera. `hecho[i]` queda a `true` para los resueltos (`exps[i].salida` rellena); el resto
+    /// cada uno en el dispositivo, con una sola espera. `pesos` (`n × top_k`) son los pesos del ranking; en `suma` (`n × h`) queda, para cada
+    /// token, la suma ponderada de los expertos resueltos aquí (en el orden del ranking). `hecho[i]` queda a `true` para los resueltos; el resto
     /// los hace quien llama. Por defecto no resuelve ninguno.
     fn expertos_bloque(
         &mut self,
@@ -317,10 +337,13 @@ pub trait GpuDispatch {
         n: usize,
         h: usize,
         ffn: usize,
+        top_k: usize,
+        pesos: &[f32],
         exps: &mut [ExpertoBloque<'_>],
+        suma: &mut [f32],
         hecho: &mut [bool],
     ) -> Result<(), ()> {
-        let _ = (xs, n, h, ffn, exps, hecho);
+        let _ = (xs, n, h, ffn, top_k, pesos, exps, suma, hecho);
         Ok(())
     }
 
@@ -343,6 +366,48 @@ pub trait GpuDispatch {
         filas_validas: &mut usize,
     ) -> Result<bool, ()> {
         let _ = (capa, q, out, n, seq_antes, heads, kv_heads, hd, k, v, filas_validas);
+        Ok(false)
+    }
+
+    /// Capa GDN entera de un bloque de `n` tokens (`xs`: `n` vectores de `h` ya normalizados): `salida` (`n × h`) es la proyección de salida
+    /// (sin el residual). `conv_estado` (`(kernel - 1) × qkv_dim`) y `estado` (`n_v × d × d`) entran y salen. `Ok(false)` = hacerlo en CPU.
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_capa(
+        &mut self,
+        capa: &GdnCapa<'_>,
+        xs: &[f32],
+        n: usize,
+        h: usize,
+        conv_estado: &mut [f32],
+        estado: &mut [f32],
+        salida: &mut [f32],
+    ) -> Result<bool, ()> {
+        let _ = (capa, xs, n, h, conv_estado, estado, salida);
+        Ok(false)
+    }
+
+    /// Gated DeltaNet de un bloque de `n` tokens: conv causal + SiLU, normas, recurrencia por cabeza y puerta. `hist`: `(kernel - 1 + n)`
+    /// filas de `qkv_dim` (estado de la conv seguido de las entradas del bloque); `z`: `n × v_dim`; `decay`/`beta`: `n × n_v`; `estado`: `n_v × d × d`
+    /// (entra y sale); `salida`: `n × v_dim`. Sólo `d == 128`. `Ok(false)` = hacerlo en CPU.
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_bloque(
+        &mut self,
+        hist: &[f32],
+        conv: &[f32],
+        z: &[f32],
+        decay: &[f32],
+        beta: &[f32],
+        norma: &[f32],
+        estado: &mut [f32],
+        salida: &mut [f32],
+        n: usize,
+        n_k: usize,
+        n_v: usize,
+        d: usize,
+        kernel: usize,
+        eps: f32,
+    ) -> Result<bool, ()> {
+        let _ = (hist, conv, z, decay, beta, norma, estado, salida, n, n_k, n_v, d, kernel, eps);
         Ok(false)
     }
 

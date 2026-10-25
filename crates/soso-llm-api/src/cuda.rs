@@ -31,6 +31,18 @@ const PTX_Q4_0: &str = include_str!("../cuda/matvec_q4_0.ptx");
 /// i-quants y Q5_K residentes tal cual (`matvec_iq.cu`, compilado con NVRTC: `tools/cuda-nvrtc/compilar.py`).
 const PTX_IQ: &str = include_str!("../cuda/matvec_iq.ptx");
 
+/// Código del decodificador de `iq_matmul_mma` y bytes por fila para un tensor de ese dtype y `cols` columnas.
+fn codigo_mma(dtype: u8, cols: usize) -> Option<(i32, i64)> {
+    match dtype {
+        DTYPE_Q8_0 if cols % 32 == 0 => Some((1000, ((cols / 32) * 36) as i64)),
+        DTYPE_Q4_K if cols % 256 == 0 => Some((1002, ((cols / 256) * 144) as i64)),
+        d if es_iq_gpu(d) && cols % 256 == 0 => {
+            Some((sosomodel::layout::ggml_de_dtype_iq(d)? as i32, sosomodel::dequant::row_bytes(d, cols)? as i64))
+        }
+        _ => None,
+    }
+}
+
 /// Dtypes que resuelve `iq_matvec`.
 fn soltar_paginas_host(bytes: &[u8]) {
     unsafe extern "C" {
@@ -63,6 +75,15 @@ const FILAS_POR_WARP: u32 = 4;
 const LOSA: usize = 256 << 20;
 const ALINEACION: usize = 256;
 const RESERVA_VRAM: usize = 1024 << 20;
+
+/// Argumento de un lanzamiento (el valor se pasa por puntero, en los bytes bajos).
+#[derive(Clone, Copy)]
+enum Arg {
+    P(u64),
+    I(i32),
+    L(i64),
+    F(f32),
+}
 
 type CuResult = c_int;
 type CuCtx = *mut c_void;
@@ -215,11 +236,19 @@ pub struct CudaGpu {
     losa_libre: usize,
     x_dev: u64,
     /// Búferes del prefill por bloques de expertos MoE: vectores del bloque, índices de token, activaciones y salidas.
-    blq: [(u64, usize); 5],
+    blq: [(u64, usize); 14],
     f_gateup_n: CuFunction,
     f_down_n: CuFunction,
     f_iq_matmul_n: CuFunction,
     f_gateup_multi: CuFunction,
+    f_combinar: CuFunction,
+    f_gdn_conv: CuFunction,
+    f_gdn_rec: CuFunction,
+    f_gdn_conv2: CuFunction,
+    f_gdn_params: CuFunction,
+    f_gdn_cola: CuFunction,
+    /// Búferes de la capa GDN entera (ver `gdn_capa_gpu`).
+    gbuf: [(u64, usize); 17],
     f_down_multi: CuFunction,
     f_attn_prefill: CuFunction,
     /// KV espejado por capa para la atención del prefill: (K, V, filas de capacidad).
@@ -275,10 +304,16 @@ impl CudaGpu {
             let f_iq = func(mod_iq, "iq_matvec")?;
             let f_gateup_n = func(mod_iq, "iq_gateup_n")?;
             let f_down_n = func(mod_iq, "iq_down_n")?;
-            let f_iq_matmul_n = func(mod_iq, "iq_matmul_n")?;
+            let f_iq_matmul_n = func(mod_iq, "iq_matmul_mma")?;
             let f_attn_prefill = func(mod_iq, "attn_prefill_f16")?;
-            let f_gateup_multi = func(mod_iq, "iq_gateup_multi")?;
-            let f_down_multi = func(mod_iq, "iq_down_multi")?;
+            let f_gateup_multi = func(mod_iq, "iq_gateup_mma")?;
+            let f_combinar = func(mod_iq, "iq_combinar")?;
+            let f_gdn_conv = func(mod_iq, "gdn_conv_silu")?;
+            let f_gdn_rec = func(mod_iq, "gdn_rec")?;
+            let f_gdn_conv2 = func(mod_iq, "gdn_conv_silu2")?;
+            let f_gdn_params = func(mod_iq, "gdn_params")?;
+            let f_gdn_cola = func(mod_iq, "gdn_cola")?;
+            let f_down_multi = func(mod_iq, "iq_down_mma")?;
             let (mut libre, mut total) = (0usize, 0usize);
             ck((api.mem_info)(&mut libre, &mut total), "cuMemGetInfo")?;
             let capa = capa::Estado::nueva(&api)?;
@@ -304,12 +339,19 @@ impl CudaGpu {
                 losa_ptr: 0,
                 losa_libre: 0,
                 x_dev: 0,
-                blq: [(0, 0); 5],
+                blq: [(0, 0); 14],
                 f_gateup_n,
                 f_down_n,
                 f_iq_matmul_n,
                 f_attn_prefill,
                 f_gateup_multi,
+                f_combinar,
+                f_gdn_conv,
+                f_gdn_rec,
+                f_gdn_conv2,
+                f_gdn_params,
+                f_gdn_cola,
+                gbuf: [(0, 0); 17],
                 f_down_multi,
                 kvdev: HashMap::new(),
                 x_cap: 0,
@@ -484,7 +526,7 @@ impl CudaGpu {
                     bytes: total,
                 }))
             }
-            DTYPE_Q4_K if cols % Q4_K_ELEMS == 0 && cols <= 4096 => {
+            DTYPE_Q4_K if cols % Q4_K_ELEMS == 0 => {
                 let total = view.bytes.len();
                 if total != rows * (cols / Q4_K_ELEMS) * Q4_K_BLOCK_BYTES {
                     return Ok(None);
@@ -604,6 +646,23 @@ impl CudaGpu {
                     t0 += NT;
                 }
             }
+            DTYPE_Q4_K if n >= 2 || cols > 4096 => {
+                // Bloque de tokens (o filas más anchas que el kernel de un vector): tensor cores con el decodificador Q4_K (tipo 1002).
+                let rb = ((cols / 256) * 144) as i64;
+                let (mut a0, mut a1, mut a2) = (pd, x_dev, y_dev);
+                let (mut a3, mut a4, mut a5, mut a6, mut a7) = (r32, c32, n as c_int, 1002 as c_int, rb);
+                let mut args = [
+                    &mut a0 as *mut _ as *mut c_void,
+                    &mut a1 as *mut _ as *mut c_void,
+                    &mut a2 as *mut _ as *mut c_void,
+                    &mut a3 as *mut _ as *mut c_void,
+                    &mut a4 as *mut _ as *mut c_void,
+                    &mut a5 as *mut _ as *mut c_void,
+                    &mut a6 as *mut _ as *mut c_void,
+                    &mut a7 as *mut _ as *mut c_void,
+                ];
+                self.lanzar3s(self.f_iq_matmul_n, ((rows as u32).div_ceil(64), (n as u32).div_ceil(16), 1), (128, 1, 1), 0, &mut args)?;
+            }
             DTYPE_Q4_K => {
                 // Un solo vector por lanzamiento, como Q8_0.
                 for t in 0..n {
@@ -619,6 +678,23 @@ impl CudaGpu {
                     ];
                     self.lanzar(self.capa.fns.q4k, rows, args)?;
                 }
+            }
+            DTYPE_Q8_0 if n >= 4 => {
+                // Bloque de tokens: tensor cores (`iq_matmul_mma` con el decodificador de Q8_0 de sosomodel, tipo 1000).
+                let rb = ((cols / 32) * 36) as i64;
+                let (mut a0, mut a1, mut a2) = (pd, x_dev, y_dev);
+                let (mut a3, mut a4, mut a5, mut a6, mut a7) = (r32, c32, n as c_int, 1000 as c_int, rb);
+                let mut args = [
+                    &mut a0 as *mut _ as *mut c_void,
+                    &mut a1 as *mut _ as *mut c_void,
+                    &mut a2 as *mut _ as *mut c_void,
+                    &mut a3 as *mut _ as *mut c_void,
+                    &mut a4 as *mut _ as *mut c_void,
+                    &mut a5 as *mut _ as *mut c_void,
+                    &mut a6 as *mut _ as *mut c_void,
+                    &mut a7 as *mut _ as *mut c_void,
+                ];
+                self.lanzar3s(self.f_iq_matmul_n, ((rows as u32).div_ceil(64), (n as u32).div_ceil(16), 1), (128, 1, 1), 0, &mut args)?;
             }
             DTYPE_Q8_0 => {
                 // 4 filas por warp y varios tokens por lectura de pesos (cabeza de logits incluida).
@@ -666,10 +742,206 @@ impl CudaGpu {
                     &mut a6 as *mut _ as *mut c_void,
                     &mut a7 as *mut _ as *mut c_void,
                 ];
-                self.lanzar3s(self.f_iq_matmul_n, ((rows as u32).div_ceil(8), (n as u32).div_ceil(16), 1), (256, 1, 1), 0, &mut args)?;
+                self.lanzar3s(self.f_iq_matmul_n, ((rows as u32).div_ceil(64), (n as u32).div_ceil(16), 1), (128, 1, 1), 0, &mut args)?;
             }
             _ => return Ok(false),
         }
+        Ok(true)
+    }
+
+    fn lanzar_a(&self, f: CuFunction, grid: (u32, u32, u32), block: (u32, u32, u32), args: &[Arg]) -> Result<(), String> {
+        let mut vals: Vec<u64> = args
+            .iter()
+            .map(|a| match *a {
+                Arg::P(v) => v,
+                Arg::I(v) => v as u32 as u64,
+                Arg::L(v) => v as u64,
+                Arg::F(v) => v.to_bits() as u64,
+            })
+            .collect();
+        let mut ptrs: Vec<*mut c_void> = vals.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
+        self.lanzar3s(f, grid, block, 0, &mut ptrs)
+    }
+
+    fn gbuf_asegurar(&mut self, i: usize, bytes: usize) -> Result<u64, String> {
+        if bytes > self.gbuf[i].1 {
+            if self.gbuf[i].0 != 0 {
+                unsafe { (self.api.mem_free)(self.gbuf[i].0) };
+            }
+            let cap = bytes.max(1 << 16).next_power_of_two();
+            self.gbuf[i] = (self.alloc(cap)?, cap);
+        }
+        Ok(self.gbuf[i].0)
+    }
+
+    /// Capa GDN entera de un bloque en el dispositivo: ver [`GpuDispatch::gdn_capa`].
+    fn gdn_capa_gpu(
+        &mut self,
+        c: &soso_llm_core::gpu::GdnCapa<'_>,
+        xs: &[f32],
+        n: usize,
+        h: usize,
+        conv_estado: &mut [f32],
+        estado: &mut [f32],
+        salida: &mut [f32],
+    ) -> Result<bool, String> {
+        let (n_k, n_v, d, ker) = (c.n_k, c.n_v, c.d, c.kernel);
+        if d != 128 || n < ker || ker < 2 || n_k == 0 || n_v % n_k != 0 {
+            return Ok(false);
+        }
+        let (qkv_dim, v_dim, prev) = (2 * n_k * d + n_v * d, n_v * d, ker - 1);
+        if xs.len() != n * h || salida.len() != n * h || conv_estado.len() != prev * qkv_dim || estado.len() != n_v * d * d
+            || c.beta_w.len() != n_v * h || c.alpha_w.len() != n_v * h || c.conv_w.len() != qkv_dim * ker
+        {
+            return Ok(false);
+        }
+        unsafe { ck((self.api.ctx_set_current)(self.ctx), "cuCtxSetCurrent")? };
+        // pesos grandes (Q8_0) residentes
+        let dims = [(qkv_dim, h), (v_dim, h), (h, v_dim)];
+        let mut w = [0u64; 3];
+        let mut cod = [(0i32, 0i64); 3];
+        for k in 0..3 {
+            let Some(cr) = codigo_mma(c.vistas[k].dtype, dims[k].1) else { return Ok(false) };
+            cod[k] = cr;
+            if !self.pesos.contains_key(c.claves[k]) {
+                let p = self.subir_peso(c.vistas[k], dims[k].0, dims[k].1)?;
+                self.pesos.insert(c.claves[k].to_string(), p);
+            }
+            match self.pesos.get(c.claves[k]) {
+                Some(Some(p)) if p.dtype == c.vistas[k].dtype && p.rows == dims[k].0 && p.cols == dims[k].1 => w[k] = p.d,
+                _ => return Ok(false),
+            }
+        }
+        let f = |v: &[f32]| unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) };
+        let x_dev = self.gbuf_asegurar(0, xs.len() * 4)?;
+        let qkv_dev = self.gbuf_asegurar(1, n * qkv_dim * 4)?;
+        let z_dev = self.gbuf_asegurar(2, n * v_dim * 4)?;
+        let braw_dev = self.gbuf_asegurar(3, n * n_v * 4)?;
+        let araw_dev = self.gbuf_asegurar(4, n * n_v * 4)?;
+        let up_dev = self.gbuf_asegurar(5, n * qkv_dim * 4)?;
+        let dec_dev = self.gbuf_asegurar(6, n * n_v * 4)?;
+        let bet_dev = self.gbuf_asegurar(7, n * n_v * 4)?;
+        let o_dev = self.gbuf_asegurar(8, n * v_dim * 4)?;
+        let y_dev = self.gbuf_asegurar(9, n * h * 4)?;
+        let s_dev = self.gbuf_asegurar(10, estado.len() * 4)?;
+        let cs_dev = self.gbuf_asegurar(11, conv_estado.len() * 4)?;
+        let bw_dev = self.gbuf_asegurar(12, c.beta_w.len() * 4)?;
+        let aw_dev = self.gbuf_asegurar(13, c.alpha_w.len() * 4)?;
+        let cw_dev = self.gbuf_asegurar(14, c.conv_w.len() * 4)?;
+        let par_dev = self.gbuf_asegurar(15, (c.dt.len() + c.a.len() + c.norma.len()) * 4)?;
+        let (dt_dev, a_dev, nw_dev) = (par_dev, par_dev + (c.dt.len() * 4) as u64, par_dev + ((c.dt.len() + c.a.len()) * 4) as u64);
+        self.subir(x_dev, f(xs))?;
+        self.subir(s_dev, f(estado))?;
+        self.subir(cs_dev, f(conv_estado))?;
+        self.subir(bw_dev, f(c.beta_w))?;
+        self.subir(aw_dev, f(c.alpha_w))?;
+        self.subir(cw_dev, f(c.conv_w))?;
+        self.subir(dt_dev, f(c.dt))?;
+        self.subir(a_dev, f(c.a))?;
+        self.subir(nw_dev, f(c.norma))?;
+        let nn = n as i32;
+        let mm = |s: &Self, w: u64, rows: usize, cols: usize, dtype: i32, rb: i64, x: u64, y: u64| {
+            s.lanzar_a(s.f_iq_matmul_n, ((rows as u32).div_ceil(64), (n as u32).div_ceil(16), 1), (128, 1, 1),
+                &[Arg::P(w), Arg::P(x), Arg::P(y), Arg::I(rows as i32), Arg::I(cols as i32), Arg::I(nn), Arg::I(dtype), Arg::L(rb)])
+        };
+        mm(self, w[0], qkv_dim, h, cod[0].0, cod[0].1, x_dev, qkv_dev)?;
+        mm(self, w[1], v_dim, h, cod[1].0, cod[1].1, x_dev, z_dev)?;
+        mm(self, bw_dev, n_v, h, 1001, (h * 4) as i64, x_dev, braw_dev)?;
+        mm(self, aw_dev, n_v, h, 1001, (h * 4) as i64, x_dev, araw_dev)?;
+        self.lanzar_a(self.f_gdn_params, (((n * n_v) as u32).div_ceil(256), 1, 1), (256, 1, 1),
+            &[Arg::P(araw_dev), Arg::P(braw_dev), Arg::P(dt_dev), Arg::P(a_dev), Arg::P(dec_dev), Arg::P(bet_dev), Arg::I(nn), Arg::I(n_v as i32)])?;
+        self.lanzar_a(self.f_gdn_conv2, ((qkv_dim as u32).div_ceil(256), n as u32, 1), (256, 1, 1),
+            &[Arg::P(cs_dev), Arg::P(qkv_dev), Arg::P(cw_dev), Arg::P(up_dev), Arg::I(nn), Arg::I(qkv_dim as i32), Arg::I(ker as i32)])?;
+        self.lanzar_a(self.f_gdn_rec, (n_v as u32, 1, 1), (256, 1, 1),
+            &[Arg::P(up_dev), Arg::P(z_dev), Arg::P(dec_dev), Arg::P(bet_dev), Arg::P(nw_dev), Arg::P(s_dev), Arg::P(o_dev), Arg::I(nn), Arg::I(n_k as i32), Arg::I(n_v as i32), Arg::F(c.eps)])?;
+        mm(self, w[2], h, v_dim, cod[2].0, cod[2].1, o_dev, y_dev)?;
+        // estado de la conv para el bloque siguiente: las `prev` últimas filas de qkv (se baja antes de pisarlo)
+        self.lanzar_a(self.f_gdn_cola, (((prev * qkv_dim) as u32).div_ceil(256), 1, 1), (256, 1, 1),
+            &[Arg::P(qkv_dev), Arg::P(cs_dev), Arg::I(nn), Arg::I(qkv_dim as i32), Arg::I(prev as i32)])?;
+        ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
+        ck(unsafe { (self.api.dtoh)(salida.as_mut_ptr() as *mut c_void, y_dev, salida.len() * 4) }, "cuMemcpyDtoH")?;
+        ck(unsafe { (self.api.dtoh)(estado.as_mut_ptr() as *mut c_void, s_dev, estado.len() * 4) }, "cuMemcpyDtoH")?;
+        ck(unsafe { (self.api.dtoh)(conv_estado.as_mut_ptr() as *mut c_void, cs_dev, conv_estado.len() * 4) }, "cuMemcpyDtoH")?;
+        self.stats.launches += 1;
+        Ok(true)
+    }
+
+    /// Gated DeltaNet de un bloque: ver [`GpuDispatch::gdn_bloque`].
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_bloque_gpu(
+        &mut self,
+        hist: &[f32],
+        conv: &[f32],
+        z: &[f32],
+        decay: &[f32],
+        beta: &[f32],
+        norma: &[f32],
+        estado: &mut [f32],
+        salida: &mut [f32],
+        n: usize,
+        n_k: usize,
+        n_v: usize,
+        d: usize,
+        kernel: usize,
+        eps: f32,
+    ) -> Result<bool, String> {
+        if d != 128 || n == 0 || n_k == 0 || n_v % n_k != 0 {
+            return Ok(false);
+        }
+        let qkv_dim = 2 * n_k * d + n_v * d;
+        let v_dim = n_v * d;
+        if hist.len() != (kernel - 1 + n) * qkv_dim || conv.len() != qkv_dim * kernel || z.len() != n * v_dim || decay.len() != n * n_v
+            || beta.len() != n * n_v || norma.len() != d || estado.len() != n_v * d * d || salida.len() != n * v_dim
+        {
+            return Ok(false);
+        }
+        unsafe { ck((self.api.ctx_set_current)(self.ctx), "cuCtxSetCurrent")? };
+        let f = |v: &[f32]| unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) };
+        let h_dev = self.blq_asegurar(8, hist.len() * 4)?;
+        let c_dev = self.blq_asegurar(9, conv.len() * 4)?;
+        let up_dev = self.blq_asegurar(10, n * qkv_dim * 4)?;
+        let z_dev = self.blq_asegurar(11, (z.len() + decay.len() + beta.len() + norma.len()) * 4)?;
+        let s_dev = self.blq_asegurar(12, estado.len() * 4)?;
+        let o_dev = self.blq_asegurar(13, salida.len() * 4)?;
+        let (dec_dev, bet_dev, nw_dev) = (z_dev + (z.len() * 4) as u64, z_dev + ((z.len() + decay.len()) * 4) as u64, z_dev + ((z.len() + decay.len() + beta.len()) * 4) as u64);
+        self.subir(h_dev, f(hist))?;
+        self.subir(c_dev, f(conv))?;
+        self.subir(z_dev, f(z))?;
+        self.subir(dec_dev, f(decay))?;
+        self.subir(bet_dev, f(beta))?;
+        self.subir(nw_dev, f(norma))?;
+        self.subir(s_dev, f(estado))?;
+        let (mut a0, mut a1, mut a2) = (h_dev, c_dev, up_dev);
+        let (mut a3, mut a4, mut a5) = (n as c_int, qkv_dim as c_int, kernel as c_int);
+        let mut args = [
+            &mut a0 as *mut _ as *mut c_void,
+            &mut a1 as *mut _ as *mut c_void,
+            &mut a2 as *mut _ as *mut c_void,
+            &mut a3 as *mut _ as *mut c_void,
+            &mut a4 as *mut _ as *mut c_void,
+            &mut a5 as *mut _ as *mut c_void,
+        ];
+        self.lanzar3s(self.f_gdn_conv, ((qkv_dim as u32).div_ceil(256), n as u32, 1), (256, 1, 1), 0, &mut args)?;
+        let (mut b0, mut b1, mut b2, mut b3, mut b4, mut b5, mut b6) = (up_dev, z_dev, dec_dev, bet_dev, nw_dev, s_dev, o_dev);
+        let (mut b7, mut b8, mut b9, mut b10) = (n as c_int, n_k as c_int, n_v as c_int, eps);
+        let mut args = [
+            &mut b0 as *mut _ as *mut c_void,
+            &mut b1 as *mut _ as *mut c_void,
+            &mut b2 as *mut _ as *mut c_void,
+            &mut b3 as *mut _ as *mut c_void,
+            &mut b4 as *mut _ as *mut c_void,
+            &mut b5 as *mut _ as *mut c_void,
+            &mut b6 as *mut _ as *mut c_void,
+            &mut b7 as *mut _ as *mut c_void,
+            &mut b8 as *mut _ as *mut c_void,
+            &mut b9 as *mut _ as *mut c_void,
+            &mut b10 as *mut _ as *mut c_void,
+        ];
+        self.lanzar3s(self.f_gdn_rec, (n_v as u32, 1, 1), (256, 1, 1), 0, &mut args)?;
+        ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
+        ck(unsafe { (self.api.dtoh)(salida.as_mut_ptr() as *mut c_void, o_dev, salida.len() * 4) }, "cuMemcpyDtoH")?;
+        ck(unsafe { (self.api.dtoh)(estado.as_mut_ptr() as *mut c_void, s_dev, estado.len() * 4) }, "cuMemcpyDtoH")?;
+        self.stats.launches += 1;
         Ok(true)
     }
 
@@ -764,12 +1036,16 @@ impl CudaGpu {
     fn expertos_bloque_gpu(
         &mut self,
         xs: &[f32],
-        _n: usize,
+        n: usize,
         h: usize,
         ffn: usize,
+        top_k: usize,
+        pesos: &[f32],
         exps: &mut [soso_llm_core::gpu::ExpertoBloque<'_>],
+        suma: &mut [f32],
         hecho: &mut [bool],
     ) -> Result<(), String> {
+        let t_a = std::time::Instant::now();
         unsafe { ck((self.api.ctx_set_current)(self.ctx), "cuCtxSetCurrent")? };
         // 1) qué expertos se pueden resolver aquí (pesos residentes o que caben): se anotan sus punteros.
         struct Plan {
@@ -804,17 +1080,32 @@ impl CudaGpu {
         if plan.is_empty() {
             return Ok(());
         }
+        let t_b = std::time::Instant::now();
         // 2) datos del bloque a la tarjeta
         let x_dev = self.blq_asegurar(0, xs.len() * 4)?;
         let tok_dev = self.blq_asegurar(1, total * 4)?;
         let act_dev = self.blq_asegurar(2, total * ffn * 4)?;
-        let y_dev = self.blq_asegurar(3, total * h * 4)?;
+        let y_dev = self.blq_asegurar(3, n * top_k * h * 4)?;
+        let dest_dev = self.blq_asegurar(5, total * 4)?;
+        let wd_dev = self.blq_asegurar(6, n * top_k * 4)?;
+        let out_dev = self.blq_asegurar(7, n * h * 4)?;
         self.subir(x_dev, unsafe { std::slice::from_raw_parts(xs.as_ptr() as *const u8, xs.len() * 4) })?;
         let mut toks: Vec<i32> = Vec::with_capacity(total);
         for pl in &plan {
             toks.extend(exps[pl.i].tokens.iter().map(|&t| t as i32));
         }
         self.subir(tok_dev, unsafe { std::slice::from_raw_parts(toks.as_ptr() as *const u8, toks.len() * 4) })?;
+        let mut dests: Vec<i32> = Vec::with_capacity(total);
+        for pl in &plan {
+            dests.extend(exps[pl.i].destinos.iter().map(|&d| d as i32));
+        }
+        self.subir(dest_dev, unsafe { std::slice::from_raw_parts(dests.as_ptr() as *const u8, dests.len() * 4) })?;
+        let mut wd = vec![0f32; n * top_k];
+        for &d in &dests {
+            wd[d as usize] = pesos[d as usize];
+        }
+        self.subir(wd_dev, unsafe { std::slice::from_raw_parts(wd.as_ptr() as *const u8, wd.len() * 4) })?;
+        let t_c = std::time::Instant::now();
         // 3) un descriptor por experto y DOS lanzamientos para todos (gate+up+SwiGLU y down), una sola espera
         let mut desc: Vec<u64> = Vec::with_capacity(plan.len() * 12);
         let mut max_cnt = 0usize;
@@ -842,24 +1133,42 @@ impl CudaGpu {
             &mut a4 as *mut _ as *mut c_void,
             &mut a5 as *mut _ as *mut c_void,
         ];
-        self.lanzar3s(self.f_gateup_multi, (((ffn as u32) + 7) / 8, tiles, nexp), (256, 1, 1), 0, &mut args)?;
+        self.lanzar3s(self.f_gateup_multi, (((ffn as u32) + 63) / 64, tiles, nexp), (128, 1, 1), 0, &mut args)?;
         let (mut b0, mut b1, mut b2) = (d_dev, act_dev, y_dev);
-        let (mut b3, mut b4) = (h as c_int, ffn as c_int);
+        let (mut b3, mut b4, mut b5) = (h as c_int, ffn as c_int, dest_dev);
         let mut args = [
             &mut b0 as *mut _ as *mut c_void,
             &mut b1 as *mut _ as *mut c_void,
             &mut b2 as *mut _ as *mut c_void,
             &mut b3 as *mut _ as *mut c_void,
             &mut b4 as *mut _ as *mut c_void,
+            &mut b5 as *mut _ as *mut c_void,
         ];
-        self.lanzar3s(self.f_down_multi, (((h as u32) + 7) / 8, tiles, nexp), (256, 1, 1), 0, &mut args)?;
+        self.lanzar3s(self.f_down_multi, (((h as u32) + 63) / 64, tiles, nexp), (128, 1, 1), 0, &mut args)?;
+        let (mut c0, mut c1, mut c2, mut c3, mut c4) = (y_dev, wd_dev, out_dev, top_k as c_int, h as c_int);
+        let mut args = [
+            &mut c0 as *mut _ as *mut c_void,
+            &mut c1 as *mut _ as *mut c_void,
+            &mut c2 as *mut _ as *mut c_void,
+            &mut c3 as *mut _ as *mut c_void,
+            &mut c4 as *mut _ as *mut c_void,
+        ];
+        self.lanzar3s(self.f_combinar, ((h as u32).div_ceil(256), n as u32, 1), (256, 1, 1), 0, &mut args)?;
+        let t_d = std::time::Instant::now();
         ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
-        let mut host = vec![0f32; total * h];
-        ck(unsafe { (self.api.dtoh)(host.as_mut_ptr() as *mut c_void, y_dev, total * h * 4) }, "cuMemcpyDtoH")?;
+        let t_e = std::time::Instant::now();
+        ck(unsafe { (self.api.dtoh)(suma.as_mut_ptr() as *mut c_void, out_dev, n * h * 4) }, "cuMemcpyDtoH")?;
         for pl in &plan {
-            let cnt = exps[pl.i].tokens.len();
-            exps[pl.i].salida.copy_from_slice(&host[pl.abase * h..(pl.abase + cnt) * h]);
             hecho[pl.i] = true;
+        }
+        if std::env::var_os("SOSO_TRAZA_GPU").is_some() {
+            let t_f = std::time::Instant::now();
+            eprintln!(
+                "[gpu] expertos: {} exps, {} asignaciones | plan {:.1} ms, subida {:.1}, lanzar {:.1}, kernels {:.1}, bajada+copia {:.1}",
+                plan.len(), total,
+                (t_b - t_a).as_secs_f64() * 1e3, (t_c - t_b).as_secs_f64() * 1e3, (t_d - t_c).as_secs_f64() * 1e3,
+                (t_e - t_d).as_secs_f64() * 1e3, (t_f - t_e).as_secs_f64() * 1e3
+            );
         }
         self.stats.launches += 1;
         self.stats.bytes_up += (xs.len() * 4 + toks.len() * 4) as u64;
@@ -938,6 +1247,37 @@ impl CudaGpu {
         Ok(())
     }
 
+    /// Producto por bloque con los pesos subidos sólo para esta llamada (no residentes).
+    fn calcular_de_paso(&mut self, view: &TensorView<'_>, rows: usize, cols: usize, n: usize, x: &[f32], out: &mut [f32]) -> Result<bool, String> {
+        let (dtype_k, rb) = if view.dtype == DTYPE_Q8_0 {
+            (1000i32, ((cols / 32) * 36) as i64)
+        } else if view.dtype == DTYPE_Q4_K {
+            (1002i32, ((cols / 256) * 144) as i64)
+        } else {
+            let Some(rb) = sosomodel::dequant::row_bytes(view.dtype, cols) else { return Ok(false) };
+            (sosomodel::layout::ggml_de_dtype_iq(view.dtype).unwrap_or(0) as i32, rb as i64)
+        };
+        if view.bytes.len() as i64 != rows as i64 * rb {
+            return Ok(false);
+        }
+        let w_dev = self.gbuf_asegurar(16, view.bytes.len())?;
+        self.subir(w_dev, view.bytes)?;
+        self.asegurar_buffers(n * cols, n * rows)?;
+        let x_bytes = unsafe { std::slice::from_raw_parts(x.as_ptr() as *const u8, x.len() * 4) };
+        self.subir(self.x_dev, x_bytes)?;
+        self.lanzar_a(
+            self.f_iq_matmul_n,
+            ((rows as u32).div_ceil(64), (n as u32).div_ceil(16), 1),
+            (128, 1, 1),
+            &[Arg::P(w_dev), Arg::P(self.x_dev), Arg::P(self.y_dev), Arg::I(rows as i32), Arg::I(cols as i32), Arg::I(n as i32), Arg::I(dtype_k), Arg::L(rb)],
+        )?;
+        ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
+        let out_bytes = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u8, out.len() * 4) };
+        ck(unsafe { (self.api.dtoh)(out_bytes.as_mut_ptr() as *mut c_void, self.y_dev, out_bytes.len()) }, "cuMemcpyDtoH")?;
+        self.stats.launches += 1;
+        Ok(true)
+    }
+
     fn calcular(
         &mut self,
         key: &str,
@@ -958,6 +1298,11 @@ impl CudaGpu {
             self.pesos.insert(key.to_string(), p);
         }
         let Some(Some(p)) = self.pesos.get(key) else {
+            // Sin sitio en VRAM: con varios tokens por lectura (prefill por bloques) compensa subir los pesos de paso y usar los tensor cores
+            // (una matriz de la FFN del 27B son ~34 MB: 6 ms de bus frente a cientos de ms en CPU).
+            if n >= 16 && (es_iq_gpu(view.dtype) || view.dtype == DTYPE_Q8_0 || view.dtype == DTYPE_Q4_K) && cols % 256 == 0 {
+                return self.calcular_de_paso(view, rows, cols, n, x, out);
+            }
             return Ok(false);
         };
         if p.rows != rows || p.cols != cols || p.dtype != view.dtype {
@@ -1088,6 +1433,58 @@ impl GpuDispatch for CudaGpu {
         }
     }
 
+    fn gdn_capa(
+        &mut self,
+        capa: &soso_llm_core::gpu::GdnCapa<'_>,
+        xs: &[f32],
+        n: usize,
+        h: usize,
+        conv_estado: &mut [f32],
+        estado: &mut [f32],
+        salida: &mut [f32],
+    ) -> Result<bool, ()> {
+        match self.gdn_capa_gpu(capa, xs, n, h, conv_estado, estado, salida) {
+            Ok(b) => Ok(b),
+            Err(e) => {
+                if !self.avisado {
+                    eprintln!("cuda: {e}; sigo en CPU");
+                    self.avisado = true;
+                }
+                Err(())
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_bloque(
+        &mut self,
+        hist: &[f32],
+        conv: &[f32],
+        z: &[f32],
+        decay: &[f32],
+        beta: &[f32],
+        norma: &[f32],
+        estado: &mut [f32],
+        salida: &mut [f32],
+        n: usize,
+        n_k: usize,
+        n_v: usize,
+        d: usize,
+        kernel: usize,
+        eps: f32,
+    ) -> Result<bool, ()> {
+        match self.gdn_bloque_gpu(hist, conv, z, decay, beta, norma, estado, salida, n, n_k, n_v, d, kernel, eps) {
+            Ok(b) => Ok(b),
+            Err(e) => {
+                if !self.avisado {
+                    eprintln!("cuda: {e}; sigo en CPU");
+                    self.avisado = true;
+                }
+                Err(())
+            }
+        }
+    }
+
     fn atencion_prefill(
         &mut self,
         capa: u32,
@@ -1120,11 +1517,13 @@ impl GpuDispatch for CudaGpu {
         n: usize,
         h: usize,
         ffn: usize,
+        top_k: usize,
+        pesos: &[f32],
         exps: &mut [soso_llm_core::gpu::ExpertoBloque<'_>],
+        suma: &mut [f32],
         hecho: &mut [bool],
     ) -> Result<(), ()> {
-        let _ = n;
-        match self.expertos_bloque_gpu(xs, n, h, ffn, exps, hecho) {
+        match self.expertos_bloque_gpu(xs, n, h, ffn, top_k, pesos, exps, suma, hecho) {
             Ok(()) => Ok(()),
             Err(e) => {
                 if !self.avisado {

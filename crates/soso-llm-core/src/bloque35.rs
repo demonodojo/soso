@@ -155,6 +155,56 @@ fn gdn_bloque<S: TensorSource>(
     kv.ensure_gdn(n_v, d, kernel.saturating_sub(1).saturating_mul(qkv_dim));
 
     let mut tp = perfil_ahora();
+    // Con GPU, la capa entera en el dispositivo (proyecciones, conv, recurrencia y salida) sin llevar las activaciones intermedias por el bus.
+    if use_gpu && n >= kernel && d == 128 {
+        let nombres = [format!("{prefix}.attn_qkv"), format!("{prefix}.attn_gate"), format!("{prefix}.ssm_out")];
+        let mut dt = vec![0.0f32; n_v];
+        let mut a = vec![0.0f32; n_v];
+        let mut norm_w = vec![0.0f32; d];
+        source.load_f32(&format!("{prefix}.ssm_dt"), &mut dt)?;
+        source.load_f32(&format!("{prefix}.ssm_a"), &mut a)?;
+        source.load_f32(&format!("{prefix}.ssm_norm"), &mut norm_w)?;
+        let mut crudo = |source: &mut S, name: &str| -> Result<(usize, usize, u8, usize), ()> {
+            let v = source.tensor_view(name)?;
+            Ok((v.bytes.as_ptr() as usize, v.bytes.len(), v.dtype, v.elems))
+        };
+        let (rq, rz, ro) = (crudo(source, &nombres[0])?, crudo(source, &nombres[1])?, crudo(source, &nombres[2])?);
+        let (rb, ra, rc) = (
+            crudo(source, &format!("{prefix}.ssm_beta"))?,
+            crudo(source, &format!("{prefix}.ssm_alpha"))?,
+            crudo(source, &format!("{prefix}.ssm_conv1d"))?,
+        );
+        let mk = |r: (usize, usize, u8, usize)| crate::layer::TensorView { bytes: unsafe { core::slice::from_raw_parts(r.0 as *const u8, r.1) }, dtype: r.2, elems: r.3 };
+        let (vb, va, vc) = (mk(rb), mk(ra), mk(rc));
+        if let (Some(bw), Some(aw), Some(cw)) = (vb.f32(), va.f32(), vc.f32()) {
+            let (tq, tz, to) = (mk(rq), mk(rz), mk(ro));
+            let capa = crate::gpu::GdnCapa {
+                claves: [nombres[0].as_str(), nombres[1].as_str(), nombres[2].as_str()],
+                vistas: [&tq, &tz, &to],
+                beta_w: bw,
+                alpha_w: aw,
+                conv_w: cw,
+                dt: &dt,
+                a: &a,
+                norma: &norm_w,
+                n_k,
+                n_v,
+                d,
+                kernel,
+                eps,
+            };
+            let prev = kernel - 1;
+            if kv.gdn_conv.len() >= prev * qkv_dim {
+                let ok = gpu.as_deref_mut().is_some_and(|g| {
+                    matches!(g.gdn_capa(&capa, xs, n, h, &mut kv.gdn_conv[..prev * qkv_dim], &mut kv.gdn_s, salida), Ok(true))
+                });
+                if ok {
+                    perfil_marca(&mut tp, FASE_ROPE_KV);
+                    return Ok(());
+                }
+            }
+        }
+    }
     let mut qkv = vec![0.0f32; n * qkv_dim];
     let mut z = vec![0.0f32; n * v_dim];
     let mut beta = vec![0.0f32; n * n_v];
@@ -193,6 +243,30 @@ fn gdn_bloque<S: TensorSource>(
     let mut hist = vec![0.0f32; (prev + n) * qkv_dim];
     hist[..prev * qkv_dim].copy_from_slice(&kv.gdn_conv[..prev * qkv_dim]);
     hist[prev * qkv_dim..].copy_from_slice(&qkv[..n * qkv_dim]);
+    // Con GPU (y d = 128), conv + recurrencia + puerta del bloque entero en el dispositivo; el estado de la conv lo actualiza igualmente el host.
+    let mut attn_out = vec![0.0f32; n * v_dim];
+    let en_gpu = use_gpu && {
+        let mut dec = vec![0.0f32; n * n_v];
+        let mut bet = vec![0.0f32; n * n_v];
+        for t in 0..n {
+            for i in 0..n_v {
+                dec[t * n_v + i] = libm::expf(softplus(alpha[t * n_v + i] + dt[i]) * a[i]);
+                bet[t * n_v + i] = sigmoid(beta[t * n_v + i]);
+            }
+        }
+        gpu.as_deref_mut().is_some_and(|g| {
+            matches!(g.gdn_bloque(&hist, conv, &z, &dec, &bet, &norm_w, &mut kv.gdn_s, &mut attn_out, n, n_k, n_v, d, kernel, eps), Ok(true))
+        })
+    };
+    if en_gpu {
+        if prev > 0 {
+            kv.gdn_conv[..prev * qkv_dim].copy_from_slice(&hist[n * qkv_dim..(n + prev) * qkv_dim]);
+        }
+        perfil_marca(&mut tp, FASE_ROPE_KV);
+        let r = mv(source, &format!("{prefix}.ssm_out"), layer, h, v_dim, &attn_out, n, salida, par, bs, gpu, use_gpu);
+        perfil_marca(&mut tp, FASE_O);
+        return r;
+    }
     {
         let (hist_p, ups_p, conv_p) = (hist.as_ptr() as usize, ups.as_mut_ptr() as usize, conv.as_ptr() as usize);
         let (dec_p, bet_p, alpha_p, beta_raw_p, dt_p, a_p) = (
@@ -239,7 +313,7 @@ fn gdn_bloque<S: TensorSource>(
     }
     // 2) recurrencia: cada cabeza recorre sus `n` tokens seguidos (su estado es independiente), así que el bloque entero cuesta una
     //    sola barrera en vez de una por token. Mismo cálculo, mismo orden por cabeza: el resultado no cambia.
-    let mut attn_out = vec![0.0f32; n * v_dim];
+    attn_out.fill(0.0);
     {
         let (up_p, decay_p, beta_p, normw_p, out_p, st_p, z_p) = (
             ups.as_ptr() as usize,
@@ -467,6 +541,8 @@ fn moe_bloque<S: TensorSource>(
     // Con GPU: los expertos con pesos en la tarjeta se resuelven allí de una vez (una subida de los vectores, un lanzamiento por experto y
     // una sola espera); los demás siguen por la CPU a la vez que se reparten abajo.
     let mut hecho_gpu = vec![false; activos.len()];
+    let mut suma_gpu = vec![0.0f32; if use_gpu { n * h } else { 0 }];
+    let mut hecha = vec![false; n * top_k]; // asignación (token, posición) ya sumada por la GPU
     if use_gpu {
         if let Some(g) = gpu.as_deref_mut().filter(|g| g.available()) {
             let vistas: Vec<[crate::layer::TensorView<'_>; 3]> = activos
@@ -480,28 +556,33 @@ fn moe_bloque<S: TensorSource>(
                 })
                 .collect();
             let tokens: Vec<Vec<u32>> = activos.iter().map(|a| unsafe { &*a.lista }.iter().map(|(t, _)| *t as u32).collect()).collect();
-            let mut salidas: Vec<Vec<f32>> = tokens.iter().map(|t| vec![0.0f32; t.len() * h]).collect();
+            let destinos: Vec<Vec<u32>> = activos.iter().map(|a| unsafe { &*a.lista }.iter().map(|(t, j)| (t * top_k + j) as u32).collect()).collect();
+            let mut pesos = vec![0.0f32; n * top_k];
+            for (t, r) in ranking.iter().enumerate() {
+                for (j, (_, w)) in r.iter().enumerate() {
+                    pesos[t * top_k + j] = *w;
+                }
+            }
             {
                 let mut exps: Vec<crate::gpu::ExpertoBloque<'_>> = activos
                     .iter()
                     .zip(vistas.iter())
                     .zip(tokens.iter())
-                    .zip(salidas.iter_mut())
-                    .map(|(((a, v), t), o)| crate::gpu::ExpertoBloque {
+                    .zip(destinos.iter())
+                    .map(|(((a, v), t), d)| crate::gpu::ExpertoBloque {
                         claves: [a.claves[0].as_str(), a.claves[1].as_str(), a.claves[2].as_str()],
                         vistas: [&v[0], &v[1], &v[2]],
                         tokens: t.as_slice(),
-                        salida: o.as_mut_slice(),
+                        destinos: d.as_slice(),
                     })
                     .collect();
-                let _ = g.expertos_bloque(xs, n, h, ffn, &mut exps, &mut hecho_gpu);
+                let _ = g.expertos_bloque(xs, n, h, ffn, top_k, &pesos, &mut exps, &mut suma_gpu, &mut hecho_gpu);
             }
-            for (k, a) in activos.iter().enumerate() {
-                if !hecho_gpu[k] {
-                    continue;
-                }
-                for (i, (t, j)) in unsafe { &*a.lista }.iter().enumerate() {
-                    y[(t * top_k + j) * h..(t * top_k + j + 1) * h].copy_from_slice(&salidas[k][i * h..(i + 1) * h]);
+            for (k, d) in destinos.iter().enumerate() {
+                if hecho_gpu[k] {
+                    for &x in d {
+                        hecha[x as usize] = true;
+                    }
                 }
             }
         }
@@ -579,11 +660,18 @@ fn moe_bloque<S: TensorSource>(
         }
     }
     perfil_marca(&mut tp, FASE_O);
-    // Suma por token: expertos en el orden del ranking y luego los compartidos, como en la decodificación.
+    // Suma por token: lo que ya sumó la GPU, luego los expertos de la CPU en el orden del ranking y por último los compartidos.
     for t in 0..n {
         let o = &mut salida[t * h..(t + 1) * h];
-        o.fill(0.0);
+        if use_gpu && !suma_gpu.is_empty() {
+            o.copy_from_slice(&suma_gpu[t * h..(t + 1) * h]);
+        } else {
+            o.fill(0.0);
+        }
         for (j, (_, w)) in ranking[t].iter().enumerate() {
+            if hecha[t * top_k + j] {
+                continue;
+            }
             let yj = &y[(t * top_k + j) * h..(t * top_k + j + 1) * h];
             for i in 0..h {
                 o[i] += yj[i] * w;
