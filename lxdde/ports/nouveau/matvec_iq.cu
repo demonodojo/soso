@@ -556,3 +556,78 @@ extern "C" __global__ void attn_prefill_f16(const float *q, const unsigned short
         }
     }
 }
+
+/* ---------------------------------------------------------------------------------------------------------------------
+ * Todos los expertos de un bloque en UN lanzamiento: el descriptor de cada experto (punteros, tipos, token base y cuenta) está en un
+ * array de u64 (`IQ_DESC` por experto). Con 256 expertos por capa, un lanzamiento por experto era latencia pura (cada kernel tiene pocos
+ * bloques y tarda lo mismo que uno grande). grid = (ceil(filas / 8), tiles máximos, expertos); los bloques sin trabajo salen enseguida.
+ * ------------------------------------------------------------------------------------------------------------------ */
+#define IQ_DESC 12 /* wg, wu, wd, abase, cnt, dg, du, dd, rbg, rbu, rbd, tokbase */
+
+extern "C" __global__ void iq_gateup_multi(const unsigned long long *desc, const float *xs, const int *tok, float *act, int ffn, int h)
+{
+    const unsigned long long *d = desc + (long)blockIdx.z * IQ_DESC;
+    int cnt = (int)d[4];
+    int t0 = (int)blockIdx.y * IQ_TILE;
+    if (t0 >= cnt) {
+        return;
+    }
+    int warp = (int)threadIdx.x >> 5;
+    int lane = (int)threadIdx.x & 31;
+    int fila = (int)blockIdx.x * 8 + warp;
+    if (fila >= ffn) {
+        return;
+    }
+    int abase = (int)d[3];
+    int nt = cnt - t0 < IQ_TILE ? cnt - t0 : IQ_TILE;
+    const int *tk = tok + (long)d[11];
+    const unsigned char *rg = (const unsigned char *)d[0] + (long)fila * (long)d[8];
+    const unsigned char *ru = (const unsigned char *)d[1] + (long)fila * (long)d[9];
+    int dg = (int)d[5], du = (int)d[6];
+    float ag[IQ_TILE], au[IQ_TILE];
+#pragma unroll
+    for (int t = 0; t < IQ_TILE; t++) {
+        ag[t] = 0.0f;
+        au[t] = 0.0f;
+    }
+    int units = h >> 5;
+    for (int u = lane; u < units; u += 32) {
+        float vg[32], vu[32];
+        iq_decodificar(dg, rg, u, vg);
+        iq_decodificar(du, ru, u, vu);
+#pragma unroll
+        for (int t = 0; t < IQ_TILE; t++) {
+            if (t < nt) {
+                const float4 *xp = (const float4 *)(xs + (long)tk[t0 + t] * h + (long)u * 32);
+                float sg = 0.0f, su = 0.0f;
+#pragma unroll
+                for (int i = 0; i < 8; i++) {
+                    float4 x = xp[i];
+                    sg += vg[4 * i] * x.x + vg[4 * i + 1] * x.y + vg[4 * i + 2] * x.z + vg[4 * i + 3] * x.w;
+                    su += vu[4 * i] * x.x + vu[4 * i + 1] * x.y + vu[4 * i + 2] * x.z + vu[4 * i + 3] * x.w;
+                }
+                ag[t] += sg;
+                au[t] += su;
+            }
+        }
+    }
+#pragma unroll
+    for (int t = 0; t < IQ_TILE; t++) {
+        float g = iq_warp_sum(ag[t]);
+        float up = iq_warp_sum(au[t]);
+        if (lane == 0 && t < nt) {
+            act[(long)(abase + t0 + t) * ffn + fila] = (g / (1.0f + expf(-g))) * up;
+        }
+    }
+}
+
+extern "C" __global__ void iq_down_multi(const unsigned long long *desc, const float *act, float *y, int rows, int cols)
+{
+    const unsigned long long *d = desc + (long)blockIdx.z * IQ_DESC;
+    int cnt = (int)d[4];
+    int t0 = (int)blockIdx.y * IQ_TILE;
+    if (t0 >= cnt) {
+        return;
+    }
+    iq_down_dev((const unsigned char *)d[2], act, y, rows, cols, cnt, (int)d[3], (int)d[7], (long)d[10]);
+}

@@ -45,13 +45,23 @@ fn psf2_glyph_index(ptr: Int, len: Int, cp: Int) -> Int ! alloc
         b = bytes_view_mem(ptr, len)
         n = psf2_num(ptr, len)
         i = 0
-        ix = 63
+        ix = -1
         while i < n
             c = bytes_get_u32(b, hs + i * 4)
             if c == cp
                 ix = i
             i = i + 1
-        ix
+        if ix < 0
+            j = 0
+            while j < n
+                c2 = bytes_get_u32(b, hs + j * 4)
+                if c2 == 63
+                    ix = j
+                j = j + 1
+        if ix < 0
+            0
+        else
+            ix
 
 fn psf2_offset_glifo(ptr: Int, len: Int, cp: Int) -> Int ! alloc
     if cp < 0

@@ -315,6 +315,36 @@ fn spawn_io_full(path: String, stdin: Int, stdout: Int, stderr: Int, log_fd: Int
     bytes_set_i64(opts, spawnio_off_log_fd(), log_fd)
     syscall(sys_spawn_io(), bytes_ptr(opts), 0, 0, 0, 0, 0)
 
+fn spawn_io_argv(path: String, a1: String, a2: String, a3: String, a4: String, a5: String, n: Int, stdin: Int, stdout: Int, stderr: Int, log_fd: Int) -> Int ! io, alloc
+    pbuf = spawn_string_buf(path)
+    b1 = spawn_string_buf(a1)
+    b2 = spawn_string_buf(a2)
+    b3 = spawn_string_buf(a3)
+    b4 = spawn_string_buf(a4)
+    b5 = spawn_string_buf(a5)
+    tab = bytes_new(96)
+    _p = spawn_argv_slot_ptr(tab, 0, pbuf, str_len(path))
+    if n >= 2
+        _1 = spawn_argv_slot_ptr(tab, 1, b1, str_len(a1))
+    if n >= 3
+        _2 = spawn_argv_slot_ptr(tab, 2, b2, str_len(a2))
+    if n >= 4
+        _3 = spawn_argv_slot_ptr(tab, 3, b3, str_len(a3))
+    if n >= 5
+        _4 = spawn_argv_slot_ptr(tab, 4, b4, str_len(a4))
+    if n >= 6
+        _5 = spawn_argv_slot_ptr(tab, 5, b5, str_len(a5))
+    opts = bytes_new(spawnio_size())
+    bytes_set_i64(opts, spawnio_off_path_ptr(), bytes_ptr(pbuf))
+    bytes_set_i64(opts, spawnio_off_path_len(), str_len(path))
+    bytes_set_i64(opts, spawnio_off_stdin(), stdin)
+    bytes_set_i64(opts, spawnio_off_stdout(), stdout)
+    bytes_set_i64(opts, spawnio_off_stderr(), stderr)
+    bytes_set_i64(opts, spawnio_off_argv_ptr(), bytes_ptr(tab))
+    bytes_set_i64(opts, spawnio_off_argv_count(), n)
+    bytes_set_i64(opts, spawnio_off_log_fd(), log_fd)
+    syscall(sys_spawn_io(), bytes_ptr(opts), 0, 0, 0, 0, 0)
+
 fn spawn_io_4(path: String, a1: String, a2: String, a3: String, stdin: Int, stdout: Int, stderr: Int, log_fd: Int) -> Int ! io, alloc
     pbuf = spawn_string_buf(path)
     b1 = spawn_string_buf(a1)

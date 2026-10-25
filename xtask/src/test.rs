@@ -2839,6 +2839,9 @@ fn ssh_soso_wm_soso_web(key: &Path, ssh_port: u16) -> Result<(), String> {
     if texto.contains("superficie gráfica no disponible") {
         return Err(format!("soso-web no pudo abrir ventana con WM activo: {texto:?}"));
     }
+    if !texto.contains("soso-wm: prueba-web OK") {
+        return Err(format!("soso-wm --prueba-web sin línea OK: {texto:?}"));
+    }
     if !texto.contains("WEB=0") {
         return Err(format!("soso-wm --prueba-web falló: {texto:?}"));
     }

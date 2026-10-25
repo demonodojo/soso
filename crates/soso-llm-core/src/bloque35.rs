@@ -506,6 +506,7 @@ fn moe_bloque<S: TensorSource>(
             }
         }
     }
+    perfil_marca(&mut tp, crate::layer::FASE_FFN_DOWN);
     let (y_p, xs_p) = (y.as_mut_ptr() as usize, xs.as_ptr() as usize);
     let fallo = core::sync::atomic::AtomicBool::new(false);
     let seq = Sequential;

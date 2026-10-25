@@ -815,7 +815,8 @@ incluir `3D clear verificado (H1 GO)` tras el arranque.
 
 ```text
 soso-wm                 # gestor de ventanas (terminales y clientes gráficos)
-soso-wm --prueba        # autoprueba sin tomar la pantalla (CI)
+soso-wm --prueba        # autoprueba en RAM; debe imprimir `soso-wm: prueba OK`
+soso-wm --prueba-web    # cliente gráfico mínimo; imprime `soso-wm: prueba-web OK`
 ```
 
 Atajos habituales: **Alt+Intro** (terminal nueva), **Alt+Tab** (cambiar ventana),

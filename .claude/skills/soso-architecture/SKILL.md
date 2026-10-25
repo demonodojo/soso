@@ -221,6 +221,12 @@ Modo gráfico: `soso-web --grafico <url>` (syscalls FB + `input_poll`, TTF en
 `/lib/fonts/DejaVuSans.ttf` vía fontdue, `--fuente` para otra ruta). Prueba local: `/etc/web-prueba.html`. Tests host: `cargo test -p soso-web-core`;
 E2E: paso `soso-web: HTML local` en `cargo xtask test`.
 
+**Escritorio `soso-wm`** (`user/sal/escritorio/`, binario Sal en `/bin/soso-wm`):
+WM en Sal (terminales PTY, clientes TCP `:7430`, SHM 32 B). Protocolo compartido con
+`crates/soso-wm-proto` y `libsoso::ventana` (incl. `Redimensionar` con shm en offset 20).
+Fuentes PSF2 Spleen en `/lib/fonts/`. Host: `tests/sal/escritorio/probar_host.py` vía
+`cargo xtask check`. Guest: `soso-wm --prueba` / `--prueba-web` (líneas `… OK`).
+
 **Cargar un segundo modelo en el mismo proceso** destapó que `StagingWorker::spawned`
 era por instancia: el hilo de staging y `STAGE` son del proceso, así que arrancaba un
 segundo worker y reseteaba `generation` (que el vivo leía como kick) → dos hilos sobre

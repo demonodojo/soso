@@ -8,6 +8,8 @@ pub struct InputState {
     pub mouse_y: i32,
     pub btn_left: bool,
     pub key: Option<u32>,
+    /// Tras `Redimensionar` del WM hay que recomputar el layout HTML.
+    pub layout_dirty: bool,
 }
 
 impl Default for InputState {
@@ -17,6 +19,7 @@ impl Default for InputState {
             mouse_y: 0,
             btn_left: false,
             key: None,
+            layout_dirty: false,
         }
     }
 }
@@ -41,6 +44,7 @@ pub fn poll_input_from_wm(st: &mut InputState, fb: &mut super::fb::Framebuffer) 
         Evento::Redimensionar { w, h, shm_id } => {
             let _ = fb.inner_mut().aplicar_redimension(w, h, shm_id);
             fb.info = fb.inner_mut().fb_info();
+            st.layout_dirty = true;
         }
         Evento::Foco => {}
     }

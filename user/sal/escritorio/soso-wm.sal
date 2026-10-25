@@ -139,8 +139,7 @@ fn bucle_grafico(ejecutar: String) -> Int ! io, alloc
                 rc = 4
             if listener >= 0
                 st = st_nuevo(evt, msg)
-                if str_len(ejecutar) > 0
-                    _sp = spawn_ejecutar(ejecutar)
+                _sp = lanzar_ejecutar()
                 _loop = bucle_wm(st, listener, compos, plen, sw, sh, stride, bpp, fmt)
                 _c = fb_set_mode(fb_mode_consola())
                 close_fd(listener)
@@ -163,11 +162,47 @@ fn arg_valor(flag: String) -> String ! io, alloc
         a = a + 1
     d""
 
-fn spawn_ejecutar(path: String) -> Int ! io, alloc
-    if str_eq(path, d"/bin/soso-web") != 0
-        spawn_io_4(d"/bin/soso-web", d"--grafico", d"--local", d"/etc/web-prueba.html", 0, 0, 0, fd_kernel_log())
+fn lanzar_ejecutar() -> Int ! io, alloc
+    ix = -1
+    a = 1
+    while a < argc()
+        if str_eq(argv(a), d"--ejecutar") != 0
+            ix = a
+        a = a + 1
+    if ix < 0
+        0
     else
-        spawn_io_full(path, 0, 0, 0, fd_kernel_log())
+        if ix + 1 >= argc()
+            0
+        else
+            path = argv(ix + 1)
+            n = 1
+            ai = ix + 2
+            a1 = d""
+            a2 = d""
+            a3 = d""
+            a4 = d""
+            a5 = d""
+            while ai < argc()
+                if n >= 6
+                    ai = argc()
+                if n < 6
+                    if n == 1
+                        a1 = argv(ai)
+                    if n == 2
+                        a2 = argv(ai)
+                    if n == 3
+                        a3 = argv(ai)
+                    if n == 4
+                        a4 = argv(ai)
+                    if n == 5
+                        a5 = argv(ai)
+                    n = n + 1
+                    ai = ai + 1
+            if n == 1
+                spawn_io_full(path, 0, 0, 0, fd_kernel_log())
+            else
+                spawn_io_argv(path, a1, a2, a3, a4, a5, n, 0, 0, 0, fd_kernel_log())
 
 fn prueba_web_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     listener = tcp_listen(puerto_wm())
@@ -193,6 +228,7 @@ fn prueba_web_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: I
                         ok = 1
         close_fd(listener)
         if ok == 1
+            _pr = print_str(d"soso-wm: prueba-web OK\n")
             ok = 0
     ok
 
@@ -230,6 +266,5 @@ fn main() -> Int ! io, alloc
                 compos = bytes_ptr(bytes_new(plen))
                 rc = prueba_modo(compos, plen, sw, sh, stride, bpp, fmt)
         if arg_flag(d"--prueba") == 0
-            exe = arg_valor(d"--ejecutar")
-            rc = bucle_grafico(exe)
+            rc = bucle_grafico(d"")
     rc

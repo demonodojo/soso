@@ -370,6 +370,54 @@ fn wm_enviar_foco(fd: Int) -> Int ! io, alloc
     _e = msg_set_op(m, op_foco())
     write_fd(fd, m, msg_len())
 
+fn wm_cliente_cw(ww: Int) -> Int
+    c = ww - 8
+    if c < 1
+        1
+    else
+        c
+
+fn wm_cliente_ch(wh: Int) -> Int
+    c = wh - barra_alto() - 8
+    if c < 1
+        1
+    else
+        c
+
+fn wm_redim_slot(st: Int, tab: Int, i: Int, fmt: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int) -> Int ! io, alloc
+    if tab_get(tab, i, tab_tipo()) != tab_tipo_cli()
+        0
+    else
+        if tab_get(tab, i, tab_fase()) != 2
+            0
+        else
+            ww = tab_get(tab, i, tab_ww())
+            wh = tab_get(tab, i, tab_wh())
+            cw = wm_cliente_cw(ww)
+            ch = wm_cliente_ch(wh)
+            slen = cw * ch * 4
+            sid = shm_create(slen)
+            ok = 0
+            if sid >= 0
+                sptr = shm_map(sid)
+                if sptr >= 0
+                    old = tab_get(tab, i, tab_shm_id())
+                    fd = tab_get(tab, i, tab_fd())
+                    msg = st_get(st, st_msg_buf())
+                    _e = msg_encode_redim(msg, cw, ch, sid)
+                    _w = write_fd(fd, msg, msg_len())
+                    if old > 0
+                        _f = shm_free(old)
+                    _a = tab_set(tab, i, tab_shm_id(), sid)
+                    _b = tab_set(tab, i, tab_shm_ptr(), sptr)
+                    _c = tab_set(tab, i, tab_cw(), cw)
+                    _d = tab_set(tab, i, tab_ch(), ch)
+                    _s = wm_st_desde_tab(st, tab, i)
+                    _r = wm_repintar_ventana(st, compos, clen, sw, sh, stride, bpp, fmt)
+                    _t = wm_tab_desde_st(st, tab, i)
+                    ok = 1
+            ok
+
 fn wm_on_crear(st: Int, fd: Int, msg: Int, fmt: Int, sw: Int, sh: Int) -> Int ! io, alloc
     cw = msg_get_u32(msg, 4)
     ch = msg_get_u32(msg, 8)
@@ -516,9 +564,14 @@ fn wm_raton_mover(st: Int, x: Int, y: Int, botones: Int, sw: Int, sh: Int) -> In
             _r = wm_reenviar_raton_slot(st, tab, fi, x, y, botones)
     0
 
-fn wm_raton_btn(st: Int, x: Int, y: Int, botones: Int) -> Int ! io, alloc
+fn wm_raton_btn(st: Int, x: Int, y: Int, botones: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     tab = st_get(st, st_tab())
     if botones == 0
+        dix = st_get(st, st_drag_ix())
+        dk = st_get(st, st_drag_kind())
+        if dix >= 0
+            if dk == 2
+                _r = wm_redim_slot(st, tab, dix, fmt, compos, clen, sw, sh, stride, bpp)
         _d = st_set(st, st_drag_ix(), -1)
         _k = st_set(st, st_drag_kind(), 0)
     if botones != 0
@@ -674,14 +727,14 @@ fn wm_slot_atender_term(st: Int, tab: Int, i: Int, compos: Int, clen: Int, strid
                 _d = wm_marcar_dirty(st, wx, wy, wx + ww, wy + wh)
     0
 
-fn wm_input(st: Int, evt: Int, evt_len: Int, n: Int, sw: Int, sh: Int) -> Int ! io, alloc
+fn wm_input(st: Int, evt: Int, evt_len: Int, n: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     i = 0
     while i < n
         k = input_event_kind(evt, evt_len, i)
         if k == input_mouse_move()
             _r = wm_raton_mover(st, input_event_x(evt, evt_len, i), input_event_y(evt, evt_len, i), input_event_button(evt, evt_len, i), sw, sh)
         if k == input_mouse_btn()
-            _r = wm_raton_btn(st, input_event_x(evt, evt_len, i), input_event_y(evt, evt_len, i), input_event_button(evt, evt_len, i))
+            _r = wm_raton_btn(st, input_event_x(evt, evt_len, i), input_event_y(evt, evt_len, i), input_event_button(evt, evt_len, i), compos, clen, sw, sh, stride, bpp, fmt)
         if k == input_key()
             if input_event_pressed(evt, evt_len, i) != 0
                 key = input_event_key(evt, evt_len, i)
@@ -750,7 +803,7 @@ fn wm_tick(st: Int, listener: Int, compos: Int, clen: Int, sw: Int, sh: Int, str
         fi = st_get(st, st_focus())
         if fi >= 0
             _ld = wm_st_desde_tab(st, st_get(st, st_tab()), fi)
-        _i = wm_input(st, evt, 24 * 8, en, sw, sh)
+        _i = wm_input(st, evt, 24 * 8, en, compos, clen, sw, sh, stride, bpp, fmt)
         if fi >= 0
             _sv = wm_tab_desde_st(st, st_get(st, st_tab()), fi)
         en = input_poll(evt, 24 * 8, 8)
@@ -758,7 +811,7 @@ fn wm_tick(st: Int, listener: Int, compos: Int, clen: Int, sw: Int, sh: Int, str
         fi = st_get(st, st_focus())
         if fi >= 0
             _ld = wm_st_desde_tab(st, st_get(st, st_tab()), fi)
-        _i = wm_input(st, evt, 24 * 8, en, sw, sh)
+        _i = wm_input(st, evt, 24 * 8, en, compos, clen, sw, sh, stride, bpp, fmt)
         if fi >= 0
             _sv = wm_tab_desde_st(st, st_get(st, st_tab()), fi)
     acc = tcp_accept(listener, 1)

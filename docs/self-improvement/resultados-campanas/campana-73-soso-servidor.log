@@ -1,0 +1,741 @@
+serve_host: 8 hilos
+serve_host: GPU CUDA activa (pesos residentes bajo demanda)
+serve_host: top_p por defecto 0.8
+serve_host: la salida se recorta al contexto que quede
+serve_host: top_k por defecto 20
+serve_host: escuchando en http://127.0.0.1:7460 model=qwen3.6-35b-a3b backend=host-cpu+cuda
+[soso] petición: prompt de 3390 tokens (0 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 25 tokens generados en 80.6 s (en total, con el prefill)
+[soso] fases (s): qkv 7.1, atención 1.6, o-proj 3.9, ffn up+gate 16.9, swiglu 42.6, ffn down 0.1, otros 0.0, rope+kv 4.3
+[soso] petición: prompt de 4460 tokens (3390 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 47 tokens generados en 15.2 s (en total, con el prefill)
+[soso] fases (s): qkv 1.7, atención 1.3, o-proj 1.3, ffn up+gate 7.4, swiglu 1.0, ffn down 0.2, otros 0.0, rope+kv 1.5
+[soso] petición: prompt de 8940 tokens (4460 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 85 tokens generados en 57.5 s (en total, con el prefill)
+[soso] fases (s): qkv 6.8, atención 5.8, o-proj 4.5, ffn up+gate 30.5, swiglu 1.6, ffn down 0.4, otros 0.0, rope+kv 5.6
+[soso] petición: prompt de 9290 tokens (8940 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 58 tokens generados en 7.9 s (en total, con el prefill)
+[soso] fases (s): qkv 0.6, atención 1.5, o-proj 0.8, ffn up+gate 3.3, swiglu 0.1, ffn down 0.3, otros 0.0, rope+kv 0.5
+[soso] petición: prompt de 11102 tokens (9290 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 93 tokens generados en 30.0 s (en total, con el prefill)
+[soso] fases (s): qkv 3.2, atención 4.2, o-proj 2.3, ffn up+gate 14.1, swiglu 1.0, ffn down 0.5, otros 0.0, rope+kv 3.1
+[soso] petición: prompt de 11280 tokens (11102 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 45 tokens generados en 5.4 s (en total, con el prefill)
+[soso] fases (s): qkv 0.4, atención 1.1, o-proj 0.6, ffn up+gate 2.0, swiglu 0.1, ffn down 0.2, otros 0.0, rope+kv 0.4
+[soso] petición: prompt de 15656 tokens (11280 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 320 tokens generados en 91.6 s (en total, con el prefill)
+[soso] fases (s): qkv 9.4, atención 15.4, o-proj 6.6, ffn up+gate 39.5, swiglu 4.2, ffn down 1.7, otros 0.0, rope+kv 10.1
+[soso] petición: prompt de 16246 tokens (15656 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 91 tokens generados en 15.0 s (en total, con el prefill)
+[soso] fases (s): qkv 1.3, atención 3.3, o-proj 1.3, ffn up+gate 5.8, swiglu 0.5, ffn down 0.5, otros 0.0, rope+kv 1.3
+[soso] petición: prompt de 16807 tokens (16246 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 1085 tokens generados en 79.9 s (en total, con el prefill)
+[soso] fases (s): qkv 2.5, atención 29.6, o-proj 10.6, ffn up+gate 25.2, swiglu 0.6, ffn down 6.1, otros 0.0, rope+kv 1.4
+[soso] petición: prompt de 19706 tokens (16807 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 121 tokens generados en 47.2 s (en total, con el prefill)
+[soso] fases (s): qkv 5.1, atención 10.8, o-proj 3.8, ffn up+gate 19.8, swiglu 0.7, ffn down 0.7, otros 0.0, rope+kv 4.1
+[soso] petición: prompt de 21107 tokens (19706 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 8192 tokens generados en 646.8 s (en total, con el prefill)
+[soso] fases (s): qkv 12.1, atención 295.0, o-proj 81.8, ffn up+gate 177.3, swiglu 1.0, ffn down 48.7, otros 0.0, rope+kv 3.4
+[soso] petición: prompt de 18506 tokens (3561 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 36 tokens generados en 194.3 s (en total, con el prefill)
+[soso] fases (s): qkv 27.0, atención 25.3, o-proj 15.2, ffn up+gate 93.2, swiglu 3.2, ffn down 0.2, otros 0.0, rope+kv 22.7
+[soso] petición: prompt de 19332 tokens (18506 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 150 tokens generados en 21.0 s (en total, con el prefill)
+[soso] fases (s): qkv 1.6, atención 6.3, o-proj 2.1, ffn up+gate 7.5, swiglu 0.2, ffn down 0.8, otros 0.0, rope+kv 1.1
+[soso] petición: prompt de 20762 tokens (19332 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 232 tokens generados en 35.2 s (en total, con el prefill)
+[soso] fases (s): qkv 2.6, atención 10.7, o-proj 3.5, ffn up+gate 13.0, swiglu 0.3, ffn down 1.3, otros 0.0, rope+kv 2.0
+[soso] petición: prompt de 21327 tokens (20762 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 92 tokens generados en 14.9 s (en total, con el prefill)
+[soso] fases (s): qkv 1.0, atención 4.5, o-proj 1.4, ffn up+gate 5.3, swiglu 0.1, ffn down 0.5, otros 0.0, rope+kv 0.8
+[soso] petición: prompt de 23134 tokens (21327 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 8192 tokens generados en 673.9 s (en total, con el prefill)
+[soso] fases (s): qkv 12.9, atención 326.6, o-proj 76.6, ffn up+gate 167.7, swiglu 1.1, ffn down 47.4, otros 0.0, rope+kv 4.0
+serve: salida rechazada (HistorialInvalido { motivo: "llamada a herramienta truncada" }): "Ahora voy a corregir la función `protective_mbr_fix`. La función actual solo establece el tamaño del sector y el tipo de partición, pero falta:\n- CHS inicial (bytes 447..450) = `00 02 00`\n- CHS final (bytes 451..454) = `FF FF FF`\n- Las otras tres entradas de partición (bytes 462..510) a cero\n\n<tool_call>\n<function=reemplazar_texto>\n<parameter=filePath>\ncrates/gptdisk/src/lib.rs\n</parameter>\n<parameter=buscar>\n/// Ajusta el MBR protector al tamaño del disco (campo de 32 bits, saturado a\n/// 0xFFFFFFFF en discos de más de 2 TiB, como hace sgdisk).\npub fn protective_mbr_fix(mbr: &mut [u8; SECTOR], disk_sectors: u64) {\n    let size = (disk_sectors - 1).min(0xFFFF_FFFF) as u32;\n    mbr[446] = 0x00; // no arrancable\n    mbr[446 + 4] = 0xEE; // tipo: GPT protective\n    wr32(mbr, 446 + 8, 1); // primer LBA\n    wr32(mbr, 446 + 12, size);\n    mbr[510] = 0x55;\n    mbr[511] = 0xAA;\n}\n</parameter>\n<parameter=nuevo>\n/// Ajusta el MBR protector al tamaño del disco (campo de 32 bits, saturado a\n/// 0xFFFFFFFF en discos de más de 2 TiB, como hace sgdisk).\npub fn protective_mbr_fix(mbr: &mut [u8; SECTOR], disk_sectors: u64) {\n    let size = if disk_sectors <= 1 {\n        0\n    } else {\n        (disk_sectors - 1).min(0xFFFF_FFFF) as u32\n    };\n    mbr[446] = 0x00; // no arrancable\n    mbr[447] = 0x02; // CHS inicial\n    mbr[448] = 0x00; // CHS inicial\n    mbr[447] = 0x02; // CHS inicial\n    mbr[448] = 0x00; // CHS inicial\n    mbr[449] = 0x00; // CHS inicial\n    mbr[449] = 0x02; // CHS inicial\n "
+[soso] petición: prompt de 23187 tokens (23128 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 8192 tokens generados en 663.4 s (en total, con el prefill)
+[soso] fases (s): qkv 11.2, atención 329.9, o-proj 74.6, ffn up+gate 158.2, swiglu 0.9, ffn down 47.0, otros 0.0, rope+kv 2.6
+serve: salida rechazada (HistorialInvalido { motivo: "llamada a herramienta truncada" }): "<tool_call>\n<function=reemplazar_texto>\n<parameter=filePath>\ncrates/gptdisk/src/lib.rs\n</parameter>\n<parameter=buscar>\n/// Ajusta el MBR protector al tamaño del disco (campo de 32 bits, saturado a\n/// 0xFFFFFFFF en discos de más de 2 TiB, como hace sgdisk).\npub fn protective_mbr_fix(mbr: &mut [u8; SECTOR], disk_sectors: u64) {\n    let size = (disk_sectors - 1).min(0xFFFF_FFFF) as u32;\n    mbr[446] = 0x00; // no arrancable\n    mbr[446 + 4] = 0xEE; // tipo: GPT protective\n    wr32(mbr, 446 + 8, 1); // primer LBA\n    wr32(mbr, 446 + 12, size);\n    mbr[510] = 0x55;\n    mbr[511] = 0xAA;\n}\n</parameter>\n<parameter=nuevo>\n/// Ajusta el MBR protector al tamaño del disco (campo de 32 bits, saturado a\n/// 0xFFFFFFFF en discos de más de 2 TiB, como hace sgdisk).\npub fn protective_mbr_fix(mbr: &mut [u8; SECTOR], disk_sectors: u64) {\n    let size = if disk_sectors <= 1 {\n        0\n    } else {\n        (disk_sectors - 1).min(0xFFFF_FFFF) as u64\n    } as u32;\n    // Entrada de partición 1 (la única del MBR protector)\n    mbr[446] = 0x00; // no arrancable\n    mbr[446 + 1] = 0x02; // CHS inicial\n    mbr[446 + 2] = 0x00;\n    mbr[446 + 1] = 0x02;\n    mbr[446 + 3] = 0x00;\n    mbr[446 + 1] = 0x02;\n    mbr[446 + 3] = 0x02;\n    mbr[446 + 1] = 0x02;\n    mbr[446 + 3] = 0x02;\n    mbr[446 + 1] = 0x02;\n    mbr[446 + 3] = 0x02;\n    mbr[446 + 1] = 0x02;\n    mbr[446 + 3] = 0x02;\n    mbr[446 + 1] = 0x02;\n    mbr[446 + 3] = 0x02;\n    mbr[446 + 1] = 0x02;\n    mbr[446 + 3] = 0x02;\n    mbr[446 + 1] = 0x02;\n    m"
+[soso] petición: prompt de 23303 tokens (23181 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 58 tokens generados en 16.2 s (en total, con el prefill)
+[soso] fases (s): qkv 1.3, atención 4.4, o-proj 1.3, ffn up+gate 6.4, swiglu 0.2, ffn down 0.3, otros 0.0, rope+kv 1.1
+[soso] petición: prompt de 25076 tokens (23303 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 8192 tokens generados en 702.2 s (en total, con el prefill)
+[soso] fases (s): qkv 13.0, atención 337.2, o-proj 82.4, ffn up+gate 184.3, swiglu 1.1, ffn down 49.7, otros 0.0, rope+kv 4.3
+serve: salida rechazada (HistorialInvalido { motivo: "llamada a herramienta truncada" }): "Ahora voy a corregir la función `protective_mbr_fix`. Necesito añadir:\n1. CHS inicial (bytes 447..449) = 00 02 00\n2. CHS final (bytes 451..454) = FF FF FF\n3. Las otras tres entradas de partición (bytes 462..510) a cero\n4. Manejar el caso de `disk_sectors = 0` para que el tamaño sea 0\n\n<tool_call>\n<function=reemplazar_texto>\n<parameter=filePath>\ncrates/gptdisk/src/lib.rs\n</parameter>\n<parameter=buscar>\npub fn protective_mbr_fix(mbr: &mut [u8; SECTOR], disk_sectors: u64) {\n    let size = (disk_sectors - 1).min(0xFFFF_FFFF) as u32;\n    mbr[446] = 0x00; // no arrancable\n    mbr[446 + 4] = 0xEE; // tipo: GPT protective\n    wr32(mbr, 446 + 8, 1); // primer LBA\n    wr32(mbr, 446 + 12, size);\n    mbr[510] = 0x55;\n    mbr[511] = 0xAA;\n}\n</parameter>\n<parameter=nuevo>\npub fn protective_mbr_fix(mbr: &mut [u8; SECTOR], disk_sectors: u64) {\n    let size = if disk_sectors <= 1 {\n        0\n    } else {\n        (disk_sectors - 1).min(0xFFFF_FFFF) as u32\n    };\n    mbr[446] = 0x00; // no arrancable\n    mbr[447] = 0x00; // CHS inicial\n    mbr[448] = 0x00;\n    mbr[447] = 0x00; // CHS inicial\n    mbr[448] = 0x00;\n    mbr[447] = 0x00; // CHS inicial\n    mbr[448] = 0x00;\n    mbr[447] = 0x00; // CHS inicial\n    mbr[448] = 0x00;\n    mbr[447] = 0x00; // CHS inicial\n    mbr[448] = 0x00;\n    mbr[447] = 0x00; // CHS inicial\n    mbr[448] = 0x00;\n    mbr[447] = 0x00; // CHS inicial\n    mbr[448] = 0x00;\n    mbr[447] = 0x00; // CHS inicial\n    mbr[448] = 0x00;\n    mbr[447] = 0x00; // CHS inicial\n    mbr[448"
+[soso] petición: prompt de 25129 tokens (25070 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 58 tokens generados en 13.8 s (en total, con el prefill)
+[soso] fases (s): qkv 1.1, atención 4.2, o-proj 1.1, ffn up+gate 4.9, swiglu 0.1, ffn down 0.3, otros 0.0, rope+kv 0.9
+[soso] petición: prompt de 22136 tokens (5328 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 656 tokens generados en 285.0 s (en total, con el prefill)
+[soso] fases (s): qkv 33.3, atención 54.9, o-proj 24.5, ffn up+gate 126.6, swiglu 4.1, ffn down 3.9, otros 0.0, rope+kv 27.1
+[soso] petición: prompt de 23842 tokens (22136 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 98 tokens generados en 31.7 s (en total, con el prefill)
+[soso] fases (s): qkv 3.0, atención 8.8, o-proj 2.5, ffn up+gate 12.6, swiglu 0.3, ffn down 0.6, otros 0.0, rope+kv 2.4
+[soso] petición: prompt de 25207 tokens (23842 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 76 tokens generados en 25.1 s (en total, con el prefill)
+[soso] fases (s): qkv 2.4, atención 7.0, o-proj 2.0, ffn up+gate 10.1, swiglu 0.3, ffn down 0.4, otros 0.0, rope+kv 1.9
+[soso] petición: prompt de 25504 tokens (25207 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 66 tokens generados en 9.4 s (en total, con el prefill)
+[soso] fases (s): qkv 0.6, atención 3.2, o-proj 0.8, ffn up+gate 3.3, swiglu 0.1, ffn down 0.4, otros 0.0, rope+kv 0.4
+[soso] petición: prompt de 25766 tokens (25504 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 59 tokens generados en 9.5 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 3.1, o-proj 0.9, ffn up+gate 3.2, swiglu 0.3, ffn down 0.3, otros 0.0, rope+kv 0.6
+[soso] petición: prompt de 21475 tokens (16388 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 65 tokens generados en 95.8 s (en total, con el prefill)
+[soso] fases (s): qkv 11.8, atención 19.1, o-proj 7.0, ffn up+gate 42.8, swiglu 1.5, ffn down 0.4, otros 0.0, rope+kv 9.7
+[soso] petición: prompt de 21623 tokens (21475 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 36 tokens generados en 4.7 s (en total, con el prefill)
+[soso] fases (s): qkv 0.3, atención 1.5, o-proj 0.5, ffn up+gate 1.6, swiglu 0.0, ffn down 0.2, otros 0.0, rope+kv 0.2
+[soso] petición: prompt de 21880 tokens (21623 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 62 tokens generados en 7.9 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 2.6, o-proj 0.8, ffn up+gate 2.7, swiglu 0.1, ffn down 0.3, otros 0.0, rope+kv 0.4
+[soso] petición: prompt de 22074 tokens (21880 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 67 tokens generados en 7.6 s (en total, con el prefill)
+[soso] fases (s): qkv 0.4, atención 2.7, o-proj 0.8, ffn up+gate 2.5, swiglu 0.0, ffn down 0.4, otros 0.0, rope+kv 0.3
+[soso] petición: prompt de 22226 tokens (22074 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 40 tokens generados en 5.2 s (en total, con el prefill)
+[soso] fases (s): qkv 0.3, atención 1.7, o-proj 0.5, ffn up+gate 1.8, swiglu 0.0, ffn down 0.2, otros 0.0, rope+kv 0.2
+[soso] petición: prompt de 22427 tokens (22226 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 59 tokens generados en 7.2 s (en total, con el prefill)
+[soso] fases (s): qkv 0.4, atención 2.5, o-proj 0.7, ffn up+gate 2.4, swiglu 0.0, ffn down 0.3, otros 0.0, rope+kv 0.3
+[soso] petición: prompt de 19476 tokens (3381 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 88 tokens generados en 206.4 s (en total, con el prefill)
+[soso] fases (s): qkv 28.4, atención 29.0, o-proj 16.3, ffn up+gate 97.2, swiglu 3.5, ffn down 0.5, otros 0.0, rope+kv 23.7
+[soso] petición: prompt de 19627 tokens (19476 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 36 tokens generados en 4.6 s (en total, con el prefill)
+[soso] fases (s): qkv 0.3, atención 1.4, o-proj 0.5, ffn up+gate 1.6, swiglu 0.0, ffn down 0.2, otros 0.0, rope+kv 0.2
+[soso] petición: prompt de 19884 tokens (19627 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 80 tokens generados en 8.8 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 2.9, o-proj 1.0, ffn up+gate 3.0, swiglu 0.1, ffn down 0.5, otros 0.0, rope+kv 0.4
+[soso] petición: prompt de 20425 tokens (19884 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 85 tokens generados en 13.0 s (en total, con el prefill)
+[soso] fases (s): qkv 1.0, atención 3.9, o-proj 1.2, ffn up+gate 4.7, swiglu 0.1, ffn down 0.5, otros 0.0, rope+kv 0.8
+[soso] petición: prompt de 20573 tokens (20425 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 36 tokens generados en 4.7 s (en total, con el prefill)
+[soso] fases (s): qkv 0.3, atención 1.5, o-proj 0.5, ffn up+gate 1.6, swiglu 0.0, ffn down 0.2, otros 0.0, rope+kv 0.2
+[soso] petición: prompt de 20830 tokens (20573 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 80 tokens generados en 9.1 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 3.1, o-proj 1.0, ffn up+gate 3.1, swiglu 0.1, ffn down 0.5, otros 0.0, rope+kv 0.4
+[soso] petición: prompt de 21371 tokens (20830 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 85 tokens generados en 14.2 s (en total, con el prefill)
+[soso] fases (s): qkv 1.0, atención 4.1, o-proj 1.3, ffn up+gate 5.6, swiglu 0.1, ffn down 0.5, otros 0.0, rope+kv 0.8
+[soso] petición: prompt de 21519 tokens (21371 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 80 tokens generados en 8.6 s (en total, con el prefill)
+[soso] fases (s): qkv 0.3, atención 3.1, o-proj 0.9, ffn up+gate 2.9, swiglu 0.0, ffn down 0.5, otros 0.0, rope+kv 0.2
+[soso] petición: prompt de 22031 tokens (21519 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 85 tokens generados en 13.2 s (en total, con el prefill)
+[soso] fases (s): qkv 1.0, atención 4.2, o-proj 1.3, ffn up+gate 4.7, swiglu 0.1, ffn down 0.5, otros 0.0, rope+kv 0.7
+[soso] petición: prompt de 3390 tokens (3381 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 25 tokens generados en 14.9 s (en total, con el prefill)
+[soso] fases (s): qkv 2.3, atención 1.1, o-proj 1.4, ffn up+gate 6.9, swiglu 0.3, ffn down 0.1, otros 0.0, rope+kv 1.9
+[soso] petición: prompt de 4505 tokens (3390 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 47 tokens generados en 14.0 s (en total, con el prefill)
+[soso] fases (s): qkv 1.9, atención 1.4, o-proj 1.4, ffn up+gate 6.5, swiglu 0.2, ffn down 0.2, otros 0.0, rope+kv 1.5
+[soso] petición: prompt de 8987 tokens (4505 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 61 tokens generados en 53.9 s (en total, con el prefill)
+[soso] fases (s): qkv 7.3, atención 5.8, o-proj 4.5, ffn up+gate 26.5, swiglu 0.9, ffn down 0.3, otros 0.0, rope+kv 6.1
+[soso] petición: prompt de 14201 tokens (8987 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 61 tokens generados en 66.4 s (en total, con el prefill)
+[soso] fases (s): qkv 8.4, atención 9.9, o-proj 5.2, ffn up+gate 31.5, swiglu 1.1, ffn down 0.3, otros 0.0, rope+kv 7.1
+[soso] petición: prompt de 19038 tokens (14201 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 87 tokens generados en 66.5 s (en total, con el prefill)
+[soso] fases (s): qkv 7.8, atención 13.0, o-proj 5.0, ffn up+gate 29.7, swiglu 1.0, ffn down 0.5, otros 0.0, rope+kv 6.6
+[soso] petición: prompt de 20524 tokens (19038 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 123 tokens generados en 28.3 s (en total, con el prefill)
+[soso] fases (s): qkv 2.6, atención 7.4, o-proj 2.5, ffn up+gate 10.9, swiglu 0.3, ffn down 0.7, otros 0.0, rope+kv 2.1
+[soso] petición: prompt de 23613 tokens (20524 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 108 tokens generados en 52.3 s (en total, con el prefill)
+[soso] fases (s): qkv 5.2, atención 12.2, o-proj 4.0, ffn up+gate 21.6, swiglu 1.5, ffn down 0.6, otros 0.0, rope+kv 5.0
+[soso] petición: prompt de 23938 tokens (23613 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 83 tokens generados en 11.1 s (en total, con el prefill)
+[soso] fases (s): qkv 0.6, atención 3.7, o-proj 1.1, ffn up+gate 3.6, swiglu 0.1, ffn down 0.5, otros 0.0, rope+kv 0.5
+[soso] petición: prompt de 25299 tokens (23938 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 375 tokens generados en 46.5 s (en total, con el prefill)
+[soso] fases (s): qkv 2.6, atención 17.1, o-proj 4.8, ffn up+gate 15.4, swiglu 0.3, ffn down 2.1, otros 0.0, rope+kv 1.8
+[soso] petición: prompt de 27073 tokens (25299 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 102 tokens generados en 33.9 s (en total, con el prefill)
+[soso] fases (s): qkv 3.1, atención 10.0, o-proj 2.6, ffn up+gate 12.7, swiglu 0.4, ffn down 0.6, otros 0.0, rope+kv 2.5
+[soso] petición: prompt de 28391 tokens (27073 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 772 tokens generados en 79.0 s (en total, con el prefill)
+[soso] fases (s): qkv 3.1, atención 33.5, o-proj 8.7, ffn up+gate 23.7, swiglu 0.3, ffn down 4.6, otros 0.0, rope+kv 1.9
+[soso] petición: prompt de 11822 tokens (3558 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 104 tokens generados en 117.4 s (en total, con el prefill)
+[soso] fases (s): qkv 16.2, atención 12.7, o-proj 9.7, ffn up+gate 57.0, swiglu 2.0, ffn down 0.6, otros 0.0, rope+kv 13.8
+[soso] petición: prompt de 13179 tokens (11822 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 602 tokens generados en 54.8 s (en total, con el prefill)
+[soso] fases (s): qkv 2.8, atención 16.6, o-proj 6.9, ffn up+gate 19.7, swiglu 0.3, ffn down 3.4, otros 0.0, rope+kv 2.0
+[soso] petición: prompt de 14802 tokens (13179 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 96 tokens generados en 27.2 s (en total, con el prefill)
+[soso] fases (s): qkv 2.8, atención 5.6, o-proj 2.4, ffn up+gate 11.7, swiglu 0.3, ffn down 0.5, otros 0.0, rope+kv 2.2
+[soso] petición: prompt de 16180 tokens (14802 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 183 tokens generados en 30.0 s (en total, con el prefill)
+[soso] fases (s): qkv 2.5, atención 7.7, o-proj 3.0, ffn up+gate 12.0, swiglu 0.3, ffn down 1.0, otros 0.0, rope+kv 1.9
+[soso] petición: prompt de 16631 tokens (16180 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 48 tokens generados en 9.2 s (en total, con el prefill)
+[soso] fases (s): qkv 0.8, atención 2.3, o-proj 0.9, ffn up+gate 3.7, swiglu 0.1, ffn down 0.3, otros 0.0, rope+kv 0.6
+[soso] petición: prompt de 16926 tokens (16631 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 127 tokens generados en 12.4 s (en total, con el prefill)
+[soso] fases (s): qkv 0.6, atención 4.0, o-proj 1.5, ffn up+gate 4.1, swiglu 0.1, ffn down 0.7, otros 0.0, rope+kv 0.4
+[soso] petición: prompt de 17143 tokens (16926 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 122 tokens generados en 11.3 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 3.8, o-proj 1.3, ffn up+gate 3.6, swiglu 0.1, ffn down 0.7, otros 0.0, rope+kv 0.3
+[soso] petición: prompt de 17399 tokens (17143 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 126 tokens generados en 12.1 s (en total, con el prefill)
+[soso] fases (s): qkv 0.6, atención 4.1, o-proj 1.4, ffn up+gate 4.0, swiglu 0.1, ffn down 0.7, otros 0.0, rope+kv 0.4
+[soso] petición: prompt de 17629 tokens (17399 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 58 tokens generados en 7.7 s (en total, con el prefill)
+[soso] fases (s): qkv 0.4, atención 2.2, o-proj 0.7, ffn up+gate 2.7, swiglu 0.0, ffn down 0.3, otros 0.0, rope+kv 0.3
+[soso] petición: prompt de 19099 tokens (17629 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 126 tokens generados en 28.9 s (en total, con el prefill)
+[soso] fases (s): qkv 2.7, atención 7.4, o-proj 2.6, ffn up+gate 11.6, swiglu 0.3, ffn down 0.7, otros 0.0, rope+kv 2.0
+[soso] petición: prompt de 19315 tokens (19099 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 126 tokens generados en 11.8 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 4.1, o-proj 1.4, ffn up+gate 3.7, swiglu 0.1, ffn down 0.7, otros 0.0, rope+kv 0.3
+[soso] petición: prompt de 19545 tokens (19315 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 58 tokens generados en 7.7 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 2.3, o-proj 0.8, ffn up+gate 2.6, swiglu 0.1, ffn down 0.3, otros 0.0, rope+kv 0.3
+[soso] petición: prompt de 20996 tokens (19545 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 129 tokens generados en 29.1 s (en total, con el prefill)
+[soso] fases (s): qkv 2.6, atención 7.8, o-proj 2.6, ffn up+gate 11.5, swiglu 0.3, ffn down 0.7, otros 0.0, rope+kv 2.0
+[soso] petición: prompt de 21229 tokens (20996 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 109 tokens generados en 11.5 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 4.0, o-proj 1.2, ffn up+gate 3.5, swiglu 0.1, ffn down 0.6, otros 0.0, rope+kv 0.3
+[soso] petición: prompt de 21406 tokens (21229 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 130 tokens generados en 12.4 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 4.5, o-proj 1.4, ffn up+gate 3.7, swiglu 0.0, ffn down 0.7, otros 0.0, rope+kv 0.3
+[soso] petición: prompt de 21648 tokens (21406 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 130 tokens generados en 13.3 s (en total, con el prefill)
+[soso] fases (s): qkv 0.6, atención 4.8, o-proj 1.5, ffn up+gate 4.0, swiglu 0.1, ffn down 0.7, otros 0.0, rope+kv 0.4
+[soso] petición: prompt de 21870 tokens (21648 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 130 tokens generados en 13.1 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 4.8, o-proj 1.4, ffn up+gate 3.8, swiglu 0.1, ffn down 0.7, otros 0.0, rope+kv 0.3
+[soso] petición: prompt de 22092 tokens (21870 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 130 tokens generados en 13.1 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 4.7, o-proj 1.4, ffn up+gate 3.9, swiglu 0.1, ffn down 0.7, otros 0.0, rope+kv 0.3
+[soso] petición: prompt de 22314 tokens (22092 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 130 tokens generados en 13.3 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 4.9, o-proj 1.4, ffn up+gate 4.0, swiglu 0.1, ffn down 0.7, otros 0.0, rope+kv 0.3
+[soso] petición: prompt de 17760 tokens (3381 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 130 tokens generados en 189.2 s (en total, con el prefill)
+[soso] fases (s): qkv 25.4, atención 26.0, o-proj 15.2, ffn up+gate 90.8, swiglu 3.1, ffn down 0.7, otros 0.0, rope+kv 20.2
+[soso] petición: prompt de 3390 tokens (3381 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 25 tokens generados en 14.5 s (en total, con el prefill)
+[soso] fases (s): qkv 2.3, atención 1.1, o-proj 1.4, ffn up+gate 6.7, swiglu 0.3, ffn down 0.1, otros 0.0, rope+kv 1.8
+[soso] petición: prompt de 4676 tokens (3390 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 50 tokens generados en 15.7 s (en total, con el prefill)
+[soso] fases (s): qkv 2.1, atención 1.7, o-proj 1.5, ffn up+gate 7.3, swiglu 0.2, ffn down 0.3, otros 0.0, rope+kv 1.7
+[soso] petición: prompt de 8112 tokens (4676 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 43 tokens generados en 40.3 s (en total, con el prefill)
+[soso] fases (s): qkv 5.5, atención 4.1, o-proj 3.4, ffn up+gate 19.9, swiglu 0.7, ffn down 0.2, otros 0.0, rope+kv 4.7
+[soso] petición: prompt de 9266 tokens (8112 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 51 tokens generados en 16.3 s (en total, con el prefill)
+[soso] fases (s): qkv 1.9, atención 2.5, o-proj 1.5, ffn up+gate 7.4, swiglu 0.2, ffn down 0.3, otros 0.0, rope+kv 1.6
+[soso] petición: prompt de 12703 tokens (9266 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 34 tokens generados en 42.3 s (en total, con el prefill)
+[soso] fases (s): qkv 5.6, atención 6.1, o-proj 3.3, ffn up+gate 20.1, swiglu 0.7, ffn down 0.2, otros 0.0, rope+kv 4.7
+[soso] petición: prompt de 13848 tokens (12703 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 58 tokens generados en 17.4 s (en total, con el prefill)
+[soso] fases (s): qkv 1.9, atención 3.5, o-proj 1.5, ffn up+gate 7.6, swiglu 0.2, ffn down 0.3, otros 0.0, rope+kv 1.5
+[soso] petición: prompt de 14082 tokens (13848 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 33 tokens generados en 5.0 s (en total, con el prefill)
+[soso] fases (s): qkv 0.4, atención 1.2, o-proj 0.5, ffn up+gate 1.8, swiglu 0.0, ffn down 0.2, otros 0.0, rope+kv 0.3
+[soso] petición: prompt de 19054 tokens (14082 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 47 tokens generados en 69.4 s (en total, con el prefill)
+[soso] fases (s): qkv 7.9, atención 12.0, o-proj 4.9, ffn up+gate 32.8, swiglu 1.5, ffn down 0.3, otros 0.0, rope+kv 7.1
+[soso] petición: prompt de 23854 tokens (19054 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 47 tokens generados en 66.7 s (en total, con el prefill)
+[soso] fases (s): qkv 7.8, atención 14.7, o-proj 4.7, ffn up+gate 29.2, swiglu 1.0, ffn down 0.3, otros 0.0, rope+kv 6.4
+[soso] petición: prompt de 28654 tokens (23854 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 84 tokens generados en 73.5 s (en total, con el prefill)
+[soso] fases (s): qkv 7.8, atención 19.1, o-proj 5.0, ffn up+gate 30.7, swiglu 0.9, ffn down 0.5, otros 0.0, rope+kv 6.4
+[soso] petición: prompt de 22899 tokens (3571 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 48 tokens generados en 248.5 s (en total, con el prefill)
+[soso] fases (s): qkv 33.1, atención 36.9, o-proj 18.6, ffn up+gate 118.7, swiglu 4.1, ffn down 0.3, otros 0.0, rope+kv 27.3
+[soso] petición: prompt de 24819 tokens (22899 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 34 tokens generados en 28.1 s (en total, con el prefill)
+[soso] fases (s): qkv 3.1, atención 7.0, o-proj 2.0, ffn up+gate 11.8, swiglu 0.4, ffn down 0.2, otros 0.0, rope+kv 2.6
+[soso] petición: prompt de 25964 tokens (24819 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 68 tokens generados en 20.5 s (en total, con el prefill)
+[soso] fases (s): qkv 1.9, atención 6.1, o-proj 1.7, ffn up+gate 7.7, swiglu 0.2, ffn down 0.4, otros 0.0, rope+kv 1.6
+[soso] petición: prompt de 26246 tokens (25964 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 33 tokens generados en 6.6 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 2.1, o-proj 0.6, ffn up+gate 2.3, swiglu 0.1, ffn down 0.2, otros 0.0, rope+kv 0.4
+[soso] petición: prompt de 16673 tokens (5035 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 47 tokens generados en 146.3 s (en total, con el prefill)
+[soso] fases (s): qkv 19.6, atención 19.3, o-proj 11.3, ffn up+gate 71.1, swiglu 2.4, ffn down 0.2, otros 0.0, rope+kv 16.3
+[soso] petición: prompt de 17684 tokens (16673 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 77 tokens generados en 18.3 s (en total, con el prefill)
+[soso] fases (s): qkv 1.7, atención 4.3, o-proj 1.6, ffn up+gate 7.4, swiglu 0.2, ffn down 0.4, otros 0.0, rope+kv 1.4
+[soso] petición: prompt de 22700 tokens (17684 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 61 tokens generados en 68.7 s (en total, con el prefill)
+[soso] fases (s): qkv 8.0, atención 14.8, o-proj 5.0, ffn up+gate 30.1, swiglu 1.0, ffn down 0.3, otros 0.0, rope+kv 6.6
+[soso] petición: prompt de 27514 tokens (22700 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 87 tokens generados en 77.0 s (en total, con el prefill)
+[soso] fases (s): qkv 7.6, atención 18.2, o-proj 5.1, ffn up+gate 34.3, swiglu 1.4, ffn down 0.5, otros 0.0, rope+kv 6.7
+[soso] petición: prompt de 26577 tokens (5835 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 74 tokens generados en 299.2 s (en total, con el prefill)
+[soso] fases (s): qkv 39.0, atención 49.2, o-proj 22.1, ffn up+gate 140.0, swiglu 5.0, ffn down 0.4, otros 0.0, rope+kv 32.5
+[soso] petición: prompt de 28523 tokens (26577 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 60 tokens generados en 31.7 s (en total, con el prefill)
+[soso] fases (s): qkv 3.2, atención 8.9, o-proj 2.3, ffn up+gate 12.4, swiglu 0.4, ffn down 0.3, otros 0.0, rope+kv 2.6
+[soso] petición: prompt de 25345 tokens (6782 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 48 tokens generados en 237.6 s (en total, con el prefill)
+[soso] fases (s): qkv 30.2, atención 41.3, o-proj 17.2, ffn up+gate 111.0, swiglu 3.7, ffn down 0.3, otros 0.0, rope+kv 25.1
+[soso] petición: prompt de 27265 tokens (25345 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 46 tokens generados en 29.5 s (en total, con el prefill)
+[soso] fases (s): qkv 3.1, atención 8.1, o-proj 2.1, ffn up+gate 12.0, swiglu 0.4, ffn down 0.3, otros 0.0, rope+kv 2.4
+[soso] petición: prompt de 28422 tokens (27265 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 77 tokens generados en 21.7 s (en total, con el prefill)
+[soso] fases (s): qkv 1.9, atención 6.8, o-proj 1.7, ffn up+gate 8.1, swiglu 0.2, ffn down 0.4, otros 0.0, rope+kv 1.5
+[soso] petición: prompt de 28829 tokens (28422 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 61 tokens generados en 11.3 s (en total, con el prefill)
+[soso] fases (s): qkv 0.7, atención 3.7, o-proj 0.9, ffn up+gate 3.9, swiglu 0.1, ffn down 0.3, otros 0.0, rope+kv 0.6
+[soso] petición: prompt de 14927 tokens (7264 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 61 tokens generados en 104.9 s (en total, con el prefill)
+[soso] fases (s): qkv 13.9, atención 14.2, o-proj 8.2, ffn up+gate 51.1, swiglu 1.7, ffn down 0.3, otros 0.0, rope+kv 11.2
+[soso] petición: prompt de 15952 tokens (14927 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 72 tokens generados en 17.6 s (en total, con el prefill)
+[soso] fases (s): qkv 1.7, atención 3.9, o-proj 1.6, ffn up+gate 7.4, swiglu 0.2, ffn down 0.4, otros 0.0, rope+kv 1.4
+[soso] petición: prompt de 17135 tokens (15952 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 76 tokens generados en 19.9 s (en total, con el prefill)
+[soso] fases (s): qkv 2.0, atención 4.5, o-proj 1.7, ffn up+gate 8.2, swiglu 0.3, ffn down 0.4, otros 0.0, rope+kv 1.6
+[soso] petición: prompt de 21075 tokens (17135 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 75 tokens generados en 55.9 s (en total, con el prefill)
+[soso] fases (s): qkv 6.3, atención 12.2, o-proj 4.2, ffn up+gate 24.6, swiglu 0.8, ffn down 0.4, otros 0.0, rope+kv 5.2
+[soso] petición: prompt de 22261 tokens (21075 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 51 tokens generados en 19.2 s (en total, con el prefill)
+[soso] fases (s): qkv 2.0, atención 4.9, o-proj 1.5, ffn up+gate 7.8, swiglu 0.2, ffn down 0.3, otros 0.0, rope+kv 1.6
+[soso] petición: prompt de 23573 tokens (22261 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 194 tokens generados en 30.4 s (en total, con el prefill)
+[soso] fases (s): qkv 2.3, atención 10.0, o-proj 3.0, ffn up+gate 10.6, swiglu 0.3, ffn down 1.1, otros 0.0, rope+kv 1.8
+[soso] petición: prompt de 25288 tokens (3381 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 212 tokens generados en 288.8 s (en total, con el prefill)
+[soso] fases (s): qkv 37.0, atención 49.6, o-proj 22.3, ffn up+gate 132.4, swiglu 4.6, ffn down 1.2, otros 0.0, rope+kv 30.8
+[soso] petición: prompt de 20258 tokens (6494 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 86 tokens generados en 171.6 s (en total, con el prefill)
+[soso] fases (s): qkv 22.2, atención 27.6, o-proj 13.2, ffn up+gate 80.8, swiglu 2.7, ffn down 0.5, otros 0.0, rope+kv 18.0
+[soso] petición: prompt de 25141 tokens (20258 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 47 tokens generados en 68.8 s (en total, con el prefill)
+[soso] fases (s): qkv 7.9, atención 15.9, o-proj 4.8, ffn up+gate 29.8, swiglu 1.0, ffn down 0.3, otros 0.0, rope+kv 6.6
+[soso] petición: prompt de 23727 tokens (8366 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 86 tokens generados en 195.5 s (en total, con el prefill)
+[soso] fases (s): qkv 24.6, atención 35.1, o-proj 14.5, ffn up+gate 90.4, swiglu 3.0, ffn down 0.5, otros 0.0, rope+kv 20.3
+[soso] petición: prompt de 25763 tokens (23727 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 50 tokens generados en 31.1 s (en total, con el prefill)
+[soso] fases (s): qkv 3.3, atención 8.2, o-proj 2.3, ffn up+gate 12.8, swiglu 0.4, ffn down 0.3, otros 0.0, rope+kv 2.6
+[soso] petición: prompt de 26924 tokens (25763 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 79 tokens generados en 21.9 s (en total, con el prefill)
+[soso] fases (s): qkv 1.9, atención 6.6, o-proj 1.8, ffn up+gate 8.2, swiglu 0.2, ffn down 0.4, otros 0.0, rope+kv 1.5
+[soso] petición: prompt de 22614 tokens (8890 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 62 tokens generados en 179.7 s (en total, con el prefill)
+[soso] fases (s): qkv 22.7, atención 31.3, o-proj 13.3, ffn up+gate 84.0, swiglu 2.7, ffn down 0.3, otros 0.0, rope+kv 18.6
+[soso] petición: prompt de 24555 tokens (22614 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 62 tokens generados en 30.7 s (en total, con el prefill)
+[soso] fases (s): qkv 3.2, atención 7.8, o-proj 2.3, ffn up+gate 12.4, swiglu 0.4, ffn down 0.3, otros 0.0, rope+kv 2.6
+[soso] petición: prompt de 26496 tokens (24555 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 48 tokens generados en 29.9 s (en total, con el prefill)
+[soso] fases (s): qkv 3.1, atención 8.0, o-proj 2.2, ffn up+gate 12.1, swiglu 0.4, ffn down 0.3, otros 0.0, rope+kv 2.6
+[soso] petición: prompt de 24626 tokens (3699 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 50 tokens generados en 268.3 s (en total, con el prefill)
+[soso] fases (s): qkv 35.6, atención 42.1, o-proj 20.1, ffn up+gate 126.7, swiglu 4.4, ffn down 0.3, otros 0.0, rope+kv 29.4
+[soso] petición: prompt de 3390 tokens (3381 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 25 tokens generados en 14.4 s (en total, con el prefill)
+[soso] fases (s): qkv 2.3, atención 1.1, o-proj 1.4, ffn up+gate 6.6, swiglu 0.3, ffn down 0.1, otros 0.0, rope+kv 1.8
+[soso] petición: prompt de 4804 tokens (3390 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 50 tokens generados en 17.0 s (en total, con el prefill)
+[soso] fases (s): qkv 2.3, atención 1.8, o-proj 1.6, ffn up+gate 7.8, swiglu 0.3, ffn down 0.3, otros 0.0, rope+kv 1.9
+[soso] petición: prompt de 5428 tokens (4804 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 277 tokens generados en 22.0 s (en total, con el prefill)
+[soso] fases (s): qkv 1.3, atención 5.2, o-proj 3.0, ffn up+gate 8.6, swiglu 0.1, ffn down 1.5, otros 0.0, rope+kv 0.8
+[soso] petición: prompt de 6279 tokens (5428 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 52 tokens generados en 12.5 s (en total, con el prefill)
+[soso] fases (s): qkv 1.4, atención 1.7, o-proj 1.2, ffn up+gate 5.8, swiglu 0.2, ffn down 0.3, otros 0.0, rope+kv 1.1
+[soso] petición: prompt de 6517 tokens (6279 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 85 tokens generados en 7.6 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 1.7, o-proj 1.0, ffn up+gate 2.8, swiglu 0.1, ffn down 0.5, otros 0.0, rope+kv 0.4
+[soso] petición: prompt de 6641 tokens (6517 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 45 tokens generados en 4.1 s (en total, con el prefill)
+[soso] fases (s): qkv 0.2, atención 0.9, o-proj 0.5, ffn up+gate 1.5, swiglu 0.0, ffn down 0.2, otros 0.0, rope+kv 0.2
+[soso] petición: prompt de 6770 tokens (6641 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 155 tokens generados en 10.2 s (en total, con el prefill)
+[soso] fases (s): qkv 0.4, atención 2.7, o-proj 1.5, ffn up+gate 3.6, swiglu 0.0, ffn down 0.8, otros 0.0, rope+kv 0.2
+[soso] petición: prompt de 7062 tokens (6770 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 8192 tokens generados en 502.1 s (en total, con el prefill)
+[soso] fases (s): qkv 9.3, atención 174.2, o-proj 78.2, ffn up+gate 162.1, swiglu 1.0, ffn down 47.3, otros 0.0, rope+kv 1.5
+serve: salida rechazada (HistorialInvalido { motivo: "llamada a herramienta truncada" }): "Ahora voy a añadir las funciones y estructuras necesarias. Voy a añadir todo el código necesario después de la función `cmp`.\n\n<tool_call>\n<function=reemplazar_texto>\n<parameter=buscar>\n//! Comparación semver numérica `major.minor.patch`.\n</parameter>\n<parameter=ediciones>\n[{\"buscar\":\"use core::cmp::Ordering;\", \"nuevo\":\"use core::cmp::Ordering;\\nuse core::str::FromStr;\\n\\n/// Estructura interna para representar un SemVer completo con pre-release y metadatos.\\n#[derive(Clone, Debug, PartialEq, Eq)]\\nstruct FullSemVer {\\n    major: u32,\\n    minor: u32,\\n    patch: u32,\\n    pre_release: Vec<PreReleaseIdent>,\\n}\\n\\n#[derive(Clone, Debug, PartialEq, Eq)]\\nenum PreReleaseIdent {\\n    Num(u64),\\n    Alpha(String),\\n}\\n\\nimpl PartialOrd<PreReleaseIdent> for PreReleaseIdent {\\n    fn partial_cmp(&self, other: &PreReleaseIdent) -> Option<core::cmp::Ordering> {\\n        Some(self.cmp(other))\\n    }\\n}\\n\\nimpl Ord for PreReleaseIdent {\\n    fn cmp(&self, other: &Self) -> core::cmp::Ordering {\\n        match (self, other) {\\n            (Self::Num(n1), Self::Num(n2)) => n1.cmp(n2),\\n            (Self::Num(_), Self::Alpha(_)) => core::cmp::Ordering::Less,\\n            (Self::Alpha(_), Self::Num(_)) => core::cmp::Ordering::Greater,\\n            (Self::Alpha(s1), Self::Alpha(s2)) => s1.cmp(s2),\\n        }\\n    }\\n}\\n\\n/// Parsea una cadena de versión SemVer completa con pre-release y metadatos.\\npub fn parse_full(s: &str) -> Option<FullSemVer> {\\n    let s = s.trim();\\n    let (base, rest)"
+[soso] petición: prompt de 7115 tokens (7056 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 4153 tokens generados en 250.5 s (en total, con el prefill)
+[soso] fases (s): qkv 5.1, atención 81.4, o-proj 39.9, ffn up+gate 83.2, swiglu 0.7, ffn down 23.6, otros 0.0, rope+kv 1.0
+[soso] petición: prompt de 11394 tokens (7115 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 707 tokens generados en 94.1 s (en total, con el prefill)
+[soso] fases (s): qkv 7.9, atención 20.8, o-proj 10.4, ffn up+gate 38.8, swiglu 0.9, ffn down 3.8, otros 0.0, rope+kv 6.0
+[soso] petición: prompt de 12710 tokens (11394 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 57 tokens generados en 21.0 s (en total, con el prefill)
+[soso] fases (s): qkv 2.3, atención 3.8, o-proj 1.8, ffn up+gate 9.6, swiglu 0.3, ffn down 0.3, otros 0.0, rope+kv 1.8
+[soso] petición: prompt de 13648 tokens (12710 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 61 tokens generados en 20.2 s (en total, con el prefill)
+[soso] fases (s): qkv 2.2, atención 3.1, o-proj 1.4, ffn up+gate 8.5, swiglu 0.9, ffn down 0.3, otros 0.0, rope+kv 2.4
+[soso] petición: prompt de 14590 tokens (13648 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 1291 tokens generados en 96.1 s (en total, con el prefill)
+[soso] fases (s): qkv 3.0, atención 34.0, o-proj 13.2, ffn up+gate 31.1, swiglu 0.3, ffn down 7.3, otros 0.0, rope+kv 1.5
+[soso] petición: prompt de 16073 tokens (14590 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 2695 tokens generados en 205.7 s (en total, con el prefill)
+[soso] fases (s): qkv 5.6, atención 78.0, o-proj 28.1, ffn up+gate 64.7, swiglu 0.5, ffn down 16.1, otros 0.0, rope+kv 2.5
+[soso] petición: prompt de 18965 tokens (16073 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 8192 tokens generados en 654.5 s (en total, con el prefill)
+[soso] fases (s): qkv 14.7, atención 282.0, o-proj 83.9, ffn up+gate 188.5, swiglu 1.3, ffn down 49.4, otros 0.0, rope+kv 5.5
+serve: salida rechazada (HistorialInvalido { motivo: "llamada a herramienta truncada" }): "Voy a usar `reemplazar_lineas` correctamente, asegurándome de que las llaves estén balanceadas. Voy a reemplazar todo el archivo con una implementación correcta y completa.\n\n<tool_call>\n<function=reemplazar_lineas>\n<parameter=desde>\n1\n</parameter>\n<parameter=filePath>\ncrates/soso-update-core/src/semver.rs\n</parameter>\n<parameter=hasta>\n45\n</parameter>\n<parameter=nuevo>\n//! Comparación semver numérica `major.minor.patch` con soporte para pre-releases y metadatos.\n\nuse core::cmp::Ordering;\n\n#[derive(Clone,Copy,Debug,PartialEq,Eq)]\npub struct SemVer {\n    pub major:u32,\n    pub minor:u32,\n    pub patch:u32,\n}\n\n/// Parsea `major.minor.patch` (ignora sufijos tras `-` o `+`).\npub fn parse(s:&str) -> Option<SemVer> {\n    let base = s.split(['-','+']).next()?.trim();\n    let mut it = base.split('.');\n    let major = it.next()?.parse().ok()?;\n    let minor = it.next()?.parse().ok()?;\n    let patch = it.next()?.parse().ok()?;\n    Some(SemVer {\n        major,\n        minor,\n        patch,\n    })\n}\n\npub fn cmp(a:&SemVer,b:&SemVer) -> Ordering {\n    a.major\n        .cmp(&b.major)\n        .then_with(|| a.minor.cmp(&b.minor))\n        .then_with(|| a.patch.cmp(&b.patch))\n}\n\n/// Identificador de pre-release o build metadata.\n#[derive(Clone,Debug,PartialEq,Eq)]\nenum Identifier {\n    Numeric(u128),\n    Alphanumeric(String),\n}\n\n/// Parsea un identificador de pre-release o build metadata.\nfn parse_identifier(s:&str) -> Option<Identifier> {\n    if s.is_empty() {\n        return None;\n    }\n    if s"
+[soso] petición: prompt de 19018 tokens (18959 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 8192 tokens generados en 618.9 s (en total, con el prefill)
+[soso] fases (s): qkv 10.3, atención 274.3, o-proj 81.4, ffn up+gate 172.3, swiglu 0.8, ffn down 49.2, otros 0.0, rope+kv 2.1
+serve: salida rechazada (HistorialInvalido { motivo: "llamada a herramienta truncada" }): "Voy a usar `reemplazar_lineas` para reemplazar todo el contenido del archivo con una implementación correcta.\n\n<tool_call>\n<function=reemplazar_lineas>\n<parameter=desde>\n1\n</parameter>\n<parameter=filePath>\ncrates/soso-update-core/src/semver.rs\n</parameter>\n<parameter=hasta>\n45\n</parameter>\n<parameter=nuevo>\n//! Comparación semver numérica `major.minor.patch` con soporte para pre-releases y metadatos.\n\nuse core::cmp::Ordering;\n\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub struct SemVer {\n    pub major: u32,\n    pub minor: u32,\n    pub patch: u32,\n}\n\n/// Parsea `major.minor.patch` (ignora sufijos tras `-` o `+`).\npub fn parse(s: &str) -> Option<SemVer> {\n    let base = s.split(['-', '+']).next()?.trim();\n    let mut it = base.split('.');\n    let major = it.next()?.parse().ok()?;\n    let minor = it.next()?.parse().ok()?;\n    let patch = it.next()?.parse().ok()?;\n    Some(SemVer {\n        major,\n        minor,\n        patch,\n    })\n}\n\npub fn cmp(a: &SemVer, b: &SemVer) -> Ordering {\n    a.major\n        .cmp(&b.major)\n        .then_with(|| a.minor.cmp(&b.minor))\n        .then_with(|| a.patch.cmp(&b.patch))\n}\n\n/// Identificador de pre-release o build metadata.\n#[derive(Clone, Debug, PartialEq, Eq)]\nenum Identifier {\n    Numeric(u128),\n    Alphanumeric(String),\n}\n\n/// Parsea un identificador de pre-release o build metadata.\nfn parse_identifier(s: &str) -> Option<Identifier> {\n    if s.is_empty() {\n        return None;\n    }\n    if s.chars().all(|c| c.is_ascii_digit()) {\n        "
+[soso] petición: prompt de 19134 tokens (19012 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 34 tokens generados en 9.6 s (en total, con el prefill)
+[soso] fases (s): qkv 0.9, atención 2.5, o-proj 0.8, ffn up+gate 3.7, swiglu 0.1, ffn down 0.2, otros 0.0, rope+kv 0.7
+[soso] petición: prompt de 20049 tokens (19134 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 1792 tokens generados en 143.7 s (en total, con el prefill)
+[soso] fases (s): qkv 3.7, atención 58.8, o-proj 18.4, ffn up+gate 42.6, swiglu 0.3, ffn down 10.6, otros 0.0, rope+kv 1.6
+[soso] petición: prompt de 18248 tokens (3576 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 1761 tokens generados en 311.3 s (en total, con el prefill)
+[soso] fases (s): qkv 28.7, atención 74.1, o-proj 31.8, ffn up+gate 127.7, swiglu 3.5, ffn down 10.1, otros 0.0, rope+kv 22.4
+[soso] petición: prompt de 20160 tokens (12211 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 1762 tokens generados en 249.3 s (en total, con el prefill)
+[soso] fases (s): qkv 18.6, atención 73.8, o-proj 26.0, ffn up+gate 94.6, swiglu 2.1, ffn down 10.2, otros 0.0, rope+kv 13.4
+[soso] petición: prompt de 22119 tokens (15058 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 213 tokens generados en 120.3 s (en total, con el prefill)
+[soso] fases (s): qkv 13.9, atención 25.8, o-proj 9.2, ffn up+gate 51.8, swiglu 1.7, ffn down 1.2, otros 0.0, rope+kv 12.0
+[soso] petición: prompt de 22401 tokens (22119 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 1339 tokens generados en 103.4 s (en total, con el prefill)
+[soso] fases (s): qkv 2.1, atención 45.4, o-proj 13.3, ffn up+gate 29.1, swiglu 0.2, ffn down 7.9, otros 0.0, rope+kv 0.6
+[soso] petición: prompt de 23168 tokens (15452 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 1466 tokens generados en 231.5 s (en total, con el prefill)
+[soso] fases (s): qkv 17.2, atención 72.8, o-proj 22.6, ffn up+gate 84.8, swiglu 2.1, ffn down 8.9, otros 0.0, rope+kv 13.7
+[soso] petición: prompt de 24192 tokens (4438 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 1355 tokens generados en 359.3 s (en total, con el prefill)
+[soso] fases (s): qkv 35.1, atención 88.1, o-proj 31.6, ffn up+gate 149.8, swiglu 4.4, ffn down 8.2, otros 0.0, rope+kv 28.3
+[soso] petición: prompt de 25636 tokens (22544 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 53 tokens generados en 51.9 s (en total, con el prefill)
+[soso] fases (s): qkv 5.6, atención 13.4, o-proj 3.7, ffn up+gate 22.0, swiglu 0.7, ffn down 0.3, otros 0.0, rope+kv 4.5
+[soso] petición: prompt de 26541 tokens (24099 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 1636 tokens generados en 192.2 s (en total, con el prefill)
+[soso] fases (s): qkv 8.8, atención 76.5, o-proj 20.2, ffn up+gate 61.0, swiglu 1.1, ffn down 10.4, otros 0.0, rope+kv 6.2
+[soso] petición: prompt de 28346 tokens (25543 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 1768 tokens generados en 205.0 s (en total, con el prefill)
+[soso] fases (s): qkv 8.7, atención 85.6, o-proj 21.6, ffn up+gate 62.9, swiglu 1.0, ffn down 11.3, otros 0.0, rope+kv 5.7
+[soso] petición: prompt de 29512 tokens (25677 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 87 tokens generados en 84.0 s (en total, con el prefill)
+[soso] fases (s): qkv 8.8, atención 23.4, o-proj 5.8, ffn up+gate 34.6, swiglu 1.1, ffn down 0.5, otros 0.0, rope+kv 7.1
+[soso] petición: prompt de 30377 tokens (27386 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 190 tokens generados en 73.8 s (en total, con el prefill)
+[soso] fases (s): qkv 6.7, atención 22.9, o-proj 5.5, ffn up+gate 28.3, swiglu 0.9, ffn down 1.2, otros 0.0, rope+kv 5.5
+[soso] petición: prompt de 30727 tokens (29227 en común con la anterior), hasta 8185 nuevos
+[soso] respuesta: 340 tokens generados en 63.9 s (en total, con el prefill)
+[soso] fases (s): qkv 4.2, atención 23.9, o-proj 5.5, ffn up+gate 21.2, swiglu 0.5, ffn down 2.2, otros 0.0, rope+kv 3.5
+[soso] petición: prompt de 30745 tokens (29393 en común con la anterior), hasta 8167 nuevos
+[soso] respuesta: 53 tokens generados en 38.4 s (en total, con el prefill)
+[soso] fases (s): qkv 3.8, atención 11.6, o-proj 2.6, ffn up+gate 15.2, swiglu 0.5, ffn down 0.3, otros 0.0, rope+kv 3.0
+[soso] petición: prompt de 25515 tokens (3381 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 380 tokens generados en 334.5 s (en total, con el prefill)
+[soso] fases (s): qkv 40.9, atención 59.2, o-proj 25.3, ffn up+gate 153.3, swiglu 5.5, ffn down 2.2, otros 0.0, rope+kv 35.5
+[soso] petición: prompt de 25546 tokens (23816 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 52 tokens generados en 45.9 s (en total, con el prefill)
+[soso] fases (s): qkv 5.0, atención 11.5, o-proj 3.2, ffn up+gate 19.3, swiglu 0.6, ffn down 0.3, otros 0.0, rope+kv 4.2
+[soso] petición: prompt de 25679 tokens (23949 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 391 tokens generados en 73.9 s (en total, con el prefill)
+[soso] fases (s): qkv 5.7, atención 23.6, o-proj 6.6, ffn up+gate 27.1, swiglu 0.7, ffn down 2.3, otros 0.0, rope+kv 4.5
+[soso] petición: prompt de 26597 tokens (25679 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 54 tokens generados en 17.9 s (en total, con el prefill)
+[soso] fases (s): qkv 1.6, atención 5.3, o-proj 1.4, ffn up+gate 7.0, swiglu 0.2, ffn down 0.3, otros 0.0, rope+kv 1.3
+[soso] petición: prompt de 26753 tokens (24532 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 391 tokens generados en 89.6 s (en total, con el prefill)
+[soso] fases (s): qkv 7.6, atención 27.8, o-proj 7.6, ffn up+gate 33.7, swiglu 1.0, ffn down 2.3, otros 0.0, rope+kv 5.9
+[soso] petición: prompt de 26772 tokens (25010 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 53 tokens generados en 35.9 s (en total, con el prefill)
+[soso] fases (s): qkv 3.8, atención 9.6, o-proj 2.6, ffn up+gate 14.7, swiglu 0.5, ffn down 0.3, otros 0.0, rope+kv 3.1
+[soso] petición: prompt de 26906 tokens (25143 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 549 tokens generados en 75.3 s (en total, con el prefill)
+[soso] fases (s): qkv 4.4, atención 27.8, o-proj 7.4, ffn up+gate 25.1, swiglu 0.6, ffn down 3.2, otros 0.0, rope+kv 3.4
+[soso] petición: prompt de 3390 tokens (3381 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 25 tokens generados en 15.3 s (en total, con el prefill)
+[soso] fases (s): qkv 2.3, atención 1.1, o-proj 1.5, ffn up+gate 7.1, swiglu 0.3, ffn down 0.1, otros 0.0, rope+kv 2.0
+[soso] petición: prompt de 4799 tokens (3390 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 47 tokens generados en 17.4 s (en total, con el prefill)
+[soso] fases (s): qkv 2.4, atención 1.8, o-proj 1.7, ffn up+gate 8.1, swiglu 0.3, ffn down 0.2, otros 0.0, rope+kv 2.0
+[soso] petición: prompt de 8651 tokens (4799 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 73 tokens generados en 47.8 s (en total, con el prefill)
+[soso] fases (s): qkv 6.3, atención 5.3, o-proj 4.0, ffn up+gate 23.4, swiglu 0.8, ffn down 0.4, otros 0.0, rope+kv 5.3
+[soso] petición: prompt de 9095 tokens (8651 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 44 tokens generados en 8.0 s (en total, con el prefill)
+[soso] fases (s): qkv 0.8, atención 1.5, o-proj 0.8, ffn up+gate 3.4, swiglu 0.1, ffn down 0.2, otros 0.0, rope+kv 0.6
+[soso] petición: prompt de 9666 tokens (9095 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 78 tokens generados en 12.1 s (en total, con el prefill)
+[soso] fases (s): qkv 1.0, atención 2.4, o-proj 1.2, ffn up+gate 4.9, swiglu 0.1, ffn down 0.4, otros 0.0, rope+kv 0.8
+[soso] petición: prompt de 11113 tokens (9666 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 99 tokens generados en 23.4 s (en total, con el prefill)
+[soso] fases (s): qkv 2.4, atención 4.2, o-proj 2.2, ffn up+gate 10.1, swiglu 0.3, ffn down 0.5, otros 0.0, rope+kv 2.0
+[soso] petición: prompt de 12366 tokens (11113 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 145 tokens generados en 24.8 s (en total, con el prefill)
+[soso] fases (s): qkv 2.2, atención 5.3, o-proj 2.4, ffn up+gate 10.1, swiglu 0.3, ffn down 0.8, otros 0.0, rope+kv 1.8
+[soso] petición: prompt de 13637 tokens (12366 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 72 tokens generados en 20.5 s (en total, con el prefill)
+[soso] fases (s): qkv 2.2, atención 4.1, o-proj 1.8, ffn up+gate 8.9, swiglu 0.3, ffn down 0.4, otros 0.0, rope+kv 1.8
+[soso] petición: prompt de 13778 tokens (13637 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 45 tokens generados en 4.9 s (en total, con el prefill)
+[soso] fases (s): qkv 0.3, atención 1.4, o-proj 0.6, ffn up+gate 1.7, swiglu 0.0, ffn down 0.2, otros 0.0, rope+kv 0.2
+[soso] petición: prompt de 13956 tokens (13778 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 90 tokens generados en 8.6 s (en total, con el prefill)
+[soso] fases (s): qkv 0.4, atención 2.5, o-proj 1.0, ffn up+gate 2.8, swiglu 0.0, ffn down 0.5, otros 0.0, rope+kv 0.3
+[soso] petición: prompt de 15200 tokens (13956 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 290 tokens generados en 37.5 s (en total, con el prefill)
+[soso] fases (s): qkv 2.3, atención 9.6, o-proj 3.9, ffn up+gate 14.8, swiglu 0.7, ffn down 1.6, otros 0.0, rope+kv 2.3
+[soso] petición: prompt de 15840 tokens (15200 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 948 tokens generados en 72.3 s (en total, con el prefill)
+[soso] fases (s): qkv 2.2, atención 26.5, o-proj 9.6, ffn up+gate 22.8, swiglu 0.2, ffn down 5.4, otros 0.0, rope+kv 1.1
+[soso] petición: prompt de 18066 tokens (15840 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 88 tokens generados en 36.6 s (en total, con el prefill)
+[soso] fases (s): qkv 3.9, atención 7.9, o-proj 2.9, ffn up+gate 15.7, swiglu 0.5, ffn down 0.5, otros 0.0, rope+kv 3.2
+[soso] petición: prompt de 19261 tokens (18066 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 102 tokens generados en 23.8 s (en total, con el prefill)
+[soso] fases (s): qkv 2.1, atención 5.9, o-proj 2.1, ffn up+gate 9.4, swiglu 0.3, ffn down 0.6, otros 0.0, rope+kv 1.8
+[soso] petición: prompt de 20453 tokens (19261 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 469 tokens generados en 51.1 s (en total, con el prefill)
+[soso] fases (s): qkv 2.7, atención 17.8, o-proj 5.6, ffn up+gate 17.1, swiglu 0.3, ffn down 2.7, otros 0.0, rope+kv 2.1
+[soso] petición: prompt de 21688 tokens (20453 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 102 tokens generados en 26.7 s (en total, con el prefill)
+[soso] fases (s): qkv 2.3, atención 7.2, o-proj 2.2, ffn up+gate 10.3, swiglu 0.3, ffn down 0.6, otros 0.0, rope+kv 2.0
+[soso] petición: prompt de 22891 tokens (21688 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 100 tokens generados en 24.8 s (en total, con el prefill)
+[soso] fases (s): qkv 2.2, atención 6.9, o-proj 2.0, ffn up+gate 9.6, swiglu 0.3, ffn down 0.6, otros 0.0, rope+kv 1.7
+[soso] petición: prompt de 24095 tokens (22891 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 524 tokens generados en 56.5 s (en total, con el prefill)
+[soso] fases (s): qkv 2.6, atención 21.2, o-proj 6.2, ffn up+gate 18.3, swiglu 0.3, ffn down 3.1, otros 0.0, rope+kv 1.8
+[soso] petición: prompt de 13178 tokens (3551 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 483 tokens generados en 161.8 s (en total, con el prefill)
+[soso] fases (s): qkv 19.1, atención 24.6, o-proj 14.6, ffn up+gate 74.4, swiglu 2.5, ffn down 2.7, otros 0.0, rope+kv 16.1
+[soso] petición: prompt de 14309 tokens (13178 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 169 tokens generados en 26.6 s (en total, con el prefill)
+[soso] fases (s): qkv 2.1, atención 6.5, o-proj 2.7, ffn up+gate 10.5, swiglu 0.3, ffn down 0.9, otros 0.0, rope+kv 1.7
+[soso] petición: prompt de 14734 tokens (14309 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 158 tokens generados en 16.5 s (en total, con el prefill)
+[soso] fases (s): qkv 0.9, atención 4.8, o-proj 1.9, ffn up+gate 5.8, swiglu 0.1, ffn down 0.9, otros 0.0, rope+kv 0.6
+[soso] petición: prompt de 15260 tokens (14734 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 80 tokens generados en 12.5 s (en total, con el prefill)
+[soso] fases (s): qkv 1.0, atención 3.2, o-proj 1.2, ffn up+gate 4.7, swiglu 0.1, ffn down 0.4, otros 0.0, rope+kv 0.7
+[soso] petición: prompt de 16417 tokens (15260 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 131 tokens generados en 24.6 s (en total, con el prefill)
+[soso] fases (s): qkv 2.1, atención 6.0, o-proj 2.2, ffn up+gate 9.8, swiglu 0.3, ffn down 0.7, otros 0.0, rope+kv 1.7
+[soso] petición: prompt de 16722 tokens (16417 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 100 tokens generados en 11.6 s (en total, con el prefill)
+[soso] fases (s): qkv 0.6, atención 3.3, o-proj 1.2, ffn up+gate 4.0, swiglu 0.1, ffn down 0.5, otros 0.0, rope+kv 0.5
+[soso] petición: prompt de 16977 tokens (16722 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 53 tokens generados en 7.1 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 2.0, o-proj 0.7, ffn up+gate 2.6, swiglu 0.1, ffn down 0.3, otros 0.0, rope+kv 0.4
+[soso] petición: prompt de 17557 tokens (16977 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 106 tokens generados en 15.6 s (en total, con el prefill)
+[soso] fases (s): qkv 1.1, atención 4.4, o-proj 1.6, ffn up+gate 5.6, swiglu 0.1, ffn down 0.6, otros 0.0, rope+kv 0.9
+[soso] petición: prompt de 18746 tokens (17557 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 536 tokens generados en 55.0 s (en total, con el prefill)
+[soso] fases (s): qkv 2.6, atención 18.5, o-proj 6.2, ffn up+gate 19.6, swiglu 0.3, ffn down 3.1, otros 0.0, rope+kv 1.8
+[soso] petición: prompt de 19935 tokens (18746 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 53 tokens generados en 20.7 s (en total, con el prefill)
+[soso] fases (s): qkv 2.2, atención 4.8, o-proj 1.6, ffn up+gate 8.9, swiglu 0.3, ffn down 0.3, otros 0.0, rope+kv 1.7
+[soso] petición: prompt de 20255 tokens (19935 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 59 tokens generados en 8.9 s (en total, con el prefill)
+[soso] fases (s): qkv 0.6, atención 2.7, o-proj 0.9, ffn up+gate 3.3, swiglu 0.1, ffn down 0.3, otros 0.0, rope+kv 0.5
+[soso] petición: prompt de 20549 tokens (20255 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 46 tokens generados en 7.6 s (en total, con el prefill)
+[soso] fases (s): qkv 0.6, atención 2.3, o-proj 0.7, ffn up+gate 2.8, swiglu 0.1, ffn down 0.3, otros 0.0, rope+kv 0.4
+[soso] petición: prompt de 20194 tokens (3381 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 126 tokens generados en 226.2 s (en total, con el prefill)
+[soso] fases (s): qkv 30.3, atención 32.1, o-proj 17.3, ffn up+gate 107.5, swiglu 4.0, ffn down 0.7, otros 0.0, rope+kv 25.6
+[soso] petición: prompt de 20555 tokens (20194 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 79 tokens generados en 10.9 s (en total, con el prefill)
+[soso] fases (s): qkv 0.7, atención 3.3, o-proj 1.1, ffn up+gate 3.7, swiglu 0.1, ffn down 0.4, otros 0.0, rope+kv 0.5
+[soso] petición: prompt de 21753 tokens (20555 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 59 tokens generados en 20.4 s (en total, con el prefill)
+[soso] fases (s): qkv 2.0, atención 5.2, o-proj 1.6, ffn up+gate 8.4, swiglu 0.3, ffn down 0.3, otros 0.0, rope+kv 1.7
+[soso] petición: prompt de 22047 tokens (21753 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 274 tokens generados en 24.4 s (en total, con el prefill)
+[soso] fases (s): qkv 0.8, atención 9.6, o-proj 2.9, ffn up+gate 7.3, swiglu 0.1, ffn down 1.6, otros 0.0, rope+kv 0.5
+[soso] petición: prompt de 23466 tokens (22047 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 84 tokens generados en 26.7 s (en total, con el prefill)
+[soso] fases (s): qkv 2.5, atención 7.3, o-proj 2.1, ffn up+gate 10.4, swiglu 0.3, ffn down 0.5, otros 0.0, rope+kv 2.1
+[soso] petición: prompt de 23733 tokens (23466 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 959 tokens generados en 76.3 s (en total, con el prefill)
+[soso] fases (s): qkv 1.6, atención 33.5, o-proj 9.5, ffn up+gate 21.5, swiglu 0.1, ffn down 5.6, otros 0.0, rope+kv 0.6
+[soso] petición: prompt de 16726 tokens (6102 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 8192 tokens generados en 746.1 s (en total, con el prefill)
+[soso] fases (s): qkv 30.1, atención 274.6, o-proj 91.9, ffn up+gate 244.0, swiglu 3.3, ffn down 48.9, otros 0.0, rope+kv 18.5
+serve: salida rechazada (HistorialInvalido { motivo: "llamada a herramienta truncada" }): "<tool_call>\n<function=insertar>\n<parameter=antes_de>\n}\n</parameter>\n<parameter=filePath>\ncrates/soso-http/src/lib.rs\n</parameter>\n<parameter=linea>\n903\n</parameter>\n<parameter=texto>\n    #[test]\n    fn test_resolve_redirect_absolute() {\n        let base = \"https://h.org:8443/a/b/c?z=1#f\";\n        assert_eq!(resolve_redirect(base,\"https://other.com/x\"),\"https://other.com/x\");\n        assert_eq!(resolve_redirect(base,\"http://other.com/x\"),\"http://other.com/x\");\n    }\n\n    #[test]\n    fn test_resolve_redirect_protocol_relative() {\n        let base = \"https://h.org:8443/a/b/c?z=1#f\";\n        assert_eq!(resolve_redirect(base,\"//cdn.h.org/f\"),\"https:////cdn.h.org/f\");\n    }\n\n    #[test]\n    fn test_resolve_redirect_absolute_path() {\n        let base = \"https://h.org:8443/a/b/c?z=1#f\";\n        assert_eq!(resolve_redirect(base,\"/x\"),\"https://h.org:8443/x\");\n    }\n\n    #[test]\n    fn test_resolve_redirect_relative() {\n        let base = \"https://h.org:8443/a/b/c?z=1#f\";\n        assert_eq!(resolve_redirect(base,\"next/page\"),\"https://h.org:8443/a/b/next/page\");\n        assert_eq!(resolve_redirect(base,\"../d\"),\"https://h.org:8443/a/d\");\n        assert_eq!(resolve_redirect(base,\"../../../d\"),\"https://h.org:8443/d\");\n        assert_eq!(resolve_redirect(base,\".\"),\"https://h.org:8443/a/b/\");\n    }\n\n    #[test]\n    fn test_resolve_redirect_query() {\n        let base = \"https://h.org:8443/a/b/c?z=1#f\";\n        assert_eq!(resolve_redirect(base,\"?p=2\"),\"https://h.org:8443/a/b/c?p=2\");\n    }\n\n   "
+[soso] petición: prompt de 16779 tokens (16720 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 799 tokens generados en 63.9 s (en total, con el prefill)
+[soso] fases (s): qkv 1.7, atención 24.3, o-proj 8.4, ffn up+gate 19.5, swiglu 0.2, ffn down 4.9, otros 0.0, rope+kv 0.7
+[soso] petición: prompt de 17724 tokens (16779 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 819 tokens generados en 72.2 s (en total, con el prefill)
+[soso] fases (s): qkv 2.6, atención 26.6, o-proj 9.0, ffn up+gate 23.1, swiglu 0.3, ffn down 4.9, otros 0.0, rope+kv 1.6
+[soso] petición: prompt de 14724 tokens (3692 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 833 tokens generados en 202.8 s (en total, con el prefill)
+[soso] fases (s): qkv 22.0, atención 37.0, o-proj 19.4, ffn up+gate 89.6, swiglu 2.8, ffn down 4.8, otros 0.0, rope+kv 18.1
+[soso] petición: prompt de 3390 tokens (3381 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 25 tokens generados en 15.6 s (en total, con el prefill)
+[soso] fases (s): qkv 2.4, atención 1.1, o-proj 1.5, ffn up+gate 7.3, swiglu 0.3, ffn down 0.1, otros 0.0, rope+kv 2.0
+[soso] petición: prompt de 4574 tokens (3390 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 48 tokens generados en 15.4 s (en total, con el prefill)
+[soso] fases (s): qkv 2.0, atención 1.6, o-proj 1.5, ffn up+gate 7.1, swiglu 0.2, ffn down 0.2, otros 0.0, rope+kv 1.7
+[soso] petición: prompt de 4736 tokens (4574 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 89 tokens generados en 6.6 s (en total, con el prefill)
+[soso] fases (s): qkv 0.4, atención 1.5, o-proj 0.9, ffn up+gate 2.5, swiglu 0.0, ffn down 0.5, otros 0.0, rope+kv 0.2
+[soso] petición: prompt de 6099 tokens (4736 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 52 tokens generados en 18.7 s (en total, con el prefill)
+[soso] fases (s): qkv 2.3, atención 2.1, o-proj 1.7, ffn up+gate 9.0, swiglu 0.3, ffn down 0.3, otros 0.0, rope+kv 1.9
+[soso] petición: prompt de 9700 tokens (6099 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 1437 tokens generados en 130.4 s (en total, con el prefill)
+[soso] fases (s): qkv 7.4, atención 35.1, o-proj 16.9, ffn up+gate 49.0, swiglu 0.9, ffn down 8.0, otros 0.0, rope+kv 5.1
+[soso] petición: prompt de 13053 tokens (9700 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 67 tokens generados en 46.3 s (en total, con el prefill)
+[soso] fases (s): qkv 5.7, atención 7.4, o-proj 3.7, ffn up+gate 21.8, swiglu 0.7, ffn down 0.4, otros 0.0, rope+kv 4.7
+[soso] petición: prompt de 15101 tokens (13053 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 8192 tokens generados en 614.9 s (en total, con el prefill)
+[soso] fases (s): qkv 12.9, atención 251.7, o-proj 82.4, ffn up+gate 180.9, swiglu 1.1, ffn down 48.3, otros 0.0, rope+kv 4.2
+serve: salida rechazada (HistorialInvalido { motivo: "llamada a herramienta truncada" }): "Veo que el código se insertó pero hay problemas de sintaxis. El archivo tiene problemas: falta la línea `pub mod html;` al final (está pegada al final sin salto de línea) y hay problemas de sintaxis en las funciones. Voy a reescribir todo el archivo correctamente:\n\n<tool_call>\n<function=reemplazar_lineas>\n<parameter=desde>\n1\n</parameter>\n<parameter=filePath>\ncrates/soso-web-core/src/lib.rs\n</parameter>\n<parameter=hasta>\n164\n</parameter>\n<parameter=nuevo>\n//! Parser HTML y utilidades de texto para soso-web.\n\n#![no_std]\n\nextern crate alloc;\n\npub mod decode;\npub mod html;\n\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum PercentError {\n    /// Un `%` no va seguido de dos dígitos hexadecimales.\n    BadEscape,\n    /// Los bytes decodificados no forman UTF-8 válido.\n    InvalidUtf8,\n}\n\n/// Codifica `s` como componente de URL: los bytes «no reservados»\n/// (`A-Z`, `a-z`, `0-9`, `-`, `.`, `_`, `~`) se copian tal cual y\n/// cualquier otro byte se escribe como `%` más dos dígitos hexadecimales\n/// en mayúsculas.\npub fn percent_encode_component(s: &str) -> String {\n    let mut out = String::new();\n    for byte in s.as_bytes() {\n        match byte {\n            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {\n                out.push(*byte as char);\n            }\n            _ => {\n                out.push('%');\n                out.push_str(&format!(\"{:02X}\", byte));\n            }\n        }\n    }\n    out\n}\n\n/// Decodifica una cadena con codificación porcentua"
+[soso] petición: prompt de 15154 tokens (15095 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 38 tokens generados en 10.6 s (en total, con el prefill)
+[soso] fases (s): qkv 1.0, atención 2.4, o-proj 0.9, ffn up+gate 4.4, swiglu 0.1, ffn down 0.2, otros 0.0, rope+kv 0.9
+[soso] petición: prompt de 17753 tokens (15154 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 1654 tokens generados en 151.2 s (en total, con el prefill)
+[soso] fases (s): qkv 6.3, atención 56.1, o-proj 17.0, ffn up+gate 47.0, swiglu 0.7, ffn down 9.2, otros 0.0, rope+kv 4.1
+[soso] petición: prompt de 19508 tokens (17753 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 62 tokens generados en 32.2 s (en total, con el prefill)
+[soso] fases (s): qkv 3.1, atención 6.5, o-proj 2.4, ffn up+gate 13.9, swiglu 1.1, ffn down 0.3, otros 0.0, rope+kv 3.2
+[soso] petición: prompt de 21551 tokens (19508 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 2963 tokens generados en 251.5 s (en total, con el prefill)
+[soso] fases (s): qkv 6.8, atención 106.2, o-proj 30.9, ffn up+gate 73.6, swiglu 0.7, ffn down 17.6, otros 0.0, rope+kv 3.4
+[soso] petición: prompt de 18010 tokens (3559 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 1622 tokens generados en 303.5 s (en total, con el prefill)
+[soso] fases (s): qkv 28.1, atención 71.0, o-proj 30.0, ffn up+gate 125.2, swiglu 3.6, ffn down 9.5, otros 0.0, rope+kv 22.6
+[soso] petición: prompt de 20236 tokens (18010 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 52 tokens generados en 35.1 s (en total, con el prefill)
+[soso] fases (s): qkv 3.9, atención 7.7, o-proj 2.6, ffn up+gate 15.5, swiglu 0.5, ffn down 0.3, otros 0.0, rope+kv 3.2
+[soso] petición: prompt de 22693 tokens (20236 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 129 tokens generados en 43.2 s (en total, con el prefill)
+[soso] fases (s): qkv 4.3, atención 11.3, o-proj 3.4, ffn up+gate 17.2, swiglu 0.6, ffn down 0.7, otros 0.0, rope+kv 3.6
+[soso] petición: prompt de 18807 tokens (6067 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 52 tokens generados en 180.0 s (en total, con el prefill)
+[soso] fases (s): qkv 24.0, atención 25.0, o-proj 13.5, ffn up+gate 87.0, swiglu 3.1, ffn down 0.3, otros 0.0, rope+kv 20.3
+[soso] petición: prompt de 20209 tokens (18807 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 375 tokens generados en 47.2 s (en total, con el prefill)
+[soso] fases (s): qkv 2.8, atención 15.8, o-proj 4.9, ffn up+gate 15.9, swiglu 0.3, ffn down 2.2, otros 0.0, rope+kv 2.0
+[soso] petición: prompt de 21011 tokens (20209 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 96 tokens generados en 18.3 s (en total, con el prefill)
+[soso] fases (s): qkv 1.4, atención 5.2, o-proj 1.6, ffn up+gate 6.8, swiglu 0.2, ffn down 0.5, otros 0.0, rope+kv 1.2
+[soso] petición: prompt de 22080 tokens (21011 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 45 tokens generados en 18.2 s (en total, con el prefill)
+[soso] fases (s): qkv 1.8, atención 4.5, o-proj 1.4, ffn up+gate 7.5, swiglu 0.2, ffn down 0.3, otros 0.0, rope+kv 1.5
+[soso] petición: prompt de 18099 tokens (8333 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 373 tokens generados en 147.8 s (en total, con el prefill)
+[soso] fases (s): qkv 16.8, atención 28.1, o-proj 12.3, ffn up+gate 66.3, swiglu 2.2, ffn down 2.1, otros 0.0, rope+kv 13.8
+[soso] petición: prompt de 18750 tokens (18099 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 87 tokens generados en 15.2 s (en total, con el prefill)
+[soso] fases (s): qkv 1.2, atención 4.2, o-proj 1.4, ffn up+gate 5.8, swiglu 0.2, ffn down 0.5, otros 0.0, rope+kv 0.9
+[soso] petición: prompt de 19811 tokens (18750 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 680 tokens generados en 64.8 s (en total, con el prefill)
+[soso] fases (s): qkv 2.6, atención 24.1, o-proj 7.7, ffn up+gate 20.7, swiglu 0.3, ffn down 4.0, otros 0.0, rope+kv 1.6
+[soso] petición: prompt de 20987 tokens (19811 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 52 tokens generados en 20.5 s (en total, con el prefill)
+[soso] fases (s): qkv 2.1, atención 5.0, o-proj 1.6, ffn up+gate 8.7, swiglu 0.3, ffn down 0.3, otros 0.0, rope+kv 1.7
+[soso] petición: prompt de 21235 tokens (20987 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 52 tokens generados en 8.0 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 2.6, o-proj 0.8, ffn up+gate 2.7, swiglu 0.1, ffn down 0.3, otros 0.0, rope+kv 0.5
+[soso] petición: prompt de 21483 tokens (21235 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 54 tokens generados en 7.8 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 2.4, o-proj 0.7, ffn up+gate 2.8, swiglu 0.1, ffn down 0.3, otros 0.0, rope+kv 0.4
+[soso] petición: prompt de 21733 tokens (21483 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 54 tokens generados en 8.7 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 2.5, o-proj 0.8, ffn up+gate 3.1, swiglu 0.3, ffn down 0.3, otros 0.0, rope+kv 0.6
+[soso] petición: prompt de 21897 tokens (21733 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 40 tokens generados en 5.4 s (en total, con el prefill)
+[soso] fases (s): qkv 0.3, atención 1.8, o-proj 0.5, ffn up+gate 1.8, swiglu 0.0, ffn down 0.2, otros 0.0, rope+kv 0.2
+[soso] petición: prompt de 22133 tokens (21897 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 40 tokens generados en 6.4 s (en total, con el prefill)
+[soso] fases (s): qkv 0.4, atención 2.1, o-proj 0.6, ffn up+gate 2.2, swiglu 0.1, ffn down 0.2, otros 0.0, rope+kv 0.3
+[soso] petición: prompt de 22369 tokens (22133 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 41 tokens generados en 6.3 s (en total, con el prefill)
+[soso] fases (s): qkv 0.4, atención 2.0, o-proj 0.6, ffn up+gate 2.2, swiglu 0.1, ffn down 0.2, otros 0.0, rope+kv 0.4
+[soso] petición: prompt de 22670 tokens (22369 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 59 tokens generados en 8.8 s (en total, con el prefill)
+[soso] fases (s): qkv 0.6, atención 2.9, o-proj 0.9, ffn up+gate 3.1, swiglu 0.1, ffn down 0.3, otros 0.0, rope+kv 0.4
+[soso] petición: prompt de 18858 tokens (13980 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 54 tokens generados en 111.7 s (en total, con el prefill)
+[soso] fases (s): qkv 14.4, atención 18.5, o-proj 8.2, ffn up+gate 52.6, swiglu 1.9, ffn down 0.3, otros 0.0, rope+kv 11.7
+[soso] petición: prompt de 14498 tokens (3381 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 54 tokens generados en 149.9 s (en total, con el prefill)
+[soso] fases (s): qkv 20.8, atención 17.3, o-proj 11.8, ffn up+gate 73.4, swiglu 2.8, ffn down 0.3, otros 0.0, rope+kv 17.7
+[soso] petición: prompt de 14748 tokens (14498 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 54 tokens generados en 7.7 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 2.0, o-proj 0.8, ffn up+gate 2.9, swiglu 0.1, ffn down 0.3, otros 0.0, rope+kv 0.5
+[soso] petición: prompt de 14998 tokens (14748 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 17 tokens generados en 4.9 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 1.0, o-proj 0.4, ffn up+gate 2.0, swiglu 0.1, ffn down 0.1, otros 0.0, rope+kv 0.5
+[soso] petición: prompt de 15131 tokens (14998 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 40 tokens generados en 4.4 s (en total, con el prefill)
+[soso] fases (s): qkv 0.3, atención 1.3, o-proj 0.5, ffn up+gate 1.5, swiglu 0.0, ffn down 0.2, otros 0.0, rope+kv 0.2
+[soso] petición: prompt de 15514 tokens (15131 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 66 tokens generados en 9.7 s (en total, con el prefill)
+[soso] fases (s): qkv 0.7, atención 2.6, o-proj 1.0, ffn up+gate 3.8, swiglu 0.1, ffn down 0.4, otros 0.0, rope+kv 0.5
+[soso] petición: prompt de 15776 tokens (15514 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 58 tokens generados en 7.7 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 2.2, o-proj 0.8, ffn up+gate 2.8, swiglu 0.1, ffn down 0.3, otros 0.0, rope+kv 0.4
+[soso] petición: prompt de 16030 tokens (15776 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 17 tokens generados en 4.6 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 1.0, o-proj 0.4, ffn up+gate 1.9, swiglu 0.1, ffn down 0.1, otros 0.0, rope+kv 0.4
+[soso] petición: prompt de 16289 tokens (16030 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 58 tokens generados en 7.6 s (en total, con el prefill)
+[soso] fases (s): qkv 0.5, atención 2.1, o-proj 0.8, ffn up+gate 2.5, swiglu 0.1, ffn down 0.3, otros 0.0, rope+kv 0.4
+[soso] petición: prompt de 17314 tokens (16289 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 412 tokens generados en 47.3 s (en total, con el prefill)
+[soso] fases (s): qkv 2.2, atención 14.8, o-proj 5.2, ffn up+gate 16.6, swiglu 0.9, ffn down 2.6, otros 0.0, rope+kv 2.2
+[soso] petición: prompt de 11261 tokens (3659 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 52 tokens generados en 115.7 s (en total, con el prefill)
+[soso] fases (s): qkv 16.3, atención 11.7, o-proj 9.5, ffn up+gate 57.1, swiglu 2.1, ffn down 0.3, otros 0.0, rope+kv 13.9
+[soso] petición: prompt de 3390 tokens (3381 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 25 tokens generados en 15.7 s (en total, con el prefill)
+[soso] fases (s): qkv 2.4, atención 1.2, o-proj 1.5, ffn up+gate 7.4, swiglu 0.3, ffn down 0.1, otros 0.0, rope+kv 2.0
+[soso] petición: prompt de 4306 tokens (3390 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 47 tokens generados en 13.1 s (en total, con el prefill)
+[soso] fases (s): qkv 1.6, atención 1.4, o-proj 1.3, ffn up+gate 6.0, swiglu 0.2, ffn down 0.3, otros 0.0, rope+kv 1.4
+[soso] petición: prompt de 8566 tokens (4306 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 45 tokens generados en 54.2 s (en total, con el prefill)
+[soso] fases (s): qkv 7.3, atención 5.4, o-proj 4.4, ffn up+gate 27.2, swiglu 0.9, ffn down 0.2, otros 0.0, rope+kv 6.1
+[soso] petición: prompt de 9038 tokens (8566 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 50 tokens generados en 8.6 s (en total, con el prefill)
+[soso] fases (s): qkv 0.8, atención 1.6, o-proj 0.9, ffn up+gate 3.7, swiglu 0.1, ffn down 0.3, otros 0.0, rope+kv 0.7
+[soso] petición: prompt de 11914 tokens (9038 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 66 tokens generados en 37.4 s (en total, con el prefill)
+[soso] fases (s): qkv 4.7, atención 5.7, o-proj 3.2, ffn up+gate 17.2, swiglu 0.6, ffn down 0.3, otros 0.0, rope+kv 3.8
+[soso] petición: prompt de 12278 tokens (11914 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 58 tokens generados en 8.4 s (en total, con el prefill)
+[soso] fases (s): qkv 0.7, atención 1.8, o-proj 0.8, ffn up+gate 3.1, swiglu 0.1, ffn down 0.3, otros 0.0, rope+kv 0.5
+[soso] petición: prompt de 13471 tokens (12278 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 531 tokens generados en 48.8 s (en total, con el prefill)
+[soso] fases (s): qkv 2.5, atención 15.0, o-proj 6.0, ffn up+gate 17.3, swiglu 0.3, ffn down 2.9, otros 0.0, rope+kv 1.6
+[soso] petición: prompt de 15198 tokens (13471 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 8192 tokens generados en 607.5 s (en total, con el prefill)
+[soso] fases (s): qkv 12.3, atención 252.9, o-proj 81.4, ffn up+gate 176.2, swiglu 1.0, ffn down 47.6, otros 0.0, rope+kv 3.7
+[soso] petición: prompt de 18467 tokens (3558 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 58 tokens generados en 178.9 s (en total, con el prefill)
+[soso] fases (s): qkv 24.3, atención 24.9, o-proj 14.0, ffn up+gate 85.3, swiglu 2.9, ffn down 0.3, otros 0.0, rope+kv 20.4
+[soso] petición: prompt de 22738 tokens (18467 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 45 tokens generados en 58.0 s (en total, con el prefill)
+[soso] fases (s): qkv 6.8, atención 12.7, o-proj 4.2, ffn up+gate 25.1, swiglu 0.8, ffn down 0.3, otros 0.0, rope+kv 5.7
+[soso] petición: prompt de 20462 tokens (4222 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 8192 tokens generados en 805.9 s (en total, con el prefill)
+[soso] fases (s): qkv 34.9, atención 312.9, o-proj 93.1, ffn up+gate 255.1, swiglu 3.7, ffn down 47.3, otros 0.0, rope+kv 22.6
+[soso] petición: prompt de 22557 tokens (4738 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 52 tokens generados en 240.5 s (en total, con el prefill)
+[soso] fases (s): qkv 31.5, atención 38.1, o-proj 17.8, ffn up+gate 113.2, swiglu 3.9, ffn down 0.3, otros 0.0, rope+kv 27.0
+[soso] petición: prompt de 23500 tokens (22557 en común con la anterior), hasta 8192 nuevos
+[soso] respuesta: 122 tokens generados en 22.5 s (en total, con el prefill)
+[soso] fases (s): qkv 1.8, atención 7.2, o-proj 1.9, ffn up+gate 7.8, swiglu 0.2, ffn down 0.7, otros 0.0, rope+kv 1.5
+[soso] petición: prompt de 24512 tokens (13899 en común con la anterior), hasta 8192 nuevos

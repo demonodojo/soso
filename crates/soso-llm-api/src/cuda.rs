@@ -215,10 +215,12 @@ pub struct CudaGpu {
     losa_libre: usize,
     x_dev: u64,
     /// Búferes del prefill por bloques de expertos MoE: vectores del bloque, índices de token, activaciones y salidas.
-    blq: [(u64, usize); 4],
+    blq: [(u64, usize); 5],
     f_gateup_n: CuFunction,
     f_down_n: CuFunction,
     f_iq_matmul_n: CuFunction,
+    f_gateup_multi: CuFunction,
+    f_down_multi: CuFunction,
     f_attn_prefill: CuFunction,
     /// KV espejado por capa para la atención del prefill: (K, V, filas de capacidad).
     kvdev: HashMap<u32, (u64, u64, usize)>,
@@ -275,6 +277,8 @@ impl CudaGpu {
             let f_down_n = func(mod_iq, "iq_down_n")?;
             let f_iq_matmul_n = func(mod_iq, "iq_matmul_n")?;
             let f_attn_prefill = func(mod_iq, "attn_prefill_f16")?;
+            let f_gateup_multi = func(mod_iq, "iq_gateup_multi")?;
+            let f_down_multi = func(mod_iq, "iq_down_multi")?;
             let (mut libre, mut total) = (0usize, 0usize);
             ck((api.mem_info)(&mut libre, &mut total), "cuMemGetInfo")?;
             let capa = capa::Estado::nueva(&api)?;
@@ -300,11 +304,13 @@ impl CudaGpu {
                 losa_ptr: 0,
                 losa_libre: 0,
                 x_dev: 0,
-                blq: [(0, 0); 4],
+                blq: [(0, 0); 5],
                 f_gateup_n,
                 f_down_n,
                 f_iq_matmul_n,
                 f_attn_prefill,
+                f_gateup_multi,
+                f_down_multi,
                 kvdev: HashMap::new(),
                 x_cap: 0,
                 y_dev: 0,
@@ -809,54 +815,44 @@ impl CudaGpu {
             toks.extend(exps[pl.i].tokens.iter().map(|&t| t as i32));
         }
         self.subir(tok_dev, unsafe { std::slice::from_raw_parts(toks.as_ptr() as *const u8, toks.len() * 4) })?;
-        // 3) lanzamientos seguidos, una sola espera
+        // 3) un descriptor por experto y DOS lanzamientos para todos (gate+up+SwiGLU y down), una sola espera
+        let mut desc: Vec<u64> = Vec::with_capacity(plan.len() * 12);
+        let mut max_cnt = 0usize;
         for pl in &plan {
-            let cnt = exps[pl.i].tokens.len() as c_int;
-            let tiles = (cnt as u32).div_ceil(16);
+            let cnt = exps[pl.i].tokens.len();
+            max_cnt = max_cnt.max(cnt);
             let (dg, du, dd) = (pl.w[0].1, pl.w[1].1, pl.w[2].1);
-            let (gg, gu, gd) = (
-                sosomodel::layout::ggml_de_dtype_iq(dg).unwrap_or(0) as c_int,
-                sosomodel::layout::ggml_de_dtype_iq(du).unwrap_or(0) as c_int,
-                sosomodel::layout::ggml_de_dtype_iq(dd).unwrap_or(0) as c_int,
-            );
-            let rbg = sosomodel::dequant::row_bytes(dg, h).unwrap_or(0) as i64;
-            let rbu = sosomodel::dequant::row_bytes(du, h).unwrap_or(0) as i64;
-            let rbd = sosomodel::dequant::row_bytes(dd, ffn).unwrap_or(0) as i64;
-            let tok_p = tok_dev + (pl.abase * 4) as u64;
-            let (mut a0, mut a1, mut a2, mut a3, mut a4) = (pl.w[0].0, pl.w[1].0, x_dev, tok_p, act_dev);
-            let (mut a5, mut a6, mut a7, mut a8, mut a9, mut a10) = (ffn as c_int, h as c_int, cnt, pl.abase as c_int, gg, gu);
-            let (mut a11, mut a12) = (rbg, rbu);
-            let mut args = [
-                &mut a0 as *mut _ as *mut c_void,
-                &mut a1 as *mut _ as *mut c_void,
-                &mut a2 as *mut _ as *mut c_void,
-                &mut a3 as *mut _ as *mut c_void,
-                &mut a4 as *mut _ as *mut c_void,
-                &mut a5 as *mut _ as *mut c_void,
-                &mut a6 as *mut _ as *mut c_void,
-                &mut a7 as *mut _ as *mut c_void,
-                &mut a8 as *mut _ as *mut c_void,
-                &mut a9 as *mut _ as *mut c_void,
-                &mut a10 as *mut _ as *mut c_void,
-                &mut a11 as *mut _ as *mut c_void,
-                &mut a12 as *mut _ as *mut c_void,
-            ];
-            self.lanzar3s(self.f_gateup_n, (((ffn as u32) + 7) / 8, tiles, 1), (256, 1, 1), 0, &mut args)?;
-            let (mut b0, mut b1, mut b2) = (pl.w[2].0, act_dev, y_dev);
-            let (mut b3, mut b4, mut b5, mut b6, mut b7, mut b8) = (h as c_int, ffn as c_int, cnt, pl.abase as c_int, gd, rbd);
-            let mut args = [
-                &mut b0 as *mut _ as *mut c_void,
-                &mut b1 as *mut _ as *mut c_void,
-                &mut b2 as *mut _ as *mut c_void,
-                &mut b3 as *mut _ as *mut c_void,
-                &mut b4 as *mut _ as *mut c_void,
-                &mut b5 as *mut _ as *mut c_void,
-                &mut b6 as *mut _ as *mut c_void,
-                &mut b7 as *mut _ as *mut c_void,
-                &mut b8 as *mut _ as *mut c_void,
-            ];
-            self.lanzar3s(self.f_down_n, (((h as u32) + 7) / 8, tiles, 1), (256, 1, 1), 0, &mut args)?;
+            let ggml = |d: u8| sosomodel::layout::ggml_de_dtype_iq(d).unwrap_or(0) as u64;
+            let rb = |d: u8, c: usize| sosomodel::dequant::row_bytes(d, c).unwrap_or(0) as u64;
+            desc.extend_from_slice(&[
+                pl.w[0].0, pl.w[1].0, pl.w[2].0, pl.abase as u64, cnt as u64, ggml(dg), ggml(du), ggml(dd), rb(dg, h), rb(du, h), rb(dd, ffn), pl.abase as u64,
+            ]);
         }
+        let d_dev = self.blq_asegurar(4, desc.len() * 8)?;
+        self.subir(d_dev, unsafe { std::slice::from_raw_parts(desc.as_ptr() as *const u8, desc.len() * 8) })?;
+        let tiles = (max_cnt as u32).div_ceil(16);
+        let nexp = plan.len() as u32;
+        let (mut a0, mut a1, mut a2, mut a3) = (d_dev, x_dev, tok_dev, act_dev);
+        let (mut a4, mut a5) = (ffn as c_int, h as c_int);
+        let mut args = [
+            &mut a0 as *mut _ as *mut c_void,
+            &mut a1 as *mut _ as *mut c_void,
+            &mut a2 as *mut _ as *mut c_void,
+            &mut a3 as *mut _ as *mut c_void,
+            &mut a4 as *mut _ as *mut c_void,
+            &mut a5 as *mut _ as *mut c_void,
+        ];
+        self.lanzar3s(self.f_gateup_multi, (((ffn as u32) + 7) / 8, tiles, nexp), (256, 1, 1), 0, &mut args)?;
+        let (mut b0, mut b1, mut b2) = (d_dev, act_dev, y_dev);
+        let (mut b3, mut b4) = (h as c_int, ffn as c_int);
+        let mut args = [
+            &mut b0 as *mut _ as *mut c_void,
+            &mut b1 as *mut _ as *mut c_void,
+            &mut b2 as *mut _ as *mut c_void,
+            &mut b3 as *mut _ as *mut c_void,
+            &mut b4 as *mut _ as *mut c_void,
+        ];
+        self.lanzar3s(self.f_down_multi, (((h as u32) + 7) / 8, tiles, nexp), (256, 1, 1), 0, &mut args)?;
         ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
         let mut host = vec![0f32; total * h];
         ck(unsafe { (self.api.dtoh)(host.as_mut_ptr() as *mut c_void, y_dev, total * h * 4) }, "cuMemcpyDtoH")?;

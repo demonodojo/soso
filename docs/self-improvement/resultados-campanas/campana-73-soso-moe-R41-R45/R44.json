@@ -1,0 +1,11 @@
+{
+ "id": "R44",
+ "ronda": 1,
+ "resultado": "error",
+ "intentos": 1,
+ "segundos": 5401,
+ "nota": "error: entorno: el intento no termin\u00f3: ErrorModelo plazo agotado: leyendo: 0 byte(s) recibidos",
+ "fallo": "infraestructura",
+ "herramientas": 34,
+ "tokens": 668399
+}

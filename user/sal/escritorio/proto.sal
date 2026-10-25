@@ -128,7 +128,7 @@ fn msg_encode_redim(ptr: Int, w: Int, h: Int, shm: Int) -> Int ! alloc
     msg_set_op(ptr, op_redim())
     msg_set_u32(ptr, 4, w)
     msg_set_u32(ptr, 8, h)
-    msg_set_u32(ptr, 12, shm)
+    msg_set_u32(ptr, 20, shm)
     0
 
 fn msg_encode_fotograma(ptr: Int, n: Int) -> Int ! alloc

@@ -291,6 +291,13 @@ fn modo_grafico(a: Args) -> u8 {
         input_st.key = None;
         if wm {
             let _ = input::poll_input_from_wm(&mut input_st, &mut fb);
+            if input_st.layout_dirty {
+                let (b, _) = layout::compute_layout(&cur_doc, fb.info.width as f32);
+                cur_boxes = b;
+                scroll = 0.0;
+                input_st.layout_dirty = false;
+                dirty = true;
+            }
         } else {
             input::poll_input(&mut input_st);
         }
