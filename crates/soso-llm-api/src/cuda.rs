@@ -1260,6 +1260,7 @@ impl CudaGpu {
         if view.bytes.len() as i64 != rows as i64 * rb {
             return Ok(false);
         }
+        let t_ini = std::time::Instant::now();
         let w_dev = self.gbuf_asegurar(16, view.bytes.len())?;
         self.subir(w_dev, view.bytes)?;
         self.asegurar_buffers(n * cols, n * rows)?;
@@ -1274,6 +1275,9 @@ impl CudaGpu {
         ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
         let out_bytes = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u8, out.len() * 4) };
         ck(unsafe { (self.api.dtoh)(out_bytes.as_mut_ptr() as *mut c_void, self.y_dev, out_bytes.len()) }, "cuMemcpyDtoH")?;
+        if std::env::var_os("SOSO_TRAZA_GPU").is_some() {
+            eprintln!("[gpu] de paso: {}x{} dtype {} n={} → {:.1} ms", rows, cols, view.dtype, n, t_ini.elapsed().as_secs_f64() * 1e3);
+        }
         self.stats.launches += 1;
         Ok(true)
     }
