@@ -1,4 +1,6 @@
 import "mate.sal"
+import "utf8.sal"
+import "fuente.sal"
 
 fn celda_bytes() -> Int
     8
@@ -12,91 +14,111 @@ fn col_default_fg() -> Int
 fn col_default_bg() -> Int
     0
 
+fn term_st_size() -> Int
+    256
+
+fn st_cols() -> Int
+    0
+
+fn st_rows() -> Int
+    8
+
+fn st_cursor() -> Int
+    16
+
+fn st_fg() -> Int
+    24
+
+fn st_bg() -> Int
+    32
+
+fn st_attr() -> Int
+    40
+
+fn st_mode() -> Int
+    48
+
+fn st_csi_n() -> Int
+    56
+
+fn st_csi_cur() -> Int
+    64
+
+fn st_csi_base() -> Int
+    72
+
+fn st_utf8() -> Int
+    136
+
+fn st_dirty() -> Int
+    144
+
+fn st_hist_ptr() -> Int
+    152
+
+fn st_hist_w() -> Int
+    160
+
+fn st_hist_cap() -> Int
+    168
+
+fn st_hist_head() -> Int
+    176
+
+fn term_hist_cap() -> Int
+    2000
+
+fn term_cursor_scale() -> Int
+    4096
+
+fn term_st_nuevo(cols: Int, rows: Int) -> Int ! alloc
+    p = bytes_ptr(bytes_new(term_st_size()))
+    hw = cols * celda_bytes()
+    hist = bytes_ptr(bytes_new(term_hist_cap() * hw))
+    b = bytes_view_mem(p, term_st_size())
+    _0 = bytes_set_i64(b, st_cols(), cols)
+    _1 = bytes_set_i64(b, st_rows(), rows)
+    _2 = bytes_set_i64(b, st_cursor(), 0)
+    _3 = bytes_set_i64(b, st_fg(), col_default_fg())
+    _4 = bytes_set_i64(b, st_bg(), col_default_bg())
+    _5 = bytes_set_i64(b, st_attr(), 0)
+    _6 = bytes_set_i64(b, st_mode(), 0)
+    _7 = bytes_set_i64(b, st_csi_n(), 0)
+    _8 = bytes_set_i64(b, st_csi_cur(), 0)
+    _9 = bytes_set_i64(b, st_utf8(), utf8_inicio())
+    _a = bytes_set_i64(b, st_dirty(), -1)
+    _b = bytes_set_i64(b, st_hist_ptr(), hist)
+    _c = bytes_set_i64(b, st_hist_w(), cols)
+    _d = bytes_set_i64(b, st_hist_cap(), term_hist_cap())
+    _e = bytes_set_i64(b, st_hist_head(), 0)
+    p
+
+fn term_st_get(st: Int, off: Int) -> Int ! alloc
+    bytes_get_i64(bytes_view_mem(st, term_st_size()), off)
+
+fn term_st_set(st: Int, off: Int, v: Int) -> Int ! alloc
+    _s = bytes_set_i64(bytes_view_mem(st, term_st_size()), off, v)
+    0
+
+fn term_st_csi_param(st: Int, i: Int) -> Int ! alloc
+    bytes_get_i64(bytes_view_mem(st, term_st_size()), st_csi_base() + i * 8)
+
+fn term_st_set_csi_param(st: Int, i: Int, v: Int) -> Int ! alloc
+    _s = bytes_set_i64(bytes_view_mem(st, term_st_size()), st_csi_base() + i * 8, v)
+    0
+
+fn term_marcar_fila(st: Int, row: Int) -> Int ! alloc
+    _d = term_st_set(st, st_dirty(), row)
+    0
+
 fn term_capa(w: Int, h: Int) -> Int ! alloc
     bytes_ptr(bytes_new(w * h * celda_bytes()))
 
 fn term_idx(w: Int, col: Int, row: Int) -> Int
     (row * w + col) * celda_bytes()
 
-fn term_leer_cp(ptr: Int, len: Int, w: Int, col: Int, row: Int) -> Int ! alloc
-    b = bytes_view(ptr, len)
-    bytes_get_u32(b, term_idx(w, col, row))
-
-fn term_escribir(ptr: Int, len: Int, w: Int, col: Int, row: Int, cp: Int, fg: Int, bg: Int, attr: Int) -> Int ! alloc
-    if col < 0
-        0
-    else
-        if row < 0
-            0
-        else
-            b = bytes_view(ptr, len)
-            o = term_idx(w, col, row)
-            bytes_set_u32(b, o, cp)
-            bytes_set_u8(b, o + 4, u8(fg))
-            bytes_set_u8(b, o + 5, u8(bg))
-            bytes_set_u8(b, o + 6, u8(attr))
-            0
-
-fn term_limpiar(ptr: Int, len: Int, w: Int, h: Int) -> Int ! alloc
-    row = 0
-    while row < h
-        col = 0
-        while col < w
-            _t = term_escribir(ptr, len, w, col, row, 32, col_default_fg(), col_default_bg(), 0)
-            col = col + 1
-        row = row + 1
-    0
-
-fn term_nueva_linea(ptr: Int, len: Int, w: Int, h: Int, col: Int, row: Int) -> Int ! alloc
-    nr = row + 1
-    if nr >= h
-        r = 1
-        while r < h
-            c = 0
-            while c < w
-                o0 = term_idx(w, c, r - 1)
-                o1 = term_idx(w, c, r)
-                b = bytes_view(ptr, len)
-                bytes_set_u32(b, o0, bytes_get_u32(b, o1))
-                bytes_set_u8(b, o0 + 4, bytes_get_u8(b, o1 + 4))
-                bytes_set_u8(b, o0 + 5, bytes_get_u8(b, o1 + 5))
-                bytes_set_u8(b, o0 + 6, bytes_get_u8(b, o1 + 6))
-                c = c + 1
-            r = r + 1
-        c = 0
-        while c < w
-            _t = term_escribir(ptr, len, w, c, h - 1, 32, col_default_fg(), col_default_bg(), 0)
-            c = c + 1
-        nr = h - 1
-    term_pack_cursor(0, nr)
-
-fn term_cursor_scale() -> Int
-    4096
-
 fn term_pack_cursor(col: Int, row: Int) -> Int
     row * term_cursor_scale() + col
-
-fn term_put(ptr: Int, len: Int, w: Int, h: Int, col: Int, row: Int, cp: Int, fg: Int, bg: Int, attr: Int) -> Int ! alloc
-    if cp == 10
-        term_nueva_linea(ptr, len, w, h, col, row)
-    else
-        if cp == 13
-            term_pack_cursor(0, row)
-        else
-            if cp == 8
-                nc = col - 1
-                if nc < 0
-                    term_pack_cursor(0, row)
-                else
-                    _t = term_escribir(ptr, len, w, nc, row, 32, fg, bg, attr)
-                    term_pack_cursor(nc, row)
-            else
-                if cp == 9
-                    nc = col + 8 - mod_pos(col, 8)
-                    term_pack_cursor(nc, row)
-                else
-                    _t = term_escribir(ptr, len, w, col, row, cp, fg, bg, attr)
-                    term_pack_cursor(col + 1, row)
 
 fn term_cursor_col(pos: Int) -> Int
     mod_pos(pos, term_cursor_scale())
@@ -104,26 +126,347 @@ fn term_cursor_col(pos: Int) -> Int
 fn term_cursor_row(pos: Int) -> Int
     pos / term_cursor_scale()
 
-fn term_feed_byte(ptr: Int, len: Int, w: Int, h: Int, pos: Int, byte: Int, fg: Int, bg: Int, attr: Int) -> Int ! alloc
+fn term_paleta_rgb(i: Int) -> Int
+    if i == 0
+        color_rgb(0, 0, 0)
+    elsif i == 1
+        color_rgb(128, 0, 0)
+    elsif i == 2
+        color_rgb(0, 128, 0)
+    elsif i == 3
+        color_rgb(128, 128, 0)
+    elsif i == 4
+        color_rgb(0, 0, 128)
+    elsif i == 5
+        color_rgb(128, 0, 128)
+    elsif i == 6
+        color_rgb(0, 128, 128)
+    elsif i == 7
+        color_rgb(192, 192, 192)
+    elsif i == 8
+        color_rgb(128, 128, 128)
+    elsif i == 9
+        color_rgb(255, 0, 0)
+    elsif i == 10
+        color_rgb(0, 255, 0)
+    elsif i == 11
+        color_rgb(255, 255, 0)
+    elsif i == 12
+        color_rgb(0, 0, 255)
+    elsif i == 13
+        color_rgb(255, 0, 255)
+    elsif i == 14
+        color_rgb(0, 255, 255)
+    else
+        color_rgb(255, 255, 255)
+
+fn term_escribir(ptr: Int, len: Int, w: Int, col: Int, row: Int, cp: Int, fg: Int, bg: Int, attr: Int) -> Int ! alloc
+    if col >= 0
+        if row >= 0
+            if col < w
+                b = bytes_view_mem(ptr, len)
+                o = term_idx(w, col, row)
+                _w0 = bytes_set_u32(b, o, cp)
+                _w1 = bytes_set_u8(b, o + 4, u8(fg))
+                _w2 = bytes_set_u8(b, o + 5, u8(bg))
+                _w3 = bytes_set_u8(b, o + 6, u8(attr))
+    0
+
+fn term_leer_cp(ptr: Int, len: Int, w: Int, col: Int, row: Int) -> Int ! alloc
+    b = bytes_view_mem(ptr, len)
+    bytes_get_u32(b, term_idx(w, col, row))
+
+fn term_leer_fg(ptr: Int, len: Int, w: Int, col: Int, row: Int) -> Int ! alloc
+    b = bytes_view_mem(ptr, len)
+    bytes_get_u8(b, term_idx(w, col, row) + 4)
+
+fn term_limpiar_pantalla(st: Int, ptr: Int, len: Int, w: Int, h: Int) -> Int ! alloc
+    row = 0
+    while row < h
+        col = 0
+        while col < w
+            _t = term_escribir(ptr, len, w, col, row, 32, col_default_fg(), col_default_bg(), 0)
+            col = col + 1
+        _m = term_marcar_fila(st, row)
+        row = row + 1
+    _c = term_st_set(st, st_cursor(), 0)
+    0
+
+fn term_hist_push(st: Int, ptr: Int, len: Int, w: Int, row: Int) -> Int ! alloc
+    hp = term_st_get(st, st_hist_ptr())
+    hw = term_st_get(st, st_hist_w())
+    cap = term_st_get(st, st_hist_cap())
+    head = term_st_get(st, st_hist_head())
+    slot = mod_pos(head, cap)
+    di = slot * hw * celda_bytes()
+    si = term_idx(w, 0, row)
+    bytes_copy(hp, di, ptr, si, w * celda_bytes())
+    _h = term_st_set(st, st_hist_head(), head + 1)
+    0
+
+fn term_scroll(st: Int, ptr: Int, len: Int, w: Int, h: Int) -> Int ! alloc
+    _h = term_hist_push(st, ptr, len, w, 0)
+    0
+
+fn term_nueva_linea(st: Int, ptr: Int, len: Int, w: Int, h: Int, col: Int, row: Int) -> Int ! alloc
+    nr = row + 1
+    if nr >= h
+        _s = term_scroll(st, ptr, len, w, h)
+    if nr >= h
+        nr = h - 1
+    _c = term_st_set(st, st_cursor(), term_pack_cursor(0, nr))
+    0
+
+fn term_borrar_linea(st: Int, ptr: Int, len: Int, w: Int, h: Int, row: Int, mode: Int) -> Int ! alloc
+    if mode == 0
+        c = term_cursor_col(term_st_get(st, st_cursor()))
+        while c < w
+            _t = term_escribir(ptr, len, w, c, row, 32, col_default_fg(), col_default_bg(), 0)
+            c = c + 1
+        _m = term_marcar_fila(st, row)
+    if mode == 1
+        c = 0
+        while c < w
+            _t = term_escribir(ptr, len, w, c, row, 32, col_default_fg(), col_default_bg(), 0)
+            c = c + 1
+        _m = term_marcar_fila(st, row)
+    if mode >= 2
+        r = 0
+        while r < h
+            c = 0
+            while c < w
+                _t = term_escribir(ptr, len, w, c, r, 32, col_default_fg(), col_default_bg(), 0)
+                c = c + 1
+            _m = term_marcar_fila(st, r)
+            r = r + 1
+    0
+
+fn term_borrar_pantalla(st: Int, ptr: Int, len: Int, w: Int, h: Int, mode: Int) -> Int ! alloc
+    if mode == 0
+        r = term_cursor_row(term_st_get(st, st_cursor()))
+        _b = term_borrar_linea(st, ptr, len, w, h, r, 0)
+    if mode == 1
+        r = term_cursor_row(term_st_get(st, st_cursor()))
+        c = 0
+        while c <= r
+            _b = term_borrar_linea(st, ptr, len, w, h, c, 1)
+            c = c + 1
+    if mode >= 2
+        _l = term_limpiar_pantalla(st, ptr, len, w, h)
+    0
+
+fn term_csi_color(st: Int, p: Int) -> Int ! alloc
+    if p == 0
+        _f = term_st_set(st, st_fg(), col_default_fg())
+        _b = term_st_set(st, st_bg(), col_default_bg())
+        _a = term_st_set(st, st_attr(), 0)
+    if p == 7
+        _a = term_st_set(st, st_attr(), term_st_get(st, st_attr()) | attr_inv())
+    if p == 27
+        _a = term_st_set(st, st_attr(), term_st_get(st, st_attr()) & (255 - attr_inv()))
+    if p == 39
+        _f = term_st_set(st, st_fg(), col_default_fg())
+    if p == 49
+        _b = term_st_set(st, st_bg(), col_default_bg())
+    if p >= 100
+        if p <= 107
+            _b = term_st_set(st, st_bg(), p - 100 + 8)
+    if p >= 90
+        if p <= 97
+            _f = term_st_set(st, st_fg(), p - 90 + 8)
+    if p >= 40
+        if p <= 47
+            _b = term_st_set(st, st_bg(), p - 40)
+    if p >= 30
+        if p <= 37
+            _f = term_st_set(st, st_fg(), p - 30)
+    0
+
+fn term_csi_fin(st: Int, ptr: Int, len: Int, w: Int, h: Int, cmd: Int) -> Int ! alloc
+    if cmd == 72
+        if term_st_get(st, st_csi_n()) >= 2
+            _c = term_st_set(st, st_cursor(), term_pack_cursor(term_st_csi_param(st, 1) - 1, term_st_csi_param(st, 0) - 1))
+        if term_st_get(st, st_csi_n()) < 2
+            _c = term_st_set(st, st_cursor(), 0)
+    if cmd == 102
+        if term_st_get(st, st_csi_n()) >= 2
+            _c = term_st_set(st, st_cursor(), term_pack_cursor(term_st_csi_param(st, 1) - 1, term_st_csi_param(st, 0) - 1))
+        if term_st_get(st, st_csi_n()) < 2
+            _c = term_st_set(st, st_cursor(), 0)
+    if cmd == 74
+        m = 0
+        if term_st_get(st, st_csi_n()) >= 1
+            m = term_st_csi_param(st, 0)
+        _b = term_borrar_pantalla(st, ptr, len, w, h, m)
+    if cmd == 75
+        m = 0
+        if term_st_get(st, st_csi_n()) >= 1
+            m = term_st_csi_param(st, 0)
+        r = term_cursor_row(term_st_get(st, st_cursor()))
+        _b = term_borrar_linea(st, ptr, len, w, h, r, m)
+    if cmd == 65
+        n = 1
+        if term_st_get(st, st_csi_n()) >= 1
+            n = term_st_csi_param(st, 0)
+        pos = term_st_get(st, st_cursor())
+        row = max(0, term_cursor_row(pos) - n)
+        _c = term_st_set(st, st_cursor(), term_pack_cursor(term_cursor_col(pos), row))
+    if cmd == 66
+        n = 1
+        if term_st_get(st, st_csi_n()) >= 1
+            n = term_st_csi_param(st, 0)
+        pos = term_st_get(st, st_cursor())
+        row = min(h - 1, term_cursor_row(pos) + n)
+        _c = term_st_set(st, st_cursor(), term_pack_cursor(term_cursor_col(pos), row))
+    if cmd == 67
+        n = 1
+        if term_st_get(st, st_csi_n()) >= 1
+            n = term_st_csi_param(st, 0)
+        pos = term_st_get(st, st_cursor())
+        col = min(w - 1, term_cursor_col(pos) + n)
+        _c = term_st_set(st, st_cursor(), term_pack_cursor(col, term_cursor_row(pos)))
+    if cmd == 68
+        n = 1
+        if term_st_get(st, st_csi_n()) >= 1
+            n = term_st_csi_param(st, 0)
+        pos = term_st_get(st, st_cursor())
+        col = max(0, term_cursor_col(pos) - n)
+        _c = term_st_set(st, st_cursor(), term_pack_cursor(col, term_cursor_row(pos)))
+    if cmd == 109
+        i = 0
+        n = term_st_get(st, st_csi_n())
+        if n == 0
+            _z = term_st_set_csi_param(st, 0, 0)
+            n = 1
+        while i < n
+            _p = term_csi_color(st, term_st_csi_param(st, i))
+            i = i + 1
+    _r = term_st_set(st, st_csi_n(), 0)
+    _m = term_st_set(st, st_mode(), 0)
+    0
+
+fn term_csi_byte(st: Int, ptr: Int, len: Int, w: Int, h: Int, b: Int) -> Int ! alloc
+    if b >= 48
+        if b <= 57
+            cur = term_st_get(st, st_csi_cur())
+            if cur == 0
+                cur = b - 48
+            else
+                cur = cur * 10 + (b - 48)
+            _c = term_st_set(st, st_csi_cur(), cur)
+        else
+            if b == 59
+                n = term_st_get(st, st_csi_n())
+                _p = term_st_set_csi_param(st, n, term_st_get(st, st_csi_cur()))
+                _nn = term_st_set(st, st_csi_n(), n + 1)
+                _z = term_st_set(st, st_csi_cur(), 0)
+            else
+                n = term_st_get(st, st_csi_n())
+                if term_st_get(st, st_csi_cur()) > 0
+                    _p = term_st_set_csi_param(st, n, term_st_get(st, st_csi_cur()))
+                    _nn = term_st_set(st, st_csi_n(), n + 1)
+                _f = term_csi_fin(st, ptr, len, w, h, b)
+    0
+
+fn term_put_cp(st: Int, ptr: Int, len: Int, w: Int, h: Int, cp: Int) -> Int ! alloc
+    pos = term_st_get(st, st_cursor())
     col = term_cursor_col(pos)
     row = term_cursor_row(pos)
-    term_put(ptr, len, w, h, col, row, u8(byte), fg, bg, attr)
+    fg = term_st_get(st, st_fg())
+    bg = term_st_get(st, st_bg())
+    attr = term_st_get(st, st_attr())
+    if cp == 10
+        _n = term_nueva_linea(st, ptr, len, w, h, col, row)
+    if cp == 13
+        _c = term_st_set(st, st_cursor(), term_pack_cursor(0, row))
+    if cp == 8
+        nc = 0
+        if col > 0
+            nc = col - 1
+            _t = term_escribir(ptr, len, w, nc, row, 32, fg, bg, attr)
+            _m = term_marcar_fila(st, row)
+        _c = term_st_set(st, st_cursor(), term_pack_cursor(nc, row))
+    if cp == 9
+        nc = col + 8 - mod_pos(col, 8)
+        _c = term_st_set(st, st_cursor(), term_pack_cursor(nc, row))
+    if cp != 10
+        if cp != 13
+            if cp != 8
+                if cp != 9
+                    _t = term_escribir(ptr, len, w, col, row, cp, fg, bg, attr)
+                    _m = term_marcar_fila(st, row)
+                    _c = term_st_set(st, st_cursor(), term_pack_cursor(col + 1, row))
+    0
 
-fn term_feed_esc(ptr: Int, len: Int, w: Int, h: Int, pos: Int, seq: String, fg: Int, bg: Int, attr: Int) -> Int ! alloc
-    if str_len(seq) >= 4
-        if str_char(seq, 0) == 27
-            if str_char(seq, 1) == 91
-                if str_char(seq, 2) == 50
-                    if str_char(seq, 3) == 74
-                        _t = term_limpiar(ptr, len, w, h)
-                        0
-                    else
-                        pos
-                else
-                    pos
-            else
-                pos
+fn term_feed_byte(st: Int, ptr: Int, len: Int, w: Int, h: Int, byte: Int) -> Int ! alloc
+    mode = term_st_get(st, st_mode())
+    if mode == 0
+        if byte == 27
+            _m = term_st_set(st, st_mode(), 1)
         else
-            pos
+            u8st = term_st_get(st, st_utf8())
+            if u8st == 0
+                if byte < 128
+                    _p = term_put_cp(st, ptr, len, w, h, byte)
+                else
+                    cp = utf8_feed(0, byte)
+                    if cp >= 256
+                        _u = term_st_set(st, st_utf8(), cp)
+                    else
+                        _p = term_put_cp(st, ptr, len, w, h, cp)
+            else
+                cp = utf8_feed(u8st, byte)
+                if cp == utf8_reempl()
+                    _p = term_put_cp(st, ptr, len, w, h, cp)
+                    _u = term_st_set(st, st_utf8(), utf8_inicio())
+                else
+                    if cp >= 256
+                        _u = term_st_set(st, st_utf8(), cp)
+                    else
+                        _p = term_put_cp(st, ptr, len, w, h, cp)
+                        _u = term_st_set(st, st_utf8(), utf8_inicio())
+    elsif mode == 1
+        if byte == 91
+            _a = term_st_set(st, st_mode(), 2)
+            _b = term_st_set(st, st_csi_n(), 0)
+            _c = term_st_set(st, st_csi_cur(), 0)
+        else
+            _d = term_st_set(st, st_mode(), 0)
     else
-        pos
+        _e = term_csi_byte(st, ptr, len, w, h, byte)
+    0
+
+fn term_pintar(st: Int, grid: Int, glen: Int, cols: Int, rows: Int, psf: Int, psflen: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, ox: Int, oy: Int) -> Int ! alloc
+    dr = term_st_get(st, st_dirty())
+    row = 0
+    while row < rows
+        pinta = 0
+        if dr < 0
+            pinta = 1
+        if dr == row
+            pinta = 1
+        if pinta != 0
+            col = 0
+            while col < cols
+                cp = term_leer_cp(grid, glen, cols, col, row)
+                fg = term_leer_fg(grid, glen, cols, col, row)
+                rgb_fg = term_paleta_rgb(fg)
+                rgb_bg = term_paleta_rgb(col_default_bg())
+                px = ox + col * 8
+                py = oy + row * 16
+                _f = fuente_dibujar(psf, psflen, compos, clen, stride, bpp, fmt, cp, rgb_fg, rgb_bg, px, py)
+                col = col + 1
+        row = row + 1
+    if dr >= 0
+        _d = term_st_set(st, st_dirty(), -1)
+    pos = term_st_get(st, st_cursor())
+    cc = term_cursor_col(pos)
+    cr = term_cursor_row(pos)
+    cx = ox + cc * 8
+    cy = oy + cr * 16
+    _c = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, cx, cy, cx + 2, cy + 16, color_rgb(255, 255, 255))
+    0
+
+fn term_limpiar(ptr: Int, len: Int, w: Int, h: Int) -> Int ! alloc
+    st = term_st_nuevo(w, h)
+    term_limpiar_pantalla(st, ptr, len, w, h)

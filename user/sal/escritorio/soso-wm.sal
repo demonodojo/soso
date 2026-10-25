@@ -12,31 +12,29 @@ fn puerto_wm() -> Int
 fn compos_len(stride: Int, sh: Int, bpp: Int) -> Int
     stride * sh * bpp
 
+fn compos_ram(sw: Int, sh: Int, stride: Int, bpp: Int) -> Int ! alloc
+    bytes_ptr(bytes_new(compos_len(stride, sh, bpp)))
+
 fn bucle_wm(st: Int, listener: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
-    if st_get(st, st_salir()) != 0
-        0
-    else
+    while st_get(st, st_salir()) == 0
         _t = wm_tick(st, listener, compos, clen, sw, sh, stride, bpp, fmt)
-        bucle_wm(st, listener, compos, clen, sw, sh, stride, bpp, fmt)
+    0
 
 fn prueba_pixel_ok(compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int, x: Int, y: Int, r: Int, g: Int, b: Int) -> Int ! alloc
     c = pixel_leer(compos, clen, stride, bpp, fmt, x, y)
+    ok = 1
     if u32_b2(c) != u8(r)
-        0
-    else
-        if u32_b1(c) != u8(g)
-            0
-        else
-            if u32_b0(c) != u8(b)
-                0
-            else
-                1
+        ok = 0
+    if u32_b1(c) != u8(g)
+        ok = 0
+    if u32_b0(c) != u8(b)
+        ok = 0
+    ok
 
 fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     listener = tcp_listen(puerto_wm())
-    if listener < 0
-        1
-    else
+    ok = 1
+    if listener >= 0
         evt = bytes_ptr(bytes_new(24 * 8))
         msg = bytes_ptr(bytes_new(msg_len()))
         st = st_nuevo(evt, msg)
@@ -47,8 +45,9 @@ fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, 
         while ok == 0
             if uptime_ms() - t0 > 15000
                 ok = 2
-            else
+            if ok == 0
                 _t = wm_tick(st, listener, compos, clen, sw, sh, stride, bpp, fmt)
+            if ok == 0
                 fi = st_get(st, st_focus())
                 if fi >= 0
                     tab = st_get(st, st_tab())
@@ -57,28 +56,22 @@ fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, 
                         wy = tab_get(tab, fi, tab_wy())
                         if prueba_pixel_ok(compos, clen, stride, bpp, fmt, wx + 10, wy + barra_alto() + 10, 40, 80, 200) != 0
                             ok = 1
-                        else
-                            0
-                    else
-                        0
-                else
-                    0
         _c = wm_cerrar_cliente(st)
         close_fd(listener)
         if ok == 1
-            0
-        else
-            ok
+            ok = 0
+    ok
 
 fn bucle_grafico(ejecutar: String) -> Int ! io, alloc
     info = fb_info_nuevo()
     r = fb_info(info)
+    rc = 0
     if r < 0
-        2
-    else
+        rc = 2
+    if r >= 0
         if fb_info_leer(info) == 0
-            3
-        else
+            rc = 3
+        if fb_info_leer(info) != 0
             _m = fb_set_mode(fb_mode_graficos())
             sw = fb_info_ancho(info)
             sh = fb_info_alto(info)
@@ -92,15 +85,15 @@ fn bucle_grafico(ejecutar: String) -> Int ! io, alloc
             _bg = rellenar_rect(compos, plen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo())
             listener = tcp_listen(puerto_wm())
             if listener < 0
-                4
-            else
+                rc = 4
+            if listener >= 0
                 st = st_nuevo(evt, msg)
                 if str_len(ejecutar) > 0
                     _sp = spawn_io_full(ejecutar, 0, 0, 0, fd_kernel_log())
                 _loop = bucle_wm(st, listener, compos, plen, sw, sh, stride, bpp, fmt)
                 _c = fb_set_mode(fb_mode_consola())
                 close_fd(listener)
-                0
+    rc
 
 fn arg_flag(nombre: String) -> Int ! io, alloc
     a = 1
@@ -121,9 +114,8 @@ fn arg_valor(flag: String) -> String ! io, alloc
 
 fn prueba_web_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     listener = tcp_listen(puerto_wm())
-    if listener < 0
-        1
-    else
+    ok = 1
+    if listener >= 0
         evt = bytes_ptr(bytes_new(24 * 8))
         msg = bytes_ptr(bytes_new(msg_len()))
         st = st_nuevo(evt, msg)
@@ -134,30 +126,28 @@ fn prueba_web_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: I
         while ok == 0
             if uptime_ms() - t0 > 20000
                 ok = 2
-            else
+            if ok == 0
                 _t = wm_tick(st, listener, compos, clen, sw, sh, stride, bpp, fmt)
+            if ok == 0
                 fi = st_get(st, st_focus())
                 if fi >= 0
                     tab = st_get(st, st_tab())
                     if tab_get(tab, fi, tab_fase()) >= 1
                         ok = 1
-                    else
-                        0
-                else
-                    0
         close_fd(listener)
         if ok == 1
-            0
-        else
-            ok
+            ok = 0
+    ok
 
 fn main() -> Int ! io, alloc
+    rc = 0
     if arg_flag(d"--prueba-web") != 0
         info = fb_info_nuevo()
         r = fb_info(info)
         if r < 0
-            prueba_web_modo(0, 0, 640, 480, 640, 4, fmt_bgr())
-        else
+            compos = compos_ram(640, 480, 640, 4)
+            rc = prueba_web_modo(compos, compos_len(640, 480, 4), 640, 480, 640, 4, fmt_bgr())
+        if r >= 0
             sw = fb_info_ancho(info)
             sh = fb_info_alto(info)
             stride = fb_info_stride(info)
@@ -165,14 +155,15 @@ fn main() -> Int ! io, alloc
             fmt = fb_info_formato(info)
             plen = compos_len(stride, sh, bpp)
             compos = bytes_ptr(bytes_new(plen))
-            prueba_web_modo(compos, plen, sw, sh, stride, bpp, fmt)
-    else
+            rc = prueba_web_modo(compos, plen, sw, sh, stride, bpp, fmt)
+    if arg_flag(d"--prueba-web") == 0
         if arg_flag(d"--prueba") != 0
             info = fb_info_nuevo()
             r = fb_info(info)
             if r < 0
-                prueba_modo(0, 0, 640, 480, 640, 4, fmt_bgr())
-            else
+                compos = compos_ram(640, 480, 640, 4)
+                rc = prueba_modo(compos, compos_len(640, 480, 4), 640, 480, 640, 4, fmt_bgr())
+            if r >= 0
                 sw = fb_info_ancho(info)
                 sh = fb_info_alto(info)
                 stride = fb_info_stride(info)
@@ -181,10 +172,7 @@ fn main() -> Int ! io, alloc
                 plen = compos_len(stride, sh, bpp)
                 compos = bytes_ptr(bytes_new(plen))
                 rc = prueba_modo(compos, plen, sw, sh, stride, bpp, fmt)
-                if rc == 0
-                    0
-                else
-                    rc
-        else
+        if arg_flag(d"--prueba") == 0
             exe = arg_valor(d"--ejecutar")
-            bucle_grafico(exe)
+            rc = bucle_grafico(exe)
+    rc

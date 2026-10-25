@@ -6,13 +6,28 @@ import subprocess
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[3]
-SAL = REPO.parent / "sal" / "target" / "release" / "sal"
+
+
+def sal_bin() -> pathlib.Path:
+    import json
+
+    manifest = REPO.parent / "sal" / "Cargo.toml"
+    meta = subprocess.run(
+        ["cargo", "metadata", "--format-version", "1", "--manifest-path", str(manifest)],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    target = json.loads(meta.stdout)["target_directory"]
+    return pathlib.Path(target) / "release" / "sal"
 SDK = REPO / "target" / "sal" / "sdk"
 OUT = REPO / "target" / "sal" / "escritorio-host"
 SKIP = {"bytes_type.sal", "str_type.sal"}
 
 
 def main() -> int:
+    SAL = sal_bin()
     if not SAL.is_file() or not SDK.is_dir():
         print("falta SDK o compilador Sal; ejecuta cargo xtask sal-build", file=sys.stderr)
         return 2

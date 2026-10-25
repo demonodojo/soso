@@ -12,17 +12,14 @@ fn barra_alto() -> Int
 fn ventana_contiene(x: Int, y: Int, wx: Int, wy: Int, ww: Int, wh: Int) -> Int
     if x < wx
         0
+    elsif y < wy
+        0
+    elsif x >= wx + ww
+        0
+    elsif y >= wy + wh
+        0
     else
-        if y < wy
-            0
-        else
-            if x >= wx + ww
-                0
-            else
-                if y >= wy + wh
-                    0
-                else
-                    1
+        1
 
 fn ventana_hit_titulo(x: Int, y: Int, wx: Int, wy: Int, ww: Int) -> Int
     if ventana_contiene(x, y, wx, wy, ww, barra_alto()) == 0
@@ -32,34 +29,28 @@ fn ventana_hit_titulo(x: Int, y: Int, wx: Int, wy: Int, ww: Int) -> Int
 
 fn ventana_hit_cerrar(x: Int, y: Int, wx: Int, wy: Int, ww: Int) -> Int
     cx = wx + ww - 20
-    if x >= cx
-        if x < cx + 16
-            if y >= wy
-                if y < wy + barra_alto()
-                    1
-                else
-                    0
-            else
-                0
-        else
-            0
-    else
+    if x < cx
         0
+    elsif x >= cx + 16
+        0
+    elsif y < wy
+        0
+    elsif y >= wy + barra_alto()
+        0
+    else
+        1
 
 fn ventana_hit_resize(x: Int, y: Int, wx: Int, wy: Int, ww: Int, wh: Int) -> Int
-    if x >= wx + ww - 12
-        if y >= wy + wh - 12
-            if x < wx + ww
-                if y < wy + wh
-                    1
-                else
-                    0
-            else
-                0
-        else
-            0
-    else
+    if x < wx + ww - 12
         0
+    elsif y < wy + wh - 12
+        0
+    elsif x >= wx + ww
+        0
+    elsif y >= wy + wh
+        0
+    else
+        1
 
 fn ventana_mosaico_ix(i: Int, total: Int, pantalla_w: Int, pantalla_h: Int) -> Int
     # Devuelve wx*1e9 + wy*1e6 + ww*1e3 + wh aprox — listas paralelas en el WM.

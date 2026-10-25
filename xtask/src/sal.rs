@@ -39,6 +39,7 @@ pub fn build(args: &[String]) {
     let source = std::env::var_os("SOSO_SAL_SOURCE")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| root.join("../sal"));
+    let manifest = source.join("Cargo.toml");
     ejecutar(
         Command::new("cargo")
             .current_dir(&root)
@@ -50,8 +51,21 @@ pub fn build(args: &[String]) {
                 "sal",
                 "--manifest-path",
             ])
-            .arg(source.join("Cargo.toml")),
+            .arg(&manifest),
     );
+    let meta = Command::new("cargo")
+        .current_dir(&root)
+        .args(["metadata", "--format-version", "1", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .expect("cargo metadata (sal)");
+    assert!(meta.status.success(), "cargo metadata falló");
+    let meta_json: serde_json::Value =
+        serde_json::from_slice(&meta.stdout).expect("JSON metadata sal");
+    let target_dir = meta_json["target_directory"]
+        .as_str()
+        .expect("target_directory en metadata sal");
+    let sal_bin = Path::new(target_dir).join("release/sal");
     let sysroot = Command::new("rustc")
         .args(["--print", "sysroot"])
         .output()
@@ -67,7 +81,7 @@ pub fn build(args: &[String]) {
         ("tests/sal/runtime.sal", "runtime"),
     ] {
         ejecutar(
-            Command::new(source.join("target/release/sal"))
+            Command::new(&sal_bin)
                 .current_dir(&root)
                 .env("SAL_LD", &lld)
                 .env("SAL_SDK", root.join("target/sal/sdk"))

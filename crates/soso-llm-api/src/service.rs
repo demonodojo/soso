@@ -355,6 +355,15 @@ impl ChatBackend for CpuBackend {
         let mut gpu: Option<&mut dyn soso_llm_core::gpu::GpuDispatch> =
             self.gpu.as_mut().map(|b| &mut **b as &mut dyn soso_llm_core::gpu::GpuDispatch);
         let t_inicio = std::time::Instant::now();
+        let perfilar = std::env::var_os("SOSO_PERFIL").is_some();
+        if perfilar {
+            fn reloj_ns() -> u64 {
+                use std::sync::OnceLock;
+                static T0: OnceLock<std::time::Instant> = OnceLock::new();
+                T0.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64 + 1
+            }
+            soso_llm_core::layer::perfil_activar(Some(reloj_ns));
+        }
         let comun = self.ultimo_prompt.iter().zip(prompt_ids).take_while(|(a, b)| a == b).count();
         eprintln!(
             "[soso] petición: prompt de {} tokens ({} en común con la anterior), hasta {} nuevos",
@@ -381,6 +390,11 @@ impl ChatBackend for CpuBackend {
             secuencia.len().saturating_sub(prompt_ids.len()),
             t_inicio.elapsed().as_secs_f64()
         );
+        if perfilar {
+            let f = soso_llm_core::layer::perfil_fases_ns();
+            let partes: Vec<String> = soso_llm_core::layer::NOMBRES_FASES.iter().zip(f).map(|(n, v)| format!("{n} {:.1}", v as f64 / 1e9)).collect();
+            eprintln!("[soso] fases (s): {}", partes.join(", "));
+        }
         Ok((solo_generados(&secuencia, prompt_ids.len()), report))
     }
 

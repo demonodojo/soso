@@ -2963,7 +2963,7 @@ fn sys_pty_open() -> Result<u64, i64> {
     let slot = super::pty::alloc_slot()?;
     super::with_current(|p| {
         let fd = alloc_fd(p, Fd::PtyMaster(slot))?;
-        Ok(fd as u64)
+        Ok((fd as u64) << 32 | u64::from(slot))
     })
 }
 

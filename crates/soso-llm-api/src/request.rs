@@ -293,6 +293,13 @@ fn top_p_defecto() -> f64 {
     f32::from_bits(TOP_P_DEFECTO.load(core::sync::atomic::Ordering::Relaxed)) as f64
 }
 
+static RECORTAR_SALIDA: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Con `true`, una petición cuyo `prompt + max_tokens` no cabe en el contexto se acepta recortando la salida (como llama.cpp).
+pub fn fijar_recortar_salida(on: bool) {
+    RECORTAR_SALIDA.store(on, core::sync::atomic::Ordering::Relaxed);
+}
+
 fn comprobar_finito(campo: &str, v: f64) -> Result<(), ApiError> {
     if v.is_finite() {
         Ok(())
@@ -480,9 +487,17 @@ pub fn prepare_chat_completion(
             model: model.to_string(),
         });
     }
-    let max_new_tokens = resolver_max_new(&wire, profile);
+    let mut max_new_tokens = resolver_max_new(&wire, profile);
     let ids = render_messages(&input, profile, tokenizer)?;
     let prompt_tokens = ids.len() as u32;
+    // llama.cpp no exige que quepa `max_tokens` entero: la generación se corta al llenarse el contexto. Con este modo se recorta la salida a lo
+    // que queda (siempre que quede un mínimo razonable) en vez de rechazar la petición.
+    if RECORTAR_SALIDA.load(core::sync::atomic::Ordering::Relaxed)
+        && !profile.cabe(prompt_tokens, max_new_tokens)
+        && profile.context_tokens.saturating_sub(prompt_tokens) >= 512
+    {
+        max_new_tokens = profile.context_tokens - prompt_tokens;
+    }
     if !profile.cabe(prompt_tokens, max_new_tokens) {
         return Err(ChatError::ContextoExcedido {
             necesarios: prompt_tokens.saturating_add(max_new_tokens),

@@ -778,8 +778,8 @@ pub const FD_SERIAL_TTY: u64 = u64::MAX - 1;
 pub const FD_PTY_TTY_BASE: u64 = u64::MAX - 3;
 /// Canal de registro del kernel (fd 3 por defecto); sólo válido en el slot `log_fd`.
 pub const FD_KERNEL_LOG: u64 = u64::MAX - 2;
-/// Deja el slot vacío (`write` devuelve `EBADF`).
-pub const FD_CLOSED: u64 = u64::MAX - 3;
+/// Deja el slot vacío (`write` devuelve `EBADF`). Fuera del rango pty (`MAX-3`..=`MAX-10`).
+pub const FD_CLOSED: u64 = u64::MAX - 11;
 
 /// Descriptor estándar de registro de eventos de aplicación.
 pub const LOG_FD: u64 = 3;

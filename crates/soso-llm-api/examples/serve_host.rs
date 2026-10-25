@@ -92,6 +92,10 @@ fn main() {
         soso_llm_api::request::fijar_top_p_defecto(p);
         eprintln!("serve_host: top_p por defecto {p}");
     }
+    if std::env::var_os("SOSO_RECORTAR_SALIDA").is_some() {
+        soso_llm_api::request::fijar_recortar_salida(true);
+        eprintln!("serve_host: la salida se recorta al contexto que quede");
+    }
     if let Some(k) = std::env::var("SOSO_TOP_K").ok().and_then(|v| v.parse::<usize>().ok()) {
         soso_llm_core::sample::fijar_top_k_defecto(k);
         eprintln!("serve_host: top_k por defecto {k}");

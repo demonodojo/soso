@@ -6,7 +6,7 @@ fn tab_cap() -> Int
     16
 
 fn tab_slot_bytes() -> Int
-    128
+    192
 
 fn tab_tipo() -> Int
     0
@@ -56,15 +56,24 @@ fn tab_acc_len() -> Int
 fn tab_term_pos() -> Int
     120
 
-fn tab_base(tab: Int, i: Int) -> Int
-    tab + i * tab_slot_bytes()
+fn tab_term_st() -> Int
+    128
+
+fn tab_titulo_off() -> Int
+    136
+
+fn tab_acc_off() -> Int
+    168
+
+fn tab_slot_off(i: Int) -> Int
+    i * tab_slot_bytes()
 
 fn tab_get(tab: Int, i: Int, off: Int) -> Int ! alloc
-    b = bytes_view(tab_base(tab, i), tab_slot_bytes())
+    b = bytes_view_mem(tab + tab_slot_off(i), tab_slot_bytes())
     bytes_get_i64(b, off)
 
 fn tab_set(tab: Int, i: Int, off: Int, v: Int) -> Int ! alloc
-    b = bytes_view(tab_base(tab, i), tab_slot_bytes())
+    b = bytes_view_mem(tab + tab_slot_off(i), tab_slot_bytes())
     bytes_set_i64(b, off, v)
     0
 
@@ -99,6 +108,22 @@ fn tab_slot_activo(tab: Int, i: Int) -> Int
             else
                 1
 
+fn tab_titulo_set(tab: Int, i: Int, titulo: String) -> Int ! alloc
+    b = bytes_view_mem(tab + tab_slot_off(i) + tab_titulo_off(), 32)
+    j = 0
+    n = str_len(titulo)
+    while j < 32
+        ch = 32
+        if j < n
+            ch = str_char(titulo, j)
+        bytes_set_u8(b, j, ch)
+        j = j + 1
+    0
+
+fn tab_acc_reset(tab: Int, i: Int) -> Int ! alloc
+    _l = tab_set(tab, i, tab_acc_len(), 0)
+    0
+
 fn tab_cerrar_slot(tab: Int, i: Int) -> Int ! io, alloc
     if tab_slot_activo(tab, i) == 0
         0
@@ -121,11 +146,11 @@ fn tab_zorder_size() -> Int
     tab_cap() * 8
 
 fn z_get(z: Int, k: Int) -> Int ! alloc
-    b = bytes_view(z, tab_zorder_size())
+    b = bytes_view_mem(z, tab_zorder_size())
     bytes_get_i64(b, k * 8)
 
 fn z_set(z: Int, k: Int, v: Int) -> Int ! alloc
-    b = bytes_view(z, tab_zorder_size())
+    b = bytes_view_mem(z, tab_zorder_size())
     bytes_set_i64(b, k * 8, v)
     0
 
@@ -140,9 +165,7 @@ fn z_subir(z: Int, n: Int, idx: Int) -> Int ! alloc
                     otro = z_get(z, k + 1)
                     _a = z_set(z, k, otro)
                     _b = z_set(z, k + 1, idx)
-                n
-            else
-                k = k + 1
+            k = k + 1
         n
 
 fn z_quitar(z: Int, n: Int, idx: Int) -> Int ! alloc
@@ -154,7 +177,7 @@ fn z_quitar(z: Int, n: Int, idx: Int) -> Int ! alloc
                 _m = z_set(z, j, z_get(z, j + 1))
                 j = j + 1
             _t = z_set(z, n - 1, -1)
-            n - 1
+            n = n - 1
         else
             k = k + 1
     n

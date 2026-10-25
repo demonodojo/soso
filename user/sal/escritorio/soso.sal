@@ -151,53 +151,53 @@ fn spawnio_off_log_fd() -> Int
     88
 
 fn fb_info_leer(ptr: Int) -> Int ! alloc
-    b = bytes_view(ptr, fb_info_size())
+    b = bytes_view_mem(ptr, fb_info_size())
     bytes_get_u8(b, fb_off_present())
 
 fn fb_info_ancho(ptr: Int) -> Int ! alloc
-    b = bytes_view(ptr, fb_info_size())
+    b = bytes_view_mem(ptr, fb_info_size())
     bytes_get_u32(b, fb_off_width())
 
 fn fb_info_alto(ptr: Int) -> Int ! alloc
-    b = bytes_view(ptr, fb_info_size())
+    b = bytes_view_mem(ptr, fb_info_size())
     bytes_get_u32(b, fb_off_height())
 
 fn fb_info_stride(ptr: Int) -> Int ! alloc
-    b = bytes_view(ptr, fb_info_size())
+    b = bytes_view_mem(ptr, fb_info_size())
     bytes_get_u32(b, fb_off_stride())
 
 fn fb_info_bpp(ptr: Int) -> Int ! alloc
-    b = bytes_view(ptr, fb_info_size())
+    b = bytes_view_mem(ptr, fb_info_size())
     bytes_get_u8(b, fb_off_bpp())
 
 fn fb_info_formato(ptr: Int) -> Int ! alloc
-    b = bytes_view(ptr, fb_info_size())
+    b = bytes_view_mem(ptr, fb_info_size())
     bytes_get_u8(b, fb_off_format())
 
 fn input_event_kind(evt_ptr: Int, evt_len: Int, i: Int) -> Int ! alloc
-    b = bytes_view(evt_ptr, evt_len)
+    b = bytes_view_mem(evt_ptr, evt_len)
     bytes_get_u32(b, i * 24 + input_off_kind())
 
 fn input_event_key(evt_ptr: Int, evt_len: Int, i: Int) -> Int ! alloc
-    b = bytes_view(evt_ptr, evt_len)
+    b = bytes_view_mem(evt_ptr, evt_len)
     bytes_get_u32(b, i * 24 + input_off_key())
 
 fn input_event_pressed(evt_ptr: Int, evt_len: Int, i: Int) -> Int ! alloc
-    b = bytes_view(evt_ptr, evt_len)
+    b = bytes_view_mem(evt_ptr, evt_len)
     bytes_get_u8(b, i * 24 + input_off_pressed())
 
 fn input_event_x(evt_ptr: Int, evt_len: Int, i: Int) -> Int ! alloc
-    b = bytes_view(evt_ptr, evt_len)
+    b = bytes_view_mem(evt_ptr, evt_len)
     v = bytes_get_u32(b, i * 24 + input_off_x())
     i32_desde_u32(v)
 
 fn input_event_y(evt_ptr: Int, evt_len: Int, i: Int) -> Int ! alloc
-    b = bytes_view(evt_ptr, evt_len)
+    b = bytes_view_mem(evt_ptr, evt_len)
     v = bytes_get_u32(b, i * 24 + input_off_y())
     i32_desde_u32(v)
 
 fn input_event_button(evt_ptr: Int, evt_len: Int, i: Int) -> Int ! alloc
-    b = bytes_view(evt_ptr, evt_len)
+    b = bytes_view_mem(evt_ptr, evt_len)
     bytes_get_u32(b, i * 24 + input_off_button())
 
 fn fb_info_nuevo() -> Int ! alloc
@@ -247,7 +247,7 @@ fn tcp_accept(fd: Int, ms: Int) -> Int ! io
 fn sockaddr_loopback(port: Int) -> Int ! alloc
     sa = bytes_new(sockaddr_size())
     sap = bytes_ptr(sa)
-    b = bytes_view(sap, sockaddr_size())
+    b = bytes_view_mem(sap, sockaddr_size())
     bytes_set_u8(b, 0, 127)
     bytes_set_u8(b, 1, 0)
     bytes_set_u8(b, 2, 0)
@@ -280,17 +280,24 @@ fn sleep_ms(ms: Int) -> Int ! io
 fn uptime_ms() -> Int ! io
     syscall(sys_uptime_ms(), 0, 0, 0, 0, 0, 0)
 
-fn spawn_argv_slot(tab: Int, i: Int, s: String) -> Int ! alloc
-    bytes_set_i64(tab, i * 16, str_bytes(s))
-    bytes_set_i64(tab, i * 16 + 8, str_len(s))
+fn spawn_string_buf(s: String) -> Bytes ! alloc
+    buf = bytes_new(str_len(s) + 1)
+    str_bytes_copy(buf, 0, s)
+    buf
+
+fn spawn_argv_slot_ptr(tab: Bytes, i: Int, buf: Bytes, len: Int) -> Int ! alloc
+    bytes_set_i64(tab, i * 16, bytes_ptr(buf))
+    bytes_set_i64(tab, i * 16 + 8, len)
     0
 
 fn spawn_io_full(path: String, stdin: Int, stdout: Int, stderr: Int, log_fd: Int) -> Int ! io, alloc
+    pbuf = spawn_string_buf(path)
+    plen = str_len(path)
     tab = bytes_new(16)
-    _a = spawn_argv_slot(tab, 0, path)
+    _a = spawn_argv_slot_ptr(tab, 0, pbuf, plen)
     opts = bytes_new(spawnio_size())
-    bytes_set_i64(opts, spawnio_off_path_ptr(), str_bytes(path))
-    bytes_set_i64(opts, spawnio_off_path_len(), str_len(path))
+    bytes_set_i64(opts, spawnio_off_path_ptr(), bytes_ptr(pbuf))
+    bytes_set_i64(opts, spawnio_off_path_len(), plen)
     bytes_set_i64(opts, spawnio_off_stdin(), stdin)
     bytes_set_i64(opts, spawnio_off_stdout(), stdout)
     bytes_set_i64(opts, spawnio_off_stderr(), stderr)
@@ -300,13 +307,17 @@ fn spawn_io_full(path: String, stdin: Int, stdout: Int, stderr: Int, log_fd: Int
     syscall(sys_spawn_io(), bytes_ptr(opts), 0, 0, 0, 0, 0)
 
 fn spawn_io_4(path: String, a1: String, a2: String, a3: String, stdin: Int, stdout: Int, stderr: Int, log_fd: Int) -> Int ! io, alloc
+    pbuf = spawn_string_buf(path)
+    b1 = spawn_string_buf(a1)
+    b2 = spawn_string_buf(a2)
+    b3 = spawn_string_buf(a3)
     tab = bytes_new(64)
-    _p = spawn_argv_slot(tab, 0, path)
-    _1 = spawn_argv_slot(tab, 1, a1)
-    _2 = spawn_argv_slot(tab, 2, a2)
-    _3 = spawn_argv_slot(tab, 3, a3)
+    _p = spawn_argv_slot_ptr(tab, 0, pbuf, str_len(path))
+    _1 = spawn_argv_slot_ptr(tab, 1, b1, str_len(a1))
+    _2 = spawn_argv_slot_ptr(tab, 2, b2, str_len(a2))
+    _3 = spawn_argv_slot_ptr(tab, 3, b3, str_len(a3))
     opts = bytes_new(spawnio_size())
-    bytes_set_i64(opts, spawnio_off_path_ptr(), str_bytes(path))
+    bytes_set_i64(opts, spawnio_off_path_ptr(), bytes_ptr(pbuf))
     bytes_set_i64(opts, spawnio_off_path_len(), str_len(path))
     bytes_set_i64(opts, spawnio_off_stdin(), stdin)
     bytes_set_i64(opts, spawnio_off_stdout(), stdout)

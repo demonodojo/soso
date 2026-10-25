@@ -1,5 +1,6 @@
 import "../../../user/sal/escritorio/superficie.sal"
 
 fn main() -> Int ! alloc
-    buf = bytes_ptr(bytes_new(16))
-    rellenar_rect(buf, 16, 2, 2, 8, 4, 0, 0, 0, 2, 2, 16711680)
+    buf = bytes_ptr(bytes_new(64))
+    rellenar_rect(buf, 64, 2, 2, 2, 4, 0, 0, 0, 2, 2, 16711680)
+    0

@@ -43,12 +43,12 @@ fn msg_nuevo() -> Int ! alloc
     bytes_ptr(bytes_new(msg_len()))
 
 fn msg_set_u32(ptr: Int, off: Int, v: Int) -> Int ! alloc
-    b = bytes_view(ptr, msg_len())
+    b = bytes_view_mem(ptr, msg_len())
     bytes_set_u32(b, off, v)
     0
 
 fn msg_get_u32(ptr: Int, off: Int) -> Int ! alloc
-    b = bytes_view(ptr, msg_len())
+    b = bytes_view_mem(ptr, msg_len())
     bytes_get_u32(b, off)
 
 fn msg_set_op(ptr: Int, op: Int) -> Int ! alloc
@@ -100,13 +100,13 @@ fn msg_encode_danio(ptr: Int, x: Int, y: Int, w: Int, h: Int) -> Int ! alloc
     0
 
 fn msg_titulo_copiar(ptr: Int, off: Int, titulo: String) -> Int ! alloc
-    b = bytes_view(ptr, msg_len())
+    b = bytes_view_mem(ptr, msg_len())
     i = 0
     n = str_len(titulo)
     while i < 16
+        ch = 0
         if i < n
-            bytes_set_u8(b, off + i, str_char(titulo, i))
-        else
-            bytes_set_u8(b, off + i, 0)
+            ch = str_char(titulo, i)
+        bytes_set_u8(b, off + i, ch)
         i = i + 1
     0

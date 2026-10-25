@@ -2,30 +2,29 @@ fn mod_pos(v: Int, m: Int) -> Int
     if m <= 0
         0
     else
-        r = v
-        while r >= m
-            r = r - m
-        while r < 0
-            r = r + m
-        r
+        r = v % m
+        if r < 0
+            r + m
+        else
+            r
 
 fn u8(v: Int) -> Int
-    mod_pos(v, 256)
+    v & 255
 
 fn u32_le(b0: Int, b1: Int, b2: Int, b3: Int) -> Int
-    u8(b0) + u8(b1) * 256 + u8(b2) * 65536 + u8(b3) * 16777216
+    u8(b0) + (u8(b1) << 8) + (u8(b2) << 16) + (u8(b3) << 24)
 
 fn u32_b0(v: Int) -> Int
     u8(v)
 
 fn u32_b1(v: Int) -> Int
-    u8(v / 256)
+    u8(v >> 8)
 
 fn u32_b2(v: Int) -> Int
-    u8(v / 65536)
+    u8(v >> 16)
 
 fn u32_b3(v: Int) -> Int
-    u8(v / 16777216)
+    u8(v >> 24)
 
 fn i32_desde_u32(v: Int) -> Int
     if v >= 2147483648
