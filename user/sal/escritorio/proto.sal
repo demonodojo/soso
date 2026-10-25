@@ -110,3 +110,35 @@ fn msg_titulo_copiar(ptr: Int, off: Int, titulo: String) -> Int ! alloc
         bytes_set_u8(b, off + i, ch)
         i = i + 1
     0
+
+fn msg_encode_titulo(ptr: Int, off: Int, titulo: String) -> Int ! alloc
+    msg_set_op(ptr, op_titulo())
+    _t = msg_titulo_copiar(ptr, off, titulo)
+    0
+
+fn msg_encode_cerrar_cli(ptr: Int) -> Int ! alloc
+    msg_set_op(ptr, op_cerrar_cli())
+    0
+
+fn msg_encode_cerrar_wm(ptr: Int) -> Int ! alloc
+    msg_set_op(ptr, op_cerrar_wm())
+    0
+
+fn msg_encode_redim(ptr: Int, w: Int, h: Int, shm: Int) -> Int ! alloc
+    msg_set_op(ptr, op_redim())
+    msg_set_u32(ptr, 4, w)
+    msg_set_u32(ptr, 8, h)
+    msg_set_u32(ptr, 12, shm)
+    0
+
+fn msg_encode_fotograma(ptr: Int, n: Int) -> Int ! alloc
+    msg_set_op(ptr, op_fotograma())
+    msg_set_u32(ptr, 4, n)
+    0
+
+fn msg_encode_foco(ptr: Int) -> Int ! alloc
+    msg_set_op(ptr, op_foco())
+    0
+
+fn msg_get_u32_at(ptr: Int, off: Int) -> Int ! alloc
+    msg_get_u32(ptr, off)

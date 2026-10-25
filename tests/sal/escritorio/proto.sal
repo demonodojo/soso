@@ -1,5 +1,25 @@
 import "../../../user/sal/escritorio/proto.sal"
 
 fn main() -> Int ! alloc
-    b = msg_nuevo()
-    msg_encode_tecla(b, 65, 1)
+    m = msg_nuevo()
+    _h = msg_encode_hola(m, 1)
+    if msg_get_op(m) != op_hola()
+        1
+    else
+        _c = msg_encode_crear(m, 640, 480, 16)
+        if msg_get_u32(m, 4) != 640
+            2
+        else
+            _v = msg_encode_ventana(m, 3, 9, 640, 480, 0)
+            if msg_get_u32(m, 8) != 9
+                3
+            else
+                _t = msg_encode_tecla(m, 97, 2)
+                if msg_get_u32(m, 4) != 97
+                    4
+                else
+                    _d = msg_encode_danio(m, 10, 20, 100, 50)
+                    if msg_get_u32(m, 16) != 50
+                        5
+                    else
+                        0

@@ -17,6 +17,19 @@ pub fn run() {
 
     println!("check: tests host…");
     run_host(&root, &fallos);
+    println!("check: escritorio Sal (host)…");
+    if !ejecutar_con_log(
+        {
+            let mut cmd = Command::new("python3");
+            cmd.current_dir(&root)
+                .arg("tests/sal/escritorio/probar_host.py");
+            cmd
+        },
+        &arte.join("escritorio-host.log"),
+        "escritorio host",
+    ) {
+        *fallos.lock().unwrap() += 1;
+    }
     if let Err(e) = crate::rtc_host::run_rtc_host_tests() {
         eprintln!("check: falló rtc host ({e})");
         *fallos.lock().unwrap() += 1;

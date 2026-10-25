@@ -9,6 +9,12 @@ fn tipo_cliente() -> Int
 fn barra_alto() -> Int
     24
 
+fn ventana_min_ancho() -> Int
+    120
+
+fn ventana_min_alto() -> Int
+    80
+
 fn ventana_contiene(x: Int, y: Int, wx: Int, wy: Int, ww: Int, wh: Int) -> Int
     if x < wx
         0
@@ -52,50 +58,56 @@ fn ventana_hit_resize(x: Int, y: Int, wx: Int, wy: Int, ww: Int, wh: Int) -> Int
     else
         1
 
-fn ventana_mosaico_ix(i: Int, total: Int, pantalla_w: Int, pantalla_h: Int) -> Int
-    # Devuelve wx*1e9 + wy*1e6 + ww*1e3 + wh aprox — listas paralelas en el WM.
+fn ventana_mosaico_wx(i: Int, total: Int, pantalla_w: Int, pantalla_h: Int) -> Int
     if total <= 0
         0
     else
         if total == 1
-            pantalla_w * 1000000000 + barra_alto() * 1000000 + pantalla_w * 1000 + (pantalla_h - barra_alto())
+            0
         else
-            mw = pantalla_w / 2
             if i == 0
-                mw * 1000000000 + barra_alto() * 1000000 + mw * 1000 + (pantalla_h - barra_alto())
+                0
             else
-                mw * 1000000000 + barra_alto() * 1000000 + (pantalla_w - mw) * 1000 + (pantalla_h - barra_alto())
+                pantalla_w / 2
 
-fn ventana_pack(wx: Int, wy: Int, ww: Int, wh: Int) -> Int
-    wx * 1000000000 + wy * 1000000 + ww * 1000 + wh
+fn ventana_mosaico_wy(i: Int, total: Int, pantalla_w: Int, pantalla_h: Int) -> Int
+    barra_alto()
 
-fn ventana_wx(p: Int) -> Int
+fn ventana_mosaico_ww(i: Int, total: Int, pantalla_w: Int, pantalla_h: Int) -> Int
+    if total <= 0
+        pantalla_w
+    else
+        if total == 1
+            pantalla_w
+        else
+            if i == 0
+                pantalla_w / 2
+            else
+                pantalla_w - pantalla_w / 2
+
+fn ventana_mosaico_wh(i: Int, total: Int, pantalla_w: Int, pantalla_h: Int) -> Int
+    pantalla_h - barra_alto()
+
+fn ventana_recortar_pantalla(wx: Int, wy: Int, ww: Int, wh: Int, sw: Int, sh: Int) -> Int
+    # Devuelve wx*1e9+wy*1e6+ww*1e3+wh recortado (solo uso interno WM legacy).
+    nx = max(0, wx)
+    ny = max(barra_alto(), wy)
+    nw = ww
+    nh = wh
+    if nx + nw > sw
+        nw = max(ventana_min_ancho(), sw - nx)
+    if ny + nh > sh
+        nh = max(ventana_min_alto() + barra_alto(), sh - ny)
+    nx * 1000000000 + ny * 1000000 + nw * 1000 + nh
+
+fn ventana_clip_wx(p: Int) -> Int
     p / 1000000000
 
-fn ventana_wy(p: Int) -> Int
+fn ventana_clip_wy(p: Int) -> Int
     mod_pos(p / 1000000, 1000)
 
-fn ventana_ww(p: Int) -> Int
+fn ventana_clip_ww(p: Int) -> Int
     mod_pos(p / 1000, 1000)
 
-fn ventana_wh(p: Int) -> Int
+fn ventana_clip_wh(p: Int) -> Int
     mod_pos(p, 1000)
-
-fn rect_unir(x0: Int, y0: Int, x1: Int, y1: Int, nx0: Int, ny0: Int, nx1: Int, ny1: Int) -> Int
-    ax0 = min(x0, nx0)
-    ay0 = min(y0, ny0)
-    ax1 = max(x1, nx1)
-    ay1 = max(y1, ny1)
-    ax0 * 1000000000 + ay0 * 1000000 + ax1 * 1000 + ay1
-
-fn rect_x0(r: Int) -> Int
-    r / 1000000000
-
-fn rect_y0(r: Int) -> Int
-    mod_pos(r / 1000000, 1000)
-
-fn rect_x1(r: Int) -> Int
-    mod_pos(r / 1000, 1000)
-
-fn rect_y1(r: Int) -> Int
-    mod_pos(r, 1000)

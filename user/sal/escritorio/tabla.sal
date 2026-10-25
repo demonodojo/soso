@@ -124,6 +124,50 @@ fn tab_acc_reset(tab: Int, i: Int) -> Int ! alloc
     _l = tab_set(tab, i, tab_acc_len(), 0)
     0
 
+fn tab_acc_push_byte(tab: Int, i: Int, b: Int) -> Int ! alloc
+    al = tab_get(tab, i, tab_acc_len())
+    if al >= 32
+        -1
+    else
+        slot = tab + tab_slot_off(i) + tab_acc_off()
+        bb = bytes_view_mem(slot, 32)
+        _s = bytes_set_u8(bb, al, u8(b))
+        _l = tab_set(tab, i, tab_acc_len(), al + 1)
+        al + 1
+
+fn tab_acc_copiar_msg(tab: Int, i: Int, dst: Int) -> Int ! alloc
+    al = tab_get(tab, i, tab_acc_len())
+    if al < 32
+        0
+    else
+        slot = tab + tab_slot_off(i) + tab_acc_off()
+        _c = bytes_copy(dst, 0, slot, 0, 32)
+        _r = tab_acc_reset(tab, i)
+        32
+
+fn tab_guardar_float(tab: Int, i: Int) -> Int ! alloc
+    _x = tab_set(tab, i, tab_fwx(), tab_get(tab, i, tab_wx()))
+    _y = tab_set(tab, i, tab_fwy(), tab_get(tab, i, tab_wy()))
+    0
+
+fn tab_restaurar_float(tab: Int, i: Int) -> Int ! alloc
+    fx = tab_get(tab, i, tab_fwx())
+    fy = tab_get(tab, i, tab_fwy())
+    if fx > 0
+        _x = tab_set(tab, i, tab_wx(), fx)
+    if fy > 0
+        _y = tab_set(tab, i, tab_wy(), fy)
+    0
+
+fn tab_contar_tipo(tab: Int, tipo: Int) -> Int
+    i = 0
+    n = 0
+    while i < tab_cap()
+        if tab_get(tab, i, tab_tipo()) == tipo
+            n = n + 1
+        i = i + 1
+    n
+
 fn tab_cerrar_slot(tab: Int, i: Int) -> Int ! io, alloc
     if tab_slot_activo(tab, i) == 0
         0

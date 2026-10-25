@@ -192,21 +192,77 @@ fn term_limpiar_pantalla(st: Int, ptr: Int, len: Int, w: Int, h: Int) -> Int ! a
     _c = term_st_set(st, st_cursor(), 0)
     0
 
+fn term_fila_copiar(dst: Int, dlen: Int, dw: Int, drow: Int, src: Int, slen: Int, sw: Int, srow: Int, cols: Int) -> Int ! alloc
+    col = 0
+    while col < cols
+        cp = term_leer_cp(src, slen, sw, col, srow)
+        fg = term_leer_fg(src, slen, sw, col, srow)
+        bg = col_default_bg()
+        attr = 0
+        _t = term_escribir(dst, dlen, dw, col, drow, cp, fg, bg, attr)
+        col = col + 1
+    0
+
 fn term_hist_push(st: Int, ptr: Int, len: Int, w: Int, row: Int) -> Int ! alloc
     hp = term_st_get(st, st_hist_ptr())
     hw = term_st_get(st, st_hist_w())
     cap = term_st_get(st, st_hist_cap())
     head = term_st_get(st, st_hist_head())
     slot = mod_pos(head, cap)
-    di = slot * hw * celda_bytes()
-    si = term_idx(w, 0, row)
-    bytes_copy(hp, di, ptr, si, w * celda_bytes())
+    hlen = cap * hw * celda_bytes()
+    _c = term_fila_copiar(hp, hlen, hw, slot, ptr, len, w, row, w)
     _h = term_st_set(st, st_hist_head(), head + 1)
     0
 
 fn term_scroll(st: Int, ptr: Int, len: Int, w: Int, h: Int) -> Int ! alloc
     _h = term_hist_push(st, ptr, len, w, 0)
+    row = 1
+    while row < h
+        _cp = term_fila_copiar(ptr, len, w, row - 1, ptr, len, w, row, w)
+        _m = term_marcar_fila(st, row - 1)
+        row = row + 1
+    col = 0
+    lr = h - 1
+    while col < w
+        _t = term_escribir(ptr, len, w, col, lr, 32, col_default_fg(), col_default_bg(), 0)
+        col = col + 1
+    _ml = term_marcar_fila(st, lr)
     0
+
+fn term_redimensionar(st: Int, ptr: Int, len: Int, ow: Int, oh: Int, nw: Int, nh: Int) -> Int ! alloc
+    newp = term_capa(nw, nh)
+    nlen = nw * nh * celda_bytes()
+    mr = min(oh, nh)
+    mc = min(ow, nw)
+    row = 0
+    while row < mr
+        if mc > 0
+            _cp = term_fila_copiar(newp, nlen, nw, row, ptr, len, ow, row, mc)
+        row = row + 1
+    row = 0
+    while row < nh
+        col = 0
+        while col < nw
+            if row >= mr
+                _t = term_escribir(newp, nlen, nw, col, row, 32, col_default_fg(), col_default_bg(), 0)
+            if row < mr
+                if col >= mc
+                    _t2 = term_escribir(newp, nlen, nw, col, row, 32, col_default_fg(), col_default_bg(), 0)
+            col = col + 1
+        row = row + 1
+    _c0 = term_st_set(st, st_cols(), nw)
+    _c1 = term_st_set(st, st_rows(), nh)
+    _hw = term_st_set(st, st_hist_w(), nw)
+    pos = term_st_get(st, st_cursor())
+    nc = min(term_cursor_col(pos), nw - 1)
+    nr = min(term_cursor_row(pos), nh - 1)
+    if nw <= 0
+        nc = 0
+    if nh <= 0
+        nr = 0
+    _c = term_st_set(st, st_cursor(), term_pack_cursor(nc, nr))
+    _d = term_st_set(st, st_dirty(), -1)
+    newp
 
 fn term_nueva_linea(st: Int, ptr: Int, len: Int, w: Int, h: Int, col: Int, row: Int) -> Int ! alloc
     nr = row + 1

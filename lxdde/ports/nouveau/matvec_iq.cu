@@ -309,6 +309,9 @@ __device__ __forceinline__ void iq_decodificar(int dtype, const unsigned char *w
 }
 
 #define IQ_TILE 16
+#ifndef INFINITY
+#define INFINITY __int_as_float(0x7f800000)
+#endif
 
 /* Gate y up de un experto para `cnt` tokens y SwiGLU: act[(abase + t) * ffn + fila] = silu(gate·x_t) · (up·x_t).
  * `xs` son los `n` vectores del bloque (h floats cada uno); `tok[t]` dice qué vector es el token `t` del experto.
@@ -418,4 +421,138 @@ extern "C" __global__ void iq_down_n(const unsigned char *w, const float *act, f
 extern "C" __global__ void iq_matmul_n(const unsigned char *w, const float *xs, float *y, int rows, int cols, int n, int dtype, long rb)
 {
     iq_down_dev(w, xs, y, rows, cols, n, 0, dtype, rb);
+}
+
+/* ---------------------------------------------------------------------------------------------------------------------
+ * Atención del prefill por bloques en la GPU (KV f16 espejado en la tarjeta).
+ *
+ * Un bloque CUDA por (cabeza KV, grupo de tokens): las `group` cabezas de consulta que comparten la cabeza KV y `tb = 16 / group` tokens
+ * consecutivos (hasta 16 consultas) recorren el contexto por tiles de 16 posiciones con softmax en línea; cada hilo es una dimensión de
+ * salida (`hd` <= 256). K va en f32 y V en f16 en memoria compartida. El token `i` del bloque ve las posiciones `0 .. seq_antes + i`.
+ * ------------------------------------------------------------------------------------------------------------------ */
+#define AP_TILE 16
+
+__device__ __forceinline__ float ap_f16(unsigned short h)
+{
+    float f;
+    asm("cvt.f32.f16 %0, %1;" : "=f"(f) : "h"(h));
+    return f;
+}
+
+extern "C" __global__ void attn_prefill_f16(const float *q, const unsigned short *K, const unsigned short *V, float *out, int n,
+                                            int seq_antes, int heads, int kv_heads, int hd, int group)
+{
+    __shared__ float Qs[16][256];
+    __shared__ float Ks[AP_TILE][256];
+    __shared__ unsigned short Vs[AP_TILE][256];
+    __shared__ float P[16][AP_TILE];
+    __shared__ float mm[16], ll[16], alfa[16];
+    int tid = (int)threadIdx.x;
+    int kvh = (int)blockIdx.x;
+    int tb = 16 / group;
+    int tok0 = (int)blockIdx.y * tb;
+    int ntok = n - tok0 < tb ? n - tok0 : tb;
+    int qn = ntok * group;
+    int kv_dim = kv_heads * hd;
+    int q_dim = heads * hd;
+    float inv = rsqrtf((float)hd);
+    for (int qi = 0; qi < 16; qi++) {
+        float v = 0.0f;
+        if (qi < qn && tid < hd) {
+            int tl = qi / group, g = qi % group;
+            v = q[(long)(tok0 + tl) * q_dim + (long)(kvh * group + g) * hd + tid] * inv;
+        }
+        Qs[qi][tid] = v;
+    }
+    if (tid < 16) {
+        mm[tid] = -INFINITY;
+        ll[tid] = 0.0f;
+    }
+    float acc[16];
+#pragma unroll
+    for (int i = 0; i < 16; i++) {
+        acc[i] = 0.0f;
+    }
+    int max_pos = seq_antes + tok0 + ntok;
+    __syncthreads();
+    for (int t0 = 0; t0 < max_pos; t0 += AP_TILE) {
+        for (int r = 0; r < AP_TILE; r++) {
+            int pos = t0 + r;
+            float kk = 0.0f;
+            unsigned short vv = 0;
+            if (pos < max_pos && tid < hd) {
+                kk = ap_f16(K[(long)pos * kv_dim + (long)kvh * hd + tid]);
+                vv = V[(long)pos * kv_dim + (long)kvh * hd + tid];
+            }
+            Ks[r][tid] = kk;
+            Vs[r][tid] = vv;
+        }
+        __syncthreads();
+        {
+            int qi = tid >> 4, p = tid & 15;
+            float s = -INFINITY;
+            if (qi < qn) {
+                int tl = qi / group;
+                int limite = seq_antes + tok0 + tl + 1;
+                if (t0 + p < limite) {
+                    float a = 0.0f;
+                    for (int d = 0; d < hd; d++) {
+                        a += Qs[qi][d] * Ks[p][d];
+                    }
+                    s = a;
+                }
+            }
+            P[qi][p] = s;
+        }
+        __syncthreads();
+        {
+            int qi = (tid >> 5) * 2 + ((tid & 31) >> 4);
+            int p = tid & 15;
+            float s = P[qi][p];
+            float mx = s;
+            for (int o = 8; o > 0; o >>= 1) {
+                mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o, 16));
+            }
+            float mold = mm[qi];
+            float mnew = fmaxf(mold, mx);
+            float al = 1.0f, pe = 0.0f;
+            if (mnew != -INFINITY) {
+                al = (mold == -INFINITY) ? 0.0f : expf(mold - mnew);
+                pe = (s == -INFINITY) ? 0.0f : expf(s - mnew);
+            }
+            float sum = pe;
+            for (int o = 8; o > 0; o >>= 1) {
+                sum += __shfl_xor_sync(0xffffffffu, sum, o, 16);
+            }
+            P[qi][p] = pe;
+            if (p == 0) {
+                ll[qi] = ll[qi] * al + sum;
+                mm[qi] = mnew;
+                alfa[qi] = al;
+            }
+        }
+        __syncthreads();
+        if (tid < hd) {
+#pragma unroll
+            for (int qi = 0; qi < 16; qi++) {
+                acc[qi] *= alfa[qi];
+            }
+            for (int p = 0; p < AP_TILE; p++) {
+                float v = ap_f16(Vs[p][tid]);
+#pragma unroll
+                for (int qi = 0; qi < 16; qi++) {
+                    acc[qi] += P[qi][p] * v;
+                }
+            }
+        }
+        __syncthreads();
+    }
+    if (tid < hd) {
+        for (int qi = 0; qi < 16; qi++) {
+            if (qi < qn && ll[qi] > 0.0f) {
+                int tl = qi / group, g = qi % group;
+                out[(long)(tok0 + tl) * q_dim + (long)(kvh * group + g) * hd + tid] = acc[qi] / ll[qi];
+            }
+        }
+    }
 }

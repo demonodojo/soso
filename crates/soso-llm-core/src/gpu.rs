@@ -324,6 +324,28 @@ pub trait GpuDispatch {
         Ok(())
     }
 
+    /// Atención causal de un bloque de `n` tokens en el dispositivo (KV f16 espejado por capa). `q`: `n` vectores de `heads * hd`; `out`: lo
+    /// mismo; `k`/`v`: el KV del host con `seq_antes + n` filas ya añadidas; `filas_validas`: filas del principio que el dispositivo ya tiene
+    /// (el despacho sube las que falten y la actualiza). `Ok(false)` = hacerlo en CPU.
+    #[allow(clippy::too_many_arguments)]
+    fn atencion_prefill(
+        &mut self,
+        capa: u32,
+        q: &[f32],
+        out: &mut [f32],
+        n: usize,
+        seq_antes: usize,
+        heads: usize,
+        kv_heads: usize,
+        hd: usize,
+        k: &[u16],
+        v: &[u16],
+        filas_validas: &mut usize,
+    ) -> Result<bool, ()> {
+        let _ = (capa, q, out, n, seq_antes, heads, kv_heads, hd, k, v, filas_validas);
+        Ok(false)
+    }
+
     /// Varios matvec de **un** vector con una sola espera al final. `hecho[i]` queda a `true` para los que el
     /// despacho ha calculado en `ops[i].out`; los demás los hace quien llama. Por defecto, uno a uno.
     fn matvec_lote(&mut self, ops: &mut [MatvecOp<'_>], hecho: &mut [bool]) -> Result<(), ()> {

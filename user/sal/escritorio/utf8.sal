@@ -28,23 +28,43 @@ fn utf8_feed(st: Int, c: Int) -> Int
     else
         if st >= 16777216
             lead = st - 16777216
-            if b >= 128
-                if b <= 191
-                    lead * 65536 + b
-                else
-                    utf8_reempl()
-            else
+            bad = 0
+            if lead == 244
+                if b > 143
+                    bad = 1
+            if lead == 240
+                if b < 144
+                    bad = 1
+            if bad != 0
                 utf8_reempl()
-        else
-            if st >= 65536
-                lead = st - 65536
+            else
                 if b >= 128
                     if b <= 191
-                        lead * 256 + b
+                        lead * 65536 + b
                     else
                         utf8_reempl()
                 else
                     utf8_reempl()
+        else
+            if st >= 65536
+                lead = st - 65536
+                bad = 0
+                if lead == 224
+                    if b < 160
+                        bad = 1
+                if lead == 237
+                    if b >= 160
+                        bad = 1
+                if bad != 0
+                    utf8_reempl()
+                else
+                    if b >= 128
+                        if b <= 191
+                            lead * 256 + b
+                        else
+                            utf8_reempl()
+                    else
+                        utf8_reempl()
             else
                 if st >= 256
                     lead = st - 256

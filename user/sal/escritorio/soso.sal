@@ -232,6 +232,15 @@ fn read_fd(fd: Int, buf_ptr: Int, len: Int) -> Int ! io
 fn write_fd(fd: Int, buf_ptr: Int, len: Int) -> Int ! io
     syscall(sys_write(), fd, buf_ptr, len, 0, 0, 0)
 
+fn write_str_fd(fd: Int, s: String) -> Int ! io, alloc
+    n = str_len(s)
+    if n <= 0
+        0
+    else
+        buf = bytes_new(n)
+        str_bytes_copy(buf, 0, s)
+        write_fd(fd, bytes_ptr(buf), n)
+
 fn close_fd(fd: Int) -> Int ! io
     syscall(sys_close(), fd, 0, 0, 0, 0, 0)
 

@@ -351,7 +351,19 @@ fn atencion_bloque<S: TensorSource>(
     }
     perfil_marca(&mut tp, FASE_ROPE_KV);
     let mut attn = vec![0.0f32; n * q_dim];
-    atencion_f16_grupos(par, &q, &mut attn, n, q_dim, kv, kv_heads, group, hd, kv_dim, seq_antes + 1);
+    // Con GPU, la atención del bloque va al dispositivo (el coste es cuadrático con el contexto y en CPU dominaba el prefill largo); el KV
+    // del host sigue siendo la fuente de verdad y el dispositivo sube lo que le falte.
+    let en_gpu = use_gpu
+        && kv.dropped == 0
+        && gpu.as_deref_mut().is_some_and(|g| {
+            let mut filas = kv.gpu_kv_filas;
+            let ok = matches!(g.atencion_prefill(layer, &q, &mut attn, n, seq_antes, heads, kv_heads, hd, kv.k_f16_slice(), kv.v_f16_slice(), &mut filas), Ok(true));
+            kv.gpu_kv_filas = filas;
+            ok
+        });
+    if !en_gpu {
+        atencion_f16_grupos(par, &q, &mut attn, n, q_dim, kv, kv_heads, group, hd, kv_dim, seq_antes + 1);
+    }
     for i in 0..n * q_dim {
         attn[i] *= sigmoid(puerta[i]);
     }

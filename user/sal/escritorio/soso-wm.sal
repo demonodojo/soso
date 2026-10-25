@@ -31,6 +31,30 @@ fn prueba_pixel_ok(compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int, x: I
         ok = 0
     ok
 
+fn term_busca_cp(grid: Int, glen: Int, w: Int, h: Int, cp: Int) -> Int ! alloc
+    row = 0
+    found = 0
+    while row < h
+        col = 0
+        while col < w
+            if found == 0
+                if term_leer_cp(grid, glen, w, col, row) == cp
+                    found = 1
+            col = col + 1
+        row = row + 1
+    found
+
+fn prueba_term_echo(tab: Int, i: Int, cp: Int) -> Int ! alloc
+    if tab_get(tab, i, tab_tipo()) != tab_tipo_term()
+        0
+    else
+        grid = tab_get(tab, i, tab_shm_ptr())
+        ww = tab_get(tab, i, tab_ww())
+        wh = tab_get(tab, i, tab_wh())
+        cols = wm_term_cols(ww)
+        rows = wm_term_rows(wh)
+        term_busca_cp(grid, cols * rows * celda_bytes(), cols, rows, cp)
+
 fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     listener = tcp_listen(puerto_wm())
     ok = 1
@@ -39,26 +63,53 @@ fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, 
         msg = bytes_ptr(bytes_new(msg_len()))
         st = st_nuevo(evt, msg)
         _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo())
+        _t1 = wm_abrir_terminal(st, sw, sh)
+        tab = st_get(st, st_tab())
+        t0i = st_get(st, st_focus())
+        if t0i >= 0
+            fd0 = tab_get(tab, t0i, tab_fd())
+            _w0 = write_str_fd(fd0, d"echo uno\n")
+        _t2 = wm_abrir_terminal(st, sw, sh)
+        t1i = st_get(st, st_focus())
+        if t1i >= 0
+            fd1 = tab_get(tab, t1i, tab_fd())
+            _w1 = write_str_fd(fd1, d"echo dos\n")
         _p = spawn_io_full(d"/bin/demo-cliente", 0, 0, 0, fd_kernel_log())
         t0 = uptime_ms()
         ok = 0
+        demo = 0
+        uno = 0
+        dos = 0
         while ok == 0
-            if uptime_ms() - t0 > 15000
+            if uptime_ms() - t0 > 20000
                 ok = 2
             if ok == 0
                 _t = wm_tick(st, listener, compos, clen, sw, sh, stride, bpp, fmt)
             if ok == 0
-                fi = st_get(st, st_focus())
-                if fi >= 0
-                    tab = st_get(st, st_tab())
-                    if tab_get(tab, fi, tab_fase()) == 2
-                        wx = tab_get(tab, fi, tab_wx())
-                        wy = tab_get(tab, fi, tab_wy())
-                        if prueba_pixel_ok(compos, clen, stride, bpp, fmt, wx + 10, wy + barra_alto() + 10, 40, 80, 200) != 0
+                tab = st_get(st, st_tab())
+                if uno == 0
+                    if t0i >= 0
+                        if prueba_term_echo(tab, t0i, 117) != 0
+                            uno = 1
+                if dos == 0
+                    if t1i >= 0
+                        if prueba_term_echo(tab, t1i, 100) != 0
+                            dos = 1
+                if demo == 0
+                    fi = st_get(st, st_focus())
+                    if fi >= 0
+                        if tab_get(tab, fi, tab_fase()) == 2
+                            wx = tab_get(tab, fi, tab_wx())
+                            wy = tab_get(tab, fi, tab_wy())
+                            if prueba_pixel_ok(compos, clen, stride, bpp, fmt, wx + 10, wy + barra_alto() + 10, 40, 80, 200) != 0
+                                demo = 1
+                if uno != 0
+                    if dos != 0
+                        if demo != 0
                             ok = 1
-        _c = wm_cerrar_cliente(st)
         close_fd(listener)
         if ok == 1
+            _pr = print_str(d"soso-wm: prueba OK\n")
             ok = 0
     ok
 
@@ -89,7 +140,7 @@ fn bucle_grafico(ejecutar: String) -> Int ! io, alloc
             if listener >= 0
                 st = st_nuevo(evt, msg)
                 if str_len(ejecutar) > 0
-                    _sp = spawn_io_full(ejecutar, 0, 0, 0, fd_kernel_log())
+                    _sp = spawn_ejecutar(ejecutar)
                 _loop = bucle_wm(st, listener, compos, plen, sw, sh, stride, bpp, fmt)
                 _c = fb_set_mode(fb_mode_consola())
                 close_fd(listener)
@@ -111,6 +162,12 @@ fn arg_valor(flag: String) -> String ! io, alloc
             argv(a + 1)
         a = a + 1
     d""
+
+fn spawn_ejecutar(path: String) -> Int ! io, alloc
+    if str_eq(path, d"/bin/soso-web") != 0
+        spawn_io_4(d"/bin/soso-web", d"--grafico", d"--local", d"/etc/web-prueba.html", 0, 0, 0, fd_kernel_log())
+    else
+        spawn_io_full(path, 0, 0, 0, fd_kernel_log())
 
 fn prueba_web_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     listener = tcp_listen(puerto_wm())

@@ -159,9 +159,96 @@ fn wm_cargar_psf(st: Int) -> Int ! io, alloc
             _l = st_set(st, st_psf_len(), n)
     0
 
+fn pty_max() -> Int
+    8
+
+fn wm_term_cols(ww: Int) -> Int
+    c = (ww - 8) / 8
+    if c < 1
+        1
+    else
+        c
+
+fn wm_term_rows(wh: Int) -> Int
+    r = (wh - barra_alto() - 8) / 16
+    if r < 1
+        1
+    else
+        r
+
 fn wm_pintar_barra(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
     _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, barra_alto(), wm_color_barra())
     _d = wm_marcar_dirty(st, 0, 0, sw, barra_alto())
+    0
+
+fn wm_hit_test(st: Int, x: Int, y: Int) -> Int ! alloc
+    tab = st_get(st, st_tab())
+    z = st_get(st, st_z())
+    nz = st_get(st, st_nz())
+    k = nz - 1
+    found = -1
+    while k >= 0
+        if found < 0
+            i = z_get(z, k)
+            if tab_slot_activo(tab, i) != 0
+                wx = tab_get(tab, i, tab_wx())
+                wy = tab_get(tab, i, tab_wy())
+                ww = tab_get(tab, i, tab_ww())
+                wh = tab_get(tab, i, tab_wh())
+                if ventana_contiene(x, y, wx, wy, ww, wh) != 0
+                    found = i
+        k = k - 1
+    found
+
+fn wm_foco_a(st: Int, i: Int) -> Int ! alloc
+    tab = st_get(st, st_tab())
+    z = st_get(st, st_z())
+    nz = st_get(st, st_nz())
+    if tab_slot_activo(tab, i) != 0
+        _f = st_set(st, st_focus(), i)
+        _u = z_subir(z, nz, i)
+    0
+
+fn wm_cerrar_indice(st: Int, i: Int) -> Int ! io, alloc
+    tab = st_get(st, st_tab())
+    z = st_get(st, st_z())
+    nz = st_get(st, st_nz())
+    fi = st_get(st, st_focus())
+    if tab_cerrar_slot(tab, i) != 0
+        nn = z_quitar(z, nz, i)
+        _n = st_set(st, st_nz(), nn)
+        nfi = fi
+        if fi == i
+            nfi = -1
+            if nn > 0
+                nfi = z_get(z, nn - 1)
+        _fo = st_set(st, st_focus(), nfi)
+    0
+
+fn wm_aplicar_mosaic(st: Int, sw: Int, sh: Int) -> Int ! alloc
+    tab = st_get(st, st_tab())
+    z = st_get(st, st_z())
+    nz = st_get(st, st_nz())
+    mos = st_get(st, st_mosaic())
+    k = 0
+    while k < nz
+        i = z_get(z, k)
+        if tab_slot_activo(tab, i) != 0
+            if mos == 0
+                _r = tab_restaurar_float(tab, i)
+            if mos != 0
+                _g = tab_guardar_float(tab, i)
+                wx = ventana_mosaico_wx(k, nz, sw, sh)
+                wy = ventana_mosaico_wy(k, nz, sw, sh)
+                ww = ventana_mosaico_ww(k, nz, sw, sh)
+                wh = ventana_mosaico_wh(k, nz, sw, sh)
+                clip = ventana_recortar_pantalla(wx, wy, ww, wh, sw, sh)
+                _x = tab_set(tab, i, tab_wx(), ventana_clip_wx(clip))
+                _y = tab_set(tab, i, tab_wy(), ventana_clip_wy(clip))
+                _w = tab_set(tab, i, tab_ww(), ventana_clip_ww(clip))
+                _h = tab_set(tab, i, tab_wh(), ventana_clip_wh(clip))
+        k = k + 1
+    _d = wm_marcar_dirty(st, 0, barra_alto(), sw, sh)
     0
 
 fn wm_repintar_slot(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
@@ -177,8 +264,8 @@ fn wm_repintar_slot(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, 
             if psf > 0
                 grid = tab_get(tab, i, tab_shm_ptr())
                 tst = tab_get(tab, i, tab_term_st())
-                cols = 80
-                rows = 24
+                cols = wm_term_cols(ww)
+                rows = wm_term_rows(wh)
                 _t = term_pintar(tst, grid, cols * rows * celda_bytes(), cols, rows, psf, plen, compos, clen, sw, sh, stride, bpp, fmt, wx + 4, wy + barra_alto() + 4)
         if tab_get(tab, i, tab_tipo()) == tab_tipo_cli()
             if tab_get(tab, i, tab_fase()) == 2
@@ -336,36 +423,61 @@ fn wm_on_danio(st: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int,
 fn wm_leer_msg(fd: Int, buf: Int) -> Int ! io, alloc
     read_timeout_fd(fd, buf, msg_len(), 1)
 
-fn wm_atender_cliente(st: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int, sw: Int, sh: Int) -> Int ! io, alloc
-    fd = st_get(st, st_cli_fd())
-    if fd > 0
-        m = st_get(st, st_msg_buf())
-        n = wm_leer_msg(fd, m)
-        if n == 0
-            _c = wm_cerrar_cliente(st)
-        if n == msg_len()
-            op = msg_get_op(m)
-            if op == op_hola()
-                _f = st_set(st, st_fase(), 1)
-            if op == op_crear()
-                if st_get(st, st_fase()) == 1
-                    ok = wm_on_crear(st, fd, m, fmt, sw, sh)
-                    if ok != 0
-                        _r = wm_on_crear_repintar(st, compos, clen, sw, sh, stride, bpp, fmt)
-            if op == op_danio()
-                _d = wm_on_danio(st, compos, clen, stride, bpp, fmt, m)
-            if op == op_cerrar_cli()
-                _x = wm_cerrar_cliente(st)
+fn wm_dispatch_msg(st: Int, tab: Int, i: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int, sw: Int, sh: Int, m: Int) -> Int ! io, alloc
+    fd = tab_get(tab, i, tab_fd())
+    op = msg_get_op(m)
+    if op == op_hola()
+        _f = tab_set(tab, i, tab_fase(), 1)
+    if op == op_crear()
+        if tab_get(tab, i, tab_fase()) == 1
+            _s = wm_st_desde_tab(st, tab, i)
+            ok = wm_on_crear(st, fd, m, fmt, sw, sh)
+            _t = wm_tab_desde_st(st, tab, i)
+            if ok != 0
+                _r = wm_on_crear_repintar(st, compos, clen, sw, sh, stride, bpp, fmt)
+                _t2 = wm_tab_desde_st(st, tab, i)
+    if op == op_danio()
+        _s = wm_st_desde_tab(st, tab, i)
+        _d = wm_on_danio(st, compos, clen, stride, bpp, fmt, m)
+        _t = wm_tab_desde_st(st, tab, i)
+    if op == op_cerrar_cli()
+        _s = wm_st_desde_tab(st, tab, i)
+        _x = wm_cerrar_cliente(st)
+        _t = wm_tab_desde_st(st, tab, i)
+        _c = wm_cerrar_indice(st, i)
+    if op == op_cerrar_wm()
+        _q = st_set(st, st_salir(), 1)
     0
 
-fn wm_reenviar_raton(st: Int, x: Int, y: Int, botones: Int) -> Int ! io, alloc
-    if st_get(st, st_fase()) == 2
-        wx = st_get(st, st_wx())
-        wy = st_get(st, st_wy())
-        ww = st_get(st, st_ww())
-        wh = st_get(st, st_wh())
-        cw = st_get(st, st_cw())
-        ch = st_get(st, st_ch())
+fn wm_atender_cliente_tab(st: Int, tab: Int, i: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int, sw: Int, sh: Int) -> Int ! io, alloc
+    fd = tab_get(tab, i, tab_fd())
+    if fd > 0
+        m = st_get(st, st_msg_buf())
+        n = read_timeout_fd(fd, m, msg_len(), 1)
+        if n == 0
+            _c = wm_cerrar_indice(st, i)
+        if n > 0
+            j = 0
+            while j < n
+                bb = bytes_view_mem(m, msg_len())
+                ch = bytes_get_u8(bb, j)
+                al = tab_acc_push_byte(tab, i, ch)
+                if al == 32
+                    slot = tab + tab_slot_off(i) + tab_acc_off()
+                    _cp = bytes_copy(m, 0, slot, 0, 32)
+                    _r = tab_acc_reset(tab, i)
+                    _d = wm_dispatch_msg(st, tab, i, compos, clen, stride, bpp, fmt, sw, sh, m)
+                j = j + 1
+    0
+
+fn wm_reenviar_raton_slot(st: Int, tab: Int, i: Int, x: Int, y: Int, botones: Int) -> Int ! io, alloc
+    if tab_get(tab, i, tab_fase()) == 2
+        wx = tab_get(tab, i, tab_wx())
+        wy = tab_get(tab, i, tab_wy())
+        ww = tab_get(tab, i, tab_ww())
+        wh = tab_get(tab, i, tab_wh())
+        cw = tab_get(tab, i, tab_cw())
+        ch = tab_get(tab, i, tab_ch())
         if ventana_contiene(x, y, wx, wy, ww, wh) != 0
             lx = x - wx
             ly = y - wy - barra_alto()
@@ -373,10 +485,69 @@ fn wm_reenviar_raton(st: Int, x: Int, y: Int, botones: Int) -> Int ! io, alloc
                 if ly >= 0
                     if lx < cw
                         if ly < ch
-                            fd = st_get(st, st_cli_fd())
+                            fd = tab_get(tab, i, tab_fd())
                             msg = st_get(st, st_msg_buf())
                             _e = msg_encode_raton(msg, lx, ly, botones)
                             _w = write_fd(fd, msg, msg_len())
+    0
+
+fn wm_raton_mover(st: Int, x: Int, y: Int, botones: Int, sw: Int, sh: Int) -> Int ! io, alloc
+    tab = st_get(st, st_tab())
+    dix = st_get(st, st_drag_ix())
+    if dix >= 0
+        if botones != 0
+            dk = st_get(st, st_drag_kind())
+            wx = tab_get(tab, dix, tab_wx())
+            wy = tab_get(tab, dix, tab_wy())
+            ww = tab_get(tab, dix, tab_ww())
+            wh = tab_get(tab, dix, tab_wh())
+            if dk == 1
+                _x = tab_set(tab, dix, tab_wx(), x - st_get(st, st_dx0()))
+                _y = tab_set(tab, dix, tab_wy(), y - st_get(st, st_dy0()))
+            if dk == 2
+                nw = max(ventana_min_ancho(), x - wx)
+                nh = max(ventana_min_alto() + barra_alto(), y - wy)
+                _w = tab_set(tab, dix, tab_ww(), nw)
+                _h = tab_set(tab, dix, tab_wh(), nh)
+            _d = wm_marcar_dirty(st, 0, barra_alto(), sw, sh)
+    if dix < 0
+        fi = st_get(st, st_focus())
+        if fi >= 0
+            _r = wm_reenviar_raton_slot(st, tab, fi, x, y, botones)
+    0
+
+fn wm_raton_btn(st: Int, x: Int, y: Int, botones: Int) -> Int ! io, alloc
+    tab = st_get(st, st_tab())
+    if botones == 0
+        _d = st_set(st, st_drag_ix(), -1)
+        _k = st_set(st, st_drag_kind(), 0)
+    if botones != 0
+        i = wm_hit_test(st, x, y)
+        if i >= 0
+            _f = wm_foco_a(st, i)
+            wx = tab_get(tab, i, tab_wx())
+            wy = tab_get(tab, i, tab_wy())
+            ww = tab_get(tab, i, tab_ww())
+            wh = tab_get(tab, i, tab_wh())
+            if ventana_hit_cerrar(x, y, wx, wy, ww) != 0
+                if tab_get(tab, i, tab_tipo()) == tab_tipo_cli()
+                    fd = tab_get(tab, i, tab_fd())
+                    msg = st_get(st, st_msg_buf())
+                    _e = msg_set_op(msg, op_cerrar_wm())
+                    _w = write_fd(fd, msg, msg_len())
+                _c = wm_cerrar_indice(st, i)
+            else
+                if ventana_hit_resize(x, y, wx, wy, ww, wh) != 0
+                    _di = st_set(st, st_drag_ix(), i)
+                    _dk = st_set(st, st_drag_kind(), 2)
+                else
+                    if ventana_hit_titulo(x, y, wx, wy, ww) != 0
+                        _di = st_set(st, st_drag_ix(), i)
+                        _dk = st_set(st, st_drag_kind(), 1)
+                        _x0 = st_set(st, st_dx0(), x - wx)
+                        _y0 = st_set(st, st_dy0(), y - wy)
+                    else
+                        _r = wm_reenviar_raton_slot(st, tab, i, x, y, botones)
     0
 
 fn wm_reenviar_tecla(st: Int, key: Int, mods: Int) -> Int ! io, alloc
@@ -406,12 +577,13 @@ fn wm_tecla_foco(st: Int, key: Int) -> Int ! io, alloc
     0
 
 fn wm_cerrar_foco(st: Int) -> Int ! io, alloc
-    tab = st_get(st, st_tab())
     fi = st_get(st, st_focus())
     if fi >= 0
+        tab = st_get(st, st_tab())
         _s = wm_st_desde_tab(st, tab, fi)
         _c = wm_cerrar_cliente(st)
-        _t = tab_cerrar_slot(tab, fi)
+        _t = wm_tab_desde_st(st, tab, fi)
+        _x = wm_cerrar_indice(st, fi)
     0
 
 fn wm_foco_siguiente(st: Int) -> Int ! alloc
@@ -437,6 +609,8 @@ fn wm_abrir_terminal(st: Int, sw: Int, sh: Int) -> Int ! io, alloc
     z = st_get(st, st_z())
     si = tab_buscar_libre(tab)
     ok = 0
+    if tab_contar_tipo(tab, tab_tipo_term()) >= pty_max()
+        si = -1
     if si >= 0
         pack = pty_open()
         if pack >= 0
@@ -454,8 +628,8 @@ fn wm_abrir_terminal(st: Int, sw: Int, sh: Int) -> Int ! io, alloc
             nn = z_anadir(z, nz, si)
             _n = st_set(st, st_nz(), nn)
             _fo = st_set(st, st_focus(), si)
-            cols = 80
-            rows = 24
+            cols = wm_term_cols(640)
+            rows = wm_term_rows(400 + barra_alto())
             grid = term_capa(cols, rows)
             tst = term_st_nuevo(cols, rows)
             _g = tab_set(tab, si, tab_shm_ptr(), grid)
@@ -480,8 +654,10 @@ fn wm_slot_atender_term(st: Int, tab: Int, i: Int, compos: Int, clen: Int, strid
             if n > 0
                 grid = tab_get(tab, i, tab_shm_ptr())
                 tst = tab_get(tab, i, tab_term_st())
-                cols = 80
-                rows = 24
+                ww = tab_get(tab, i, tab_ww())
+                wh = tab_get(tab, i, tab_wh())
+                cols = wm_term_cols(ww)
+                rows = wm_term_rows(wh)
                 glen = cols * rows * celda_bytes()
                 j = 0
                 while j < n
@@ -498,14 +674,14 @@ fn wm_slot_atender_term(st: Int, tab: Int, i: Int, compos: Int, clen: Int, strid
                 _d = wm_marcar_dirty(st, wx, wy, wx + ww, wy + wh)
     0
 
-fn wm_input(st: Int, evt: Int, evt_len: Int, n: Int) -> Int ! io, alloc
+fn wm_input(st: Int, evt: Int, evt_len: Int, n: Int, sw: Int, sh: Int) -> Int ! io, alloc
     i = 0
     while i < n
         k = input_event_kind(evt, evt_len, i)
         if k == input_mouse_move()
-            _r = wm_reenviar_raton(st, input_event_x(evt, evt_len, i), input_event_y(evt, evt_len, i), 0)
+            _r = wm_raton_mover(st, input_event_x(evt, evt_len, i), input_event_y(evt, evt_len, i), input_event_button(evt, evt_len, i), sw, sh)
         if k == input_mouse_btn()
-            _r = wm_reenviar_raton(st, input_event_x(evt, evt_len, i), input_event_y(evt, evt_len, i), input_event_button(evt, evt_len, i))
+            _r = wm_raton_btn(st, input_event_x(evt, evt_len, i), input_event_y(evt, evt_len, i), input_event_button(evt, evt_len, i))
         if k == input_key()
             if input_event_pressed(evt, evt_len, i) != 0
                 key = input_event_key(evt, evt_len, i)
@@ -523,6 +699,7 @@ fn wm_input(st: Int, evt: Int, evt_len: Int, n: Int) -> Int ! io, alloc
                             _f = wm_foco_siguiente(st)
                         if key == 116
                             _m = st_set(st, st_mosaic(), 1 - st_get(st, st_mosaic()))
+                            _a = wm_aplicar_mosaic(st, sw, sh)
                 if (mods & mod_alt()) == 0
                     _t = wm_tecla_foco(st, key)
         i = i + 1
@@ -533,12 +710,10 @@ fn wm_slot_atender(st: Int, tab: Int, i: Int, compos: Int, clen: Int, stride: In
         if tab_get(tab, i, tab_tipo()) == tab_tipo_term()
             _t = wm_slot_atender_term(st, tab, i, compos, clen, stride, bpp, fmt)
         if tab_get(tab, i, tab_tipo()) == tab_tipo_cli()
-            _s = wm_st_desde_tab(st, tab, i)
-            _a = wm_atender_cliente(st, compos, clen, stride, bpp, fmt, sw, sh)
-            _w = wm_tab_desde_st(st, tab, i)
+            _a = wm_atender_cliente_tab(st, tab, i, compos, clen, stride, bpp, fmt, sw, sh)
             if tab_get(tab, i, tab_fase()) == 0
                 if tab_get(tab, i, tab_fd()) <= 0
-                    _c = tab_cerrar_slot(tab, i)
+                    _c = wm_cerrar_indice(st, i)
     0
 
 fn wm_aceptar_cliente(st: Int, acc: Int) -> Int ! io, alloc
@@ -575,7 +750,7 @@ fn wm_tick(st: Int, listener: Int, compos: Int, clen: Int, sw: Int, sh: Int, str
         fi = st_get(st, st_focus())
         if fi >= 0
             _ld = wm_st_desde_tab(st, st_get(st, st_tab()), fi)
-        _i = wm_input(st, evt, 24 * 8, en)
+        _i = wm_input(st, evt, 24 * 8, en, sw, sh)
         if fi >= 0
             _sv = wm_tab_desde_st(st, st_get(st, st_tab()), fi)
         en = input_poll(evt, 24 * 8, 8)
@@ -583,7 +758,7 @@ fn wm_tick(st: Int, listener: Int, compos: Int, clen: Int, sw: Int, sh: Int, str
         fi = st_get(st, st_focus())
         if fi >= 0
             _ld = wm_st_desde_tab(st, st_get(st, st_tab()), fi)
-        _i = wm_input(st, evt, 24 * 8, en)
+        _i = wm_input(st, evt, 24 * 8, en, sw, sh)
         if fi >= 0
             _sv = wm_tab_desde_st(st, st_get(st, st_tab()), fi)
     acc = tcp_accept(listener, 1)

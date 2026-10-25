@@ -42,6 +42,9 @@ pub struct LayerKv {
     /// posiciones absolutas que tiene el dispositivo.
     pub en_gpu: bool,
     pub gpu_pos: usize,
+    /// Filas del principio de este KV que el despacho de GPU ya tiene espejadas y siguen siendo válidas (atención del prefill por bloques):
+    /// recortar, reiniciar o expulsar filas la baja; el despacho sube lo que falte y la sube.
+    pub gpu_kv_filas: usize,
 }
 
 impl LayerKv {
@@ -71,6 +74,7 @@ impl LayerKv {
                 dropped: 0,
                 en_gpu: false,
                 gpu_pos: 0,
+                gpu_kv_filas: 0,
             },
             KvDtype::I8 => Self {
                 dtype,
@@ -87,6 +91,7 @@ impl LayerKv {
                 dropped: 0,
                 en_gpu: false,
                 gpu_pos: 0,
+                gpu_kv_filas: 0,
             },
         }
     }
@@ -117,6 +122,7 @@ impl LayerKv {
         self.dropped = 0;
         self.en_gpu = false;
         self.gpu_pos = 0;
+        self.gpu_kv_filas = 0;
     }
 
     /// Posiciones absolutas cubiertas (expulsadas + guardadas).
@@ -140,6 +146,7 @@ impl LayerKv {
         let m = filas.min(self.mass.len());
         self.mass.drain(..m);
         self.dropped += filas;
+        self.gpu_kv_filas = 0;
     }
 
     /// Reserva (y pone a cero) el estado GDN si el tamaño no coincide.
@@ -162,6 +169,7 @@ impl LayerKv {
         self.k_scale.truncate(tokens);
         self.v_scale.truncate(tokens);
         self.mass.truncate(tokens);
+        self.gpu_kv_filas = self.gpu_kv_filas.min(tokens + self.dropped);
     }
 
     pub fn ensure_gdn(&mut self, n_v_heads: usize, head_dim: usize, conv_len: usize) {

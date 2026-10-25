@@ -2803,6 +2803,9 @@ fn ssh_soso_wm_prueba(key: &Path, ssh_port: u16) -> Result<(), String> {
         true,
         None,
     )?;
+    if !texto.contains("soso-wm: prueba OK") {
+        return Err(format!("soso-wm --prueba sin línea OK: {texto:?}"));
+    }
     if !texto.contains("WM_EXIT=0") {
         return Err(format!("soso-wm --prueba no devolvió 0: {texto:?}"));
     }

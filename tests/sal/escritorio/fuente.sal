@@ -1,14 +1,21 @@
 import "../../../user/sal/escritorio/fuente.sal"
 
 fn main() -> Int ! alloc
-    buf = bytes_ptr(bytes_new(64))
-    b = bytes_view_mem(buf, 64)
+    buf = bytes_ptr(bytes_new(4096))
+    b = bytes_view_mem(buf, 4096)
     bytes_set_u32(b, 0, 2252299634)
+    bytes_set_u32(b, 8, 32)
+    bytes_set_u32(b, 12, 0)
     bytes_set_u32(b, 16, 16)
-    bytes_set_u32(b, 20, 16)
-    bytes_set_u32(b, 24, 8)
+    bytes_set_u32(b, 20, 8)
+    bytes_set_u32(b, 24, 16)
     bytes_set_u32(b, 28, 128)
-    if psf2_magic_ok(buf, 64) == 0
+    goff = 32 + 65 * 16 + 2
+    bytes_set_u8(b, goff, 124)
+    if psf2_magic_ok(buf, 4096) == 0
         1
     else
-        0
+        if psf2_glifo_byte(buf, 4096, 65, 2, 2) != 1
+            2
+        else
+            0

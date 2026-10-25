@@ -7,8 +7,18 @@ fn main() -> Int ! alloc
     if cp != 225
         1
     else
-        bad = utf8_feed(utf8_inicio(), 255)
-        if bad != 65533
+        ov = utf8_feed(utf8_inicio(), 224)
+        ov = utf8_feed(ov, 128)
+        if ov != 65533
             2
         else
-            0
+            su = utf8_feed(utf8_inicio(), 237)
+            su = utf8_feed(su, 160)
+            if su != 65533
+                3
+            else
+                bad = utf8_feed(utf8_inicio(), 255)
+                if bad != 65533
+                    4
+                else
+                    0

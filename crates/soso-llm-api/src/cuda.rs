@@ -219,6 +219,9 @@ pub struct CudaGpu {
     f_gateup_n: CuFunction,
     f_down_n: CuFunction,
     f_iq_matmul_n: CuFunction,
+    f_attn_prefill: CuFunction,
+    /// KV espejado por capa para la atención del prefill: (K, V, filas de capacidad).
+    kvdev: HashMap<u32, (u64, u64, usize)>,
     x_cap: usize,
     y_dev: u64,
     y_cap: usize,
@@ -271,6 +274,7 @@ impl CudaGpu {
             let f_gateup_n = func(mod_iq, "iq_gateup_n")?;
             let f_down_n = func(mod_iq, "iq_down_n")?;
             let f_iq_matmul_n = func(mod_iq, "iq_matmul_n")?;
+            let f_attn_prefill = func(mod_iq, "attn_prefill_f16")?;
             let (mut libre, mut total) = (0usize, 0usize);
             ck((api.mem_info)(&mut libre, &mut total), "cuMemGetInfo")?;
             let capa = capa::Estado::nueva(&api)?;
@@ -300,6 +304,8 @@ impl CudaGpu {
                 f_gateup_n,
                 f_down_n,
                 f_iq_matmul_n,
+                f_attn_prefill,
+                kvdev: HashMap::new(),
                 x_cap: 0,
                 y_dev: 0,
                 y_cap: 0,
@@ -661,6 +667,81 @@ impl CudaGpu {
         Ok(true)
     }
 
+    /// Atención del prefill de un bloque en la GPU: ver [`GpuDispatch::atencion_prefill`].
+    #[allow(clippy::too_many_arguments)]
+    fn atencion_prefill_gpu(
+        &mut self,
+        capa: u32,
+        q: &[f32],
+        out: &mut [f32],
+        n: usize,
+        seq_antes: usize,
+        heads: usize,
+        kv_heads: usize,
+        hd: usize,
+        k: &[u16],
+        v: &[u16],
+        filas_validas: &mut usize,
+    ) -> Result<bool, String> {
+        let group = if kv_heads == 0 { 0 } else { heads / kv_heads };
+        if hd > 256 || group == 0 || group > 16 || heads % kv_heads != 0 || n == 0 {
+            return Ok(false);
+        }
+        let kv_dim = kv_heads * hd;
+        let total = seq_antes + n;
+        if k.len() < total * kv_dim || v.len() < total * kv_dim || q.len() != n * heads * hd || out.len() != n * heads * hd {
+            return Ok(false);
+        }
+        unsafe { ck((self.api.ctx_set_current)(self.ctx), "cuCtxSetCurrent")? };
+        // 1) KV espejado: capacidad, y subir las filas que el dispositivo no tenga válidas
+        let valid = (*filas_validas).min(seq_antes);
+        let (mut kd, mut vd, mut cap) = self.kvdev.get(&capa).copied().unwrap_or((0, 0, 0));
+        if total > cap {
+            let ncap = total.div_ceil(4096) * 4096 + 4096;
+            let (nk, nv) = (self.alloc(ncap * kv_dim * 2)?, self.alloc(ncap * kv_dim * 2)?);
+            if kd != 0 && valid > 0 {
+                ck(unsafe { (self.api.dtod)(nk, kd, valid * kv_dim * 2) }, "cuMemcpyDtoD")?;
+                ck(unsafe { (self.api.dtod)(nv, vd, valid * kv_dim * 2) }, "cuMemcpyDtoD")?;
+            }
+            if kd != 0 {
+                unsafe {
+                    (self.api.mem_free)(kd);
+                    (self.api.mem_free)(vd);
+                }
+            }
+            (kd, vd, cap) = (nk, nv, ncap);
+            self.kvdev.insert(capa, (kd, vd, cap));
+        }
+        let (ini, fin) = (valid * kv_dim, total * kv_dim);
+        self.subir(kd + (ini * 2) as u64, unsafe { std::slice::from_raw_parts(k.as_ptr().add(ini) as *const u8, (fin - ini) * 2) })?;
+        self.subir(vd + (ini * 2) as u64, unsafe { std::slice::from_raw_parts(v.as_ptr().add(ini) as *const u8, (fin - ini) * 2) })?;
+        *filas_validas = total;
+        // 2) consultas, lanzamiento, resultado
+        let q_dev = self.blq_asegurar(0, q.len() * 4)?;
+        let o_dev = self.blq_asegurar(3, out.len() * 4)?;
+        self.subir(q_dev, unsafe { std::slice::from_raw_parts(q.as_ptr() as *const u8, q.len() * 4) })?;
+        let tb = 16 / group;
+        let (mut a0, mut a1, mut a2, mut a3) = (q_dev, kd, vd, o_dev);
+        let (mut a4, mut a5, mut a6, mut a7, mut a8, mut a9) = (n as c_int, seq_antes as c_int, heads as c_int, kv_heads as c_int, hd as c_int, group as c_int);
+        let mut args = [
+            &mut a0 as *mut _ as *mut c_void,
+            &mut a1 as *mut _ as *mut c_void,
+            &mut a2 as *mut _ as *mut c_void,
+            &mut a3 as *mut _ as *mut c_void,
+            &mut a4 as *mut _ as *mut c_void,
+            &mut a5 as *mut _ as *mut c_void,
+            &mut a6 as *mut _ as *mut c_void,
+            &mut a7 as *mut _ as *mut c_void,
+            &mut a8 as *mut _ as *mut c_void,
+            &mut a9 as *mut _ as *mut c_void,
+        ];
+        self.lanzar3s(self.f_attn_prefill, (kv_heads as u32, (n as u32).div_ceil(tb as u32), 1), (256, 1, 1), 0, &mut args)?;
+        ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
+        ck(unsafe { (self.api.dtoh)(out.as_mut_ptr() as *mut c_void, o_dev, out.len() * 4) }, "cuMemcpyDtoH")?;
+        self.stats.launches += 1;
+        Ok(true)
+    }
+
     /// Asegura que el búfer `i` del prefill por bloques tenga al menos `bytes`.
     fn blq_asegurar(&mut self, i: usize, bytes: usize) -> Result<u64, String> {
         if bytes > self.blq[i].1 {
@@ -1006,6 +1087,32 @@ impl GpuDispatch for CudaGpu {
             Err(e) => {
                 eprintln!("cuda: capa {}: {e}; sigo en CPU", capa.layer);
                 self.capa.rechazar(capa.layer);
+                Err(())
+            }
+        }
+    }
+
+    fn atencion_prefill(
+        &mut self,
+        capa: u32,
+        q: &[f32],
+        out: &mut [f32],
+        n: usize,
+        seq_antes: usize,
+        heads: usize,
+        kv_heads: usize,
+        hd: usize,
+        k: &[u16],
+        v: &[u16],
+        filas_validas: &mut usize,
+    ) -> Result<bool, ()> {
+        match self.atencion_prefill_gpu(capa, q, out, n, seq_antes, heads, kv_heads, hd, k, v, filas_validas) {
+            Ok(b) => Ok(b),
+            Err(e) => {
+                if !self.avisado {
+                    eprintln!("cuda: {e}; sigo en CPU");
+                    self.avisado = true;
+                }
                 Err(())
             }
         }

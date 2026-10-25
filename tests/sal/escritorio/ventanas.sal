@@ -1,0 +1,25 @@
+import "../../../user/sal/escritorio/ventanas.sal"
+
+fn main() -> Int ! alloc
+    sw = 1920
+    sh = 1080
+    if ventana_mosaico_ww(0, 1, sw, sh) != sw
+        1
+    else
+        if ventana_mosaico_ww(0, 2, sw, sh) != sw / 2
+            2
+        else
+            if ventana_mosaico_ww(1, 2, sw, sh) != sw - sw / 2
+                3
+            else
+                wx = 1000
+                wy = barra_alto()
+                ww = 400
+                cx = wx + ww - 10
+                if ventana_hit_cerrar(cx, wy + 2, wx, wy, ww) == 0
+                    4
+                else
+                    if ventana_hit_resize(wx + ww - 6, wy + 300 - 6, wx, wy, ww, 300) == 0
+                        5
+                    else
+                        0
