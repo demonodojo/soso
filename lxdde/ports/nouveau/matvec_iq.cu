@@ -1504,3 +1504,112 @@ extern "C" __global__ void dec_moe_combine_cpu(float *hid, const float *cpu, con
     }
     hid[i] += a;
 }
+
+/* matvec de decode (n = 1) para cualquier código de `iq_decodificar`: una fila por warp, `x` en memoria compartida (cols floats).
+ * grid = ceil(rows / 8); 256 hilos. Con pocas filas reparte mejor que los tiles de tensor cores (que dan 1 bloque por 64 filas). */
+extern "C" __global__ void __launch_bounds__(256) dec_matvec(const unsigned char *w, const float *x, float *y, int rows, int cols, int code, long rb)
+{
+    extern __shared__ float xs[];
+    for (int i = (int)threadIdx.x; i < cols; i += 256) {
+        xs[i] = x[i];
+    }
+    __syncthreads();
+    int warp = (int)threadIdx.x >> 5;
+    int lane = (int)threadIdx.x & 31;
+    int row = (int)blockIdx.x * 8 + warp;
+    if (row >= rows) {
+        return;
+    }
+    const unsigned char *wr = w + (long)row * rb;
+    int units = cols >> 5;
+    float acc = 0.0f;
+    for (int u = lane; u < units; u += 32) {
+        float o[32];
+        iq_decodificar(code, wr, u, o);
+        const float *xp = xs + u * 32;
+#pragma unroll
+        for (int l = 0; l < 32; l++) {
+            acc += o[l] * xp[l];
+        }
+    }
+    acc = iq_warp_sum(acc);
+    if (lane == 0) {
+        y[row] = acc;
+    }
+}
+
+/* Versiones «una fila por warp» de los expertos de decode (n = 1): más bloques que los tiles de tensor cores y sin relleno a 8 columnas. */
+extern "C" __global__ void __launch_bounds__(256) dec_moe_gateup_w(const unsigned long long *tg, const unsigned long long *tu, const int *idx, const float *xn,
+                                                                  float *act, int ffn, int h, int dg, int du, long rbg, long rbu)
+{
+    extern __shared__ float xs[];
+    for (int i = (int)threadIdx.x; i < h; i += 256) {
+        xs[i] = xn[i];
+    }
+    __syncthreads();
+    int slot = (int)blockIdx.z;
+    int e = idx[slot];
+    int warp = (int)threadIdx.x >> 5;
+    int lane = (int)threadIdx.x & 31;
+    int row = (int)blockIdx.x * 8 + warp;
+    if (row >= ffn) {
+        return;
+    }
+    const unsigned char *wg = (const unsigned char *)tg[e] + (long)row * rbg;
+    const unsigned char *wu = (const unsigned char *)tu[e] + (long)row * rbu;
+    int units = h >> 5;
+    float ag = 0.0f, au = 0.0f;
+    for (int u = lane; u < units; u += 32) {
+        float o[32];
+        const float *xp = xs + u * 32;
+        iq_decodificar(dg, wg, u, o);
+#pragma unroll
+        for (int l = 0; l < 32; l++) {
+            ag += o[l] * xp[l];
+        }
+        iq_decodificar(du, wu, u, o);
+#pragma unroll
+        for (int l = 0; l < 32; l++) {
+            au += o[l] * xp[l];
+        }
+    }
+    ag = iq_warp_sum(ag);
+    au = iq_warp_sum(au);
+    if (lane == 0) {
+        act[(long)slot * ffn + row] = (ag / (1.0f + expf(-ag))) * au;
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(256) dec_moe_down_w(const unsigned long long *td, const int *idx, const float *act, float *ys, int rows, int cols,
+                                                                int dd, long rbd)
+{
+    extern __shared__ float xs[];
+    int slot = (int)blockIdx.z;
+    for (int i = (int)threadIdx.x; i < cols; i += 256) {
+        xs[i] = act[(long)slot * cols + i];
+    }
+    __syncthreads();
+    int e = idx[slot];
+    int warp = (int)threadIdx.x >> 5;
+    int lane = (int)threadIdx.x & 31;
+    int row = (int)blockIdx.x * 8 + warp;
+    if (row >= rows) {
+        return;
+    }
+    const unsigned char *wr = (const unsigned char *)td[e] + (long)row * rbd;
+    int units = cols >> 5;
+    float acc = 0.0f;
+    for (int u = lane; u < units; u += 32) {
+        float o[32];
+        iq_decodificar(dd, wr, u, o);
+        const float *xp = xs + u * 32;
+#pragma unroll
+        for (int l = 0; l < 32; l++) {
+            acc += o[l] * xp[l];
+        }
+    }
+    acc = iq_warp_sum(acc);
+    if (lane == 0) {
+        ys[(long)slot * rows + row] = acc;
+    }
+}

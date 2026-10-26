@@ -280,6 +280,8 @@ pub struct CudaGpu {
     stream: *mut c_void,
     capturando: bool,
     modulo_iq: CuModule,
+    /// Se incrementa cuando cambian las direcciones del KV espejado (invalida los grafos del decode).
+    kv_gen: u64,
     dec: Option<decode::DecodeDev>,
 }
 
@@ -375,6 +377,7 @@ impl CudaGpu {
                 f_down_multi,
                 kvdev: HashMap::new(),
                 modulo_iq: mod_iq,
+                kv_gen: 0,
                 dec: None,
                 x_cap: 0,
                 y_dev: 0,
@@ -1024,6 +1027,7 @@ impl CudaGpu {
             }
             (kd, vd, cap) = (nk, nv, ncap);
             self.kvdev.insert(capa, (kd, vd, cap));
+            self.kv_gen += 1;
         }
         let (ini, fin) = (valid * kv_dim, total * kv_dim);
         self.subir(kd + (ini * 2) as u64, unsafe { std::slice::from_raw_parts(k.as_ptr().add(ini) as *const u8, (fin - ini) * 2) })?;

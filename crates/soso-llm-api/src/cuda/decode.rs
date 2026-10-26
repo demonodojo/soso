@@ -34,6 +34,9 @@ pub(super) struct FnsDec {
     pgate: CuFunction,
     combine: CuFunction,
     combine_cpu: CuFunction,
+    matvec: CuFunction,
+    gateup_w: CuFunction,
+    down_w: CuFunction,
 }
 
 #[derive(Clone, Copy)]
@@ -158,6 +161,9 @@ pub(super) struct DecodeDev {
     n_attn: usize,
     kv_dim: usize,
     bufs: [(u64, usize); b::N],
+    grafos: std::collections::HashMap<(usize, usize, usize), *mut c_void>,
+    paradas: std::collections::HashMap<(usize, usize, usize), Option<usize>>,
+    kv_gen: u64,
 }
 
 impl CudaGpu {
@@ -229,6 +235,9 @@ impl CudaGpu {
             pgate: get("dec_pgate")?,
             combine: get("dec_moe_combine")?,
             combine_cpu: get("dec_moe_combine_cpu")?,
+            matvec: get("dec_matvec")?,
+            gateup_w: get("dec_moe_gateup_w")?,
+            down_w: get("dec_moe_down_w")?,
         };
         // 1) pesos densos y pequeños, todos residentes (si alguno no cabe o no tiene decodificador, no hay decode en GPU)
         let mut capas: Vec<CapaD> = Vec::with_capacity(plan.capas.len());
@@ -419,7 +428,7 @@ impl CudaGpu {
         for (i, (_, bytes)) in sizes.iter().enumerate() {
             Self::dec_buf(&mut bufs, &self.api, i, *bytes)?;
         }
-        self.dec = Some(DecodeDev { f, capas, h, eps: plan.eps, nfin, lm, vocab: plan.vocab, n_attn, kv_dim, bufs });
+        self.dec = Some(DecodeDev { f, capas, h, eps: plan.eps, nfin, lm, vocab: plan.vocab, n_attn, kv_dim, bufs, grafos: Default::default(), paradas: Default::default(), kv_gen: 0 });
         Ok(true)
     }
 
@@ -482,6 +491,7 @@ impl CudaGpu {
             }
         }
         self.kvdev.insert(layer, (nk, nv, ncap));
+        self.kv_gen += 1;
         Ok(())
     }
 
@@ -498,13 +508,18 @@ impl CudaGpu {
         Ok(())
     }
 
-    fn dec_mm1(&self, m: &MatDev, x: u64, y: u64) -> Result<(), String> {
-        self.lanzar_a(
-            self.f_iq_matmul_n,
-            ((m.rows as u32).div_ceil(64), 1, 1),
-            (128, 1, 1),
-            &[Arg::P(m.d), Arg::P(x), Arg::P(y), Arg::I(m.rows as i32), Arg::I(m.cols as i32), Arg::I(1), Arg::I(m.code), Arg::L(m.rb)],
-        )
+    fn dec_mm1(&self, f: CuFunction, m: &MatDev, x: u64, y: u64) -> Result<(), String> {
+        if std::env::var("SOSO_DECODE_MMA").is_ok() {
+            return self.lanzar_a(
+                self.f_iq_matmul_n,
+                ((m.rows as u32).div_ceil(64), 1, 1),
+                (128, 1, 1),
+                &[Arg::P(m.d), Arg::P(x), Arg::P(y), Arg::I(m.rows as i32), Arg::I(m.cols as i32), Arg::I(1), Arg::I(m.code), Arg::L(m.rb)],
+            );
+        }
+        let mut vals: Vec<u64> = vec![m.d, x, y, m.rows as u32 as u64, m.cols as u32 as u64, m.code as u32 as u64, m.rb as u64];
+        let mut ptrs: Vec<*mut c_void> = vals.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
+        self.lanzar3s(f, ((m.rows as u32).div_ceil(8), 1, 1), (256, 1, 1), (m.cols * 4) as u32, &mut ptrs)
     }
 
     pub(super) fn decode_token_impl(
@@ -516,15 +531,15 @@ impl CudaGpu {
         kv_rows: &mut [u16],
     ) -> Result<bool, String> {
         unsafe { ck((self.api.ctx_set_current)(self.ctx), "cuCtxSetCurrent")? };
-        let Some(dec) = self.dec.take() else { return Ok(false) };
-        let r = self.decode_token_dev(&dec, embed, pos, cpu_moe, logits, kv_rows);
+        let Some(mut dec) = self.dec.take() else { return Ok(false) };
+        let r = self.decode_token_dev(&mut dec, embed, pos, cpu_moe, logits, kv_rows);
         self.dec = Some(dec);
         r
     }
 
     fn decode_token_dev(
         &mut self,
-        d: &DecodeDev,
+        d: &mut DecodeDev,
         embed: &[f32],
         pos: usize,
         cpu_moe: &mut dyn FnMut(usize, &[f32], &[u32], &[f32], &mut [f32]) -> Result<(), ()>,
@@ -537,16 +552,113 @@ impl CudaGpu {
         }
         let bf = |i: usize| d.bufs[i].0;
         // capacidad del KV de las capas de atención (sin perder las `pos` filas ya subidas)
+        let gen_antes = self.kv_gen;
         for c in &d.capas {
             if let Some(g) = &c.gated {
                 self.kv_asegurar(c.layer, pos + 1, pos, g.kv_dim)?;
             }
         }
+        if self.kv_gen != gen_antes || d.kv_gen != self.kv_gen {
+            // las direcciones del KV cambiaron: los grafos capturados ya no valen
+            if let Some(g) = &self.grafo {
+                for (_, ex) in d.grafos.drain() {
+                    unsafe { (g.graph_exec_destroy)(ex) };
+                }
+            }
+            d.kv_gen = self.kv_gen;
+        }
         let f32b = |v: &[f32]| unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) };
         self.subir(bf(b::HID), f32b(embed))?;
         let dyn_host = [pos as i32, pos as i32 + 1, 0, 0];
         self.subir(bf(b::DYN), unsafe { std::slice::from_raw_parts(dyn_host.as_ptr() as *const u8, 16) })?;
+        let nsplit = (pos + 1).div_ceil(CHUNK).min(MAX_SPLIT).next_power_of_two().min(MAX_SPLIT);
+        let usar_grafos = self.grafo.is_some() && std::env::var("SOSO_DECODE_SIN_GRAFO").is_err();
+        let (mut desde, mut comb) = (0usize, None::<usize>);
+        let perfil = std::env::var("SOSO_DECODE_PERFIL").is_ok();
+        let (mut t_gpu, mut t_cpu, mut nseg) = (0f64, 0f64, 0u32);
+        let t_ini = std::time::Instant::now();
+        loop {
+            let t_a = std::time::Instant::now();
+            let parada = if usar_grafos {
+                let clave = (desde, comb.map_or(usize::MAX, |c| c), nsplit);
+                let ex = match d.grafos.get(&clave) {
+                    Some(&e) => Some(e),
+                    None => {
+                        let g = self.grafo.as_ref().unwrap();
+                        let (mut gr, mut ex) = (std::ptr::null_mut(), std::ptr::null_mut());
+                        self.capturando = true;
+                        let ini = unsafe { (g.capture_begin)(self.stream, 0) };
+                        let r = if ini == 0 { self.dec_emitir(d, desde, comb, nsplit) } else { Err(format!("cuStreamBeginCapture {ini}")) };
+                        let fin = if ini == 0 { unsafe { (g.capture_end)(self.stream, &mut gr) } } else { -1 };
+                        self.capturando = false;
+                        match r {
+                            Ok(p) if fin == 0 => {
+                                let inst = unsafe { (g.graph_instantiate)(&mut ex, gr, 0) };
+                                unsafe { (g.graph_destroy)(gr) };
+                                if inst != 0 {
+                                    return Err(format!("cuGraphInstantiate {inst}"));
+                                }
+                                d.grafos.insert(clave, ex);
+                                d.paradas.insert(clave, p);
+                                Some(ex)
+                            }
+                            Ok(_) => return Err(format!("captura del grafo de decode: {fin}")),
+                            Err(e) => return Err(e),
+                        }
+                    }
+                };
+                let ex = ex.unwrap();
+                let g = self.grafo.as_ref().unwrap();
+                ck(unsafe { (g.graph_launch)(ex, self.stream) }, "cuGraphLaunch")?;
+                d.paradas[&clave]
+            } else {
+                self.dec_emitir(d, desde, comb, nsplit)?
+            };
+            ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
+            t_gpu += t_a.elapsed().as_secs_f64();
+            nseg += 1;
+            let t_b = std::time::Instant::now();
+            match parada {
+                None => break,
+                Some(ci) => {
+                    let m = &d.capas[ci].moe;
+                    let mut xn = vec![0f32; h];
+                    let mut idx = vec![0i32; m.top_k];
+                    let mut wt = vec![0f32; m.top_k];
+                    ck(unsafe { (self.api.dtoh)(xn.as_mut_ptr() as *mut c_void, bf(b::XN), h * 4) }, "cuMemcpyDtoH")?;
+                    ck(unsafe { (self.api.dtoh)(idx.as_mut_ptr() as *mut c_void, bf(b::RIDX), m.top_k * 4) }, "cuMemcpyDtoH")?;
+                    ck(unsafe { (self.api.dtoh)(wt.as_mut_ptr() as *mut c_void, bf(b::RWT), m.top_k * 4) }, "cuMemcpyDtoH")?;
+                    let idx_u: Vec<u32> = idx.iter().map(|&i| i as u32).collect();
+                    let mut cpu = vec![0f32; h];
+                    cpu_moe(ci, &xn, &idx_u, &wt, &mut cpu).map_err(|_| "expertos en CPU: error".to_string())?;
+                    self.subir(bf(b::CPUOUT), f32b(&cpu))?;
+                    desde = ci + 1;
+                    comb = Some(ci);
+                    t_cpu += t_b.elapsed().as_secs_f64();
+                }
+            }
+        }
+        ck(unsafe { (self.api.dtoh)(logits.as_mut_ptr() as *mut c_void, bf(b::LOGITS), d.vocab * 4) }, "cuMemcpyDtoH")?;
+        if d.n_attn > 0 {
+            ck(unsafe { (self.api.dtoh)(kv_rows.as_mut_ptr() as *mut c_void, bf(b::KST), kv_rows.len() * 2) }, "cuMemcpyDtoH")?;
+        }
+        if perfil {
+            eprintln!("[dec] pos {pos}: total {:.1} ms, gpu {:.1} ms en {nseg} segmentos, cpu {:.1} ms", t_ini.elapsed().as_secs_f64() * 1e3, t_gpu * 1e3, t_cpu * 1e3);
+        }
+        self.stats.launches += 1;
+        Ok(true)
+    }
+
+    fn salta(que: &str) -> bool {
+        std::env::var("SOSO_DECODE_SALTAR").is_ok_and(|v| v.split(',').any(|x| x == que))
+    }
+
+    /// Encola las operaciones del token desde la capa `desde` (precedidas, si `comb`, de la suma de los expertos de CPU de esa capa) hasta
+    /// el router de la siguiente capa con expertos en CPU —devuelve su índice— o hasta los logits (`None`).
+    fn dec_emitir(&self, d: &DecodeDev, desde: usize, comb: Option<usize>, nsplit: usize) -> Result<Option<usize>, String> {
+        let h = d.h;
         let hh = h as i32;
+        let bf = |i: usize| d.bufs[i].0;
         let blocks256 = |n: usize| (n as u32).div_ceil(256);
         let rms = |s: &Self, x: u64, w: u64, y: u64, n: usize| -> Result<(), String> {
             s.lanzar_a(d.f.rmsnorm, (1, 1, 1), (256, 1, 1), &[Arg::P(x), Arg::P(w), Arg::P(y), Arg::I(n as i32), Arg::F(d.eps)])
@@ -554,14 +666,23 @@ impl CudaGpu {
         let add = |s: &Self, a: u64, bb: u64, n: usize| -> Result<(), String> {
             s.lanzar_a(d.f.add, (blocks256(n), 1, 1), (256, 1, 1), &[Arg::P(a), Arg::P(bb), Arg::I(n as i32)])
         };
-        for (ci, c) in d.capas.iter().enumerate() {
+        if let Some(ci) = comb {
+            let ysh = if d.capas[ci].moe.sh.is_some() { bf(b::YSH) } else { 0 };
+            self.lanzar_a(
+                d.f.combine_cpu,
+                (blocks256(h), 1, 1),
+                (256, 1, 1),
+                &[Arg::P(bf(b::HID)), Arg::P(bf(b::CPUOUT)), Arg::P(ysh), Arg::P(bf(b::SG)), Arg::I(hh)],
+            )?;
+        }
+        for (ci, c) in d.capas.iter().enumerate().skip(desde) {
             // ---- mezcla de tokens (GDN o atención con puerta) ----
             rms(self, bf(b::HID), c.na, bf(b::XN), h)?;
             if let Some(g) = &c.gdn {
-                self.dec_mm1(&c.mats[0], bf(b::XN), bf(b::QKV))?;
-                self.dec_mm1(&c.mats[1], bf(b::XN), bf(b::Z))?;
-                self.dec_mm1(&g.bw, bf(b::XN), bf(b::BRAW))?;
-                self.dec_mm1(&g.aw, bf(b::XN), bf(b::ARAW))?;
+                self.dec_mm1(d.f.matvec, &c.mats[0], bf(b::XN), bf(b::QKV))?;
+                self.dec_mm1(d.f.matvec, &c.mats[1], bf(b::XN), bf(b::Z))?;
+                self.dec_mm1(d.f.matvec, &g.bw, bf(b::XN), bf(b::BRAW))?;
+                self.dec_mm1(d.f.matvec, &g.aw, bf(b::XN), bf(b::ARAW))?;
                 self.lanzar_a(
                     d.f.gdn_params,
                     (blocks256(g.n_v), 1, 1),
@@ -580,13 +701,13 @@ impl CudaGpu {
                     (256, 1, 1),
                     &[Arg::P(bf(b::UP)), Arg::P(bf(b::Z)), Arg::P(bf(b::DECAY)), Arg::P(bf(b::BETA)), Arg::P(g.nw), Arg::P(g.s), Arg::P(bf(b::O)), Arg::I(1), Arg::I(g.n_k as i32), Arg::I(g.n_v as i32), Arg::F(d.eps)],
                 )?;
-                self.dec_mm1(&c.mats[2], bf(b::O), bf(b::Y))?;
+                self.dec_mm1(d.f.matvec, &c.mats[2], bf(b::O), bf(b::Y))?;
                 add(self, bf(b::HID), bf(b::Y), h)?;
             } else if let Some(g) = &c.gated {
                 let (kd, vd, _) = self.kvdev[&c.layer];
-                self.dec_mm1(&c.mats[0], bf(b::XN), bf(b::QF))?;
-                self.dec_mm1(&c.mats[1], bf(b::XN), bf(b::KK))?;
-                self.dec_mm1(&c.mats[2], bf(b::XN), bf(b::VV))?;
+                self.dec_mm1(d.f.matvec, &c.mats[0], bf(b::XN), bf(b::QF))?;
+                self.dec_mm1(d.f.matvec, &c.mats[1], bf(b::XN), bf(b::KK))?;
+                self.dec_mm1(d.f.matvec, &c.mats[2], bf(b::XN), bf(b::VV))?;
                 let kst = bf(b::KST) + (g.attn_idx * 2 * g.kv_dim * 2) as u64;
                 let vst = kst + (g.kv_dim * 2) as u64;
                 self.lanzar_a(
@@ -600,8 +721,7 @@ impl CudaGpu {
                     ],
                 )?;
                 let group = g.heads / g.kv_heads;
-                // los trozos que no se usen salen enseguida (seq viene del dispositivo): se lanza el máximo posible para este contexto
-                let nsplit = (pos + 1).div_ceil(CHUNK).min(MAX_SPLIT);
+                if !Self::salta("attn") {
                 self.lanzar_a(
                     d.f.attn_split,
                     (g.kv_heads as u32, nsplit as u32, 1),
@@ -611,6 +731,7 @@ impl CudaGpu {
                         Arg::I(g.hd as i32), Arg::I(group as i32), Arg::I(CHUNK as i32), Arg::I(MAX_SPLIT as i32),
                     ],
                 )?;
+                }
                 self.lanzar_a(
                     d.f.attn_combine,
                     (g.heads as u32, 1, 1),
@@ -620,13 +741,13 @@ impl CudaGpu {
                         Arg::I(g.hd as i32), Arg::I(CHUNK as i32), Arg::I(MAX_SPLIT as i32),
                     ],
                 )?;
-                self.dec_mm1(&c.mats[3], bf(b::ATT), bf(b::Y))?;
+                self.dec_mm1(d.f.matvec, &c.mats[3], bf(b::ATT), bf(b::Y))?;
                 add(self, bf(b::HID), bf(b::Y), h)?;
             }
             // ---- FFN MoE ----
             let m = &c.moe;
             rms(self, bf(b::HID), c.nf, bf(b::XN), h)?;
-            self.dec_mm1(&m.router, bf(b::XN), bf(b::RLOG))?;
+            self.dec_mm1(d.f.matvec, &m.router, bf(b::XN), bf(b::RLOG))?;
             self.lanzar_a(
                 d.f.router,
                 (1, 1, 1),
@@ -635,64 +756,37 @@ impl CudaGpu {
             )?;
             if let Some(sh) = &m.sh {
                 self.lanzar_a(d.f.pgate, (1, 1, 1), (256, 1, 1), &[Arg::P(sh.pg), Arg::P(bf(b::XN)), Arg::P(bf(b::SG)), Arg::I(hh)])?;
-                self.dec_mm1(&sh.gate, bf(b::XN), bf(b::G1))?;
-                self.dec_mm1(&sh.up, bf(b::XN), bf(b::U1))?;
+                self.dec_mm1(d.f.matvec, &sh.gate, bf(b::XN), bf(b::G1))?;
+                self.dec_mm1(d.f.matvec, &sh.up, bf(b::XN), bf(b::U1))?;
                 self.lanzar_a(d.f.swiglu, (blocks256(sh.ffn), 1, 1), (256, 1, 1), &[Arg::P(bf(b::U1)), Arg::P(bf(b::G1)), Arg::I(sh.ffn as i32)])?;
-                self.dec_mm1(&sh.down, bf(b::U1), bf(b::YSH))?;
+                self.dec_mm1(d.f.matvec, &sh.down, bf(b::U1), bf(b::YSH))?;
             }
             let ysh = if m.sh.is_some() { bf(b::YSH) } else { 0 };
-            if m.en_gpu {
-                self.lanzar_a(
-                    d.f.gateup,
-                    (((m.ffn as u32) + 63) / 64, 1, m.top_k as u32),
-                    (128, 1, 1),
-                    &[
-                        Arg::P(m.tg), Arg::P(m.tu), Arg::P(bf(b::RIDX)), Arg::P(bf(b::XN)), Arg::P(bf(b::ACT)), Arg::I(m.ffn as i32), Arg::I(hh), Arg::I(m.dg), Arg::I(m.du),
-                        Arg::L(m.rbg), Arg::L(m.rbu),
-                    ],
-                )?;
-                self.lanzar_a(
-                    d.f.down,
-                    (((h as u32) + 63) / 64, 1, m.top_k as u32),
-                    (128, 1, 1),
-                    &[Arg::P(m.td), Arg::P(bf(b::RIDX)), Arg::P(bf(b::ACT)), Arg::P(bf(b::YS)), Arg::I(hh), Arg::I(m.ffn as i32), Arg::I(m.dd), Arg::L(m.rbd)],
-                )?;
+            if m.en_gpu && !Self::salta("moe") {
+                {
+                    let mut v1: Vec<u64> = vec![m.tg, m.tu, bf(b::RIDX), bf(b::XN), bf(b::ACT), m.ffn as u64, h as u64, m.dg as u32 as u64, m.du as u32 as u64, m.rbg as u64, m.rbu as u64];
+                    let mut p1: Vec<*mut c_void> = v1.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
+                    self.lanzar3s(d.f.gateup_w, ((m.ffn as u32).div_ceil(8), 1, m.top_k as u32), (256, 1, 1), (h * 4) as u32, &mut p1)?;
+                    let mut v2: Vec<u64> = vec![m.td, bf(b::RIDX), bf(b::ACT), bf(b::YS), h as u64, m.ffn as u64, m.dd as u32 as u64, m.rbd as u64];
+                    let mut p2: Vec<*mut c_void> = v2.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
+                    self.lanzar3s(d.f.down_w, ((h as u32).div_ceil(8), 1, m.top_k as u32), (256, 1, 1), (m.ffn * 4) as u32, &mut p2)?;
+                }
                 self.lanzar_a(
                     d.f.combine,
                     (blocks256(h), 1, 1),
                     (256, 1, 1),
                     &[Arg::P(bf(b::HID)), Arg::P(bf(b::YS)), Arg::P(bf(b::RWT)), Arg::P(ysh), Arg::P(bf(b::SG)), Arg::I(m.top_k as i32), Arg::I(hh)],
                 )?;
-            } else {
-                // expertos en CPU: baja la entrada normalizada y la elección del router, sincroniza, calcula y vuelve a subir la suma
-                let mut xn = vec![0f32; h];
-                let mut idx = vec![0i32; m.top_k];
-                let mut wt = vec![0f32; m.top_k];
-                ck(unsafe { (self.api.dtoh)(xn.as_mut_ptr() as *mut c_void, bf(b::XN), h * 4) }, "cuMemcpyDtoH")?;
-                ck(unsafe { (self.api.dtoh)(idx.as_mut_ptr() as *mut c_void, bf(b::RIDX), m.top_k * 4) }, "cuMemcpyDtoH")?;
-                ck(unsafe { (self.api.dtoh)(wt.as_mut_ptr() as *mut c_void, bf(b::RWT), m.top_k * 4) }, "cuMemcpyDtoH")?;
-                let idx_u: Vec<u32> = idx.iter().map(|&i| i as u32).collect();
-                let mut cpu = vec![0f32; h];
-                cpu_moe(ci, &xn, &idx_u, &wt, &mut cpu).map_err(|_| "expertos en CPU: error".to_string())?;
-                self.subir(bf(b::CPUOUT), f32b(&cpu))?;
-                self.lanzar_a(
-                    d.f.combine_cpu,
-                    (blocks256(h), 1, 1),
-                    (256, 1, 1),
-                    &[Arg::P(bf(b::HID)), Arg::P(bf(b::CPUOUT)), Arg::P(ysh), Arg::P(bf(b::SG)), Arg::I(hh)],
-                )?;
+            } else if !m.en_gpu {
+                // expertos en CPU: el token se corta aquí; el host los calcula y el segmento siguiente suma el resultado
+                return Ok(Some(ci));
             }
         }
         // ---- norma final y logits ----
         rms(self, bf(b::HID), d.nfin, bf(b::XN), h)?;
-        self.dec_mm1(&d.lm, bf(b::XN), bf(b::LOGITS))?;
-        ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
-        ck(unsafe { (self.api.dtoh)(logits.as_mut_ptr() as *mut c_void, bf(b::LOGITS), d.vocab * 4) }, "cuMemcpyDtoH")?;
-        if d.n_attn > 0 {
-            ck(unsafe { (self.api.dtoh)(kv_rows.as_mut_ptr() as *mut c_void, bf(b::KST), kv_rows.len() * 2) }, "cuMemcpyDtoH")?;
+        if !Self::salta("lm") {
+            self.dec_mm1(d.f.matvec, &d.lm, bf(b::XN), bf(b::LOGITS))?;
         }
-        self.stats.launches += 1;
-        let _ = c_int::MAX;
-        Ok(true)
+        Ok(None)
     }
 }

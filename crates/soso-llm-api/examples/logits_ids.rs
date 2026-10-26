@@ -89,6 +89,7 @@ fn main() {
         let mut generados = alloc_vec_ids(tok);
         let t = Instant::now();
         let (mut t_fwd, mut t_log) = (0.0f64, 0.0f64);
+        let mut por_paso: Vec<f64> = Vec::new();
         for _ in 0..pasos {
             let a = Instant::now();
             if std::env::var("DECODIFICAR_GPU").is_ok() {
@@ -103,10 +104,14 @@ fn main() {
             tok = Runtime::argmax(l);
             generados.push(tok);
             t_log += b.elapsed().as_secs_f64();
+            por_paso.push(a.elapsed().as_secs_f64() * 1e3);
         }
         let tot = t.elapsed().as_secs_f64();
         rt.decode_gpu_cerrar(&mut gpu);
         eprintln!("ids generados: {:?}", generados);
+        let mut o = por_paso.clone();
+        o.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        eprintln!("ms por paso: primero {:.0}, mediana {:.1}, mín {:.1}", por_paso[0], o[o.len() / 2], o[0]);
         eprintln!(
             "decodificar {pasos}: {:.2} ms/token ({:.0} tok/s); capas {:.2} ms, logits {:.2} ms",
             tot * 1e3 / pasos as f64,
