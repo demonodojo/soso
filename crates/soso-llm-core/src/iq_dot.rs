@@ -6,21 +6,21 @@
 
 use crate::q8k::{Q8_K_BLOCK_BYTES, Q8_K_BLOCK_ELEMS};
 use sosomodel::dequant::f16_to_f32;
-use sosomodel::iq::{escala_y_minimo_k4, GGML_IQ2_S, GGML_IQ3_S, GGML_IQ3_XXS, GGML_IQ4_XS, GGML_Q5_K, IQ2_S_BYTES, IQ3_S_BYTES, IQ3_XXS_BYTES, IQ4_XS_BYTES, Q5_K_BYTES};
-use sosomodel::iq_tablas::{IQ2S_GRID, IQ3S_GRID, IQ3XXS_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS, KVALUES_IQ4NL};
+use sosomodel::iq::{escala_y_minimo_k4, GGML_IQ2_S, GGML_IQ2_XS, GGML_IQ3_S, GGML_IQ3_XXS, GGML_IQ4_XS, GGML_Q5_K, IQ2_S_BYTES, IQ3_S_BYTES, IQ3_XXS_BYTES, IQ4_XS_BYTES, Q5_K_BYTES};
+use sosomodel::iq_tablas::{IQ2S_GRID, IQ2XS_GRID, IQ3S_GRID, IQ3XXS_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS, KVALUES_IQ4NL};
 
 /// Factor con el que ggml cierra cada fila de ese tipo (`0.25f * sumf`, …).
 pub fn factor_fila(ggml: u32) -> f32 {
     match ggml {
         GGML_IQ3_XXS => 0.25,
-        GGML_IQ2_S => 0.125,
+        GGML_IQ2_S | GGML_IQ2_XS => 0.125,
         _ => 1.0,
     }
 }
 
 /// ¿Hay producto entero × Q8_K para este tipo GGML?
 pub fn soporta(ggml: u32) -> bool {
-    matches!(ggml, GGML_IQ3_XXS | GGML_IQ2_S | GGML_IQ4_XS | GGML_IQ3_S | GGML_Q5_K)
+    matches!(ggml, GGML_IQ3_XXS | GGML_IQ2_S | GGML_IQ2_XS | GGML_IQ4_XS | GGML_IQ3_S | GGML_Q5_K)
 }
 
 #[inline]
@@ -54,6 +54,28 @@ fn bsum_iq3_xxs(w: &[u8], q8: &[u8]) -> i32 {
             }
         }
         bsum += sumi * ls;
+    }
+    bsum
+}
+
+fn bsum_iq2_xs(w: &[u8], q8: &[u8]) -> i32 {
+    let scales = &w[66..74];
+    let q8 = &q8[4..4 + Q8_K_BLOCK_ELEMS];
+    let mut bsum = 0i32;
+    for ib in 0..8 {
+        let ls = [2 * (scales[ib] & 0xf) as i32 + 1, 2 * (scales[ib] >> 4) as i32 + 1];
+        let mut sumi = [0i32; 2];
+        for l in 0..4 {
+            let i = 2 + 2 * (4 * ib + l);
+            let q = u16::from_le_bytes([w[i], w[i + 1]]);
+            let grid = IQ2XS_GRID[(q & 511) as usize].to_le_bytes();
+            let sg = KSIGNS_IQ2XS[(q >> 9) as usize];
+            let qq = &q8[ib * 32 + 8 * l..];
+            for j in 0..8 {
+                sumi[l / 2] += qq[j] as i8 as i32 * grid[j] as i32 * s(sg, j);
+            }
+        }
+        bsum += ls[0] * sumi[0] + ls[1] * sumi[1];
     }
     bsum
 }
@@ -164,6 +186,7 @@ pub fn dot_bloque_escalar(ggml: u32, w: &[u8], q8: &[u8]) -> f32 {
         GGML_IQ3_XXS => f16_to_f32(u16::from_le_bytes([w[0], w[1]])) * q8_d(q8) * bsum_iq3_xxs(w, q8) as f32,
         GGML_IQ2_S => f16_to_f32(u16::from_le_bytes([w[0], w[1]])) * q8_d(q8) * bsum_iq2_s(w, q8) as f32,
         GGML_IQ3_S => f16_to_f32(u16::from_le_bytes([w[0], w[1]])) * q8_d(q8) * bsum_iq3_s(w, q8) as f32,
+        GGML_IQ2_XS => f16_to_f32(u16::from_le_bytes([w[0], w[1]])) * q8_d(q8) * bsum_iq2_xs(w, q8) as f32,
         GGML_Q5_K => dot_q5_k(w, q8),
         GGML_IQ4_XS => sumf_iq4_xs(w, q8),
         _ => 0.0,
@@ -267,6 +290,10 @@ mod avx2 {
                     assert!(w.len() >= IQ4_XS_BYTES);
                     sumf_iq4_xs(w, q8)
                 }
+                GGML_IQ2_XS => {
+                    assert!(w.len() >= 74);
+                    f16_to_f32(u16::from_le_bytes([w[0], w[1]])) * q8_d(q8) * bsum_iq2_xs(w, q8) as f32
+                }
                 GGML_IQ3_S => {
                     assert!(w.len() >= IQ3_S_BYTES);
                     f16_to_f32(u16::from_le_bytes([w[0], w[1]])) * q8_d(q8) * bsum_iq3_s(w, q8) as f32
@@ -315,6 +342,22 @@ mod avx2 {
                     for l in 0..4 {
                         let g = IQ2S_GRID[qs[ib * 4 + l] as usize | (((qh[ib] as usize) << (8 - 2 * l)) & 0x300)].to_le_bytes();
                         let sg = qs[32 + ib * 4 + l];
+                        for j in 0..8 {
+                            vals[ib * 32 + 8 * l + j] = if sg & KMASK_IQ2XS[j] != 0 { -(g[j] as i8) } else { g[j] as i8 };
+                        }
+                    }
+                }
+            }
+            GGML_IQ2_XS => {
+                let scales = &w[66..74];
+                for ib in 0..8 {
+                    sc[2 * ib] = 2 * (scales[ib] & 0xf) as i32 + 1;
+                    sc[2 * ib + 1] = 2 * (scales[ib] >> 4) as i32 + 1;
+                    for l in 0..4 {
+                        let i = 2 + 2 * (4 * ib + l);
+                        let q = u16::from_le_bytes([w[i], w[i + 1]]);
+                        let g = IQ2XS_GRID[(q & 511) as usize].to_le_bytes();
+                        let sg = KSIGNS_IQ2XS[(q >> 9) as usize];
                         for j in 0..8 {
                             vals[ib * 32 + 8 * l + j] = if sg & KMASK_IQ2XS[j] != 0 { -(g[j] as i8) } else { g[j] as i8 };
                         }

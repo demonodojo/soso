@@ -22,6 +22,8 @@ use crate::pipeline::PipelineRole;
 use sosomodel::index::TensorIndex;
 use sosomodel::manifest::{AttnKind, Manifest};
 
+mod decode_gpu;
+
 fn kv_storage_dim(manifest: &Manifest, layer: u32) -> usize {
     let spec = manifest.layer(layer).cloned().unwrap_or_default();
     if spec.attn_kind == AttnKind::Mla && spec.kv_lora_rank > 0 {
@@ -218,6 +220,7 @@ pub struct Runtime {
     pub backend: Backend,
     scratch: LayerScratch,
     logits_buf: Vec<f32>,
+    pub decode_gpu: decode_gpu::DecGpu,
     has_gate: bool,
     has_lm_head: bool,
     has_output_norm: bool,
@@ -288,6 +291,7 @@ impl Runtime {
             planner: None,
             layer_hook: None,
             layer_enter_hook: None,
+            decode_gpu: Default::default(),
         }
     }
 
@@ -487,6 +491,7 @@ impl Runtime {
     }
 
     pub fn reset_sequence(&mut self) {
+        self.decode_gpu_descartar();
         self.pos = 0;
         self.cached_tokens.clear();
         self.gdn_instantaneas.clear();
@@ -649,6 +654,7 @@ impl Runtime {
     /// Empieza una secuencia reaprovechando el prefijo de la anterior. Devuelve
     /// cuántos tokens del prompt no hay que volver a procesar.
     pub fn begin_sequence_reusing(&mut self, prompt: &[u32]) -> usize {
+        self.decode_gpu_descartar();
         let p = self.prefijo_reutilizable(prompt);
         if p == 0 {
             self.reset_sequence();
@@ -1834,6 +1840,10 @@ impl Runtime {
         parallel: Option<&dyn RowParallel>,
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
     ) -> Result<&[f32], ()> {
+        if self.decode_gpu.logits_listos {
+            self.decode_gpu.logits_listos = false;
+            return Ok(&self.logits_buf);
+        }
         let h = self.manifest.hidden_dim as usize;
         let vocab = self.manifest.vocab_size as usize;
         let name = if self.has_lm_head { "lm_head" } else { "embed" };
@@ -2006,6 +2016,7 @@ impl Runtime {
         }) {
             return Ok((tokens, ledger.into_report()));
         }
+        let dec_gpu = cluster.is_none() && self.decode_gpu_posible(gpu);
         while remaining > 0 {
             if self.planner.is_none() && self.pos >= self.manifest.max_seq as usize {
                 ledger.note_context_limit();
@@ -2027,7 +2038,7 @@ impl Runtime {
             }
             avanzar_restriccion(&mut restr, next);
             remaining -= 1;
-            let mut drafts = if greedy && self.borrador_activo {
+            let mut drafts = if greedy && self.borrador_activo && !dec_gpu {
                 crate::attn::prompt_lookup_draft(&tokens, remaining.min(8))
             } else {
                 alloc::vec::Vec::new()
@@ -2063,15 +2074,18 @@ impl Runtime {
                 self.prefetch_embed(d0, source);
             }
             self.embed_token(next, source)?;
-            self.forward_step_par(
-                source,
-                parallel,
-                gpu,
-                Some(observer),
-                &mut cancel_slot,
-                Some(&mut ledger),
-                cluster,
-            )?;
+            let en_gpu = dec_gpu && self.forward_token_gpu(source, parallel, gpu)?;
+            if !en_gpu {
+                self.forward_step_par(
+                    source,
+                    parallel,
+                    gpu,
+                    Some(observer),
+                    &mut cancel_slot,
+                    Some(&mut ledger),
+                    cluster,
+                )?;
+            }
             self.forwards_decode += 1;
             if cancel_slot.as_ref().is_some_and(|g| g.stopped) {
                 break;
@@ -2123,6 +2137,7 @@ impl Runtime {
             let aceptados = (self.borrador_aceptados - aceptados_antes) as usize;
             self.anotar_ronda(t0, 0, drafts.len(), aceptados);
         }
+        self.decode_gpu_cerrar(gpu);
         if !cancel_slot.as_ref().is_some_and(|g| g.stopped) {
             self.recordar_cache(&tokens);
         }

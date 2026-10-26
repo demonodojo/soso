@@ -20,8 +20,8 @@ use crate::device::{
     USB_REQ_SET_CONFIGURATION, USB_TYPE_CLASS, USB_TYPE_STANDARD,
 };
 use crate::hid::{
-    KeyEvent, KeyboardReportLayout, KeyboardState, HID_PROTOCOL_BOOT, HID_REQ_SET_IDLE,
-    HID_REQ_SET_PROTOCOL,
+    KeyEvent, KeyboardReportLayout, KeyboardState, PointerEvent, PointerReportLayout,
+    PointerState, HID_PROTOCOL_BOOT, HID_REQ_SET_IDLE, HID_REQ_SET_PROTOCOL,
 };
 use crate::mass_storage::MassStorage;
 use crate::dma::delay_us;
@@ -95,6 +95,8 @@ pub struct XhciController {
     transfer_rings: Vec<Vec<Option<TransferRing>>>,
     /// Teclados HID activos (puede haber más de uno en el mismo xHCI).
     keyboards: Vec<KeyboardInfo>,
+    /// Ratones / touchpads HID activos.
+    pointers: Vec<PointerInfo>,
     /// Transfer completions desviados mientras otro slot esperaba su evento.
     pending_transfers: Vec<Trb>,
     /// CCS en puertos root vistos antes de HCRST (bit N = puerto N+1).
@@ -159,6 +161,16 @@ struct KeyboardInfo {
     /// Keyboard state tracker for event generation
     state: KeyboardState,
     /// Whether we have an outstanding interrupt transfer
+    transfer_pending: bool,
+}
+
+struct PointerInfo {
+    slot_id: u8,
+    dci: u8,
+    report_buf_va: *mut u8,
+    report_buf_phys: u64,
+    report_buf_len: usize,
+    state: PointerState,
     transfer_pending: bool,
 }
 
@@ -338,6 +350,7 @@ impl XhciController {
             devices,
             transfer_rings,
             keyboards: Vec::new(),
+            pointers: Vec::new(),
             inventory: Vec::new(),
             pending_transfers: Vec::new(),
             boot_ccs_mask,
@@ -988,8 +1001,12 @@ impl XhciController {
         let mut keyboard_info = parsed_config
             .find_hid_keyboard()
             .map(|(iface_num, boot, ep)| (iface_num, boot, ep.clone()));
+        let mut pointer_info = parsed_config
+            .find_hid_pointer()
+            .map(|(iface_num, boot, ep)| (iface_num, boot, ep.clone()));
 
-        let needs_config = parsed_config.needs_full_config(&dev_desc, keyboard_info.is_some());
+        let has_hid_input = keyboard_info.is_some() || pointer_info.is_some();
+        let needs_config = parsed_config.needs_full_config(&dev_desc, has_hid_input);
         if !needs_config {
             log::info!(
                 "xhci: omitiendo SET_CONFIGURATION slot={} VID={:#06x} (no hub/hid/ms)",
@@ -1007,7 +1024,7 @@ impl XhciController {
         }
 
         let critical = dev_desc.is_hub()
-            || keyboard_info.is_some()
+            || has_hid_input
             || parsed_config.is_mass_storage();
         let mut configured = false;
         for config_try in 0..PORT_INIT_TRIES {
@@ -1061,6 +1078,9 @@ impl XhciController {
                 keyboard_info = parsed_config
                     .find_hid_keyboard()
                     .map(|(iface_num, boot, ep)| (iface_num, boot, ep.clone()));
+                pointer_info = parsed_config
+                    .find_hid_pointer()
+                    .map(|(iface_num, boot, ep)| (iface_num, boot, ep.clone()));
             }
 
             let config_val = parsed_config.config.b_configuration_value;
@@ -1101,6 +1121,14 @@ impl XhciController {
                 slot_id, iface_num, boot
             );
             self.setup_keyboard(slot_id, iface_num, boot, ep_desc, &parsed_config);
+        }
+
+        if let Some((iface_num, boot, ref ep_desc)) = pointer_info {
+            log::info!(
+                "xhci: setting up HID pointer on slot={} interface={} boot={}",
+                slot_id, iface_num, boot
+            );
+            self.setup_pointer(slot_id, iface_num, boot, ep_desc, &parsed_config);
         }
 
         if parsed_config.is_mass_storage()
@@ -2065,6 +2093,106 @@ impl XhciController {
         );
     }
 
+    fn setup_pointer(
+        &mut self,
+        slot_id: u8,
+        iface_num: u8,
+        boot: bool,
+        ep_desc: &EndpointDescriptor,
+        config: &ParsedConfiguration,
+    ) {
+        let dci = ep_desc.dci();
+
+        let (vendor, product) = self.devices[slot_id as usize]
+            .as_ref()
+            .and_then(|d| d.device_desc.as_ref())
+            .map(|d| (d.id_vendor, d.id_product))
+            .unwrap_or((0, 0));
+
+        let rdesc_len = config
+            .hid_descriptors
+            .iter()
+            .find(|(n, _)| *n == iface_num)
+            .map(|(_, h)| h.report_descriptor_length)
+            .unwrap_or(0);
+
+        let layout = if boot {
+            if let Some(ring) = self.transfer_rings[slot_id as usize][1].as_mut() {
+                let handles = ring.enqueue_control_transfer(
+                    USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
+                    HID_REQ_SET_PROTOCOL,
+                    HID_PROTOCOL_BOOT,
+                    iface_num as u16,
+                    0,
+                    0,
+                );
+                self.db.ring_endpoint(slot_id, 1);
+                let _ = self.wait_transfer_event(slot_id, Some(handles.status_trb_phys));
+            }
+            PointerReportLayout::boot()
+        } else if rdesc_len > 0 {
+            match self.get_hid_report_descriptor(slot_id, iface_num, rdesc_len) {
+                Some(rdesc) => PointerReportLayout::from_descriptor(&rdesc).unwrap_or_else(|| {
+                    log::warn!(
+                        "xhci: HID pointer slot={} iface={}: descriptor sin X/Y relativos",
+                        slot_id,
+                        iface_num
+                    );
+                    PointerReportLayout::boot()
+                }),
+                None => {
+                    log::warn!("xhci: pointer report descriptor unreadable");
+                    return;
+                }
+            }
+        } else {
+            log::warn!("xhci: pointer sin report descriptor");
+            return;
+        };
+
+        if let Some(ring) = self.transfer_rings[slot_id as usize][1].as_mut() {
+            let handles = ring.enqueue_control_transfer(
+                USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE,
+                HID_REQ_SET_IDLE,
+                0,
+                iface_num as u16,
+                0,
+                0,
+            );
+            self.db.ring_endpoint(slot_id, 1);
+            let _ = self.wait_transfer_event(slot_id, Some(handles.status_trb_phys));
+        }
+
+        let report_len = ep_desc.xhci_max_packet_size().max(8) as usize;
+        let (report_va, report_phys) = unsafe { alloc_dma_buffer(report_len) };
+
+        if let Some(ring) = self.transfer_rings[slot_id as usize].get_mut(dci as usize) {
+            if let Some(ring) = ring.as_mut() {
+                ring.enqueue_interrupt_in(report_phys, report_len as u32);
+                self.db.ring_endpoint(slot_id, dci);
+            }
+        }
+
+        self.pointers.push(PointerInfo {
+            slot_id,
+            dci,
+            report_buf_va: report_va,
+            report_buf_phys: report_phys,
+            report_buf_len: report_len,
+            state: PointerState::new(layout),
+            transfer_pending: true,
+        });
+
+        log::info!(
+            "xhci: pointer ready on slot={} dci={} ({:#06x}:{:#06x}) boot={}",
+            slot_id,
+            dci,
+            vendor,
+            product,
+            boot
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Event ring dispatch (un solo consumidor del anillo HW)
     // -----------------------------------------------------------------------
@@ -2087,6 +2215,12 @@ impl XhciController {
         self.keyboards
             .iter()
             .position(|kb| kb.slot_id == slot_id && kb.dci == ep_id)
+    }
+
+    fn pointer_index(&self, slot_id: u8, ep_id: u8) -> Option<usize> {
+        self.pointers
+            .iter()
+            .position(|p| p.slot_id == slot_id && p.dci == ep_id)
     }
 
     fn queue_pending(&mut self, evt: Trb) {
@@ -2138,6 +2272,36 @@ impl XhciController {
         self.keyboards[idx].transfer_pending = true;
     }
 
+    fn handle_pointer_transfer(&mut self, idx: usize, evt: &Trb) {
+        let code = evt.completion_code();
+        let (slot_id, dci, report_va, report_len, buf_phys) = {
+            let p = &self.pointers[idx];
+            (
+                p.slot_id,
+                p.dci,
+                p.report_buf_va,
+                p.report_buf_len,
+                p.report_buf_phys,
+            )
+        };
+
+        if code == TRB_COMPLETION_SUCCESS || code == TRB_COMPLETION_SHORT_PACKET {
+            let report_data = unsafe { read_dma_buffer(report_va, report_len) };
+            self.pointers[idx].state.process_raw_report(&report_data);
+        } else {
+            log::warn!("xhci: pointer transfer error: code={}", code);
+        }
+
+        if let Some(ring) = self.transfer_rings[slot_id as usize]
+            .get_mut(dci as usize)
+            .and_then(|r| r.as_mut())
+        {
+            ring.enqueue_interrupt_in(buf_phys, report_len as u32);
+            self.db.ring_endpoint(slot_id, dci);
+        }
+        self.pointers[idx].transfer_pending = true;
+    }
+
     /// Despacha un evento del anillo: teclado → rearma IN; otro slot → cola.
     fn dispatch_event(&mut self, evt: Trb) {
         let evt_type = evt.trb_type();
@@ -2146,6 +2310,8 @@ impl XhciController {
             let ep = evt.endpoint_id();
             if let Some(idx) = self.keyboard_index(slot, ep) {
                 self.handle_keyboard_transfer(idx, &evt);
+            } else if let Some(idx) = self.pointer_index(slot, ep) {
+                self.handle_pointer_transfer(idx, &evt);
             } else {
                 self.queue_pending(evt);
             }
@@ -2289,6 +2455,31 @@ impl XhciController {
     /// Número de teclados HID inicializados en este controlador.
     pub fn keyboard_count(&self) -> usize {
         self.keyboards.len()
+    }
+
+    fn next_buffered_pointer(&mut self) -> Option<PointerEvent> {
+        for p in &mut self.pointers {
+            if let Some(evt) = p.state.next_event() {
+                return Some(evt);
+            }
+        }
+        None
+    }
+
+    /// Poll for pointer events (USB mouse / touchpad relativo).
+    pub fn poll_pointer(&mut self) -> Option<PointerEvent> {
+        if self.pointers.is_empty() {
+            return None;
+        }
+        if let Some(evt) = self.next_buffered_pointer() {
+            return Some(evt);
+        }
+        self.drain_hw_events();
+        self.next_buffered_pointer()
+    }
+
+    pub fn pointer_count(&self) -> usize {
+        self.pointers.len()
     }
 
     // -----------------------------------------------------------------------

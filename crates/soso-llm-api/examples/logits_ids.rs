@@ -91,8 +91,12 @@ fn main() {
         let (mut t_fwd, mut t_log) = (0.0f64, 0.0f64);
         for _ in 0..pasos {
             let a = Instant::now();
-            rt.prefill_prompt(&mut source, &[tok], par, &mut gpu, None)
-                .expect("paso");
+            if std::env::var("DECODIFICAR_GPU").is_ok() {
+                rt.embed_token(tok, &mut source).expect("embed");
+                assert!(rt.forward_token_gpu(&mut source, par, &mut gpu).expect("decode gpu"), "decode GPU no disponible");
+            } else {
+                rt.prefill_prompt(&mut source, &[tok], par, &mut gpu, None).expect("paso");
+            }
             t_fwd += a.elapsed().as_secs_f64();
             let b = Instant::now();
             let l = rt.logits_gpu(&mut source, par, &mut gpu).expect("logits");
@@ -101,6 +105,7 @@ fn main() {
             t_log += b.elapsed().as_secs_f64();
         }
         let tot = t.elapsed().as_secs_f64();
+        rt.decode_gpu_cerrar(&mut gpu);
         eprintln!("ids generados: {:?}", generados);
         eprintln!(
             "decodificar {pasos}: {:.2} ms/token ({:.0} tok/s); capas {:.2} ms, logits {:.2} ms",

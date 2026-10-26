@@ -390,6 +390,10 @@ impl ChatBackend for CpuBackend {
             secuencia.len().saturating_sub(prompt_ids.len()),
             t_inicio.elapsed().as_secs_f64()
         );
+        if let Some(g) = self.gpu.as_ref() {
+            let st = soso_llm_core::gpu::GpuDispatch::stats(&**g);
+            eprintln!("[soso] expertos en GPU: {} aciertos, {} fallos (acumulado)", st.flujo_aciertos, st.flujo_fallos);
+        }
         if perfilar {
             let f = soso_llm_core::layer::perfil_fases_ns();
             let partes: Vec<String> = soso_llm_core::layer::NOMBRES_FASES.iter().zip(f).map(|(n, v)| format!("{n} {:.1}", v as f64 / 1e9)).collect();

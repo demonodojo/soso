@@ -626,3 +626,25 @@ de 8 GB de memoria de datos por proceso). **Cualquier cambio del arnés tras est
 ---
 
 **Nota sobre la evidencia de las campañas 6–13:** las carpetas `tests/self-improvement/campana/ejecucion-9` a `ejecucion-17-*` están en el `.gitignore` (sólo locales). Sus resúmenes, registros por tarea, comprobaciones de la base final e incidencias están versionados en [`resultados-campanas/`](resultados-campanas/README.md).
+
+
+## Campaña 75 — Qwen3.6-35B-A3B servido por **soso** (banco ciego 5, R41–R50; 2026-10-26)
+
+Misma configuración que la pasada A del combo (arnés v43, T=0,7, `MAX_TURNOS=40`, 8192 tokens de salida, `top_p 0,8`, `top_k 20`), pero con `serve_host` de soso (CPU AVX2 + CUDA) en lugar de llama.cpp. Pesos: el mismo GGUF UD-IQ3_XXS convertido con `convert-gguf` (`som-35b-iq3`).
+
+| Tarea | Resultado | Tiempo |
+|---|---|---|
+| R41 | rechazada | 31 min |
+| R42 | rechazada | 72 min |
+| R43 | sin aceptar (límite de 40 llamadas a herramientas) | 40 min |
+| R44 | rechazada | 31 min |
+| R45 | rechazada | 37 min |
+| **R46** | **aceptada** | 31 min |
+| R47 | bloqueada (el candidato no cambió nada) | 24 min |
+| R48 | rechazada | 21 min |
+| R49 | sin aceptar (límite de llamadas) | 19 min |
+| R50 | rechazada | 30 min |
+
+**1/10 frente a 3/10 de llama.cpp con el mismo modelo y banco** (campaña 50-bis, banco ciego 5). Con n=10 y T=0,7 la diferencia no es significativa (con p=0,3, P(≤1 de 10) ≈ 0,15), pero tampoco acredita la paridad de calidad. Tiempo total ≈ 4 h (llama.cpp, ~2 h): ~2× más lento. 376 respuestas del servidor, 19 de más de 150 s (reprocesos tras un pliegue del historial).
+
+Antes de este resultado hubo cuatro tandas descartadas por problemas de infraestructura de soso (no del modelo): presupuesto de 5400 s agotado por prefill lento (47 tok/s), `head_dim` 256 sin kernel AVX2, sin `top_k 20`/`top_p 0,8` por defecto y el 422 por `prompt + max_tokens` > contexto. Lo que movió el rendimiento está en `PLAN-PUESTA-EN-MARCHA.md` (A3/A4).

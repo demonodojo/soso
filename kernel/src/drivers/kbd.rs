@@ -608,9 +608,17 @@ fn poll_hw(from_irq: bool) {
         while let Some(evt) = crate::drivers::usb_storage::poll_keyboard_event() {
             handle_usb_event_try(evt);
         }
+        while let Some(evt) = crate::drivers::usb_storage::poll_pointer_event() {
+            crate::drivers::mouse::apply_button_mask(evt.buttons);
+            crate::drivers::mouse::apply_relative(evt.dx, evt.dy);
+        }
     } else {
         while let Some(evt) = crate::drivers::usb_storage::poll_keyboard_event() {
             handle_usb_event(evt);
+        }
+        while let Some(evt) = crate::drivers::usb_storage::poll_pointer_event() {
+            crate::drivers::mouse::apply_button_mask(evt.buttons);
+            crate::drivers::mouse::apply_relative(evt.dx, evt.dy);
         }
     }
 }

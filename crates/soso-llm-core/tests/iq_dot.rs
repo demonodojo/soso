@@ -1,6 +1,6 @@
 //! Producto IQ × Q8_K: el escalar coincide con «descuantizar y multiplicar» y el despachado (AVX2 si el binario lo trae)
 //! coincide bit a bit con el escalar. Para ejercitar AVX2: `RUSTFLAGS="-C target-feature=+avx2,+fma"`.
-use soso_llm_core::iq::{bytes_de_bloque, dequant_bloque, GGML_IQ2_S, GGML_IQ3_S, GGML_IQ3_XXS, GGML_IQ4_XS, GGML_Q5_K, QK_K};
+use soso_llm_core::iq::{bytes_de_bloque, dequant_bloque, GGML_IQ2_S, GGML_IQ2_XS, GGML_IQ3_S, GGML_IQ3_XXS, GGML_IQ4_XS, GGML_Q5_K, QK_K};
 use soso_llm_core::iq_dot::{dot_bloque, dot_bloque_escalar, factor_fila};
 use soso_llm_core::q8k::{quantize_row_q8_k, Q8_K_BLOCK_BYTES};
 
@@ -70,3 +70,5 @@ fn lote(nombre: &str, ggml: u32) {
 #[test] fn lote_iq4_xs() { lote("IQ4_XS", GGML_IQ4_XS) }
 #[test] fn lote_iq3_s() { lote("IQ3_S", GGML_IQ3_S) }
 #[test] fn lote_q5_k() { lote("Q5_K", GGML_Q5_K) }
+#[test] fn iq2_xs() { comprobar("IQ2_XS", GGML_IQ2_XS) }
+#[test] fn lote_iq2_xs() { lote("IQ2_XS", GGML_IQ2_XS) }

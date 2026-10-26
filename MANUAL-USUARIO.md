@@ -817,6 +817,13 @@ incluir `3D clear verificado (H1 GO)` tras el arranque.
 soso-wm                 # gestor de ventanas (terminales y clientes gráficos)
 soso-wm --prueba        # autoprueba en RAM; debe imprimir `soso-wm: prueba OK`
 soso-wm --prueba-web    # cliente gráfico mínimo; imprime `soso-wm: prueba-web OK`
+
+En modo gráfico el teclado lo consume el WM (Ctrl+C de la shell no mata el proceso).
+Salir: **Ctrl+C** dentro del WM, o **Alt+Mayús+E** (vuelta a consola). **Alt+Intro** abre una terminal.
+
+El WM dibuja un **puntero** en pantalla. Entrada: ratón **PS/2** (aux) y **USB HID**
+(relativo; p. ej. `-device usb-mouse` en QEMU). El **touchpad** del portátil solo funciona
+si el firmware lo expone como PS/2 o como HID USB relativo (no I2C-HID interno).
 ```
 
 Atajos habituales: **Alt+Intro** (terminal nueva), **Alt+Tab** (cambiar ventana),

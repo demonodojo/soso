@@ -47,6 +47,109 @@ pub struct GdnCapa<'a> {
     pub eps: f32,
 }
 
+/// Vista cruda de un tensor: puntero al mapa de la fuente (vive mientras viva el modelo), sin tomar prestada la fuente.
+#[derive(Clone, Copy, Debug)]
+pub struct VistaCruda {
+    pub ptr: usize,
+    pub len: usize,
+    pub dtype: u8,
+    pub elems: usize,
+}
+
+impl VistaCruda {
+    pub fn de(v: &TensorView<'_>) -> Self {
+        VistaCruda { ptr: v.bytes.as_ptr() as usize, len: v.bytes.len(), dtype: v.dtype, elems: v.elems }
+    }
+
+    /// # Safety
+    /// El tensor al que apunta debe seguir mapeado.
+    pub unsafe fn vista(&self) -> TensorView<'static> {
+        TensorView { bytes: unsafe { core::slice::from_raw_parts(self.ptr as *const u8, self.len) }, dtype: self.dtype, elems: self.elems }
+    }
+}
+
+/// Una matriz del modelo para el decode en GPU.
+#[derive(Clone, Debug)]
+pub struct MatDec {
+    pub clave: alloc::string::String,
+    pub v: VistaCruda,
+    pub rows: usize,
+    pub cols: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct GdnDec {
+    pub n_k: usize,
+    pub n_v: usize,
+    pub d: usize,
+    pub kernel: usize,
+    pub beta_w: VistaCruda,
+    pub alpha_w: VistaCruda,
+    pub conv_w: VistaCruda,
+    pub dt: alloc::vec::Vec<f32>,
+    pub a: alloc::vec::Vec<f32>,
+    pub norma: alloc::vec::Vec<f32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct GatedDec {
+    pub heads: usize,
+    pub kv_heads: usize,
+    pub hd: usize,
+    pub rope_n: usize,
+    pub theta: f32,
+    pub q_norm: alloc::vec::Vec<f32>,
+    pub k_norm: alloc::vec::Vec<f32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CompartidoDec {
+    pub mats: [MatDec; 3],
+    pub pg: VistaCruda,
+}
+
+#[derive(Clone, Debug)]
+pub struct MoeDec {
+    pub router: VistaCruda,
+    pub n_exp: usize,
+    pub top_k: usize,
+    pub ffn: usize,
+    pub expertos: alloc::vec::Vec<[MatDec; 3]>,
+    pub compartido: Option<CompartidoDec>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CapaDec {
+    pub layer: u32,
+    pub gdn: Option<GdnDec>,
+    pub gated: Option<GatedDec>,
+    pub norma_attn: alloc::vec::Vec<f32>,
+    pub norma_ffn: alloc::vec::Vec<f32>,
+    /// GDN: qkv, z, salida. Atención con puerta: q, k, v, salida.
+    pub mats: alloc::vec::Vec<MatDec>,
+    pub moe: MoeDec,
+}
+
+/// Todo lo que el decode de un token en GPU necesita saber del modelo.
+#[derive(Clone, Debug)]
+pub struct DecodePlan {
+    pub capas: alloc::vec::Vec<CapaDec>,
+    pub h: usize,
+    pub eps: f32,
+    pub norma_final: alloc::vec::Vec<f32>,
+    pub lm_head: MatDec,
+    pub vocab: usize,
+}
+
+/// Estado de una capa en el host (entra al empezar una sesión de decode y sale al terminarla).
+pub struct EstadoCapaDec<'a> {
+    pub gdn_s: &'a mut [f32],
+    pub gdn_conv: &'a mut [f32],
+    pub k: &'a [u16],
+    pub v: &'a [u16],
+    pub filas_validas: &'a mut usize,
+}
+
 /// Un experto de un bloque de prefill MoE: sus tres matrices y los tokens que lo eligen.
 pub struct ExpertoBloque<'a> {
     /// Claves estables de `ffn_gate`, `ffn_up` y `ffn_down` (para tenerlas residentes).
@@ -54,6 +157,8 @@ pub struct ExpertoBloque<'a> {
     pub vistas: [&'a TensorView<'a>; 3],
     /// Índice (dentro del bloque) de cada token que elige este experto.
     pub tokens: &'a [u32],
+    /// Es un experto compartido (no cuenta para el tope de VRAM de los expertos).
+    pub compartido: bool,
     /// Índice `token * top_k + posición en su ranking` de cada uno de esos tokens.
     pub destinos: &'a [u32],
 }
@@ -409,6 +514,45 @@ pub trait GpuDispatch {
     ) -> Result<bool, ()> {
         let _ = (hist, conv, z, decay, beta, norma, estado, salida, n, n_k, n_v, d, kernel, eps);
         Ok(false)
+    }
+
+    /// Prepara el decode de un token entero en el dispositivo (pesos residentes, tablas de expertos, búferes). `Ok(false)` = no se puede.
+    fn decode_preparar(&mut self, plan: &DecodePlan) -> Result<bool, ()> {
+        let _ = plan;
+        Ok(false)
+    }
+
+    /// ¿Está preparado el decode en GPU?
+    fn decode_listo(&self) -> bool {
+        false
+    }
+
+    /// Empieza una sesión de decode: sube el estado de las capas (GDN y filas del KV que falten) a la posición `pos`.
+    fn decode_subir_estado(&mut self, capas: &mut [EstadoCapaDec<'_>], pos: usize) -> Result<(), ()> {
+        let _ = (capas, pos);
+        Err(())
+    }
+
+    /// Un token en el dispositivo: `embed` es la fila de embedding; `cpu_moe(capa, xn, índices, pesos, salida)` calcula en CPU los expertos
+    /// elegidos de las capas cuyos expertos no están en la tarjeta. Deja los logits en `logits` y las filas K/V nuevas de las capas de atención
+    /// (en orden de capa, `[k..., v...]` en f16) en `kv_rows`.
+    #[allow(clippy::type_complexity)]
+    fn decode_token(
+        &mut self,
+        embed: &[f32],
+        pos: usize,
+        cpu_moe: &mut dyn FnMut(usize, &[f32], &[u32], &[f32], &mut [f32]) -> Result<(), ()>,
+        logits: &mut [f32],
+        kv_rows: &mut [u16],
+    ) -> Result<bool, ()> {
+        let _ = (embed, pos, cpu_moe, logits, kv_rows);
+        Ok(false)
+    }
+
+    /// Termina la sesión: baja el estado de las capas GDN al host.
+    fn decode_bajar_estado(&mut self, capas: &mut [EstadoCapaDec<'_>]) -> Result<(), ()> {
+        let _ = capas;
+        Ok(())
     }
 
     /// Varios matvec de **un** vector con una sola espera al final. `hecho[i]` queda a `true` para los que el

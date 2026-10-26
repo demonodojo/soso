@@ -6,7 +6,7 @@ import "tabla.sal"
 import "term.sal"
 
 fn st_size() -> Int
-    208
+    240
 
 fn st_cli_fd() -> Int
     0
@@ -86,11 +86,118 @@ fn st_drag_ix() -> Int
 fn st_drag_kind() -> Int
     200
 
+fn st_mx() -> Int
+    208
+
+fn st_my() -> Int
+    216
+
+fn st_mx_prev() -> Int
+    224
+
+fn st_my_prev() -> Int
+    232
+
+fn wm_cursor_w() -> Int
+    12
+
+fn wm_cursor_h() -> Int
+    16
+
+fn wm_color_cursor() -> Int
+    color_rgb(240, 240, 255)
+
+fn wm_color_cursor_borde() -> Int
+    color_rgb(16, 16, 24)
+
+fn wm_cursor_pixel(lx: Int, ly: Int) -> Int
+    ok = 0
+    if ly >= 0
+        if ly < 11
+            if lx >= 0
+                if lx <= ly
+                    ok = 1
+        if ly >= 11
+            if ly < 16
+                if lx >= 0
+                    if lx <= 1
+                        ok = 1
+    ok
+
+fn wm_cursor_marcar(st: Int, mx: Int, my: Int) -> Int ! alloc
+    w = wm_cursor_w()
+    h = wm_cursor_h()
+    _d = wm_marcar_dirty(st, mx, my, mx + w, my + h)
+    0
+
+fn wm_cursor_actualizar(st: Int, x: Int, y: Int, sw: Int, sh: Int) -> Int ! alloc
+    nx = x
+    if nx < 0
+        nx = 0
+    if nx > sw - 1
+        nx = sw - 1
+    ny = y
+    if ny < 0
+        ny = 0
+    if ny > sh - 1
+        ny = sh - 1
+    ox = st_get(st, st_mx())
+    oy = st_get(st, st_my())
+    if ox != nx
+        _p = wm_cursor_marcar(st, ox, oy)
+    if oy != ny
+        _p2 = wm_cursor_marcar(st, ox, oy)
+    if nx != ox
+        _n = wm_cursor_marcar(st, nx, ny)
+    if ny != oy
+        _n2 = wm_cursor_marcar(st, nx, ny)
+    _a = st_set(st, st_mx_prev(), ox)
+    _b = st_set(st, st_my_prev(), oy)
+    _c = st_set(st, st_mx(), nx)
+    _d = st_set(st, st_my(), ny)
+    0
+
+fn wm_pintar_cursor(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
+    mx = st_get(st, st_mx())
+    my = st_get(st, st_my())
+    ly = 0
+    while ly < wm_cursor_h()
+        lx = 0
+        while lx < wm_cursor_w()
+            if wm_cursor_pixel(lx, ly) != 0
+                px = mx + lx
+                py = my + ly
+                col = wm_color_cursor()
+                if lx == ly
+                    col = wm_color_cursor_borde()
+                if ly == 0
+                    col = wm_color_cursor_borde()
+                if ly >= 11
+                    if lx == 1
+                        col = wm_color_cursor_borde()
+                _p = pixel_escribir(compos, clen, stride, bpp, fmt, px, py, col)
+            lx = lx + 1
+        ly = ly + 1
+    _d = wm_cursor_marcar(st, mx, my)
+    0
+
+fn wm_iniciar_cursor(st: Int, sw: Int, sh: Int) -> Int ! alloc
+    cx = sw / 2
+    cy = sh / 2
+    _a = st_set(st, st_mx(), cx)
+    _b = st_set(st, st_my(), cy)
+    _c = st_set(st, st_mx_prev(), cx)
+    _d = st_set(st, st_my_prev(), cy)
+    0
+
 fn mod_alt() -> Int
     4
 
 fn mod_shift() -> Int
     1
+
+fn mod_ctrl() -> Int
+    2
 
 fn wm_st_desde_tab(st: Int, tab: Int, i: Int) -> Int ! alloc
     _a = st_set(st, st_cli_fd(), tab_get(tab, i, tab_fd()))
@@ -282,12 +389,14 @@ fn wm_compose(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bp
     z = st_get(st, st_z())
     nz = st_get(st, st_nz())
     _bg = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, barra_alto(), sw, sh, wm_color_fondo())
+    _db = wm_marcar_dirty(st, 0, barra_alto(), sw, sh)
     _bar = wm_pintar_barra(st, compos, clen, sw, sh, stride, bpp, fmt)
     k = 0
     while k < nz
         i = z_get(z, k)
         _r = wm_repintar_slot(st, tab, i, compos, clen, sw, sh, stride, bpp, fmt)
         k = k + 1
+    _cur = wm_pintar_cursor(st, compos, clen, sw, sh, stride, bpp, fmt)
     0
 
 fn wm_marcar_dirty(st: Int, x0: Int, y0: Int, x1: Int, y1: Int) -> Int ! alloc
@@ -540,6 +649,7 @@ fn wm_reenviar_raton_slot(st: Int, tab: Int, i: Int, x: Int, y: Int, botones: In
     0
 
 fn wm_raton_mover(st: Int, x: Int, y: Int, botones: Int, sw: Int, sh: Int) -> Int ! io, alloc
+    _c = wm_cursor_actualizar(st, x, y, sw, sh)
     tab = st_get(st, st_tab())
     dix = st_get(st, st_drag_ix())
     if dix >= 0
@@ -565,6 +675,7 @@ fn wm_raton_mover(st: Int, x: Int, y: Int, botones: Int, sw: Int, sh: Int) -> In
     0
 
 fn wm_raton_btn(st: Int, x: Int, y: Int, botones: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
+    _c = wm_cursor_actualizar(st, x, y, sw, sh)
     tab = st_get(st, st_tab())
     if botones == 0
         dix = st_get(st, st_drag_ix())
@@ -739,6 +850,9 @@ fn wm_input(st: Int, evt: Int, evt_len: Int, n: Int, compos: Int, clen: Int, sw:
             if input_event_pressed(evt, evt_len, i) != 0
                 key = input_event_key(evt, evt_len, i)
                 mods = input_event_button(evt, evt_len, i)
+                if (mods & mod_ctrl()) != 0
+                    if key == 3
+                        _x = st_set(st, st_salir(), 1)
                 if (mods & mod_alt()) != 0
                     if (mods & mod_shift()) != 0
                         if key == 101
@@ -795,25 +909,27 @@ fn wm_atender_todos(st: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt:
         i = i + 1
     0
 
+fn wm_drenar_input(st: Int, evt: Int, evt_len: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
+    lotes = 0
+    en = input_poll(evt, evt_len, 8)
+    while en > 0
+        fi = st_get(st, st_focus())
+        if fi >= 0
+            _ld = wm_st_desde_tab(st, st_get(st, st_tab()), fi)
+        _i = wm_input(st, evt, evt_len, en, compos, clen, sw, sh, stride, bpp, fmt)
+        if fi >= 0
+            _sv = wm_tab_desde_st(st, st_get(st, st_tab()), fi)
+        lotes = lotes + 1
+        if lotes >= 8
+            en = 0
+        else
+            en = input_poll(evt, evt_len, 8)
+    0
+
 fn wm_tick(st: Int, listener: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     _ps = wm_cargar_psf(st)
     evt = st_get(st, st_evt_buf())
-    en = input_poll(evt, 24 * 8, 8)
-    while en == 8
-        fi = st_get(st, st_focus())
-        if fi >= 0
-            _ld = wm_st_desde_tab(st, st_get(st, st_tab()), fi)
-        _i = wm_input(st, evt, 24 * 8, en, compos, clen, sw, sh, stride, bpp, fmt)
-        if fi >= 0
-            _sv = wm_tab_desde_st(st, st_get(st, st_tab()), fi)
-        en = input_poll(evt, 24 * 8, 8)
-    if en > 0
-        fi = st_get(st, st_focus())
-        if fi >= 0
-            _ld = wm_st_desde_tab(st, st_get(st, st_tab()), fi)
-        _i = wm_input(st, evt, 24 * 8, en, compos, clen, sw, sh, stride, bpp, fmt)
-        if fi >= 0
-            _sv = wm_tab_desde_st(st, st_get(st, st_tab()), fi)
+    _in = wm_drenar_input(st, evt, 24 * 8, compos, clen, sw, sh, stride, bpp, fmt)
     acc = tcp_accept(listener, 1)
     if acc > 0
         if acc != listener

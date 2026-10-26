@@ -585,6 +585,241 @@ impl KeyboardState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// HID pointer / mouse (boot + report protocol relativo)
+// ---------------------------------------------------------------------------
+
+const HID_USAGE_MOUSE: u16 = 0x02;
+
+/// Movimiento relativo y botones de un informe HID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointerEvent {
+    pub dx: i32,
+    pub dy: i32,
+    /// bit0=izq, bit1=der, bit2=medio (como PS/2).
+    pub buttons: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointerLayoutKind {
+    Boot3,
+    Report {
+        report_len: usize,
+        buttons_offset: usize,
+        dx_offset: usize,
+        dy_offset: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PointerReportLayout {
+    pub report_id: Option<u8>,
+    pub kind: PointerLayoutKind,
+}
+
+impl PointerReportLayout {
+    pub fn boot() -> Self {
+        Self {
+            report_id: None,
+            kind: PointerLayoutKind::Boot3,
+        }
+    }
+
+    pub fn from_descriptor(rdesc: &[u8]) -> Option<Self> {
+        parse_pointer_layout(rdesc).map(|(id, kind)| Self {
+            report_id: id,
+            kind,
+        })
+    }
+
+    pub fn extract(&self, data: &[u8]) -> Option<(u8, i8, i8)> {
+        let payload = match self.report_id {
+            Some(id) if !data.is_empty() && data[0] == id => &data[1..],
+            Some(_) => return None,
+            None => data,
+        };
+        match self.kind {
+            PointerLayoutKind::Boot3 => {
+                if payload.len() < 3 {
+                    return None;
+                }
+                Some((payload[0], payload[1] as i8, payload[2] as i8))
+            }
+            PointerLayoutKind::Report {
+                report_len,
+                buttons_offset,
+                dx_offset,
+                dy_offset,
+            } => {
+                if payload.len() < report_len {
+                    return None;
+                }
+                let buttons = payload[buttons_offset];
+                let dx = payload[dx_offset] as i8;
+                let dy = payload[dy_offset] as i8;
+                Some((buttons, dx, dy))
+            }
+        }
+    }
+}
+
+fn pointer_buttons_mask(byte: u8) -> u32 {
+    ((byte & 1) != 0) as u32
+        | (((byte & 2) != 0) as u32) << 1
+        | (((byte & 4) != 0) as u32) << 2
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PointerFieldLayout {
+    buttons_offset: Option<usize>,
+    dx_offset: Option<usize>,
+    dy_offset: Option<usize>,
+    report_len: usize,
+}
+
+fn parse_pointer_layout(rdesc: &[u8]) -> Option<(Option<u8>, PointerLayoutKind)> {
+    let mut best: Option<(Option<u8>, PointerFieldLayout)> = None;
+    let mut i = 0usize;
+    let mut report_id: Option<u8> = None;
+    let mut usage_page: u16 = 0;
+    let mut usage_min: u32 = 0;
+    let mut report_size: u32 = 0;
+    let mut report_count: u32 = 0;
+    let mut collection_depth: u32 = 0;
+    let mut in_mouse_app = false;
+    let mut bit_offset: usize = 0;
+    let mut field = PointerFieldLayout::default();
+
+    while i < rdesc.len() {
+        let head = rdesc[i];
+        i += 1;
+        let data_size = match head & 0x03 {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            3 => 4,
+            _ => 0,
+        };
+        if i + data_size > rdesc.len() {
+            break;
+        }
+        let mut data = 0u32;
+        for b in 0..data_size {
+            data |= (rdesc[i + b] as u32) << (8 * b);
+        }
+        i += data_size;
+
+        let item_type = (head >> 2) & 0x03;
+        let tag = head >> 4;
+
+        match (item_type, tag) {
+            (1, 0) => usage_page = data as u16,
+            (1, 8) => {
+                report_id = Some(data as u8);
+                bit_offset = 0;
+                field = PointerFieldLayout::default();
+            }
+            (1, 7) => report_size = data,
+            (1, 9) => report_count = data,
+            (2, 0) | (2, 1) | (2, 2) => usage_min = data,
+            (0, 10) => {
+                collection_depth += 1;
+                if collection_depth == 1
+                    && usage_page == HID_USAGE_PAGE_GENERIC_DESKTOP
+                    && usage_min == HID_USAGE_MOUSE as u32
+                {
+                    in_mouse_app = true;
+                    bit_offset = 0;
+                    field = PointerFieldLayout::default();
+                }
+            }
+            (0, 12) => {
+                if in_mouse_app && collection_depth == 1 {
+                    let report_len = (bit_offset + 7) / 8;
+                    if field.dx_offset.is_some() && field.dy_offset.is_some() && report_len > 0 {
+                        let id = report_id;
+                        let layout = PointerFieldLayout {
+                            report_len,
+                            buttons_offset: field
+                                .buttons_offset
+                                .or(Some(0))
+                                .filter(|_| field.buttons_offset.is_some()),
+                            ..field
+                        };
+                        if layout.dx_offset.is_some() {
+                            best = Some((id, layout));
+                        }
+                    }
+                    in_mouse_app = false;
+                    field = PointerFieldLayout::default();
+                    bit_offset = 0;
+                }
+                collection_depth = collection_depth.saturating_sub(1);
+            }
+            (0, 8) if in_mouse_app => {
+                let byte_off = bit_offset / 8;
+                if usage_page == 0x09 && report_size == 1 {
+                    field.buttons_offset = Some(byte_off);
+                }
+                if usage_page == HID_USAGE_PAGE_GENERIC_DESKTOP && report_size == 8 {
+                    if report_count >= 2 && usage_min == 0x31 {
+                        field.dx_offset = Some(byte_off);
+                        field.dy_offset = Some(byte_off + 1);
+                    } else if usage_min == 0x30 {
+                        field.dx_offset = Some(byte_off);
+                    } else if usage_min == 0x31 {
+                        field.dy_offset = Some(byte_off);
+                    }
+                }
+                bit_offset += (report_size * report_count) as usize;
+            }
+            _ => {}
+        }
+    }
+
+    let (_, f) = best?;
+    let buttons_off = f.buttons_offset.unwrap_or(0);
+    Some((
+        report_id,
+        PointerLayoutKind::Report {
+            report_len: f.report_len,
+            buttons_offset: buttons_off,
+            dx_offset: f.dx_offset?,
+            dy_offset: f.dy_offset?,
+        },
+    ))
+}
+
+/// Procesa informes HID de ratón / touchpad (relativo).
+pub struct PointerState {
+    layout: PointerReportLayout,
+    event_queue: VecDeque<PointerEvent>,
+}
+
+impl PointerState {
+    pub fn new(layout: PointerReportLayout) -> Self {
+        Self {
+            layout,
+            event_queue: VecDeque::new(),
+        }
+    }
+
+    pub fn process_raw_report(&mut self, data: &[u8]) {
+        let Some((buttons, dx, dy)) = self.layout.extract(data) else {
+            return;
+        };
+        self.event_queue.push_back(PointerEvent {
+            dx: dx as i32,
+            dy: -(dy as i32),
+            buttons: pointer_buttons_mask(buttons),
+        });
+    }
+
+    pub fn next_event(&mut self) -> Option<PointerEvent> {
+        self.event_queue.pop_front()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -696,5 +931,44 @@ mod tests {
         assert_eq!(rdesc[base + 15], 0x05);
         fix_asus_nkey_descriptor(&mut rdesc, 0x0b05, 0x1866);
         assert_eq!(rdesc[base + 15], 0x01);
+    }
+
+    /// Descriptor HID boot mouse mínimo (3 botones + X/Y relativos).
+    fn sample_boot_mouse_descriptor() -> Vec<u8> {
+        vec![
+            0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x09, 0x01, 0xa1, 0x00, 0x05, 0x09, 0x19, 0x01,
+            0x29, 0x03, 0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02, 0x95, 0x01,
+            0x75, 0x08, 0x81, 0x01, 0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x81, 0x25, 0x7f,
+            0x75, 0x08, 0x95, 0x02, 0x81, 0x06, 0xc0, 0xc0,
+        ]
+    }
+
+    #[test]
+    fn boot_mouse_report_three_bytes() {
+        let layout = PointerReportLayout::boot();
+        let (b, dx, dy) = layout.extract(&[0x01, 0x05, 0xfe]).expect("extract");
+        assert_eq!(b, 0x01);
+        assert_eq!(dx, 5);
+        assert_eq!(dy, -2);
+    }
+
+    #[test]
+    fn report_mouse_descriptor_layout() {
+        let layout = PointerReportLayout::from_descriptor(&sample_boot_mouse_descriptor());
+        assert!(layout.is_some());
+        assert!(matches!(
+            layout.expect("parse").kind,
+            PointerLayoutKind::Report { .. }
+        ));
+    }
+
+    #[test]
+    fn pointer_state_boot_report() {
+        let mut st = PointerState::new(PointerReportLayout::boot());
+        st.process_raw_report(&[0x00, 0x02, 0x01]);
+        let ev = st.next_event().expect("event");
+        assert_eq!(ev.dx, 2);
+        assert_eq!(ev.dy, -1);
+        assert_eq!(ev.buttons, 0);
     }
 }

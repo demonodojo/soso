@@ -1309,6 +1309,7 @@ impl<'a> LayerExecutor<'a> {
         if !gpu_rms_ffn {
             rmsnorm(hidden, &s.norm_w, eps);
         }
+        perfil_marca(&mut t_perfil, FASE_ROPE_KV);
 
         let t_ffn0 = tick(clock_ms);
         if spec.ffn_kind == FfnKind::LatentMoe {
@@ -1735,6 +1736,120 @@ impl<'a> LayerExecutor<'a> {
     ) -> Result<(), ()> {
         let mut t_perfil = perfil_ahora();
         let n_shared = self.manifest.layer(layer).map(|sp| sp.num_shared_experts).unwrap_or(0) as usize;
+        // Decodificación con GPU: los expertos elegidos y el compartido en el dispositivo de una vez (dos lanzamientos y la combinación en la
+        // GPU), sin pedir a la fuente las vistas de lo que ya está residente. Si algún experto no se pudo resolver allí, se sigue por el
+        // camino de siempre (se descartan los resultados parciales).
+        if use_gpu {
+            if let Some(g) = gpu.as_deref_mut().filter(|g| g.available()) {
+                let n_sel = ranked.len();
+                let top_eff = n_sel + n_shared;
+                let mut nombres: Vec<String> = Vec::with_capacity(top_eff);
+                for (e, _) in ranked {
+                    nombres.push(format!("{prefix}.E{e:02}"));
+                }
+                for sh in 0..n_shared {
+                    nombres.push(format!("{prefix}.S{sh:02}"));
+                }
+                let sufijos = ["ffn_gate", "ffn_up", "ffn_down"];
+                let claves: Vec<[String; 3]> = nombres.iter().map(|nm| core::array::from_fn(|i| format!("{nm}.{}", sufijos[i]))).collect();
+                let mut crudas: Vec<[(usize, usize, u8, usize); 3]> = Vec::with_capacity(top_eff);
+                let mut falta = false;
+                for cl in &claves {
+                    let mut v3 = [(0usize, 0usize, 0u8, 0usize); 3];
+                    for i in 0..3 {
+                        if !g.gemma_residente(&cl[i]) {
+                            match source.tensor_view(&cl[i]) {
+                                Ok(v) => v3[i] = (v.bytes.as_ptr() as usize, v.bytes.len(), v.dtype, v.elems),
+                                Err(()) => falta = true,
+                            }
+                        }
+                    }
+                    crudas.push(v3);
+                }
+                // Puerta del compartido (escalar): un producto punto contra un vector f32.
+                let mut puerta = 1.0f32;
+                if n_shared > 0 {
+                    let name_pg = format!("{prefix}.ffn_gate_inp_shexp");
+                    if let Ok(view) = source.tensor_view(&name_pg) {
+                        if let Some(w) = view.f32() {
+                            let mut acc = 0.0f32;
+                            for (a, b) in w.iter().zip(hidden.iter()) {
+                                acc += a * b;
+                            }
+                            puerta = 1.0 / (1.0 + libm::expf(-acc));
+                        }
+                    }
+                }
+                if !falta {
+                    let mut pesos = vec![0.0f32; top_eff];
+                    for (j, (_, w)) in ranked.iter().enumerate() {
+                        pesos[j] = *w;
+                    }
+                    for sh in 0..n_shared {
+                        pesos[n_sel + sh] = puerta;
+                    }
+                    let vistas: Vec<[TensorView<'_>; 3]> = crudas
+                        .iter()
+                        .map(|c| {
+                            core::array::from_fn(|i| TensorView {
+                                bytes: if c[i].1 == 0 { &[] } else { unsafe { core::slice::from_raw_parts(c[i].0 as *const u8, c[i].1) } },
+                                dtype: c[i].2,
+                                elems: c[i].3,
+                            })
+                        })
+                        .collect();
+                    let tok0 = [0u32];
+                    let dest: Vec<[u32; 1]> = (0..top_eff).map(|j| [j as u32]).collect();
+                    let mut exps: Vec<crate::gpu::ExpertoBloque<'_>> = (0..top_eff)
+                        .map(|j| crate::gpu::ExpertoBloque {
+                            claves: [claves[j][0].as_str(), claves[j][1].as_str(), claves[j][2].as_str()],
+                            vistas: [&vistas[j][0], &vistas[j][1], &vistas[j][2]],
+                            tokens: &tok0,
+                            compartido: j >= n_sel,
+                            destinos: &dest[j],
+                        })
+                        .collect();
+                    let mut suma = vec![0.0f32; h];
+                    let mut hecho = vec![false; top_eff];
+                    let _ = g.expertos_bloque(hidden, 1, h, ffn, top_eff, &pesos, &mut exps, &mut suma, &mut hecho);
+                    // Los que la GPU no tiene residentes (VRAM llena) se hacen aquí por CPU y se suman a lo que ya sumó la GPU.
+                    let pend: Vec<usize> = (0..top_eff).filter(|&j| !hecho[j]).collect();
+                    if pend.iter().all(|&j| crudas[j].iter().all(|c| c.2 != 0)) {
+                        if !pend.is_empty() {
+                            let m = pend.len();
+                            let mut gates = vec![0.0f32; m * ffn];
+                            let mut ups = vec![0.0f32; m * ffn];
+                            let mut jobs: Vec<TrabajoMatvec> = Vec::with_capacity(2 * m);
+                            for (q, &j) in pend.iter().enumerate() {
+                                for (k, buf) in [(0usize, &mut gates), (1usize, &mut ups)] {
+                                    let c = crudas[j][k];
+                                    jobs.push(TrabajoMatvec { bytes: c.0 as *const u8, len: c.1, dtype: c.2, rows: ffn, cols: h, x: hidden.as_ptr(), out: buf[q * ffn..].as_mut_ptr() });
+                                }
+                            }
+                            matvec_multi_par(&jobs, par)?;
+                            for q in 0..m {
+                                swiglu_inplace(&mut ups[q * ffn..(q + 1) * ffn], &gates[q * ffn..(q + 1) * ffn]);
+                            }
+                            let mut downs = vec![0.0f32; m * h];
+                            jobs.clear();
+                            for (q, &j) in pend.iter().enumerate() {
+                                let c = crudas[j][2];
+                                jobs.push(TrabajoMatvec { bytes: c.0 as *const u8, len: c.1, dtype: c.2, rows: h, cols: ffn, x: ups[q * ffn..].as_ptr(), out: downs[q * h..].as_mut_ptr() });
+                            }
+                            matvec_multi_par(&jobs, par)?;
+                            for (q, &j) in pend.iter().enumerate() {
+                                for i in 0..h {
+                                    suma[i] += downs[q * h + i] * pesos[j];
+                                }
+                            }
+                        }
+                        hidden.copy_from_slice(&suma);
+                        perfil_marca(&mut t_perfil, FASE_FFN_DOWN);
+                        return Ok(());
+                    }
+                }
+            }
+        }
         let mut nombres: Vec<String> = Vec::with_capacity(ranked.len() + n_shared);
         for (e, _) in ranked {
             nombres.push(format!("{prefix}.E{e:02}"));
@@ -1831,6 +1946,7 @@ impl<'a> LayerExecutor<'a> {
         if n_exp == 0 || top_k == 0 || s.router.len() < n_exp {
             return Err(());
         }
+        let mut t_m = perfil_ahora();
         let name_router = format!("{prefix}.ffn_gate_inp");
         matvec_step(
             use_gpu,
@@ -1845,8 +1961,10 @@ impl<'a> LayerExecutor<'a> {
             planner.as_deref(),
             layer,
         )?;
+        perfil_marca(&mut t_m, FASE_SWIGLU);
         let ranked = topk_softmax(&mut s.router[..n_exp], top_k);
         source.wait_moe_prefetch();
+        perfil_marca(&mut t_m, FASE_OTROS);
         let prefetch_shards = if let (Some(pl), Some(idx)) = (planner.as_mut(), index) {
             let ids: alloc::vec::Vec<(u32, f32)> =
                 ranked.iter().map(|(i, w)| (*i as u32, *w)).collect();

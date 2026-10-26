@@ -139,6 +139,8 @@ fn bucle_grafico(ejecutar: String) -> Int ! io, alloc
                 rc = 4
             if listener >= 0
                 st = st_nuevo(evt, msg)
+                _ic = wm_iniciar_cursor(st, sw, sh)
+                _d0 = wm_marcar_dirty(st, 0, 0, sw, sh)
                 _sp = lanzar_ejecutar()
                 _loop = bucle_wm(st, listener, compos, plen, sw, sh, stride, bpp, fmt)
                 _c = fb_set_mode(fb_mode_consola())

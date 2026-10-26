@@ -34,9 +34,11 @@ pub fn push_mouse_move(x: i32, y: i32) {
     });
 }
 
-pub fn push_mouse_btn(buttons: u32) {
+pub fn push_mouse_btn(buttons: u32, x: i32, y: i32) {
     push(InputEvent {
         kind: INPUT_MOUSE_BTN,
+        x,
+        y,
         button: buttons,
         pressed: 1,
         ..InputEvent::default()

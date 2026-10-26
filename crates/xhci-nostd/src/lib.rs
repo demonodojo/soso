@@ -55,6 +55,6 @@ pub mod driver;
 pub mod mass_storage;
 
 pub use driver::XhciController;
-pub use hid::KeyEvent;
+pub use hid::{KeyEvent, PointerEvent};
 pub use mass_storage::MassStorage;
 pub use dma::{set_allocator, set_delay_us};

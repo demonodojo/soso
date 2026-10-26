@@ -579,6 +579,7 @@ fn moe_bloque<S: TensorSource>(
                         claves: [a.claves[0].as_str(), a.claves[1].as_str(), a.claves[2].as_str()],
                         vistas: [&v[0], &v[1], &v[2]],
                         tokens: t.as_slice(),
+                        compartido: false,
                         destinos: d.as_slice(),
                     })
                     .collect();

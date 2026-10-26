@@ -385,6 +385,17 @@ pub struct UsbKbdEvent {
 
 /// Sondea el teclado HID. No necesita el candado del vector si otro hilo está
 /// en un write BOT: solo `try_lock` por controlador (Linux `hid_irq_in`).
+pub fn poll_pointer_event() -> Option<xhci_nostd::PointerEvent> {
+    let guard = HOSTS.try_lock()?;
+    for host in guard.iter() {
+        let mut ctrl = host.ctrl.try_lock()?;
+        if let Some(evt) = ctrl.poll_pointer() {
+            return Some(evt);
+        }
+    }
+    None
+}
+
 pub fn poll_keyboard_event() -> Option<UsbKbdEvent> {
     use xhci_nostd::hid::{MOD_LEFT_SHIFT, MOD_RIGHT_ALT, MOD_RIGHT_SHIFT};
 

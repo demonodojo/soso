@@ -92,6 +92,37 @@ fn clamp_xy(nx: i32, ny: i32) -> (i32, i32) {
     )
 }
 
+/// Máscara de botones USB boot / PS/2 (bit0=izq, bit1=der, bit2=medio).
+pub fn buttons_from_hid_byte(flags: u8) -> u32 {
+    ((flags & 1) != 0) as u32
+        | (((flags & 2) != 0) as u32) << 1
+        | (((flags & 4) != 0) as u32) << 2
+}
+
+pub fn apply_relative(dx: i32, dy: i32) {
+    let nx = X.load(Ordering::Relaxed) + dx;
+    let ny = Y.load(Ordering::Relaxed) + dy;
+    let (cx, cy) = clamp_xy(nx, ny);
+    X.store(cx, Ordering::Relaxed);
+    Y.store(cy, Ordering::Relaxed);
+    input::push_mouse_move(cx, cy);
+}
+
+pub fn apply_button_mask(mask: u32) {
+    let prev = BTNS.swap(mask, Ordering::Relaxed);
+    if mask != prev {
+        let cx = X.load(Ordering::Relaxed);
+        let cy = Y.load(Ordering::Relaxed);
+        input::push_mouse_btn(mask, cx, cy);
+    }
+}
+
+/// Informe boot HID de 3 bytes (botones, dx, dy).
+pub fn on_hid_boot_report(buttons: u8, dx: i8, dy: i8) {
+    apply_button_mask(buttons_from_hid_byte(buttons));
+    apply_relative(dx as i32, -(dy as i32));
+}
+
 pub fn on_byte(b: u8) {
     if !present() {
         return;
@@ -103,22 +134,7 @@ pub fn on_byte(b: u8) {
             return;
         }
         PKT_I = 0;
-        let flags = PKT[0];
-        let dx = PKT[1] as i8 as i32;
-        let dy = -(PKT[2] as i8 as i32);
-        let nx = X.load(Ordering::Relaxed) + dx;
-        let ny = Y.load(Ordering::Relaxed) + dy;
-        let (cx, cy) = clamp_xy(nx, ny);
-        X.store(cx, Ordering::Relaxed);
-        Y.store(cy, Ordering::Relaxed);
-        input::push_mouse_move(cx, cy);
-        let mask = ((flags & 1) != 0) as u32
-            | (((flags & 2) != 0) as u32) << 1
-            | (((flags & 4) != 0) as u32) << 2;
-        let prev = BTNS.swap(mask, Ordering::Relaxed);
-        if mask != prev {
-            input::push_mouse_btn(mask);
-        }
+        on_hid_boot_report(PKT[0], PKT[1] as i8, PKT[2] as i8);
     }
 }
 

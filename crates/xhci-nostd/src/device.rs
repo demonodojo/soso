@@ -262,9 +262,27 @@ impl InterfaceDescriptor {
             && self.b_interface_protocol == 1
     }
 
+    /// Boot HID mouse (class=3, subclass=1, protocol=2).
+    pub fn is_hid_boot_mouse(&self) -> bool {
+        self.b_interface_class == USB_CLASS_HID
+            && self.b_interface_sub_class == 1
+            && self.b_interface_protocol == 2
+    }
+
     /// Candidato a teclado: HID que no es ratón (p. ej. ASUS NKEY en report protocol).
     pub fn is_hid_keyboard_candidate(&self) -> bool {
         self.b_interface_class == USB_CLASS_HID && self.b_interface_protocol != 2
+    }
+
+    /// Candidato a puntero: boot mouse o HID genérico que no es teclado boot.
+    pub fn is_hid_pointer_candidate(&self) -> bool {
+        if self.b_interface_class != USB_CLASS_HID {
+            return false;
+        }
+        if self.is_hid_boot_mouse() {
+            return true;
+        }
+        !self.is_hid_boot_keyboard()
     }
 
     /// Is this a HID interface?
@@ -569,12 +587,12 @@ impl ParsedConfiguration {
         })
     }
 
-    /// ¿Necesita SET_CONFIGURATION + Configure Endpoint? (hub, teclado, mass storage).
-    pub fn needs_full_config(&self, dev_desc: &DeviceDescriptor, has_keyboard: bool) -> bool {
+    /// ¿Necesita SET_CONFIGURATION + Configure Endpoint? (hub, HID entrada, mass storage).
+    pub fn needs_full_config(&self, dev_desc: &DeviceDescriptor, has_hid_input: bool) -> bool {
         if dev_desc.is_hub() {
             return true;
         }
-        if has_keyboard {
+        if has_hid_input {
             return true;
         }
         self.is_mass_storage()
@@ -646,6 +664,38 @@ impl ParsedConfiguration {
 
             log::warn!(
                 "xhci: HID keyboard interface {} has no interrupt IN endpoint",
+                iface.b_interface_number
+            );
+        }
+        None
+    }
+
+    /// Primera interfaz HID de puntero (boot mouse o touchpad/ratón report protocol).
+    pub fn find_hid_pointer(&self) -> Option<(u8, bool, &EndpointDescriptor)> {
+        for iface in &self.interfaces {
+            if iface.b_alternate_setting != 0 || !iface.is_hid_pointer_candidate() {
+                continue;
+            }
+            let boot = iface.is_hid_boot_mouse();
+            let kind = if boot { "boot mouse" } else { "HID pointer" };
+            log::info!(
+                "xhci: found HID pointer ({}) on interface {}",
+                kind,
+                iface.b_interface_number
+            );
+
+            for (iface_num, alt, ep) in &self.endpoints {
+                if *iface_num == iface.b_interface_number
+                    && *alt == 0
+                    && ep.is_interrupt()
+                    && ep.is_in()
+                {
+                    return Some((iface.b_interface_number, boot, ep));
+                }
+            }
+
+            log::warn!(
+                "xhci: HID pointer interface {} has no interrupt IN endpoint",
                 iface.b_interface_number
             );
         }

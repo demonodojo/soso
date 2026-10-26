@@ -16,6 +16,7 @@
 //!   el driver los compila para la tarjeta que haya.
 
 mod capa;
+mod decode;
 
 use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_int, c_void};
@@ -23,7 +24,7 @@ use std::ffi::{CString, c_char, c_int, c_void};
 use soso_llm_core::gpu::{GpuDispatch, GpuStats};
 use soso_llm_core::layer::TensorView;
 use sosomodel::layout::{
-    DTYPE_IQ2_S, DTYPE_IQ3_S, DTYPE_IQ3_XXS, DTYPE_IQ4_XS, DTYPE_Q4_0, DTYPE_Q4_K, DTYPE_Q5_K, DTYPE_Q8_0, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMS, Q4_K_BLOCK_BYTES,
+    DTYPE_IQ2_S, DTYPE_IQ2_XS, DTYPE_IQ3_S, DTYPE_IQ3_XXS, DTYPE_IQ4_XS, DTYPE_Q4_0, DTYPE_Q4_K, DTYPE_Q5_K, DTYPE_Q8_0, Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMS, Q4_K_BLOCK_BYTES,
     Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMS,
 };
 
@@ -59,8 +60,18 @@ fn soltar_paginas_host(bytes: &[u8]) {
     }
 }
 
+/// Bytes de VRAM que se guardan para los pesos que no son expertos (`SOSO_RESERVA_DENSA_MIB`, 3072 por defecto).
+fn reserva_densa() -> usize {
+    std::env::var("SOSO_RESERVA_DENSA_MIB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(3072) << 20
+}
+
+/// ¿Es la clave de un tensor de experto (`L12.E034.ffn_gate`)?
+fn es_clave_experto(key: &str) -> bool {
+    key.find(".E").is_some_and(|i| key[i + 2..].starts_with(|c: char| c.is_ascii_digit()))
+}
+
 fn es_iq_gpu(dtype: u8) -> bool {
-    matches!(dtype, DTYPE_Q5_K | DTYPE_IQ2_S | DTYPE_IQ3_S | DTYPE_IQ3_XXS | DTYPE_IQ4_XS)
+    matches!(dtype, DTYPE_Q5_K | DTYPE_IQ2_S | DTYPE_IQ2_XS | DTYPE_IQ3_S | DTYPE_IQ3_XXS | DTYPE_IQ4_XS)
 }
 /// Elementos de un superbloque Q4_K: el kernel exige `cols` múltiplo.
 const Q4_K_ELEMS: usize = 256;
@@ -231,6 +242,11 @@ pub struct CudaGpu {
     /// `None` = ya se intentó y no sirve (otro dtype, no cabe): no se reintenta en cada token.
     pesos: HashMap<String, Option<Peso>>,
     presupuesto: usize,
+    /// Tope de VRAM para los pesos de **expertos** (`presupuesto` menos una reserva para las matrices densas, la cabeza de logits y el
+    /// compartido, que se usan en todos los tokens): sin él, los expertos subidos primero agotaban la tarjeta y la cabeza de logits (0,9 GB)
+    /// y parte de las matrices densas se quedaban en CPU.
+    tope_expertos: usize,
+    subiendo_experto: bool,
     usado: usize,
     losa_ptr: u64,
     losa_libre: usize,
@@ -263,6 +279,8 @@ pub struct CudaGpu {
     grafo: Option<GrafoApi>,
     stream: *mut c_void,
     capturando: bool,
+    modulo_iq: CuModule,
+    dec: Option<decode::DecodeDev>,
 }
 
 unsafe impl Send for CudaGpu {}
@@ -335,6 +353,8 @@ impl CudaGpu {
                 f_iq,
                 pesos: HashMap::new(),
                 presupuesto: libre.saturating_sub(RESERVA_VRAM),
+                tope_expertos: libre.saturating_sub(RESERVA_VRAM).saturating_sub(reserva_densa()),
+                subiendo_experto: false,
                 usado: 0,
                 losa_ptr: 0,
                 losa_libre: 0,
@@ -354,6 +374,8 @@ impl CudaGpu {
                 gbuf: [(0, 0); 17],
                 f_down_multi,
                 kvdev: HashMap::new(),
+                modulo_iq: mod_iq,
+                dec: None,
                 x_cap: 0,
                 y_dev: 0,
                 y_cap: 0,
@@ -480,7 +502,7 @@ impl CudaGpu {
                     return Ok(None);
                 }
                 let total = rows * nb * 2 + rows * nb * 16;
-                if self.usado + total + (self.x_cap + self.y_cap) * 4 > self.presupuesto {
+                if self.usado + total + (self.x_cap + self.y_cap) * 4 > if self.subiendo_experto { self.tope_expertos } else { self.presupuesto } {
                     return Ok(None);
                 }
                 // Reempaquetado: escalas f16 y nibbles en dos arrays alineados.
@@ -511,7 +533,7 @@ impl CudaGpu {
                     return Ok(None);
                 }
                 let total = view.bytes.len();
-                if self.usado + total + (self.x_cap + self.y_cap) * 4 > self.presupuesto {
+                if self.usado + total + (self.x_cap + self.y_cap) * 4 > if self.subiendo_experto { self.tope_expertos } else { self.presupuesto } {
                     return Ok(None);
                 }
                 let d = self.alloc_peso(total)?;
@@ -531,7 +553,7 @@ impl CudaGpu {
                 if total != rows * (cols / Q4_K_ELEMS) * Q4_K_BLOCK_BYTES {
                     return Ok(None);
                 }
-                if self.usado + total + (self.x_cap + self.y_cap) * 4 > self.presupuesto {
+                if self.usado + total + (self.x_cap + self.y_cap) * 4 > if self.subiendo_experto { self.tope_expertos } else { self.presupuesto } {
                     return Ok(None);
                 }
                 let d = self.alloc_peso(total)?;
@@ -552,7 +574,7 @@ impl CudaGpu {
                 if rb == 0 || total != rows * rb {
                     return Ok(None);
                 }
-                if self.usado + total + (self.x_cap + self.y_cap) * 4 > self.presupuesto {
+                if self.usado + total + (self.x_cap + self.y_cap) * 4 > if self.subiendo_experto { self.tope_expertos } else { self.presupuesto } {
                     return Ok(None);
                 }
                 let dd = self.alloc_peso(total)?;
@@ -1075,11 +1097,19 @@ impl CudaGpu {
             for k in 0..3 {
                 let key = e.claves[k];
                 if !self.pesos.contains_key(key) {
-                    let p = self.subir_peso(e.vistas[k], dims[k].0, dims[k].1)?;
+                    // Vista vacía (`dtype` 0): el llamante sólo la da para lo que ya cree residente; no hay nada que subir.
+                    if e.vistas[k].dtype == 0 {
+                        ok = false;
+                        break;
+                    }
+                    self.subiendo_experto = !e.compartido;
+                    let p = self.subir_peso(e.vistas[k], dims[k].0, dims[k].1);
+                    self.subiendo_experto = false;
+                    let p = p?;
                     self.pesos.insert(key.to_string(), p);
                 }
                 match self.pesos.get(key) {
-                    Some(Some(p)) if es_iq_gpu(p.dtype) && p.rows == dims[k].0 && p.cols == dims[k].1 && p.dtype == e.vistas[k].dtype => {
+                    Some(Some(p)) if codigo_mma(p.dtype, dims[k].1).is_some() && p.rows == dims[k].0 && p.cols == dims[k].1 && (e.vistas[k].dtype == 0 || p.dtype == e.vistas[k].dtype) => {
                         w[k] = (p.d, p.dtype)
                     }
                     _ => ok = false,
@@ -1090,6 +1120,8 @@ impl CudaGpu {
                 total += e.tokens.len();
             }
         }
+        self.stats.flujo_aciertos += plan.len() as u64;
+        self.stats.flujo_fallos += (exps.len() - plan.len()) as u64;
         if plan.is_empty() {
             return Ok(());
         }
@@ -1126,10 +1158,10 @@ impl CudaGpu {
             let cnt = exps[pl.i].tokens.len();
             max_cnt = max_cnt.max(cnt);
             let (dg, du, dd) = (pl.w[0].1, pl.w[1].1, pl.w[2].1);
-            let ggml = |d: u8| sosomodel::layout::ggml_de_dtype_iq(d).unwrap_or(0) as u64;
-            let rb = |d: u8, c: usize| sosomodel::dequant::row_bytes(d, c).unwrap_or(0) as u64;
+            let cm = |d: u8, c: usize| codigo_mma(d, c).unwrap_or((0, 0));
+            let (cg, cu, cd) = (cm(dg, h), cm(du, h), cm(dd, ffn));
             desc.extend_from_slice(&[
-                pl.w[0].0, pl.w[1].0, pl.w[2].0, pl.abase as u64, cnt as u64, ggml(dg), ggml(du), ggml(dd), rb(dg, h), rb(du, h), rb(dd, ffn), pl.abase as u64,
+                pl.w[0].0, pl.w[1].0, pl.w[2].0, pl.abase as u64, cnt as u64, cg.0 as u64, cu.0 as u64, cd.0 as u64, cg.1 as u64, cu.1 as u64, cd.1 as u64, pl.abase as u64,
             ]);
         }
         let d_dev = self.blq_asegurar(4, desc.len() * 8)?;
@@ -1209,7 +1241,10 @@ impl CudaGpu {
                 continue;
             }
             if !self.pesos.contains_key(op.key) {
-                let p = self.subir_peso(op.view, op.rows, op.cols)?;
+                self.subiendo_experto = es_clave_experto(op.key);
+                let p = self.subir_peso(op.view, op.rows, op.cols);
+                self.subiendo_experto = false;
+                let p = p?;
                 self.pesos.insert(op.key.to_string(), p);
             }
             let Some(Some(p)) = self.pesos.get(op.key) else { continue };
@@ -1311,7 +1346,10 @@ impl CudaGpu {
         // El contexto es del hilo: el servidor atiende cada petición en uno distinto del que lo creó.
         unsafe { ck((self.api.ctx_set_current)(self.ctx), "cuCtxSetCurrent")? };
         if !self.pesos.contains_key(key) {
-            let p = self.subir_peso(view, rows, cols)?;
+            self.subiendo_experto = es_clave_experto(key);
+            let p = self.subir_peso(view, rows, cols);
+            self.subiendo_experto = false;
+            let p = p?;
             self.pesos.insert(key.to_string(), p);
         }
         let Some(Some(p)) = self.pesos.get(key) else {
@@ -1360,6 +1398,33 @@ impl CudaGpu {
 impl GpuDispatch for CudaGpu {
     fn available(&self) -> bool {
         true
+    }
+
+    fn decode_preparar(&mut self, plan: &soso_llm_core::gpu::DecodePlan) -> Result<bool, ()> {
+        self.decode_preparar_impl(plan).map_err(|e| eprintln!("decode GPU: {e}"))
+    }
+
+    fn decode_listo(&self) -> bool {
+        self.dec.is_some()
+    }
+
+    fn decode_subir_estado(&mut self, capas: &mut [soso_llm_core::gpu::EstadoCapaDec<'_>], pos: usize) -> Result<(), ()> {
+        self.decode_subir_estado_impl(capas, pos).map_err(|e| eprintln!("decode GPU: {e}"))
+    }
+
+    fn decode_token(
+        &mut self,
+        embed: &[f32],
+        pos: usize,
+        cpu_moe: &mut dyn FnMut(usize, &[f32], &[u32], &[f32], &mut [f32]) -> Result<(), ()>,
+        logits: &mut [f32],
+        kv_rows: &mut [u16],
+    ) -> Result<bool, ()> {
+        self.decode_token_impl(embed, pos, cpu_moe, logits, kv_rows).map_err(|e| eprintln!("decode GPU: {e}"))
+    }
+
+    fn decode_bajar_estado(&mut self, capas: &mut [soso_llm_core::gpu::EstadoCapaDec<'_>]) -> Result<(), ()> {
+        self.decode_bajar_estado_impl(capas).map_err(|e| eprintln!("decode GPU: {e}"))
     }
 
     fn stats(&self) -> GpuStats {

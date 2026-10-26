@@ -108,6 +108,19 @@ __device__ __forceinline__ float iq_unidad(int dtype, const unsigned char *w, in
         }
         break;
     }
+    case 17: { /* IQ2_XS */
+        const unsigned char *b = w + (long)sb * 74;
+        float d = iq_f16(b);
+        unsigned char sbyte = b[66 + ib];
+        float db0 = d * (0.5f + (float)(sbyte & 0xf)) * 0.25f;
+        float db1 = d * (0.5f + (float)(sbyte >> 4)) * 0.25f;
+        for (int l = 0; l < 4; l++) {
+            const unsigned char *qp = b + 2 + 2 * (4 * ib + l);
+            unsigned int q = (unsigned int)qp[0] | ((unsigned int)qp[1] << 8);
+            acc += (l < 2 ? db0 : db1) * iq_grid8(IQ2XS_GRID_D[q & 511u], KSIGNS_IQ2XS_D[q >> 9], x + 8 * l);
+        }
+        break;
+    }
     case IQ_GGML_IQ3_S: {
         const unsigned char *b = w + (long)sb * 110;
         float d = iq_f16(b);
@@ -264,6 +277,25 @@ __device__ __forceinline__ void iq_decodificar(int dtype, const unsigned char *w
             for (int j = 0; j < 4; j++) {
                 o[8 * l + j] = db * (float)((g1 >> (8 * j)) & 0xffu) * iq_sg(sg, j);
                 o[8 * l + j + 4] = db * (float)((g2 >> (8 * j)) & 0xffu) * iq_sg(sg, j + 4);
+            }
+        }
+        break;
+    }
+    case 17: { /* IQ2_XS: d f16, qs u16[32], scales[8] */
+        const unsigned char *b = w + (long)sb * 74;
+        float d = iq_f16(b);
+        unsigned char s = b[66 + ib];
+        float db0 = d * (0.5f + (float)(s & 0xf)) * 0.25f;
+        float db1 = d * (0.5f + (float)(s >> 4)) * 0.25f;
+        for (int l = 0; l < 4; l++) {
+            const unsigned char *qp = b + 2 + 2 * (4 * ib + l);
+            unsigned int q = (unsigned int)qp[0] | ((unsigned int)qp[1] << 8);
+            unsigned long long g = IQ2XS_GRID_D[q & 511u];
+            unsigned char sg = KSIGNS_IQ2XS_D[q >> 9];
+            float db = l < 2 ? db0 : db1;
+#pragma unroll
+            for (int j = 0; j < 8; j++) {
+                o[8 * l + j] = db * (float)((g >> (8 * j)) & 0xffu) * iq_sg(sg, j);
             }
         }
         break;
@@ -1010,4 +1042,465 @@ extern "C" __global__ void gdn_cola(const float *qkv, float *dst, int n, int anc
         return;
     }
     dst[i] = qkv[(long)(n - filas) * ancho + i];
+}
+
+/* ---------------------------------------------------------------------------------------------------------------------
+ * Decodificación de UN token con todo el modelo en la GPU (grafo residente). Los productos matriz×vector usan `iq_matmul_mma` con n = 1.
+ * Las posiciones viven en memoria del dispositivo (`dyn[0] = pos`, `dyn[1] = seq = pos + 1`): así los lanzamientos no cambian de un token al
+ * siguiente y se pueden capturar en un grafo CUDA.
+ * ------------------------------------------------------------------------------------------------------------------ */
+__device__ __forceinline__ float dec_bsum256(float v, float *red)
+{
+    /* suma sobre los 256 hilos del bloque; todos ven el resultado. `red` tiene 8 floats. */
+    int tid = (int)threadIdx.x;
+    for (int o = 16; o > 0; o >>= 1) {
+        v += __shfl_xor_sync(0xffffffffu, v, o);
+    }
+    if ((tid & 31) == 0) {
+        red[tid >> 5] = v;
+    }
+    __syncthreads();
+    float r = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        r += red[i];
+    }
+    __syncthreads();
+    return r;
+}
+
+/* y = x · rsqrt(mean(x²) + eps) · w. Un bloque de 256 hilos. */
+extern "C" __global__ void dec_rmsnorm(const float *x, const float *w, float *y, int n, float eps)
+{
+    __shared__ float red[8];
+    float ss = 0.0f;
+    for (int i = (int)threadIdx.x; i < n; i += 256) {
+        ss += x[i] * x[i];
+    }
+    ss = dec_bsum256(ss, red);
+    float sc = rsqrtf(ss / (float)n + eps);
+    for (int i = (int)threadIdx.x; i < n; i += 256) {
+        y[i] = x[i] * sc * w[i];
+    }
+}
+
+extern "C" __global__ void dec_add(float *a, const float *b, int n)
+{
+    int i = (int)blockIdx.x * 256 + (int)threadIdx.x;
+    if (i < n) {
+        a[i] += b[i];
+    }
+}
+
+extern "C" __global__ void dec_swiglu(float *up, const float *gate, int n)
+{
+    int i = (int)blockIdx.x * 256 + (int)threadIdx.x;
+    if (i < n) {
+        float g = gate[i];
+        up[i] = (g / (1.0f + expf(-g))) * up[i];
+    }
+}
+
+/* Conv causal de un paso + SiLU (estado `cs` de `ker - 1` filas, se desplaza en el sitio). Un hilo por canal. */
+extern "C" __global__ void dec_gdn_conv(float *cs, const float *qkv, const float *cw, float *up, int qkv_dim, int ker)
+{
+    int ch = (int)blockIdx.x * 256 + (int)threadIdx.x;
+    if (ch >= qkv_dim) {
+        return;
+    }
+    int prev = ker - 1;
+    float acc = 0.0f;
+    for (int k = 0; k < prev; k++) {
+        acc += cw[(long)ch * ker + k] * cs[(long)k * qkv_dim + ch];
+    }
+    float x = qkv[ch];
+    acc += cw[(long)ch * ker + prev] * x;
+    up[ch] = acc / (1.0f + expf(-acc));
+    for (int r = 0; r + 1 < prev; r++) {
+        cs[(long)r * qkv_dim + ch] = cs[(long)(r + 1) * qkv_dim + ch];
+    }
+    if (prev > 0) {
+        cs[(long)(prev - 1) * qkv_dim + ch] = x;
+    }
+}
+
+/* Atención con puerta, preparación: parte q/puerta, norma por cabeza, RoPE parcial (parejas (2i, 2i+1) de los primeros `rope_n`), y escribe K/V
+ * (f16) en la fila `pos` del KV del dispositivo y en el búfer de salida al host. Un bloque por cabeza (heads de consulta + heads KV), 256 hilos. */
+extern "C" __global__ void dec_attn_prep(const float *qf, const float *qnw, const float *knw, const float *kk, const float *vv, float *q_out,
+                                         float *gate_out, unsigned short *Kc, unsigned short *Vc, unsigned short *kst, unsigned short *vst,
+                                         const int *dyn, int heads, int kv_heads, int hd, int rope_n, float theta, float eps)
+{
+    __shared__ float red[8];
+    __shared__ float xs[256];
+    int b = (int)blockIdx.x;
+    int tid = (int)threadIdx.x;
+    int pos = dyn[0];
+    int kv_dim = kv_heads * hd;
+    int es_q = b < heads;
+    float v = 0.0f, gt = 0.0f;
+    if (tid < hd) {
+        if (es_q) {
+            v = qf[(long)b * 2 * hd + tid];
+            gt = qf[(long)b * 2 * hd + hd + tid];
+        } else {
+            v = kk[(long)(b - heads) * hd + tid];
+        }
+    }
+    float ss = dec_bsum256(v * v, red);
+    float sc = rsqrtf(ss / (float)hd + eps);
+    float xn = v * sc * (tid < hd ? (es_q ? qnw[tid] : knw[tid]) : 0.0f);
+    xs[tid] = xn;
+    __syncthreads();
+    float out = xn;
+    if (tid < rope_n) {
+        int i = tid >> 1;
+        float freq = powf(theta, -2.0f * (float)i / (float)rope_n);
+        float ang = (float)pos * freq;
+        float sn, cs;
+        sincosf(ang, &sn, &cs);
+        float a = xs[2 * i], bb = xs[2 * i + 1];
+        out = (tid & 1) ? (a * sn + bb * cs) : (a * cs - bb * sn);
+    }
+    if (tid < hd) {
+        if (es_q) {
+            q_out[(long)b * hd + tid] = out;
+            gate_out[(long)b * hd + tid] = gt;
+        } else {
+            int kh = b - heads;
+            unsigned short kh16 = mm_h(out);
+            Kc[(long)pos * kv_dim + kh * hd + tid] = kh16;
+            kst[kh * hd + tid] = kh16;
+            unsigned short vh16 = mm_h(vv[(long)kh * hd + tid]);
+            Vc[(long)pos * kv_dim + kh * hd + tid] = vh16;
+            vst[kh * hd + tid] = vh16;
+        }
+    }
+}
+
+/* Atención de decodificación partida por trozos de contexto: grid = (kv_heads, trozos máximos). Cada bloque calcula, para las `group` cabezas de
+ * consulta de su cabeza KV, la suma ponderada SIN normalizar y (máximo, suma) del trozo `[s * chunk, min((s + 1) * chunk, seq))`. */
+extern "C" __global__ void dec_attn_split(const float *q, const unsigned short *K, const unsigned short *V, float *po, float *pml, const int *dyn,
+                                          int heads, int kv_heads, int hd, int group, int chunk, int max_split)
+{
+    __shared__ float Qs[16][256];
+    __shared__ float Ks[AP_TILE][256];
+    __shared__ unsigned short Vs[AP_TILE][256];
+    __shared__ float P[16][AP_TILE];
+    __shared__ float mm[16], ll[16], alfa[16];
+    int tid = (int)threadIdx.x;
+    int kvh = (int)blockIdx.x;
+    int sp = (int)blockIdx.y;
+    int seq = dyn[1];
+    int lo = sp * chunk;
+    if (lo >= seq) {
+        return;
+    }
+    int hi = lo + chunk < seq ? lo + chunk : seq;
+    int kv_dim = kv_heads * hd;
+    float inv = rsqrtf((float)hd);
+    for (int qi = 0; qi < 16; qi++) {
+        float v = 0.0f;
+        if (qi < group && tid < hd) {
+            v = q[(long)(kvh * group + qi) * hd + tid] * inv;
+        }
+        Qs[qi][tid] = v;
+    }
+    if (tid < 16) {
+        mm[tid] = -INFINITY;
+        ll[tid] = 0.0f;
+    }
+    float acc[16];
+#pragma unroll
+    for (int i = 0; i < 16; i++) {
+        acc[i] = 0.0f;
+    }
+    __syncthreads();
+    for (int t0 = lo; t0 < hi; t0 += AP_TILE) {
+        for (int r = 0; r < AP_TILE; r++) {
+            int pos = t0 + r;
+            float kk = 0.0f;
+            unsigned short vv = 0;
+            if (pos < hi && tid < hd) {
+                kk = ap_f16(K[(long)pos * kv_dim + (long)kvh * hd + tid]);
+                vv = V[(long)pos * kv_dim + (long)kvh * hd + tid];
+            }
+            Ks[r][tid] = kk;
+            Vs[r][tid] = vv;
+        }
+        __syncthreads();
+        {
+            int qi = tid >> 4, p = tid & 15;
+            float s = -INFINITY;
+            if (qi < group && t0 + p < hi) {
+                float a = 0.0f;
+                for (int d = 0; d < hd; d++) {
+                    a += Qs[qi][d] * Ks[p][d];
+                }
+                s = a;
+            }
+            P[qi][p] = s;
+        }
+        __syncthreads();
+        {
+            int qi = (tid >> 5) * 2 + ((tid & 31) >> 4);
+            int p = tid & 15;
+            float s = P[qi][p];
+            float mx = s;
+            for (int o = 8; o > 0; o >>= 1) {
+                mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o, 16));
+            }
+            float mold = mm[qi];
+            float mnew = fmaxf(mold, mx);
+            float al = 1.0f, pe = 0.0f;
+            if (mnew != -INFINITY) {
+                al = (mold == -INFINITY) ? 0.0f : expf(mold - mnew);
+                pe = (s == -INFINITY) ? 0.0f : expf(s - mnew);
+            }
+            float sum = pe;
+            for (int o = 8; o > 0; o >>= 1) {
+                sum += __shfl_xor_sync(0xffffffffu, sum, o, 16);
+            }
+            P[qi][p] = pe;
+            if (p == 0) {
+                ll[qi] = ll[qi] * al + sum;
+                mm[qi] = mnew;
+                alfa[qi] = al;
+            }
+        }
+        __syncthreads();
+        if (tid < hd) {
+#pragma unroll
+            for (int qi = 0; qi < 16; qi++) {
+                acc[qi] *= alfa[qi];
+            }
+            for (int p = 0; p < AP_TILE; p++) {
+                float v = ap_f16(Vs[p][tid]);
+#pragma unroll
+                for (int qi = 0; qi < 16; qi++) {
+                    acc[qi] += P[qi][p] * v;
+                }
+            }
+        }
+        __syncthreads();
+    }
+    if (tid < hd) {
+        for (int qi = 0; qi < group; qi++) {
+            po[(((long)kvh * max_split + sp) * 16 + qi) * 256 + tid] = acc[qi];
+        }
+    }
+    if (tid < group) {
+        pml[(((long)kvh * max_split + sp) * 16 + tid) * 2] = mm[tid];
+        pml[(((long)kvh * max_split + sp) * 16 + tid) * 2 + 1] = ll[tid];
+    }
+}
+
+/* Une los trozos y aplica la puerta: att[head * hd + d] = (Σ_s e^(m_s − M) o_s / Σ_s e^(m_s − M) l_s) · σ(gate). grid = heads (de consulta). */
+extern "C" __global__ void dec_attn_combine(const float *po, const float *pml, const float *gate, float *att, const int *dyn, int kv_heads, int group,
+                                            int hd, int chunk, int max_split)
+{
+    int head = (int)blockIdx.x;
+    int tid = (int)threadIdx.x;
+    int kvh = head / group, qi = head % group;
+    int seq = dyn[1];
+    int ns = (seq + chunk - 1) / chunk;
+    float M = -INFINITY;
+    for (int s = 0; s < ns; s++) {
+        float l = pml[(((long)kvh * max_split + s) * 16 + qi) * 2 + 1];
+        if (l > 0.0f) {
+            M = fmaxf(M, pml[(((long)kvh * max_split + s) * 16 + qi) * 2]);
+        }
+    }
+    float o = 0.0f, L = 0.0f;
+    for (int s = 0; s < ns; s++) {
+        float l = pml[(((long)kvh * max_split + s) * 16 + qi) * 2 + 1];
+        if (l <= 0.0f) {
+            continue;
+        }
+        float w = expf(pml[(((long)kvh * max_split + s) * 16 + qi) * 2] - M);
+        L += w * l;
+        if (tid < hd) {
+            o += w * po[(((long)kvh * max_split + s) * 16 + qi) * 256 + tid];
+        }
+    }
+    if (tid < hd) {
+        float g = gate[(long)head * hd + tid];
+        att[(long)head * hd + tid] = (L > 0.0f ? o / L : 0.0f) * (1.0f / (1.0f + expf(-g)));
+    }
+}
+
+/* Router MoE: softmax sobre todos los logits, los `top_k` mayores (empate: el índice menor) renormalizados. Un bloque de 256 hilos. */
+extern "C" __global__ void dec_router_topk(const float *lg, int *idx, float *wt, int n_exp, int top_k)
+{
+    __shared__ float red[8];
+    __shared__ float pr[1024];
+    __shared__ float bv[256];
+    __shared__ int bi[256];
+    int tid = (int)threadIdx.x;
+    float mx = -INFINITY;
+    for (int i = tid; i < n_exp; i += 256) {
+        mx = fmaxf(mx, lg[i]);
+    }
+    for (int o = 16; o > 0; o >>= 1) {
+        mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o));
+    }
+    if ((tid & 31) == 0) {
+        red[tid >> 5] = mx;
+    }
+    __syncthreads();
+    mx = red[0];
+    for (int i = 1; i < 8; i++) {
+        mx = fmaxf(mx, red[i]);
+    }
+    __syncthreads();
+    float sum = 0.0f;
+    for (int i = tid; i < n_exp; i += 256) {
+        float e = expf(lg[i] - mx);
+        pr[i] = e;
+        sum += e;
+    }
+    sum = dec_bsum256(sum, red);
+    for (int i = tid; i < n_exp; i += 256) {
+        pr[i] /= sum;
+    }
+    __syncthreads();
+    float tot = 0.0f;
+    for (int k = 0; k < top_k; k++) {
+        float best = -1.0f;
+        int bidx = 0x7fffffff;
+        for (int i = tid; i < n_exp; i += 256) {
+            if (pr[i] > best) {
+                best = pr[i];
+                bidx = i;
+            }
+        }
+        bv[tid] = best;
+        bi[tid] = bidx;
+        __syncthreads();
+        for (int s2 = 128; s2 > 0; s2 >>= 1) {
+            if (tid < s2) {
+                if (bv[tid + s2] > bv[tid] || (bv[tid + s2] == bv[tid] && bi[tid + s2] < bi[tid])) {
+                    bv[tid] = bv[tid + s2];
+                    bi[tid] = bi[tid + s2];
+                }
+            }
+            __syncthreads();
+        }
+        if (tid == 0) {
+            idx[k] = bi[0];
+            wt[k] = bv[0];
+            pr[bi[0]] = -2.0f;
+        }
+        tot += 0.0f;
+        __syncthreads();
+    }
+    if (tid == 0) {
+        float s = 0.0f;
+        for (int k = 0; k < top_k; k++) {
+            s += wt[k];
+        }
+        if (s > 0.0f) {
+            for (int k = 0; k < top_k; k++) {
+                wt[k] /= s;
+            }
+        }
+    }
+}
+
+/* gate/up + SwiGLU de los `top_k` expertos elegidos (índices en `idx`). Las tablas `tg/tu/td` guardan el puntero a los pesos de cada experto.
+ * grid = (ceil(ffn / 64), 1, top_k); 128 hilos. Salida: act[slot * ffn + fila]. */
+extern "C" __global__ void __launch_bounds__(128) dec_moe_gateup(const unsigned long long *tg, const unsigned long long *tu, const int *idx, const float *xn,
+                                                                float *act, int ffn, int h, int dg, int du, long rbg, long rbu)
+{
+    __shared__ __align__(16) unsigned short Xs[16 * MM_LD];
+    __shared__ __align__(16) unsigned short Wsh[4][16 * MM_LD];
+    int slot = (int)blockIdx.z;
+    int e = idx[slot];
+    int warp = (int)threadIdx.x >> 5;
+    int row_w = (int)blockIdx.x * 64 + warp * 16;
+    float ag[2][4], au[2][4];
+#pragma unroll
+    for (int j = 0; j < 2; j++) {
+#pragma unroll
+        for (int q = 0; q < 4; q++) {
+            ag[j][q] = 0.0f;
+            au[j][q] = 0.0f;
+        }
+    }
+    iq_mma_tile(dg, (const unsigned char *)tg[e], rbg, ffn, row_w, h, xn, h, (const int *)0, 0, 0, 1, ag, Xs, Wsh[warp]);
+    iq_mma_tile(du, (const unsigned char *)tu[e], rbu, ffn, row_w, h, xn, h, (const int *)0, 0, 0, 1, au, Xs, Wsh[warp]);
+#pragma unroll
+    for (int j = 0; j < 2; j++) {
+#pragma unroll
+        for (int q = 0; q < 4; q++) {
+            float gv = ag[j][q];
+            ag[j][q] = (gv / (1.0f + expf(-gv))) * au[j][q];
+        }
+    }
+    iq_mma_escribir(ag, act + (long)slot * ffn, ffn, ffn, row_w, 0, 0, 1, (const int *)0);
+}
+
+extern "C" __global__ void __launch_bounds__(128) dec_moe_down(const unsigned long long *td, const int *idx, const float *act, float *ys, int rows, int cols,
+                                                              int dd, long rbd)
+{
+    __shared__ __align__(16) unsigned short Xs[16 * MM_LD];
+    __shared__ __align__(16) unsigned short Wsh[4][16 * MM_LD];
+    int slot = (int)blockIdx.z;
+    int e = idx[slot];
+    int warp = (int)threadIdx.x >> 5;
+    int row_w = (int)blockIdx.x * 64 + warp * 16;
+    float a[2][4];
+#pragma unroll
+    for (int j = 0; j < 2; j++) {
+#pragma unroll
+        for (int q = 0; q < 4; q++) {
+            a[j][q] = 0.0f;
+        }
+    }
+    iq_mma_tile(dd, (const unsigned char *)td[e], rbd, rows, row_w, cols, act + (long)slot * cols, cols, (const int *)0, 0, 0, 1, a, Xs, Wsh[warp]);
+    iq_mma_escribir(a, ys + (long)slot * rows, rows, rows, row_w, 0, 0, 1, (const int *)0);
+}
+
+/* sg = σ(pg · xn): puerta escalar del experto compartido. Un bloque. */
+extern "C" __global__ void dec_pgate(const float *pg, const float *xn, float *sg, int n)
+{
+    __shared__ float red[8];
+    float a = 0.0f;
+    for (int i = (int)threadIdx.x; i < n; i += 256) {
+        a += pg[i] * xn[i];
+    }
+    a = dec_bsum256(a, red);
+    if (threadIdx.x == 0) {
+        sg[0] = 1.0f / (1.0f + expf(-a));
+    }
+}
+
+/* hid[i] += Σ_j w[j] · ys[j * h + i] + sg · ysh[i] (expertos en el orden del ranking y luego el compartido). */
+extern "C" __global__ void dec_moe_combine(float *hid, const float *ys, const float *wt, const float *ysh, const float *sg, int top_k, int h)
+{
+    int i = (int)blockIdx.x * 256 + (int)threadIdx.x;
+    if (i >= h) {
+        return;
+    }
+    float a = 0.0f;
+    for (int j = 0; j < top_k; j++) {
+        a += ys[(long)j * h + i] * wt[j];
+    }
+    if (ysh) {
+        a += ysh[i] * sg[0];
+    }
+    hid[i] += a;
+}
+
+/* hid[i] += cpu[i] + sg · ysh[i]: expertos calculados en CPU (capas cuyos expertos no caben en la tarjeta) más el compartido. */
+extern "C" __global__ void dec_moe_combine_cpu(float *hid, const float *cpu, const float *ysh, const float *sg, int h)
+{
+    int i = (int)blockIdx.x * 256 + (int)threadIdx.x;
+    if (i >= h) {
+        return;
+    }
+    float a = cpu[i];
+    if (ysh) {
+        a += ysh[i] * sg[0];
+    }
+    hid[i] += a;
 }

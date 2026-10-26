@@ -261,7 +261,15 @@ fn kernel_q4k_iguala_a_la_descuantizacion() {
                     .sum::<f64>() as f32
             })
             .collect();
-        cerca(&y, &r, &format!("Q4_K n={n}"));
+        if n == 1 {
+            cerca(&y, &r, &format!("Q4_K n={n}"));
+        } else {
+            // Varios tokens: tensor cores con pesos y activaciones en f16 (acumulación en f32). El error se mide contra la escala de la salida
+            // (rms), no elemento a elemento: con pesos aleatorios de este test las salidas pequeñas son suma de términos grandes.
+            let rms = (r.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / r.len() as f64).sqrt() as f32;
+            let peor = y.iter().zip(&r).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max) / (1.0 + rms);
+            assert!(peor < 8e-3, "Q4_K n={n}: error máximo / rms {peor}");
+        }
     }
     // Una forma que el kernel no admite (cols no múltiplo de 256) se rechaza sin error.
     let corto = TensorView {
