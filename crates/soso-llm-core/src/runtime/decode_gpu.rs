@@ -50,19 +50,23 @@ fn norma(source: &mut impl TensorSource, name: &str, n: usize) -> Result<Vec<f32
 impl Runtime {
     /// ¿Se puede (y se quiere) hacer el decode en la GPU? `SOSO_DECODE_GPU=1` lo activa.
     pub fn decode_gpu_posible(&self, gpu: &Option<&mut dyn crate::gpu::GpuDispatch>) -> bool {
-        if self.decode_gpu.preparado == Some(false) || !matches!(self.backend, Backend::Gpu | Backend::Auto) {
+        #[cfg(not(feature = "std"))]
+        {
+            let _ = gpu;
             return false;
         }
         #[cfg(feature = "std")]
-        if std::env::var("SOSO_DECODE_GPU").as_deref() != Ok("1") {
-            return false;
+        {
+            let pedido = std::env::var("SOSO_DECODE_GPU").as_deref() == Ok("1");
+            let backend = matches!(self.backend, Backend::Gpu | Backend::Auto);
+            let disp = gpu.as_ref().is_some_and(|g| g.available());
+            let kv_ok = self.kv.iter().all(|kv| kv.dtype == crate::kv::KvDtype::F16 && !kv.en_gpu);
+            let ok = self.decode_gpu.preparado != Some(false) && pedido && backend && disp && self.hay_gdn() && kv_ok;
+            if pedido && !ok {
+                std::eprintln!("[decode GPU] no aplicable: preparado={:?} backend={backend} gpu={disp} gdn={} kv={kv_ok}", self.decode_gpu.preparado, self.hay_gdn());
+            }
+            ok
         }
-        #[cfg(not(feature = "std"))]
-        return false;
-        if !gpu.as_ref().is_some_and(|g| g.available()) || !self.hay_gdn() {
-            return false;
-        }
-        self.kv.iter().all(|kv| kv.dtype == crate::kv::KvDtype::F16 && !kv.en_gpu)
     }
 
     fn construir_plan_decode(&self, source: &mut impl TensorSource) -> Result<DecodePlan, ()> {

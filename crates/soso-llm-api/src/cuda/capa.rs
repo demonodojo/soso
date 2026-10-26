@@ -270,6 +270,9 @@ impl CudaGpu {
         smem: u32,
         args: &mut [*mut c_void],
     ) -> Result<(), String> {
+        if !self.saltar.is_empty() && self.saltar.contains(&(f as usize)) {
+            return Ok(());
+        }
         ck(
             unsafe {
                 (self.api.launch)(

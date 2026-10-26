@@ -239,6 +239,29 @@ impl CudaGpu {
             gateup_w: get("dec_moe_gateup_w")?,
             down_w: get("dec_moe_down_w")?,
         };
+        if let Ok(v) = std::env::var("SOSO_DECODE_SALTAR") {
+            for n in v.split(',') {
+                let fp = match n {
+                    "rmsnorm" => f.rmsnorm,
+                    "add" => f.add,
+                    "swiglu" => f.swiglu,
+                    "gdn_conv" => f.gdn_conv,
+                    "gdn_params" => f.gdn_params,
+                    "gdn_rec" => f.gdn_rec,
+                    "attn_prep" => f.attn_prep,
+                    "attn_split" => f.attn_split,
+                    "attn_combine" => f.attn_combine,
+                    "router" => f.router,
+                    "pgate" => f.pgate,
+                    "combine" => f.combine,
+                    "matvec" => f.matvec,
+                    "gateup" => f.gateup_w,
+                    "down" => f.down_w,
+                    _ => continue,
+                };
+                self.saltar.push(fp as usize);
+            }
+        }
         // 1) pesos densos y pequeños, todos residentes (si alguno no cabe o no tiene decodificador, no hay decode en GPU)
         let mut capas: Vec<CapaD> = Vec::with_capacity(plan.capas.len());
         let mut n_attn = 0usize;
@@ -519,7 +542,7 @@ impl CudaGpu {
         }
         let mut vals: Vec<u64> = vec![m.d, x, y, m.rows as u32 as u64, m.cols as u32 as u64, m.code as u32 as u64, m.rb as u64];
         let mut ptrs: Vec<*mut c_void> = vals.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
-        self.lanzar3s(f, ((m.rows as u32).div_ceil(8), 1, 1), (256, 1, 1), (m.cols * 4) as u32, &mut ptrs)
+        self.lanzar3s(f, ((m.rows as u32).div_ceil(16), 1, 1), (256, 1, 1), (m.cols * 4) as u32, &mut ptrs)
     }
 
     pub(super) fn decode_token_impl(

@@ -1516,25 +1516,38 @@ extern "C" __global__ void __launch_bounds__(256) dec_matvec(const unsigned char
     __syncthreads();
     int warp = (int)threadIdx.x >> 5;
     int lane = (int)threadIdx.x & 31;
-    int row = (int)blockIdx.x * 8 + warp;
-    if (row >= rows) {
+    int row0 = ((int)blockIdx.x * 8 + warp) * 2;
+    if (row0 >= rows) {
         return;
     }
-    const unsigned char *wr = w + (long)row * rb;
+    int two = row0 + 1 < rows;
+    const unsigned char *w0 = w + (long)row0 * rb;
+    const unsigned char *w1 = w0 + rb;
     int units = cols >> 5;
-    float acc = 0.0f;
+    float a0 = 0.0f, a1 = 0.0f;
     for (int u = lane; u < units; u += 32) {
         float o[32];
-        iq_decodificar(code, wr, u, o);
         const float *xp = xs + u * 32;
+        iq_decodificar(code, w0, u, o);
 #pragma unroll
         for (int l = 0; l < 32; l++) {
-            acc += o[l] * xp[l];
+            a0 += o[l] * xp[l];
+        }
+        if (two) {
+            iq_decodificar(code, w1, u, o);
+#pragma unroll
+            for (int l = 0; l < 32; l++) {
+                a1 += o[l] * xp[l];
+            }
         }
     }
-    acc = iq_warp_sum(acc);
+    a0 = iq_warp_sum(a0);
+    a1 = iq_warp_sum(a1);
     if (lane == 0) {
-        y[row] = acc;
+        y[row0] = a0;
+        if (two) {
+            y[row0 + 1] = a1;
+        }
     }
 }
 

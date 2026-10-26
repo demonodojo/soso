@@ -282,6 +282,8 @@ pub struct CudaGpu {
     modulo_iq: CuModule,
     /// Se incrementa cuando cambian las direcciones del KV espejado (invalida los grafos del decode).
     kv_gen: u64,
+    /// Diagnóstico: funciones que no se lanzan (`SOSO_DECODE_SALTAR`).
+    saltar: Vec<usize>,
     dec: Option<decode::DecodeDev>,
 }
 
@@ -378,6 +380,7 @@ impl CudaGpu {
                 kvdev: HashMap::new(),
                 modulo_iq: mod_iq,
                 kv_gen: 0,
+                saltar: Vec::new(),
                 dec: None,
                 x_cap: 0,
                 y_dev: 0,
