@@ -916,7 +916,7 @@ extern "C" __global__ void __launch_bounds__(128) iq_matmul_mma(const unsigned c
 
 /* out[t * h + i] = Σ_j wd[t * top_k + j] · y[(t * top_k + j) * h + i] sobre las asignaciones resueltas en la GPU (peso 0 = no se toca).
  * grid = (ceil(h / 256), n). El orden de las sumas es el del ranking. */
-extern "C" __global__ void iq_combinar(const float *y, const float *wd, float *out, int top_k, int h)
+extern "C" __global__ void iq_combinar(const float *y, const float *wd, float *out, int top_k, int h, int acum)
 {
     int i = (int)blockIdx.x * 256 + (int)threadIdx.x;
     if (i >= h) {
@@ -930,7 +930,7 @@ extern "C" __global__ void iq_combinar(const float *y, const float *wd, float *o
             a += w * y[((long)t * top_k + j) * h + i];
         }
     }
-    out[(long)t * h + i] = a;
+    out[(long)t * h + i] = acum ? out[(long)t * h + i] + a : a;
 }
 
 /* ---------------------------------------------------------------------------------------------------------------------

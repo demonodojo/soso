@@ -160,6 +160,7 @@ struct GrafoApi {
     graph_destroy: unsafe extern "C" fn(*mut c_void) -> CuResult,
     host_alloc: unsafe extern "C" fn(*mut *mut c_void, usize) -> CuResult,
     htod_async: unsafe extern "C" fn(u64, *const c_void, usize, *mut c_void) -> CuResult,
+    stream_sync: unsafe extern "C" fn(*mut c_void) -> CuResult,
 }
 
 impl GrafoApi {
@@ -179,6 +180,7 @@ impl GrafoApi {
             graph_destroy: simbolo(lib, "cuGraphDestroy")?,
             host_alloc: simbolo(lib, "cuMemAllocHost_v2")?,
             htod_async: simbolo(lib, "cuMemcpyHtoDAsync_v2")?,
+            stream_sync: simbolo(lib, "cuStreamSynchronize")?,
         })
     }
 }
@@ -301,6 +303,10 @@ pub struct CudaGpu {
     /// Los expertos que no están residentes se suben de paso, por trozos, a `stg` (no se cachean).
     flujo_expertos: bool,
     stg: (u64, usize),
+    /// Doble búfer del paso de expertos: dispositivo, anclado en el host y stream de copia (sin bloqueo con el stream por defecto).
+    stg2: [(u64, usize); 2],
+    pin: [(usize, usize); 2],
+    stream_copia: *mut c_void,
     dec: Option<decode::DecodeDev>,
 }
 
@@ -405,6 +411,9 @@ impl CudaGpu {
                 saltar: Vec::new(),
                 flujo_expertos: false,
                 stg: (0, 0),
+                stg2: [(0, 0); 2],
+                pin: [(0, 0); 2],
+                stream_copia: std::ptr::null_mut(),
                 dec: None,
                 x_cap: 0,
                 y_dev: 0,
@@ -1205,7 +1214,7 @@ impl CudaGpu {
             return Ok(());
         }
         if !plan.is_empty() {
-            self.correr_plan(xs, n, h, ffn, top_k, pesos, &*exps, &plan, suma)?;
+            self.correr_plan(xs, n, h, ffn, top_k, pesos, &*exps, &plan, suma, (true, false, stream.is_empty()))?;
             for pl in &plan {
                 hecho[pl.i] = true;
             }
@@ -1213,11 +1222,14 @@ impl CudaGpu {
         if !stream.is_empty() {
             self.expertos_de_paso(xs, n, h, ffn, top_k, pesos, &*exps, &stream, suma, hecho, !plan.is_empty())?;
         }
-        let _ = t_a;
+        if std::env::var_os("SOSO_TRAZA_GPU").is_some() {
+            eprintln!("[gpu] llamada expertos: {:.1} ms total ({} residentes, {} de paso)", t_a.elapsed().as_secs_f64() * 1e3, plan.len(), stream.len());
+        }
         Ok(())
     }
 
-    /// Prefill de los expertos no residentes: sus pesos pasan por el búfer de paso (sin cachearse) en trozos de `TROZO_PASO`.
+    /// Prefill de los expertos no residentes: sus pesos pasan por un doble búfer de paso (sin cachearse), en trozos de `TROZO_PASO`. Tres etapas
+    /// solapadas: copia a memoria anclada (hilos), DMA asíncrono y cálculo del trozo anterior.
     #[allow(clippy::too_many_arguments)]
     fn expertos_de_paso(
         &mut self,
@@ -1234,86 +1246,204 @@ impl CudaGpu {
         mut escrita: bool,
     ) -> Result<(), String> {
         let dims = [(ffn, h), (ffn, h), (h, ffn)];
-        let mut ini = 0usize;
-        while ini < stream.len() {
-            // trozo de expertos que cabe en el búfer
-            let mut fin = ini;
-            let mut bytes = 0usize;
-            let mut plan: Vec<PlanExp> = Vec::new();
-            let mut subidas: Vec<(usize, [(usize, usize, usize, u8); 3])> = Vec::new();
-            let mut abase = 0usize;
-            while fin < stream.len() {
-                let i = stream[fin];
-                let e = &exps[i];
-                let mut desp = [(0usize, 0usize, 0usize, 0u8); 3];
-                let mut tam = 0usize;
-                let mut ok = true;
-                for k in 0..3 {
-                    let v = e.vistas[k];
-                    match codigo_mma(v.dtype, dims[k].1) {
-                        Some((_, rb)) if v.bytes.len() as i64 == dims[k].0 as i64 * rb => {
-                            let o = (bytes + tam).div_ceil(ALINEACION) * ALINEACION - bytes;
-                            desp[k] = (bytes + o, v.bytes.as_ptr() as usize, v.bytes.len(), v.dtype);
-                            tam = o + v.bytes.len();
-                        }
-                        _ => ok = false,
+        // 1) partir en trozos: (experto, [(desplazamiento, puntero origen, bytes, dtype); 3])
+        type Sub = (usize, [(usize, usize, usize, u8); 3]);
+        let mut trozos: Vec<(Vec<Sub>, usize)> = Vec::new();
+        let (mut cur, mut bytes): (Vec<Sub>, usize) = (Vec::new(), 0);
+        for &i in stream {
+            let e = &exps[i];
+            let mut desp = [(0usize, 0usize, 0usize, 0u8); 3];
+            let mut tam = 0usize;
+            let mut ok = true;
+            for k in 0..3 {
+                let v = e.vistas[k];
+                match codigo_mma(v.dtype, dims[k].1) {
+                    Some((_, rb)) if v.bytes.len() as i64 == dims[k].0 as i64 * rb => {
+                        let o = (bytes + tam).div_ceil(ALINEACION) * ALINEACION - bytes;
+                        desp[k] = (bytes + o, v.bytes.as_ptr() as usize, v.bytes.len(), v.dtype);
+                        tam = o + v.bytes.len();
                     }
+                    _ => ok = false,
                 }
-                if !ok {
-                    fin += 1;
-                    continue;
-                }
-                if bytes > 0 && bytes + tam > TROZO_PASO {
-                    break;
-                }
-                bytes += tam;
-                subidas.push((i, desp));
-                fin += 1;
             }
-            if !subidas.is_empty() {
-                if bytes > self.stg.1 {
-                    if self.stg.0 != 0 {
-                        unsafe { (self.api.mem_free)(self.stg.0) };
+            if !ok {
+                continue;
+            }
+            if bytes > 0 && bytes + tam > TROZO_PASO {
+                trozos.push((std::mem::take(&mut cur), bytes));
+                bytes = 0;
+                // el experto se vuelve a colocar al principio del trozo nuevo
+                let mut desp2 = desp;
+                let mut t2 = 0usize;
+                for k in 0..3 {
+                    let o = t2.div_ceil(ALINEACION) * ALINEACION;
+                    desp2[k].0 = o;
+                    t2 = o + desp2[k].2;
+                }
+                cur.push((i, desp2));
+                bytes = t2;
+                continue;
+            }
+            bytes += tam;
+            cur.push((i, desp));
+        }
+        if !cur.is_empty() {
+            trozos.push((cur, bytes));
+        }
+        if trozos.is_empty() {
+            return Ok(());
+        }
+        // 2) búferes (dispositivo ×2, anclados ×2, stream de copia)
+        let cap = trozos.iter().map(|t| t.1).max().unwrap_or(0).max(TROZO_PASO).div_ceil(2 << 20) * (2 << 20);
+        let con_pin = self.grafo.is_some();
+        if con_pin && self.stream_copia.is_null() {
+            let g = self.grafo.as_ref().unwrap();
+            let mut st: *mut c_void = std::ptr::null_mut();
+            ck(unsafe { (g.stream_create)(&mut st, 1) }, "cuStreamCreate(copia)")?;
+            self.stream_copia = st;
+        }
+        for b in 0..2 {
+            if cap > self.stg2[b].1 {
+                if self.stg2[b].0 != 0 {
+                    unsafe { (self.api.mem_free)(self.stg2[b].0) };
+                }
+                self.stg2[b] = (self.alloc(cap)?, cap);
+            }
+            if con_pin && cap > self.pin[b].1 {
+                let g = self.grafo.as_ref().unwrap();
+                let mut p: *mut c_void = std::ptr::null_mut();
+                ck(unsafe { (g.host_alloc)(&mut p, cap) }, "cuMemAllocHost")?;
+                self.pin[b] = (p as usize, cap); // (no se libera: vive lo que el proceso)
+            }
+        }
+        // copia de un trozo a un destino del host (anclado) con varios hilos
+        let copiar = |t: &Vec<Sub>, dst: usize| {
+            let piezas: Vec<(usize, usize, usize)> = t.iter().flat_map(|(_, d)| d.iter().map(|x| (x.0, x.1, x.2))).collect();
+            let nh = 4usize.min(piezas.len().max(1));
+            std::thread::scope(|sc| {
+                for q in 0..nh {
+                    let piezas = &piezas;
+                    sc.spawn(move || {
+                        for (idx, &(off, p, l)) in piezas.iter().enumerate() {
+                            if idx % nh == q {
+                                // SAFETY: origen = mapa del modelo (vivo); destino = búfer anclado de `cap` bytes; trozos disjuntos.
+                                unsafe { std::ptr::copy_nonoverlapping(p as *const u8, (dst + off) as *mut u8, l) };
+                            }
+                        }
+                    });
+                }
+            });
+        };
+        let t_sub = std::time::Instant::now();
+        let m = trozos.len();
+        let mut total_bytes = 0usize;
+        if con_pin {
+            let g_htod = self.grafo.as_ref().unwrap().htod_async;
+            let g_sync = self.grafo.as_ref().unwrap().stream_sync;
+            let (pin, stg, sc) = (self.pin, self.stg2, self.stream_copia);
+            let dma = |k: usize| -> Result<(), String> {
+                let b = k % 2;
+                ck(unsafe { g_htod(stg[b].0, pin[b].0 as *const c_void, trozos[k].1, sc) }, "cuMemcpyHtoDAsync")
+            };
+            let sincro = || ck(unsafe { g_sync(sc) }, "cuStreamSynchronize");
+            // prólogo: trozo 0 en el dispositivo y trozo 1 ya copiado al anclado
+            let t_p = std::time::Instant::now();
+            copiar(&trozos[0].0, pin[0].0);
+            let t_copia0 = t_p.elapsed().as_secs_f64() * 1e3;
+            dma(0)?;
+            sincro()?;
+            let t_dma0 = t_p.elapsed().as_secs_f64() * 1e3 - t_copia0;
+            if m > 1 {
+                copiar(&trozos[1].0, pin[1].0);
+            }
+            let (mut t_calc, mut t_join, mut t_sync) = (0f64, 0f64, 0f64);
+            let t_prologo = t_p.elapsed().as_secs_f64() * 1e3;
+            for k in 0..m {
+                if k + 1 < m {
+                    dma(k + 1)?;
+                }
+                let plan: Vec<PlanExp> = {
+                    let mut ab = 0usize;
+                    trozos[k]
+                        .0
+                        .iter()
+                        .map(|(i, d)| {
+                            let w = [(stg[k % 2].0 + d[0].0 as u64, d[0].3), (stg[k % 2].0 + d[1].0 as u64, d[1].3), (stg[k % 2].0 + d[2].0 as u64, d[2].3)];
+                            let p = PlanExp { i: *i, w, abase: ab };
+                            ab += exps[*i].tokens.len();
+                            p
+                        })
+                        .collect()
+                };
+                let ultimo = k + 1 == m;
+                let (acum, subir_x) = (escrita, !escrita);
+                let r = std::thread::scope(|sco| {
+                    // la copia del trozo k+2 al anclado del trozo k (ya en el dispositivo) corre mientras se calcula el k
+                    let hilo = (k + 2 < m).then(|| {
+                        let (trozo, dst) = (&trozos[k + 2].0, pin[k % 2].0);
+                        sco.spawn(move || copiar(trozo, dst))
+                    });
+                    let t_c = std::time::Instant::now();
+                    let r = self.correr_plan(xs, n, h, ffn, top_k, pesos, exps, &plan, suma, (subir_x, acum, ultimo));
+                    t_calc += t_c.elapsed().as_secs_f64() * 1e3;
+                    let t_j = std::time::Instant::now();
+                    if let Some(hh) = hilo {
+                        let _ = hh.join();
                     }
-                    let cap = bytes.max(TROZO_PASO).div_ceil(2 << 20) * (2 << 20);
-                    self.stg = (self.alloc(cap)?, cap);
+                    t_join += t_j.elapsed().as_secs_f64() * 1e3;
+                    r
+                });
+                r?;
+                if k + 1 < m {
+                    let t_s = std::time::Instant::now();
+                    sincro()?;
+                    t_sync += t_s.elapsed().as_secs_f64() * 1e3;
                 }
-                let base = self.stg.0;
-                let t_sub = std::time::Instant::now();
-                let mut ab = 0usize;
-                for (i, desp) in &subidas {
-                    let mut w = [(0u64, 0u8); 3];
-                    for k in 0..3 {
-                        let (off, p, l, dt) = desp[k];
-                        let src = unsafe { std::slice::from_raw_parts(p as *const u8, l) };
-                        self.subir(base + off as u64, src)?;
-                        w[k] = (base + off as u64, dt);
-                    }
-                    plan.push(PlanExp { i: *i, w, abase: ab });
-                    ab += exps[*i].tokens.len();
-                }
-                abase += ab;
-                if std::env::var_os("SOSO_TRAZA_GPU").is_some() {
-                    eprintln!("[gpu] de paso: {} exps, {:.0} MiB subidos en {:.1} ms ({:.1} GB/s)", plan.len(), bytes as f64 / 1048576.0, t_sub.elapsed().as_secs_f64() * 1e3, bytes as f64 / 1e9 / t_sub.elapsed().as_secs_f64());
-                }
-                let mut parcial = vec![0f32; n * h];
-                self.correr_plan(xs, n, h, ffn, top_k, pesos, exps, &plan, &mut parcial)?;
-                if escrita {
-                    for (d, p) in suma.iter_mut().zip(&parcial) {
-                        *d += *p;
-                    }
-                } else {
-                    suma.copy_from_slice(&parcial);
-                    escrita = true;
-                }
+                escrita = true;
                 for pl in &plan {
                     hecho[pl.i] = true;
                 }
-                self.stats.bytes_up += bytes as u64;
+                total_bytes += trozos[k].1;
             }
-            let _ = abase;
-            ini = fin;
+            if std::env::var_os("SOSO_TRAZA_GPU").is_some() {
+                eprintln!("[gpu] pipeline: prólogo {t_prologo:.1} (copia0 {t_copia0:.1}, dma0 {t_dma0:.1}), cálculo {t_calc:.1}, espera copia {t_join:.1}, espera dma {t_sync:.1} ms");
+            }
+        } else {
+            // sin grafos/anclada: camino síncrono desde memoria paginable
+            for k in 0..m {
+                let b = self.stg2[0].0;
+                for (_, d) in &trozos[k].0 {
+                    for x in d {
+                        let src = unsafe { std::slice::from_raw_parts(x.1 as *const u8, x.2) };
+                        self.subir(b + x.0 as u64, src)?;
+                    }
+                }
+                let plan: Vec<PlanExp> = {
+                    let mut ab = 0usize;
+                    trozos[k]
+                        .0
+                        .iter()
+                        .map(|(i, d)| {
+                            let w = [(b + d[0].0 as u64, d[0].3), (b + d[1].0 as u64, d[1].3), (b + d[2].0 as u64, d[2].3)];
+                            let p = PlanExp { i: *i, w, abase: ab };
+                            ab += exps[*i].tokens.len();
+                            p
+                        })
+                        .collect()
+                };
+                self.correr_plan(xs, n, h, ffn, top_k, pesos, exps, &plan, suma, (!escrita, escrita, k + 1 == m))?;
+                escrita = true;
+                for pl in &plan {
+                    hecho[pl.i] = true;
+                }
+                total_bytes += trozos[k].1;
+            }
         }
+        if std::env::var_os("SOSO_TRAZA_GPU").is_some() {
+            let dt = t_sub.elapsed().as_secs_f64();
+            eprintln!("[gpu] de paso: {} exps, {:.0} MiB en {:.1} ms (con cálculo, {} trozos)", stream.len(), total_bytes as f64 / 1048576.0, dt * 1e3, m);
+        }
+        self.stats.bytes_up += total_bytes as u64;
         Ok(())
     }
 
@@ -1330,6 +1460,8 @@ impl CudaGpu {
         exps: &[soso_llm_core::gpu::ExpertoBloque<'_>],
         plan: &[PlanExp],
         suma: &mut [f32],
+        // (subir `xs`, acumular sobre la suma que ya hay en el dispositivo, bajar la suma al terminar)
+        (subir_x, acum, bajar): (bool, bool, bool),
     ) -> Result<(), String> {
         let t_a = std::time::Instant::now();
         let total: usize = plan.iter().map(|p| exps[p.i].tokens.len()).sum();
@@ -1342,7 +1474,9 @@ impl CudaGpu {
         let dest_dev = self.blq_asegurar(5, total * 4)?;
         let wd_dev = self.blq_asegurar(6, n * top_k * 4)?;
         let out_dev = self.blq_asegurar(7, n * h * 4)?;
-        self.subir(x_dev, unsafe { std::slice::from_raw_parts(xs.as_ptr() as *const u8, xs.len() * 4) })?;
+        if subir_x {
+            self.subir(x_dev, unsafe { std::slice::from_raw_parts(xs.as_ptr() as *const u8, xs.len() * 4) })?;
+        }
         let mut toks: Vec<i32> = Vec::with_capacity(total);
         for pl in plan {
             toks.extend(exps[pl.i].tokens.iter().map(|&t| t as i32));
@@ -1398,19 +1532,22 @@ impl CudaGpu {
             &mut b5 as *mut _ as *mut c_void,
         ];
         self.lanzar3s(self.f_down_multi, (((h as u32) + 63) / 64, tiles, nexp), (128, 1, 1), 0, &mut args)?;
-        let (mut c0, mut c1, mut c2, mut c3, mut c4) = (y_dev, wd_dev, out_dev, top_k as c_int, h as c_int);
+        let (mut c0, mut c1, mut c2, mut c3, mut c4, mut c5) = (y_dev, wd_dev, out_dev, top_k as c_int, h as c_int, acum as c_int);
         let mut args = [
             &mut c0 as *mut _ as *mut c_void,
             &mut c1 as *mut _ as *mut c_void,
             &mut c2 as *mut _ as *mut c_void,
             &mut c3 as *mut _ as *mut c_void,
             &mut c4 as *mut _ as *mut c_void,
+            &mut c5 as *mut _ as *mut c_void,
         ];
         self.lanzar3s(self.f_combinar, ((h as u32).div_ceil(256), n as u32, 1), (256, 1, 1), 0, &mut args)?;
         let t_d = std::time::Instant::now();
         ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
         let t_e = std::time::Instant::now();
-        ck(unsafe { (self.api.dtoh)(suma.as_mut_ptr() as *mut c_void, out_dev, n * h * 4) }, "cuMemcpyDtoH")?;
+        if bajar {
+            ck(unsafe { (self.api.dtoh)(suma.as_mut_ptr() as *mut c_void, out_dev, n * h * 4) }, "cuMemcpyDtoH")?;
+        }
         if std::env::var_os("SOSO_TRAZA_GPU").is_some() {
             let t_f = std::time::Instant::now();
             eprintln!(

@@ -910,7 +910,8 @@ fn largo_pretoken(s: &str) -> usize {
         const SUFIJOS: &[&str] = &["s", "t", "re", "ve", "m", "ll", "d"];
         for suf in SUFIJOS {
             let fin = 1 + suf.len();
-            if s.len() >= fin && s[1..fin].eq_ignore_ascii_case(suf) {
+            // Se compara por bytes: `fin` puede caer dentro de un carácter multibyte (`'…`) y cortar el `&str` ahí entraba en pánico.
+            if bytes.len() >= fin && bytes[1..fin].eq_ignore_ascii_case(suf.as_bytes()) {
                 return fin;
             }
         }
@@ -1062,6 +1063,22 @@ fn parse_byte_piece(piece: &str) -> Option<u8> {
 #[cfg(feature = "std")]
 mod tests {
     use super::*;
+
+    /// Un apóstrofo seguido de un carácter multibyte no debe cortar el texto dentro del carácter (pánico en `'…`).
+    #[test]
+    fn pretoken_no_corta_caracteres_multibyte() {
+        for texto in ["'…", "'\u{e9}t\u{e9}", "'s…", "'ll\u{2026}", "x'…y", "\u{2026}'\u{2026}", "'\u{1F600}"] {
+            let mut resto = texto;
+            while !resto.is_empty() {
+                let n = largo_pretoken(resto).max(1);
+                assert!(resto.is_char_boundary(n), "{texto:?}: corte en {n} dentro de un carácter");
+                resto = &resto[n..];
+            }
+        }
+        // las contracciones de verdad siguen siendo un pre-token
+        assert_eq!(largo_pretoken("'s…"), 2);
+        assert_eq!(largo_pretoken("'LL x"), 3);
+    }
 
     fn vocab_toy() -> Tokenizer {
         let pieces: Vec<String> = [
