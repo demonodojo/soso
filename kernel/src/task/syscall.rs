@@ -2942,20 +2942,46 @@ fn sys_fb_present_rect(buf: u64, len: u64, xy: u64, wh: u64) -> Result<u64, i64>
     if len == 0 || len > 32 * 1024 * 1024 {
         return Err(-abi::EINVAL);
     }
-    if !user_range_ok(buf, len, false) {
-        return Err(-abi::EFAULT);
-    }
     let x = (xy & 0xffff) as u32;
     let y = ((xy >> 16) & 0xffff) as u32;
     let w = (wh & 0xffff) as u32;
     let h = ((wh >> 16) & 0xffff) as u32;
-    let mut kbuf = alloc::vec![0u8; len as usize];
+    if w == 0 || h == 0 {
+        return Ok(0);
+    }
+    let (log_w, log_h, bpp) = crate::drivers::fb::logical_layout().ok_or(-abi::EIO)?;
+    if bpp == 0 || x as usize >= log_w || y as usize >= log_h {
+        return Err(-abi::EINVAL);
+    }
+    let rw = (w as usize).min(log_w - x as usize);
+    let rh = (h as usize).min(log_h - y as usize);
+    let stride = log_w * bpp;
+    let row_bytes = rw * bpp;
+    let packed_len = row_bytes.checked_mul(rh).ok_or(-abi::EINVAL)?;
+    if packed_len > 32 * 1024 * 1024 {
+        return Err(-abi::EINVAL);
+    }
+    let start = y as usize * stride + x as usize * bpp;
+    let span = (rh - 1) * stride + row_bytes;
+    if start + span > len as usize || !user_range_ok(buf + start as u64, span as u64, false) {
+        return Err(-abi::EFAULT);
+    }
+    let mut packed = alloc::vec![0u8; packed_len];
     super::with_current(|p| -> Result<(), i64> {
         let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
-        space.read(buf, &mut kbuf).ok_or(-abi::EFAULT)?;
+        for row in 0..rh {
+            let off = (y as usize + row) * stride + x as usize * bpp;
+            space
+                .read(
+                    buf + off as u64,
+                    &mut packed[row * row_bytes..row * row_bytes + row_bytes],
+                )
+                .ok_or(-abi::EFAULT)?;
+        }
         Ok(())
     })?;
-    crate::drivers::fb::present_from_user_rect(&kbuf, x, y, w, h).map_err(|_| -abi::EIO)?;
+    crate::drivers::fb::present_from_user_rect(&packed, x, y, rw as u32, rh as u32)
+        .map_err(|_| -abi::EIO)?;
     Ok(0)
 }
 

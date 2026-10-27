@@ -910,6 +910,11 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 );
             },
         );
+        filter.if_step(sid, "soso-wm: fotograma", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "soso-wm: fotograma", || {
+                ssh_soso_wm_fotograma(key, port)
+            });
+        });
         filter.if_step(sid, "soso-wm: prueba", || {
             report.paso_ssh_sys(&mut qemu, slot, sid, "soso-wm: prueba", || {
                 ssh_soso_wm_prueba(key, port)
@@ -2790,6 +2795,21 @@ fn ssh_init_test(key: &Path, ssh_port: u16) -> Result<(), String> {
         return Err(format!(
             "init test no llegó al final (¿timeout?); stdout: {texto:?}"
         ));
+    }
+    Ok(())
+}
+
+fn ssh_soso_wm_fotograma(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let texto = ssh_guion_inner(
+        key,
+        ssh_port,
+        "soso-wm --fotograma\nexit\n",
+        Duration::from_secs(60),
+        true,
+        None,
+    )?;
+    if !texto.contains("soso-wm: fotograma OK") {
+        return Err(format!("soso-wm --fotograma sin línea OK (¿colgado?): {texto:?}"));
     }
     Ok(())
 }

@@ -234,6 +234,44 @@ fn prueba_web_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: I
             ok = 0
     ok
 
+fn fotograma() -> Int ! io, alloc
+    info = fb_info_nuevo()
+    r = fb_info(info)
+    rc = 0
+    if r < 0
+        rc = 2
+    if r >= 0
+        if fb_info_leer(info) == 0
+            rc = 3
+        if fb_info_leer(info) != 0
+            _m = fb_set_mode(fb_mode_graficos())
+            sw = fb_info_ancho(info)
+            sh = fb_info_alto(info)
+            stride = fb_info_stride(info)
+            bpp = fb_info_bpp(info)
+            fmt = fb_info_formato(info)
+            plen = compos_len(stride, sh, bpp)
+            compos = bytes_ptr(bytes_new(plen))
+            evt = bytes_ptr(bytes_new(24 * 8))
+            msg = bytes_ptr(bytes_new(msg_len()))
+            _bg = rellenar_rect(compos, plen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo())
+            listener = tcp_listen(puerto_wm())
+            if listener < 0
+                rc = 4
+            if listener >= 0
+                st = st_nuevo(evt, msg)
+                _ic = wm_iniciar_cursor(st, sw, sh)
+                _d0 = wm_marcar_dirty(st, 0, 0, sw, sh)
+                n = 0
+                while n < 8
+                    _t = wm_tick(st, listener, compos, plen, sw, sh, stride, bpp, fmt)
+                    n = n + 1
+                _pr = print_str(d"soso-wm: fotograma OK\n")
+                rc = 0
+                _c = fb_set_mode(fb_mode_consola())
+                close_fd(listener)
+    rc
+
 fn main() -> Int ! io, alloc
     rc = 0
     if arg_flag(d"--prueba-web") != 0
@@ -268,5 +306,8 @@ fn main() -> Int ! io, alloc
                 compos = bytes_ptr(bytes_new(plen))
                 rc = prueba_modo(compos, plen, sw, sh, stride, bpp, fmt)
         if arg_flag(d"--prueba") == 0
-            rc = bucle_grafico(d"")
+            if arg_flag(d"--fotograma") != 0
+                rc = fotograma()
+            if arg_flag(d"--fotograma") == 0
+                rc = bucle_grafico(d"")
     rc

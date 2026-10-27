@@ -6,7 +6,7 @@ import "tabla.sal"
 import "term.sal"
 
 fn st_size() -> Int
-    240
+    248
 
 fn st_cli_fd() -> Int
     0
@@ -97,6 +97,9 @@ fn st_mx_prev() -> Int
 
 fn st_my_prev() -> Int
     232
+
+fn st_fondo() -> Int
+    240
 
 fn wm_cursor_w() -> Int
     12
@@ -389,7 +392,9 @@ fn wm_compose(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bp
     z = st_get(st, st_z())
     nz = st_get(st, st_nz())
     _bg = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, barra_alto(), sw, sh, wm_color_fondo())
-    _db = wm_marcar_dirty(st, 0, barra_alto(), sw, sh)
+    if st_get(st, st_fondo()) == 0
+        _db = wm_marcar_dirty(st, 0, 0, sw, sh)
+        _sf = st_set(st, st_fondo(), 1)
     _bar = wm_pintar_barra(st, compos, clen, sw, sh, stride, bpp, fmt)
     k = 0
     while k < nz

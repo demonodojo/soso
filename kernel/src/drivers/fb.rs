@@ -983,6 +983,13 @@ fn pixel_format_tag(fmt: PixelFormat) -> u8 {
     }
 }
 
+/// Ancho lógico, alto lógico y bytes por píxel del framebuffer de usuario.
+pub fn logical_layout() -> Option<(usize, usize, usize)> {
+    let guard = FB.lock();
+    let st = guard.as_ref()?;
+    Some((st.log_w, st.log_h, st.info.bytes_per_pixel))
+}
+
 pub fn user_info(out: &mut FbInfo) -> bool {
     let guard = FB.lock();
     let Some(st) = guard.as_ref() else {
@@ -1014,7 +1021,9 @@ pub fn present_from_user(buf: &[u8]) -> Result<(), ()> {
     Ok(())
 }
 
-/// Copia un rectángulo del búfer lógico (misma geometría que `user_info`) al shadow y vuelca.
+/// Copia un rectángulo ya empaquetado (`w`×`h`, sin stride de pantalla) al shadow y vuelca.
+///
+/// Quien llama con el framebuffer completo debe recortar antes las filas `(x,y,w,h)`.
 pub fn present_from_user_rect(buf: &[u8], x: u32, y: u32, w: u32, h: u32) -> Result<(), ()> {
     let mut guard = FB.lock();
     let Some(st) = guard.as_mut() else {

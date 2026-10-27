@@ -817,6 +817,7 @@ incluir `3D clear verificado (H1 GO)` tras el arranque.
 soso-wm                 # gestor de ventanas (terminales y clientes gráficos)
 soso-wm --prueba        # autoprueba en RAM; debe imprimir `soso-wm: prueba OK`
 soso-wm --prueba-web    # cliente gráfico mínimo; imprime `soso-wm: prueba-web OK`
+soso-wm --fotograma     # un instante de escritorio y vuelve a la consola; imprime `soso-wm: fotograma OK`
 
 En modo gráfico el teclado lo consume el WM (Ctrl+C de la shell no mata el proceso).
 Salir: **Ctrl+C** dentro del WM, o **Alt+Mayús+E** (vuelta a consola). **Alt+Intro** abre una terminal.
