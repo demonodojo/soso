@@ -207,14 +207,8 @@ impl Runtime {
             .collect()
     }
 
-    /// Un token de decode en la GPU: embedding en `self.hidden` → logits en `logits_buf`. `Ok(false)` = no se pudo (la CPU lo hace; la
-    /// sesión queda cerrada).
-    pub fn forward_token_gpu(
-        &mut self,
-        source: &mut impl TensorSource,
-        parallel: Option<&dyn RowParallel>,
-        gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
-    ) -> Result<bool, ()> {
+    /// Prepara el decode en GPU (una vez): conviene hacerlo **antes** del primer prefill, que si no llena la VRAM de expertos sueltos.
+    pub fn decode_gpu_preparar(&mut self, source: &mut impl TensorSource, gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>) {
         if self.decode_gpu.preparado.is_none() {
             let ok = match self.construir_plan_decode(source) {
                 Ok(plan) => {
@@ -230,6 +224,17 @@ impl Runtime {
                 std::eprintln!("[decode GPU] no disponible: se sigue en CPU");
             }
         }
+    }
+
+    /// Un token de decode en la GPU: embedding en `self.hidden` → logits en `logits_buf`. `Ok(false)` = no se pudo (la CPU lo hace; la
+    /// sesión queda cerrada).
+    pub fn forward_token_gpu(
+        &mut self,
+        source: &mut impl TensorSource,
+        parallel: Option<&dyn RowParallel>,
+        gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
+    ) -> Result<bool, ()> {
+        self.decode_gpu_preparar(source, gpu);
         if self.decode_gpu.preparado != Some(true) {
             return Ok(false);
         }

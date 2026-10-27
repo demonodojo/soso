@@ -76,6 +76,16 @@ fn es_iq_gpu(dtype: u8) -> bool {
 /// Elementos de un superbloque Q4_K: el kernel exige `cols` múltiplo.
 const Q4_K_ELEMS: usize = 256;
 
+/// Un experto del bloque de prefill con sus tres pesos ya en VRAM (puntero y dtype) y su posición en el búfer de activaciones.
+struct PlanExp {
+    i: usize,
+    w: [(u64, u8); 3],
+    abase: usize,
+}
+
+/// Bytes máximos de expertos que se suben de una vez al búfer de paso del prefill.
+const TROZO_PASO: usize = 96 << 20;
+
 /// Tokens que procesa de una vez el kernel por lotes.
 const NT: usize = 8;
 /// Filas que procesa cada warp en `matmul_q4_0r8` (debe coincidir con `Q40R_ROWS` del kernel).
@@ -263,6 +273,10 @@ pub struct CudaGpu {
     f_gdn_conv2: CuFunction,
     f_gdn_params: CuFunction,
     f_gdn_cola: CuFunction,
+    f_sgemm: CuFunction,
+    f_topk: CuFunction,
+    /// Matrices de router (f32) subidas por clave.
+    router_w: HashMap<String, u64>,
     /// Búferes de la capa GDN entera (ver `gdn_capa_gpu`).
     gbuf: [(u64, usize); 17],
     f_down_multi: CuFunction,
@@ -284,6 +298,9 @@ pub struct CudaGpu {
     kv_gen: u64,
     /// Diagnóstico: funciones que no se lanzan (`SOSO_DECODE_SALTAR`).
     saltar: Vec<usize>,
+    /// Los expertos que no están residentes se suben de paso, por trozos, a `stg` (no se cachean).
+    flujo_expertos: bool,
+    stg: (u64, usize),
     dec: Option<decode::DecodeDev>,
 }
 
@@ -335,6 +352,8 @@ impl CudaGpu {
             let f_gdn_conv2 = func(mod_iq, "gdn_conv_silu2")?;
             let f_gdn_params = func(mod_iq, "gdn_params")?;
             let f_gdn_cola = func(mod_iq, "gdn_cola")?;
+            let f_sgemm = func(mod_iq, "sgemm_nt")?;
+            let f_topk = func(mod_iq, "dec_router_topk")?;
             let f_down_multi = func(mod_iq, "iq_down_mma")?;
             let (mut libre, mut total) = (0usize, 0usize);
             ck((api.mem_info)(&mut libre, &mut total), "cuMemGetInfo")?;
@@ -375,12 +394,17 @@ impl CudaGpu {
                 f_gdn_conv2,
                 f_gdn_params,
                 f_gdn_cola,
+                f_sgemm,
+                f_topk,
+                router_w: HashMap::new(),
                 gbuf: [(0, 0); 17],
                 f_down_multi,
                 kvdev: HashMap::new(),
                 modulo_iq: mod_iq,
                 kv_gen: 0,
                 saltar: Vec::new(),
+                flujo_expertos: false,
+                stg: (0, 0),
                 dec: None,
                 x_cap: 0,
                 y_dev: 0,
@@ -689,7 +713,7 @@ impl CudaGpu {
                     &mut a6 as *mut _ as *mut c_void,
                     &mut a7 as *mut _ as *mut c_void,
                 ];
-                self.lanzar3s(self.f_iq_matmul_n, ((rows as u32).div_ceil(64), (n as u32).div_ceil(16), 1), (128, 1, 1), 0, &mut args)?;
+                self.lanzar3s(self.f_iq_matmul_n, ((rows as u32).div_ceil(64), (n as u32).div_ceil(64), 1), (128, 1, 1), 0, &mut args)?;
             }
             DTYPE_Q4_K => {
                 // Un solo vector por lanzamiento, como Q8_0.
@@ -722,7 +746,7 @@ impl CudaGpu {
                     &mut a6 as *mut _ as *mut c_void,
                     &mut a7 as *mut _ as *mut c_void,
                 ];
-                self.lanzar3s(self.f_iq_matmul_n, ((rows as u32).div_ceil(64), (n as u32).div_ceil(16), 1), (128, 1, 1), 0, &mut args)?;
+                self.lanzar3s(self.f_iq_matmul_n, ((rows as u32).div_ceil(64), (n as u32).div_ceil(64), 1), (128, 1, 1), 0, &mut args)?;
             }
             DTYPE_Q8_0 => {
                 // 4 filas por warp y varios tokens por lectura de pesos (cabeza de logits incluida).
@@ -770,7 +794,7 @@ impl CudaGpu {
                     &mut a6 as *mut _ as *mut c_void,
                     &mut a7 as *mut _ as *mut c_void,
                 ];
-                self.lanzar3s(self.f_iq_matmul_n, ((rows as u32).div_ceil(64), (n as u32).div_ceil(16), 1), (128, 1, 1), 0, &mut args)?;
+                self.lanzar3s(self.f_iq_matmul_n, ((rows as u32).div_ceil(64), (n as u32).div_ceil(64), 1), (128, 1, 1), 0, &mut args)?;
             }
             _ => return Ok(false),
         }
@@ -882,7 +906,7 @@ impl CudaGpu {
         self.subir(nw_dev, f(c.norma))?;
         let nn = n as i32;
         let mm = |s: &Self, w: u64, rows: usize, cols: usize, dtype: i32, rb: i64, x: u64, y: u64| {
-            s.lanzar_a(s.f_iq_matmul_n, ((rows as u32).div_ceil(64), (n as u32).div_ceil(16), 1), (128, 1, 1),
+            s.lanzar_a(s.f_iq_matmul_n, ((rows as u32).div_ceil(64), (n as u32).div_ceil(64), 1), (128, 1, 1),
                 &[Arg::P(w), Arg::P(x), Arg::P(y), Arg::I(rows as i32), Arg::I(cols as i32), Arg::I(nn), Arg::I(dtype), Arg::L(rb)])
         };
         mm(self, w[0], qkv_dim, h, cod[0].0, cod[0].1, x_dev, qkv_dev)?;
@@ -1074,6 +1098,52 @@ impl CudaGpu {
         Ok(self.blq[i].0)
     }
 
+    /// Router por bloque en la GPU: ver [`GpuDispatch::router_topk`].
+    #[allow(clippy::too_many_arguments)]
+    fn router_topk_gpu(
+        &mut self,
+        key: &str,
+        w: &[f32],
+        xs: &[f32],
+        n: usize,
+        h: usize,
+        n_exp: usize,
+        top_k: usize,
+        idx: &mut [i32],
+        pesos: &mut [f32],
+    ) -> Result<bool, String> {
+        if w.len() != n_exp * h || xs.len() != n * h || idx.len() != n * top_k || pesos.len() != n * top_k || n_exp > 1024 || n == 0 {
+            return Ok(false);
+        }
+        unsafe { ck((self.api.ctx_set_current)(self.ctx), "cuCtxSetCurrent")? };
+        let w_dev = match self.router_w.get(key) {
+            Some(&d) => d,
+            None => {
+                let d = self.alloc(w.len() * 4)?;
+                self.subir(d, unsafe { std::slice::from_raw_parts(w.as_ptr() as *const u8, w.len() * 4) })?;
+                self.router_w.insert(key.to_string(), d);
+                d
+            }
+        };
+        let x_dev = self.blq_asegurar(8, n * h * 4)?;
+        let l_dev = self.blq_asegurar(9, n * n_exp * 4)?;
+        let i_dev = self.blq_asegurar(10, n * top_k * 4)?;
+        let p_dev = self.blq_asegurar(11, n * top_k * 4)?;
+        self.subir(x_dev, unsafe { std::slice::from_raw_parts(xs.as_ptr() as *const u8, xs.len() * 4) })?;
+        self.lanzar_a(
+            self.f_sgemm,
+            ((n_exp as u32).div_ceil(16), (n as u32).div_ceil(16), 1),
+            (16, 16, 1),
+            &[Arg::P(w_dev), Arg::P(x_dev), Arg::P(l_dev), Arg::I(n_exp as i32), Arg::I(h as i32), Arg::I(n as i32)],
+        )?;
+        self.lanzar_a(self.f_topk, (n as u32, 1, 1), (256, 1, 1), &[Arg::P(l_dev), Arg::P(i_dev), Arg::P(p_dev), Arg::I(n_exp as i32), Arg::I(top_k as i32)])?;
+        ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
+        ck(unsafe { (self.api.dtoh)(idx.as_mut_ptr() as *mut c_void, i_dev, idx.len() * 4) }, "cuMemcpyDtoH")?;
+        ck(unsafe { (self.api.dtoh)(pesos.as_mut_ptr() as *mut c_void, p_dev, pesos.len() * 4) }, "cuMemcpyDtoH")?;
+        self.stats.launches += 1;
+        Ok(true)
+    }
+
     /// Prefill MoE por bloques: ver [`GpuDispatch::expertos_bloque`].
     fn expertos_bloque_gpu(
         &mut self,
@@ -1090,12 +1160,8 @@ impl CudaGpu {
         let t_a = std::time::Instant::now();
         unsafe { ck((self.api.ctx_set_current)(self.ctx), "cuCtxSetCurrent")? };
         // 1) qué expertos se pueden resolver aquí (pesos residentes o que caben): se anotan sus punteros.
-        struct Plan {
-            i: usize,
-            w: [(u64, u8); 3],
-            abase: usize,
-        }
-        let mut plan: Vec<Plan> = Vec::new();
+        let mut plan: Vec<PlanExp> = Vec::new();
+        let mut stream: Vec<usize> = Vec::new();
         let mut total = 0usize;
         for (i, e) in exps.iter().enumerate() {
             let dims = [(ffn, h), (ffn, h), (h, ffn)];
@@ -1104,6 +1170,12 @@ impl CudaGpu {
             for k in 0..3 {
                 let key = e.claves[k];
                 if !self.pesos.contains_key(key) {
+                    // Con el decode en GPU residente la VRAM es de las capas enteras: los expertos de las demás pasan por el búfer de paso.
+                    if self.flujo_expertos && !e.compartido && e.vistas[k].dtype != 0 && !e.tokens.is_empty() {
+                        stream.push(i);
+                        ok = false;
+                        break;
+                    }
                     // Vista vacía (`dtype` 0): el llamante sólo la da para lo que ya cree residente; no hay nada que subir.
                     if e.vistas[k].dtype == 0 {
                         ok = false;
@@ -1123,15 +1195,144 @@ impl CudaGpu {
                 }
             }
             if ok && !e.tokens.is_empty() {
-                plan.push(Plan { i, w, abase: total });
+                plan.push(PlanExp { i, w, abase: total });
                 total += e.tokens.len();
             }
         }
         self.stats.flujo_aciertos += plan.len() as u64;
         self.stats.flujo_fallos += (exps.len() - plan.len()) as u64;
-        if plan.is_empty() {
+        if plan.is_empty() && stream.is_empty() {
             return Ok(());
         }
+        if !plan.is_empty() {
+            self.correr_plan(xs, n, h, ffn, top_k, pesos, &*exps, &plan, suma)?;
+            for pl in &plan {
+                hecho[pl.i] = true;
+            }
+        }
+        if !stream.is_empty() {
+            self.expertos_de_paso(xs, n, h, ffn, top_k, pesos, &*exps, &stream, suma, hecho, !plan.is_empty())?;
+        }
+        let _ = t_a;
+        Ok(())
+    }
+
+    /// Prefill de los expertos no residentes: sus pesos pasan por el búfer de paso (sin cachearse) en trozos de `TROZO_PASO`.
+    #[allow(clippy::too_many_arguments)]
+    fn expertos_de_paso(
+        &mut self,
+        xs: &[f32],
+        n: usize,
+        h: usize,
+        ffn: usize,
+        top_k: usize,
+        pesos: &[f32],
+        exps: &[soso_llm_core::gpu::ExpertoBloque<'_>],
+        stream: &[usize],
+        suma: &mut [f32],
+        hecho: &mut [bool],
+        mut escrita: bool,
+    ) -> Result<(), String> {
+        let dims = [(ffn, h), (ffn, h), (h, ffn)];
+        let mut ini = 0usize;
+        while ini < stream.len() {
+            // trozo de expertos que cabe en el búfer
+            let mut fin = ini;
+            let mut bytes = 0usize;
+            let mut plan: Vec<PlanExp> = Vec::new();
+            let mut subidas: Vec<(usize, [(usize, usize, usize, u8); 3])> = Vec::new();
+            let mut abase = 0usize;
+            while fin < stream.len() {
+                let i = stream[fin];
+                let e = &exps[i];
+                let mut desp = [(0usize, 0usize, 0usize, 0u8); 3];
+                let mut tam = 0usize;
+                let mut ok = true;
+                for k in 0..3 {
+                    let v = e.vistas[k];
+                    match codigo_mma(v.dtype, dims[k].1) {
+                        Some((_, rb)) if v.bytes.len() as i64 == dims[k].0 as i64 * rb => {
+                            let o = (bytes + tam).div_ceil(ALINEACION) * ALINEACION - bytes;
+                            desp[k] = (bytes + o, v.bytes.as_ptr() as usize, v.bytes.len(), v.dtype);
+                            tam = o + v.bytes.len();
+                        }
+                        _ => ok = false,
+                    }
+                }
+                if !ok {
+                    fin += 1;
+                    continue;
+                }
+                if bytes > 0 && bytes + tam > TROZO_PASO {
+                    break;
+                }
+                bytes += tam;
+                subidas.push((i, desp));
+                fin += 1;
+            }
+            if !subidas.is_empty() {
+                if bytes > self.stg.1 {
+                    if self.stg.0 != 0 {
+                        unsafe { (self.api.mem_free)(self.stg.0) };
+                    }
+                    let cap = bytes.max(TROZO_PASO).div_ceil(2 << 20) * (2 << 20);
+                    self.stg = (self.alloc(cap)?, cap);
+                }
+                let base = self.stg.0;
+                let t_sub = std::time::Instant::now();
+                let mut ab = 0usize;
+                for (i, desp) in &subidas {
+                    let mut w = [(0u64, 0u8); 3];
+                    for k in 0..3 {
+                        let (off, p, l, dt) = desp[k];
+                        let src = unsafe { std::slice::from_raw_parts(p as *const u8, l) };
+                        self.subir(base + off as u64, src)?;
+                        w[k] = (base + off as u64, dt);
+                    }
+                    plan.push(PlanExp { i: *i, w, abase: ab });
+                    ab += exps[*i].tokens.len();
+                }
+                abase += ab;
+                if std::env::var_os("SOSO_TRAZA_GPU").is_some() {
+                    eprintln!("[gpu] de paso: {} exps, {:.0} MiB subidos en {:.1} ms ({:.1} GB/s)", plan.len(), bytes as f64 / 1048576.0, t_sub.elapsed().as_secs_f64() * 1e3, bytes as f64 / 1e9 / t_sub.elapsed().as_secs_f64());
+                }
+                let mut parcial = vec![0f32; n * h];
+                self.correr_plan(xs, n, h, ffn, top_k, pesos, exps, &plan, &mut parcial)?;
+                if escrita {
+                    for (d, p) in suma.iter_mut().zip(&parcial) {
+                        *d += *p;
+                    }
+                } else {
+                    suma.copy_from_slice(&parcial);
+                    escrita = true;
+                }
+                for pl in &plan {
+                    hecho[pl.i] = true;
+                }
+                self.stats.bytes_up += bytes as u64;
+            }
+            let _ = abase;
+            ini = fin;
+        }
+        Ok(())
+    }
+
+    /// Lanza gate/up/down y la suma ponderada para los expertos de `plan` (pesos ya en VRAM) y deja en `suma` (`n × h`) su contribución.
+    #[allow(clippy::too_many_arguments)]
+    fn correr_plan(
+        &mut self,
+        xs: &[f32],
+        n: usize,
+        h: usize,
+        ffn: usize,
+        top_k: usize,
+        pesos: &[f32],
+        exps: &[soso_llm_core::gpu::ExpertoBloque<'_>],
+        plan: &[PlanExp],
+        suma: &mut [f32],
+    ) -> Result<(), String> {
+        let t_a = std::time::Instant::now();
+        let total: usize = plan.iter().map(|p| exps[p.i].tokens.len()).sum();
         let t_b = std::time::Instant::now();
         // 2) datos del bloque a la tarjeta
         let x_dev = self.blq_asegurar(0, xs.len() * 4)?;
@@ -1143,12 +1344,12 @@ impl CudaGpu {
         let out_dev = self.blq_asegurar(7, n * h * 4)?;
         self.subir(x_dev, unsafe { std::slice::from_raw_parts(xs.as_ptr() as *const u8, xs.len() * 4) })?;
         let mut toks: Vec<i32> = Vec::with_capacity(total);
-        for pl in &plan {
+        for pl in plan {
             toks.extend(exps[pl.i].tokens.iter().map(|&t| t as i32));
         }
         self.subir(tok_dev, unsafe { std::slice::from_raw_parts(toks.as_ptr() as *const u8, toks.len() * 4) })?;
         let mut dests: Vec<i32> = Vec::with_capacity(total);
-        for pl in &plan {
+        for pl in plan {
             dests.extend(exps[pl.i].destinos.iter().map(|&d| d as i32));
         }
         self.subir(dest_dev, unsafe { std::slice::from_raw_parts(dests.as_ptr() as *const u8, dests.len() * 4) })?;
@@ -1161,7 +1362,7 @@ impl CudaGpu {
         // 3) un descriptor por experto y DOS lanzamientos para todos (gate+up+SwiGLU y down), una sola espera
         let mut desc: Vec<u64> = Vec::with_capacity(plan.len() * 12);
         let mut max_cnt = 0usize;
-        for pl in &plan {
+        for pl in plan {
             let cnt = exps[pl.i].tokens.len();
             max_cnt = max_cnt.max(cnt);
             let (dg, du, dd) = (pl.w[0].1, pl.w[1].1, pl.w[2].1);
@@ -1173,7 +1374,7 @@ impl CudaGpu {
         }
         let d_dev = self.blq_asegurar(4, desc.len() * 8)?;
         self.subir(d_dev, unsafe { std::slice::from_raw_parts(desc.as_ptr() as *const u8, desc.len() * 8) })?;
-        let tiles = (max_cnt as u32).div_ceil(16);
+        let tiles = (max_cnt as u32).div_ceil(64);
         let nexp = plan.len() as u32;
         let (mut a0, mut a1, mut a2, mut a3) = (d_dev, x_dev, tok_dev, act_dev);
         let (mut a4, mut a5) = (ffn as c_int, h as c_int);
@@ -1210,9 +1411,6 @@ impl CudaGpu {
         ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
         let t_e = std::time::Instant::now();
         ck(unsafe { (self.api.dtoh)(suma.as_mut_ptr() as *mut c_void, out_dev, n * h * 4) }, "cuMemcpyDtoH")?;
-        for pl in &plan {
-            hecho[pl.i] = true;
-        }
         if std::env::var_os("SOSO_TRAZA_GPU").is_some() {
             let t_f = std::time::Instant::now();
             eprintln!(
@@ -1323,7 +1521,7 @@ impl CudaGpu {
         self.subir(self.x_dev, x_bytes)?;
         self.lanzar_a(
             self.f_iq_matmul_n,
-            ((rows as u32).div_ceil(64), (n as u32).div_ceil(16), 1),
+            ((rows as u32).div_ceil(64), (n as u32).div_ceil(64), 1),
             (128, 1, 1),
             &[Arg::P(w_dev), Arg::P(self.x_dev), Arg::P(self.y_dev), Arg::I(rows as i32), Arg::I(cols as i32), Arg::I(n as i32), Arg::I(dtype_k), Arg::L(rb)],
         )?;
@@ -1405,6 +1603,14 @@ impl CudaGpu {
 impl GpuDispatch for CudaGpu {
     fn available(&self) -> bool {
         true
+    }
+
+    fn router_topk(&mut self, key: &str, w: &[f32], xs: &[f32], n: usize, h: usize, n_exp: usize, top_k: usize, idx: &mut [i32], pesos: &mut [f32]) -> Result<bool, ()> {
+        self.router_topk_gpu(key, w, xs, n, h, n_exp, top_k, idx, pesos).map_err(|e| eprintln!("router GPU: {e}"))
+    }
+
+    fn bloque_prefill_moe(&self) -> Option<usize> {
+        self.flujo_expertos.then_some(soso_llm_core::runtime::Runtime::BLOQUE_PREFILL_STREAM)
     }
 
     fn decode_preparar(&mut self, plan: &soso_llm_core::gpu::DecodePlan) -> Result<bool, ()> {

@@ -452,6 +452,25 @@ pub trait GpuDispatch {
         Ok(())
     }
 
+    /// Router de un bloque de `n` tokens (`xs`: `n × h`; `w`: `n_exp × h` f32 con la clave `key`): logits en f32, softmax y top-`top_k` por token en el
+    /// dispositivo. `idx` y `pesos` (`n × top_k`) salen en orden de ranking, con los pesos ya renormalizados. `Ok(false)` = hacerlo en CPU.
+    #[allow(clippy::too_many_arguments)]
+    fn router_topk(
+        &mut self,
+        key: &str,
+        w: &[f32],
+        xs: &[f32],
+        n: usize,
+        h: usize,
+        n_exp: usize,
+        top_k: usize,
+        idx: &mut [i32],
+        pesos: &mut [f32],
+    ) -> Result<bool, ()> {
+        let _ = (key, w, xs, n, h, n_exp, top_k, idx, pesos);
+        Ok(false)
+    }
+
     /// Atención causal de un bloque de `n` tokens en el dispositivo (KV f16 espejado por capa). `q`: `n` vectores de `heads * hd`; `out`: lo
     /// mismo; `k`/`v`: el KV del host con `seq_antes + n` filas ya añadidas; `filas_validas`: filas del principio que el dispositivo ya tiene
     /// (el despacho sube las que falten y la actualiza). `Ok(false)` = hacerlo en CPU.
@@ -514,6 +533,11 @@ pub trait GpuDispatch {
     ) -> Result<bool, ()> {
         let _ = (hist, conv, z, decay, beta, norma, estado, salida, n, n_k, n_v, d, kernel, eps);
         Ok(false)
+    }
+
+    /// Tokens por bloque que prefiere el despacho para el prefill de un MoE (p. ej. cuando sus expertos pasan por el bus).
+    fn bloque_prefill_moe(&self) -> Option<usize> {
+        None
     }
 
     /// Prepara el decode de un token entero en el dispositivo (pesos residentes, tablas de expertos, búferes). `Ok(false)` = no se puede.

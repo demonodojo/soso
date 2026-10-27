@@ -29,8 +29,6 @@ pub(super) struct FnsDec {
     attn_split: CuFunction,
     attn_combine: CuFunction,
     router: CuFunction,
-    gateup: CuFunction,
-    down: CuFunction,
     pgate: CuFunction,
     combine: CuFunction,
     combine_cpu: CuFunction,
@@ -230,8 +228,6 @@ impl CudaGpu {
             attn_split: get("dec_attn_split")?,
             attn_combine: get("dec_attn_combine")?,
             router: get("dec_router_topk")?,
-            gateup: get("dec_moe_gateup")?,
-            down: get("dec_moe_down")?,
             pgate: get("dec_pgate")?,
             combine: get("dec_moe_combine")?,
             combine_cpu: get("dec_moe_combine_cpu")?,
@@ -407,6 +403,7 @@ impl CudaGpu {
         }
         // lo que no quedó residente no se sube más tarde por tensores sueltos
         self.tope_expertos = self.usado;
+        self.flujo_expertos = std::env::var("SOSO_SIN_FLUJO_EXPERTOS").is_err();
         eprintln!("decode GPU: {} de {} capas con los expertos en la tarjeta ({} MiB en VRAM)", con_gpu, capas.len(), self.usado >> 20);
         // 3) búferes de trabajo
         let h = plan.h;

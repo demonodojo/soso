@@ -738,8 +738,23 @@ impl Runtime {
     pub const BLOQUE_PREFILL_MOE_GPU: usize = 64;
     /// Máximo del bloque con capas MoE «en flujo».
     pub const BLOQUE_PREFILL_FLUJO: usize = 256;
+    /// Bloque cuando los expertos no residentes pasan por el bus (cada bloque los sube una vez: cuanto mayor, menos viajes).
+    pub const BLOQUE_PREFILL_STREAM: usize = 1024;
 
     /// Tokens por bloque de prefill según el modelo y el despacho.
+    /// Tokens por bloque del prefill de Qwen3.5/3.6 (`SOSO_BLOQUE_PREFILL` lo cambia): con expertos que pasan por el bus, cuanto mayor, menos viajes.
+    pub fn bloque_flujo() -> usize {
+        Self::bloque_forzado().unwrap_or(Self::BLOQUE_PREFILL_FLUJO)
+    }
+
+    fn bloque_forzado() -> Option<usize> {
+        #[cfg(feature = "std")]
+        if let Some(n) = std::env::var("SOSO_BLOQUE_PREFILL").ok().and_then(|v| v.parse::<usize>().ok()) {
+            return Some(n.max(8));
+        }
+        None
+    }
+
     fn bloque_prefill(&self, gpu: &Option<&mut dyn crate::gpu::GpuDispatch>) -> usize {
         let base_gpu = matches!(self.backend, Backend::Gpu | Backend::Auto)
             && gpu.as_ref().is_some_and(|g| g.available());
@@ -762,7 +777,7 @@ impl Runtime {
             32
         } else if (0..self.manifest.num_layers).all(|l| crate::bloque35::soporta(&exec, l, &self.kv[l as usize])) {
             // Qwen3.5: cada experto/matriz lee sus pesos una vez por bloque, así que cuanto mayor, mejor.
-            Self::BLOQUE_PREFILL_FLUJO
+            Self::bloque_forzado().or_else(|| gpu.as_ref().and_then(|g| g.bloque_prefill_moe())).unwrap_or(Self::BLOQUE_PREFILL_FLUJO)
         } else {
             Self::BLOQUE_PREFILL
         }
@@ -876,7 +891,7 @@ impl Runtime {
         let mut bs = self
             .block
             .take()
-            .unwrap_or_else(|| BlockScratch::new(&self.manifest, Self::BLOQUE_PREFILL_FLUJO));
+            .unwrap_or_else(|| BlockScratch::new(&self.manifest, Self::bloque_flujo().max(Self::BLOQUE_PREFILL_STREAM)));
         let mut hs = vec![0.0f32; n * h];
         for (i, &tok) in tokens.iter().enumerate() {
             self.embed_token(tok, source)?;
@@ -1511,7 +1526,7 @@ impl Runtime {
         let mut bs = self
             .block
             .take()
-            .unwrap_or_else(|| BlockScratch::new(&self.manifest, Self::BLOQUE_PREFILL_FLUJO));
+            .unwrap_or_else(|| BlockScratch::new(&self.manifest, Self::bloque_flujo().max(Self::BLOQUE_PREFILL_STREAM)));
         let exec = LayerExecutor {
             manifest: &self.manifest,
             has_gate: self.has_gate,
@@ -1984,6 +1999,9 @@ impl Runtime {
         if prompt.is_empty() {
             note_infer_op(None, "prompt vacío");
             return Err(());
+        }
+        if cluster.is_none() && self.decode_gpu_posible(gpu) {
+            self.decode_gpu_preparar(source, gpu);
         }
         let ya = self.begin_sequence_reusing(prompt);
         sync_cluster_prefijo(cluster, ya)?;

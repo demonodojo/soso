@@ -16,5 +16,7 @@ json.dump({"id": mid, "directory": d, "family": fam, "weights_sha256": h(d + "/i
 P
 cd $R0
 # Muestreo por defecto como el de llama.cpp con Qwen3.x (la petición del arnés sólo manda la temperatura).
+# Decode residente en GPU (capas enteras en VRAM, el resto de expertos por el bus en el prefill): -25 % por petición; la primera paga ~20 s de preparación.
+export SOSO_DECODE_GPU=${SOSO_DECODE_GPU:-1} SOSO_RESERVA_DECODE_MIB=${SOSO_RESERVA_DECODE_MIB:-1200}
 export HILOS=${HILOS:-8} SOSO_CUDA=${SOSO_CUDA:-1} SOSO_LLM_API_KEY=clave-host SOSO_TOP_P=${SOSO_TOP_P:-0.8} SOSO_TOP_K=${SOSO_TOP_K:-20} SOSO_RECORTAR_SALIDA=1 SOSO_PERFIL=1
 exec $R0/target/runtime-avx2/release/examples/serve_host --model-dir "$DIR" --profile "$PERFIL" --port $PUERTO

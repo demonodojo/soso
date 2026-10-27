@@ -62,6 +62,9 @@ fn main() {
     if std::env::var("SOSO_IQ_F32").is_ok() {
         soso_llm_core::gemm::iq_q8k_activar(false);
     }
+    if std::env::var("PREPARAR_DECODE").is_ok() {
+        rt.decode_gpu_preparar(&mut source, &mut gpu);
+    }
     // `REPETIR=N`: N prefills seguidos (el primero paga mmap y CRC de cada shard; los siguientes miden el régimen estable).
     for r in 1..std::env::var("REPETIR").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1) {
         let t = Instant::now();

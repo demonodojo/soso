@@ -41,6 +41,34 @@ pub fn soporta(exec: &LayerExecutor<'_>, layer: u32, kv: &LayerKv) -> bool {
 
 /// Una capa de `n` tokens (`hs`, `n` vectores de `hidden_dim`, se actualiza en su sitio).
 #[allow(clippy::too_many_arguments)]
+/// RMSNorm de `n` filas de `h` repartida entre hilos (cada fila es independiente).
+fn rmsnorm_filas(par: &dyn RowParallel, x: &mut [f32], w: &[f32], h: usize, n: usize, eps: f32) {
+    let (x_p, w_p) = (x.as_mut_ptr() as usize, w.as_ptr() as usize);
+    par.for_rows(n, &move |i0, i1| {
+        // SAFETY: filas disjuntas por hilo.
+        let w = unsafe { core::slice::from_raw_parts(w_p as *const f32, h) };
+        for i in i0..i1 {
+            rmsnorm(unsafe { core::slice::from_raw_parts_mut((x_p as *mut f32).add(i * h), h) }, w, eps);
+        }
+    });
+}
+
+/// `dst = a + b` por filas, repartido entre hilos.
+fn suma_filas(par: &dyn RowParallel, a: &[f32], b: &[f32], dst: &mut [f32], h: usize, n: usize) {
+    let (a_p, b_p, d_p) = (a.as_ptr() as usize, b.as_ptr() as usize, dst.as_mut_ptr() as usize);
+    par.for_rows(n, &move |i0, i1| {
+        // SAFETY: filas disjuntas por hilo.
+        let (a, b, d) = unsafe {
+            (
+                core::slice::from_raw_parts((a_p as *const f32).add(i0 * h), (i1 - i0) * h),
+                core::slice::from_raw_parts((b_p as *const f32).add(i0 * h), (i1 - i0) * h),
+                core::slice::from_raw_parts_mut((d_p as *mut f32).add(i0 * h), (i1 - i0) * h),
+            )
+        };
+        add_f32(a, b, d);
+    });
+}
+
 pub fn forward_layer_block_q35<S: TensorSource>(
     exec: &LayerExecutor<'_>,
     layer: u32,
@@ -68,9 +96,7 @@ pub fn forward_layer_block_q35<S: TensorSource>(
     let prefix = format!("L{layer:02}");
     let residual: Vec<f32> = hs.to_vec();
     source.load_f32(&format!("{prefix}.attn_norm"), &mut s.norm_w[..h])?;
-    for i in 0..n {
-        rmsnorm(&mut hs[i * h..(i + 1) * h], &s.norm_w[..h], eps);
-    }
+    rmsnorm_filas(par, hs, &s.norm_w[..h], h, n, eps);
 
     let mut salida_attn = vec![0.0f32; n * h];
     match spec.attn_kind {
@@ -78,28 +104,24 @@ pub fn forward_layer_block_q35<S: TensorSource>(
         _ => atencion_bloque(exec, layer, pos0, n, hs, &mut salida_attn, bs, s, kv, source, par, &prefix, gpu, use_gpu)?,
     }
     // hs = residual + salida de atención; luego FFN con su residual.
-    for i in 0..n {
-        add_f32(&residual[i * h..(i + 1) * h], &salida_attn[i * h..(i + 1) * h], &mut hs[i * h..(i + 1) * h]);
-    }
+    suma_filas(par, &residual, &salida_attn, hs, h, n);
     drop(salida_attn);
+    #[cfg(feature = "std")]
+    let t_mezcla = t_capa.elapsed().as_secs_f64() * 1e3;
 
     let residual2: Vec<f32> = hs.to_vec();
     source.load_f32(&format!("{prefix}.ffn_norm"), &mut s.norm_w[..h])?;
-    for i in 0..n {
-        rmsnorm(&mut hs[i * h..(i + 1) * h], &s.norm_w[..h], eps);
-    }
+    rmsnorm_filas(par, hs, &s.norm_w[..h], h, n, eps);
     let mut salida_ffn = vec![0.0f32; n * h];
     if m.layer_is_moe(layer) {
         moe_bloque(exec, layer, n, hs, &mut salida_ffn, bs, par, source, &prefix, gpu, use_gpu)?;
     } else {
         ffn_denso_bloque(exec, layer, n, hs, &mut salida_ffn, bs, par, source, &prefix, gpu, use_gpu)?;
     }
-    for i in 0..n {
-        add_f32(&residual2[i * h..(i + 1) * h], &salida_ffn[i * h..(i + 1) * h], &mut hs[i * h..(i + 1) * h]);
-    }
+    suma_filas(par, &residual2, &salida_ffn, hs, h, n);
     #[cfg(feature = "std")]
     if std::env::var_os("SOSO_TRAZA_CAPAS").is_some() {
-        std::eprintln!("[capa] L{layer} n={n} {:?}: {:.1} ms", spec.attn_kind, t_capa.elapsed().as_secs_f64() * 1e3);
+        std::eprintln!("[capa] L{layer} n={n} {:?}: {:.1} ms (mezcla {:.1})", spec.attn_kind, t_capa.elapsed().as_secs_f64() * 1e3, t_mezcla);
     }
     Ok(())
 }
@@ -400,33 +422,42 @@ fn atencion_bloque<S: TensorSource>(
     mv(source, &format!("{prefix}.attn_v"), layer, kv_dim, h, xs, n, &mut v, par, bs, gpu, use_gpu)?;
 
     perfil_marca(&mut tp, FASE_QKV);
-    // q y puerta están entrelazados por cabeza: [q_h | gate_h].
+    // q y puerta están entrelazados por cabeza: [q_h | gate_h]. Cada token es independiente: se reparten entre hilos.
     let mut q = vec![0.0f32; n * q_dim];
     let mut puerta = vec![0.0f32; n * q_dim];
-    for i in 0..n {
-        for head in 0..heads {
-            let src = i * q_full + head * 2 * hd;
-            q[i * q_dim + head * hd..i * q_dim + (head + 1) * hd].copy_from_slice(&qf[src..src + hd]);
-            puerta[i * q_dim + head * hd..i * q_dim + (head + 1) * hd].copy_from_slice(&qf[src + hd..src + 2 * hd]);
-        }
+    let mut nq = vec![0.0f32; hd];
+    source.load_f32(&format!("{prefix}.attn_q_norm"), &mut nq)?;
+    let mut nk = vec![0.0f32; hd];
+    source.load_f32(&format!("{prefix}.attn_k_norm"), &mut nk)?;
+    {
+        let (qf_p, q_p, pu_p, k_p, nq_p, nk_p) = (qf.as_ptr() as usize, q.as_mut_ptr() as usize, puerta.as_mut_ptr() as usize, k.as_mut_ptr() as usize, nq.as_ptr() as usize, nk.as_ptr() as usize);
+        par.for_rows(n, &move |i0, i1| {
+            // SAFETY: cada hilo toca sólo las filas de sus tokens; los buffers viven hasta que `for_rows` vuelve.
+            let (nqs, nks) = unsafe { (core::slice::from_raw_parts(nq_p as *const f32, hd), core::slice::from_raw_parts(nk_p as *const f32, hd)) };
+            for i in i0..i1 {
+                for head in 0..heads {
+                    let src = i * q_full + head * 2 * hd;
+                    let o = i * q_dim + head * hd;
+                    unsafe {
+                        let qo = core::slice::from_raw_parts_mut((q_p as *mut f32).add(o), hd);
+                        qo.copy_from_slice(core::slice::from_raw_parts((qf_p as *const f32).add(src), hd));
+                        core::slice::from_raw_parts_mut((pu_p as *mut f32).add(o), hd).copy_from_slice(core::slice::from_raw_parts((qf_p as *const f32).add(src + hd), hd));
+                        rmsnorm(qo, nqs, eps);
+                        rope_inplace_n(qo, pos0 + i, theta, rope_n);
+                    }
+                }
+                for head in 0..kv_heads {
+                    let o = i * kv_dim + head * hd;
+                    let ko = unsafe { core::slice::from_raw_parts_mut((k_p as *mut f32).add(o), hd) };
+                    rmsnorm(ko, nks, eps);
+                    rope_inplace_n(ko, pos0 + i, theta, rope_n);
+                }
+            }
+        });
     }
     drop(qf);
-    source.load_f32(&format!("{prefix}.attn_q_norm"), &mut s.norm_w[..hd])?;
-    for i in 0..n {
-        for head in 0..heads {
-            let o = i * q_dim + head * hd;
-            rmsnorm(&mut q[o..o + hd], &s.norm_w[..hd], eps);
-            rope_inplace_n(&mut q[o..o + hd], pos0 + i, theta, rope_n);
-        }
-    }
-    source.load_f32(&format!("{prefix}.attn_k_norm"), &mut s.norm_w[..hd])?;
     let seq_antes = kv.tokens(kv_dim);
     for i in 0..n {
-        for head in 0..kv_heads {
-            let o = i * kv_dim + head * hd;
-            rmsnorm(&mut k[o..o + hd], &s.norm_w[..hd], eps);
-            rope_inplace_n(&mut k[o..o + hd], pos0 + i, theta, rope_n);
-        }
         kv.append_f16(&k[i * kv_dim..(i + 1) * kv_dim], &v[i * kv_dim..(i + 1) * kv_dim]);
     }
     perfil_marca(&mut tp, FASE_ROPE_KV);
@@ -444,8 +475,15 @@ fn atencion_bloque<S: TensorSource>(
     if !en_gpu {
         atencion_f16_grupos(par, &q, &mut attn, n, q_dim, kv, kv_heads, group, hd, kv_dim, seq_antes + 1);
     }
-    for i in 0..n * q_dim {
-        attn[i] *= sigmoid(puerta[i]);
+    {
+        let (a_p, g_p) = (attn.as_mut_ptr() as usize, puerta.as_ptr() as usize);
+        par.for_rows(n, &move |i0, i1| {
+            // SAFETY: filas disjuntas por hilo.
+            let (a, g) = unsafe { (core::slice::from_raw_parts_mut((a_p as *mut f32).add(i0 * q_dim), (i1 - i0) * q_dim), core::slice::from_raw_parts((g_p as *const f32).add(i0 * q_dim), (i1 - i0) * q_dim)) };
+            for (x, y) in a.iter_mut().zip(g) {
+                *x *= sigmoid(*y);
+            }
+        });
     }
     perfil_marca(&mut tp, FASE_ATENCION);
     let r = mv(source, &format!("{prefix}.attn_output"), layer, h, q_dim, &attn, n, salida, par, bs, gpu, use_gpu);
@@ -505,16 +543,47 @@ fn moe_bloque<S: TensorSource>(
     }
     let mut tp = perfil_ahora();
     // Router por lotes y top-k por token.
+    #[cfg(feature = "std")]
+    let t_r0 = std::time::Instant::now();
     let mut logits = vec![0.0f32; n * n_exp];
-    mv(source, &format!("{prefix}.ffn_gate_inp"), layer, n_exp, h, xs, n, &mut logits, par, bs, gpu, use_gpu)?;
     let mut ranking: Vec<Vec<(usize, f32)>> = Vec::with_capacity(n);
     let mut por_experto: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n_exp]; // (token, posición en su ranking)
-    for t in 0..n {
-        let r = topk_softmax(&mut logits[t * n_exp..(t + 1) * n_exp], top_k);
-        for (j, (e, _)) in r.iter().enumerate() {
-            por_experto[*e].push((t, j));
+    // Router y top-k en la GPU si puede (matmul f32, mismo criterio de desempate que la CPU).
+    let mut en_gpu = false;
+    if use_gpu {
+        let name_r = format!("{prefix}.ffn_gate_inp");
+        if let (Some(g), Ok(view)) = (gpu.as_deref_mut().filter(|g| g.available()), source.tensor_view(&name_r)) {
+            if let Some(wf) = view.f32() {
+                let mut idx = vec![0i32; n * top_k];
+                let mut pw = vec![0.0f32; n * top_k];
+                if g.router_topk(&name_r, wf, xs, n, h, n_exp, top_k, &mut idx, &mut pw).unwrap_or(false) {
+                    for t in 0..n {
+                        let r: Vec<(usize, f32)> = (0..top_k).map(|j| (idx[t * top_k + j] as usize, pw[t * top_k + j])).collect();
+                        for (j, (e, _)) in r.iter().enumerate() {
+                            por_experto[*e].push((t, j));
+                        }
+                        ranking.push(r);
+                    }
+                    en_gpu = true;
+                }
+            }
         }
-        ranking.push(r);
+    }
+    if !en_gpu {
+        mv(source, &format!("{prefix}.ffn_gate_inp"), layer, n_exp, h, xs, n, &mut logits, par, bs, gpu, use_gpu)?;
+        for t in 0..n {
+            let r = topk_softmax(&mut logits[t * n_exp..(t + 1) * n_exp], top_k);
+            for (j, (e, _)) in r.iter().enumerate() {
+                por_experto[*e].push((t, j));
+            }
+            ranking.push(r);
+        }
+    }
+    #[cfg(feature = "std")]
+    let t_r1 = t_r0.elapsed().as_secs_f64() * 1e3;
+    #[cfg(feature = "std")]
+    if std::env::var_os("SOSO_TRAZA_ROUTER").is_some() {
+        std::eprintln!("[router] n={n}: matmul {:.1} ms, topk {:.1} ms", t_r1, t_r0.elapsed().as_secs_f64() * 1e3 - t_r1);
     }
     perfil_marca(&mut tp, FASE_QKV);
     // Salida de cada (token, posición del ranking).
@@ -668,28 +737,33 @@ fn moe_bloque<S: TensorSource>(
     }
     perfil_marca(&mut tp, FASE_O);
     // Suma por token: lo que ya sumó la GPU, luego los expertos de la CPU en el orden del ranking y por último los compartidos.
-    for t in 0..n {
-        let o = &mut salida[t * h..(t + 1) * h];
-        if use_gpu && !suma_gpu.is_empty() {
-            o.copy_from_slice(&suma_gpu[t * h..(t + 1) * h]);
-        } else {
-            o.fill(0.0);
-        }
-        for (j, (_, w)) in ranking[t].iter().enumerate() {
-            if hecha[t * top_k + j] {
-                continue;
+    let sal_p = salida.as_mut_ptr() as usize;
+    let (sg, y_r, comp, ranking_r, hecha_r, puerta_r) = (&suma_gpu, &y, &compartido, &ranking, &hecha, &puerta);
+    par.for_rows(n, &|t0, t1| {
+        for t in t0..t1 {
+            // SAFETY: cada hilo escribe sólo las filas de sus tokens.
+            let o = unsafe { core::slice::from_raw_parts_mut((sal_p as *mut f32).add(t * h), h) };
+            if use_gpu && !sg.is_empty() {
+                o.copy_from_slice(&sg[t * h..(t + 1) * h]);
+            } else {
+                o.fill(0.0);
             }
-            let yj = &y[(t * top_k + j) * h..(t * top_k + j + 1) * h];
-            for i in 0..h {
-                o[i] += yj[i] * w;
+            for (j, (_, w)) in ranking_r[t].iter().enumerate() {
+                if hecha_r[t * top_k + j] {
+                    continue;
+                }
+                let yj = &y_r[(t * top_k + j) * h..(t * top_k + j + 1) * h];
+                for i in 0..h {
+                    o[i] += yj[i] * w;
+                }
+            }
+            for sh in 0..n_shared {
+                let c = &comp[(sh * n + t) * h..(sh * n + t + 1) * h];
+                for i in 0..h {
+                    o[i] += c[i] * puerta_r[t];
+                }
             }
         }
-        for sh in 0..n_shared {
-            let c = &compartido[(sh * n + t) * h..(sh * n + t + 1) * h];
-            for i in 0..h {
-                o[i] += c[i] * puerta[t];
-            }
-        }
-    }
+    });
     Ok(())
 }
