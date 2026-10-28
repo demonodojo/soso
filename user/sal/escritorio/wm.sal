@@ -4,6 +4,7 @@ import "proto.sal"
 import "ventanas.sal"
 import "tabla.sal"
 import "term.sal"
+import "fuente.sal"
 
 fn st_size() -> Int
     248
@@ -286,8 +287,56 @@ fn wm_term_rows(wh: Int) -> Int
     else
         r
 
+fn wm_barra_web_ancho() -> Int
+    48
+
+fn wm_lanzar_web() -> Int ! io, alloc
+    spawn_io_4(d"/bin/soso-web", d"--grafico", d"--local", d"/etc/web-prueba.html", 0, 0, 0, fd_kernel_log())
+
+fn prueba_web_pixel_ok(tab: Int, i: Int) -> Int ! alloc
+    if tab_get(tab, i, tab_fase()) != 2
+        0
+    else
+        cw = tab_get(tab, i, tab_cw())
+        ch = tab_get(tab, i, tab_ch())
+        shm = tab_get(tab, i, tab_shm_ptr())
+        if cw < 20
+            0
+        else
+            if ch < 20
+                0
+            else
+                slen = cw * ch * 4
+                b = bytes_view_mem(shm, slen)
+                off = (10 + 10 * cw) * 4
+                b0 = bytes_get_u8(b, off)
+                b1 = bytes_get_u8(b, off + 1)
+                b2 = bytes_get_u8(b, off + 2)
+                if b1 == 18
+                    if b0 == 16
+                        if b2 == 24
+                            1
+                        else
+                            if b0 == 24
+                                if b2 == 16
+                                    1
+                                else
+                                    0
+                            else
+                                0
+                    else
+                        0
+                else
+                    0
+
 fn wm_pintar_barra(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
     _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, barra_alto(), wm_color_barra())
+    psf = st_get(st, st_psf())
+    plen = st_get(st, st_psf_len())
+    if psf > 0
+        _w = fuente_dibujar(psf, plen, compos, clen, stride, bpp, fmt, 87, color_rgb(200, 220, 255), wm_color_barra(), 8, 4)
+        _e = fuente_dibujar(psf, plen, compos, clen, stride, bpp, fmt, 101, color_rgb(200, 220, 255), wm_color_barra(), 16, 4)
+        _b = fuente_dibujar(psf, plen, compos, clen, stride, bpp, fmt, 98, color_rgb(200, 220, 255), wm_color_barra(), 24, 4)
     _d = wm_marcar_dirty(st, 0, 0, sw, barra_alto())
     0
 
@@ -367,7 +416,7 @@ fn wm_repintar_slot(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, 
         wy = tab_get(tab, i, tab_wy())
         ww = tab_get(tab, i, tab_ww())
         wh = tab_get(tab, i, tab_wh())
-        _m = wm_pintar_marco(compos, clen, sw, sh, stride, bpp, fmt, wx, wy, ww, wh)
+        _m = wm_pintar_marco(compos, clen, sw, sh, stride, bpp, fmt, wx, wy, ww, wh, st, tab, i)
         if tab_get(tab, i, tab_tipo()) == tab_tipo_term()
             psf = st_get(st, st_psf())
             plen = st_get(st, st_psf_len())
@@ -427,7 +476,7 @@ fn wm_color_fondo() -> Int
 fn wm_color_barra() -> Int
     color_rgb(48, 48, 64)
 
-fn wm_repintar_ventana(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
+fn wm_repintar_ventana(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
     wx = st_get(st, st_wx())
     wy = st_get(st, st_wy())
     ww = st_get(st, st_ww())
@@ -436,13 +485,33 @@ fn wm_repintar_ventana(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride
     ch = st_get(st, st_ch())
     shm = st_get(st, st_shm_ptr())
     slen = cw * ch * 4
-    _m = wm_pintar_marco(compos, clen, sw, sh, stride, bpp, fmt, wx, wy, ww, wh)
+    _m = wm_pintar_marco(compos, clen, sw, sh, stride, bpp, fmt, wx, wy, ww, wh, st, tab, i)
     _b = wm_blit_cliente(compos, clen, stride, bpp, fmt, wx, wy, cw, ch, shm, slen, 0, 0, cw, ch)
     _d = wm_marcar_dirty(st, wx, wy, wx + ww, wy + wh)
     0
 
-fn wm_pintar_marco(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, wx: Int, wy: Int, ww: Int, wh: Int) -> Int ! alloc
+fn wm_pintar_marco_titulo(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, wx: Int, wy: Int) -> Int ! alloc
+    psf = st_get(st, st_psf())
+    plen = st_get(st, st_psf_len())
+    if psf > 0
+        tit = bytes_view_mem(tab + tab_slot_off(i) + tab_titulo_off(), 32)
+        cx = wx + 6
+        cy = wy + 4
+        j = 0
+        while j < 16
+            ch = bytes_get_u8(tit, j)
+            if ch == 0
+                j = 16
+            else
+                if ch != 32
+                    _d = fuente_dibujar(psf, plen, compos, clen, stride, bpp, fmt, ch, color_rgb(220, 224, 236), wm_color_barra(), cx, cy)
+                    cx = cx + 8
+                j = j + 1
+    0
+
+fn wm_pintar_marco(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, wx: Int, wy: Int, ww: Int, wh: Int, st: Int, tab: Int, i: Int) -> Int ! alloc
     rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, wx, wy, wx + ww, wy + wh, wm_color_barra())
+    _t = wm_pintar_marco_titulo(st, tab, i, compos, clen, sw, sh, stride, bpp, fmt, wx, wy)
     rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, wx, wy + barra_alto(), wx + ww, wy + wh, color_rgb(20, 20, 28))
 
 fn wm_blit_cliente(compos: Int, clen: Int, cstride: Int, bpp: Int, fmt: Int, wx: Int, wy: Int, cw: Int, ch: Int, shm: Int, slen: Int, sx: Int, sy: Int, w: Int, h: Int) -> Int ! alloc
@@ -527,7 +596,7 @@ fn wm_redim_slot(st: Int, tab: Int, i: Int, fmt: Int, compos: Int, clen: Int, sw
                     _c = tab_set(tab, i, tab_cw(), cw)
                     _d = tab_set(tab, i, tab_ch(), ch)
                     _s = wm_st_desde_tab(st, tab, i)
-                    _r = wm_repintar_ventana(st, compos, clen, sw, sh, stride, bpp, fmt)
+                    _r = wm_repintar_ventana(st, tab, i, compos, clen, sw, sh, stride, bpp, fmt)
                     _t = wm_tab_desde_st(st, tab, i)
                     ok = 1
             ok
@@ -560,9 +629,9 @@ fn wm_on_crear(st: Int, fd: Int, msg: Int, fmt: Int, sw: Int, sh: Int) -> Int ! 
                     ok = 1
     ok
 
-fn wm_on_crear_repintar(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
+fn wm_on_crear_repintar(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     fd = st_get(st, st_cli_fd())
-    _r = wm_repintar_ventana(st, compos, clen, sw, sh, stride, bpp, fmt)
+    _r = wm_repintar_ventana(st, tab, i, compos, clen, sw, sh, stride, bpp, fmt)
     _f = wm_enviar_foco(fd)
     0
 
@@ -596,8 +665,15 @@ fn wm_dispatch_msg(st: Int, tab: Int, i: Int, compos: Int, clen: Int, stride: In
             ok = wm_on_crear(st, fd, m, fmt, sw, sh)
             _t = wm_tab_desde_st(st, tab, i)
             if ok != 0
-                _r = wm_on_crear_repintar(st, compos, clen, sw, sh, stride, bpp, fmt)
+                _tt = tab_titulo_desde_msg(tab, i, m)
+                _r = wm_on_crear_repintar(st, tab, i, compos, clen, sw, sh, stride, bpp, fmt)
                 _t2 = wm_tab_desde_st(st, tab, i)
+    if op == op_titulo()
+        _tt = tab_titulo_desde_msg(tab, i, m)
+        if tab_get(tab, i, tab_fase()) == 2
+            _s = wm_st_desde_tab(st, tab, i)
+            _r = wm_repintar_ventana(st, tab, i, compos, clen, sw, sh, stride, bpp, fmt)
+            _t = wm_tab_desde_st(st, tab, i)
     if op == op_danio()
         _s = wm_st_desde_tab(st, tab, i)
         _d = wm_on_danio(st, compos, clen, stride, bpp, fmt, m)
@@ -691,6 +767,10 @@ fn wm_raton_btn(st: Int, x: Int, y: Int, botones: Int, compos: Int, clen: Int, s
         _d = st_set(st, st_drag_ix(), -1)
         _k = st_set(st, st_drag_kind(), 0)
     if botones != 0
+        if y < barra_alto()
+            if x < wm_barra_web_ancho()
+                _lw = wm_lanzar_web()
+                return 0
         i = wm_hit_test(st, x, y)
         if i >= 0
             _f = wm_foco_a(st, i)
@@ -872,6 +952,8 @@ fn wm_input(st: Int, evt: Int, evt_len: Int, n: Int, compos: Int, clen: Int, sw:
                         if key == 116
                             _m = st_set(st, st_mosaic(), 1 - st_get(st, st_mosaic()))
                             _a = wm_aplicar_mosaic(st, sw, sh)
+                        if key == 119
+                            _lw = wm_lanzar_web()
                 if (mods & mod_alt()) == 0
                     _t = wm_tecla_foco(st, key)
         i = i + 1

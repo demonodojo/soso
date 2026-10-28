@@ -7,3 +7,4 @@ extern crate alloc;
 pub use soso_web_core::{decode, html};
 
 pub mod gui;
+pub mod png;

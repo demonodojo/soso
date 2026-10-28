@@ -2,8 +2,31 @@
 <html lang="es">
 <head><meta charset="utf-8"><title>Prueba soso-web</title></head>
 <body>
+<style>
+body { background-color: #101218; }
+h1 { color: #ffffff; font-size: 22px; }
+.nota { background-color: #282c38; padding: 8px; }
+.flex-row { display: flex; gap: 12px; margin-top: 8px; }
+.flex-row .col { background-color: #303848; padding: 6px; flex: 1; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+.grid2 .cell { background-color: #384058; padding: 6px; }
+</style>
 <h1>Página de prueba</h1>
 <p>Hola desde <strong>soso-web</strong>.</p>
+<p class="nota">Bloque con fondo CSS.</p>
+<div class="flex-row">
+<div class="col">Flex A</div>
+<div class="col">Flex B</div>
+</div>
+<div class="grid2">
+<div class="cell">Grid 1</div>
+<div class="cell">Grid 2</div>
+</div>
+<p><img src="/etc/web-prueba.png" alt="icono prueba" width="32" height="32"></p>
 <p>Enlace: <a href="https://example.com/">Example</a></p>
+<form action="/etc/web-form-result.html" method="get">
+<label>Buscar: <input type="text" name="q" value="hola"></label>
+<input type="submit" value="Ir">
+</form>
 </body>
 </html>

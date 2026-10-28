@@ -190,7 +190,7 @@ extern "C" __global__ void iq_matvec(const unsigned char *w, const float *x, flo
 {
     extern __shared__ float xs[];
     for (int i = (int)threadIdx.x; i < cols; i += (int)blockDim.x) {
-        xs[i] = x[i];
+        xs[(i >> 5) * 33 + (i & 31)] = x[i]; /* relleno: 33 floats por unidad de 32 (sin conflictos de banco) */
     }
     __syncthreads();
     int warp = (int)threadIdx.x >> 5;
@@ -203,7 +203,7 @@ extern "C" __global__ void iq_matvec(const unsigned char *w, const float *x, flo
     int units = cols >> 5;
     float acc = 0.0f;
     for (int u = lane; u < units; u += 32) {
-        acc += iq_unidad(dtype, wr, u, xs + (long)u * 32);
+        acc += iq_unidad(dtype, wr, u, xs + (long)u * 33);
     }
     acc = iq_warp_sum(acc);
     if (lane == 0) {
@@ -1492,7 +1492,7 @@ extern "C" __global__ void __launch_bounds__(256) dec_matvec(const unsigned char
 {
     extern __shared__ float xs[];
     for (int i = (int)threadIdx.x; i < cols; i += 256) {
-        xs[i] = x[i];
+        xs[(i >> 5) * 33 + (i & 31)] = x[i];
     }
     __syncthreads();
     int warp = (int)threadIdx.x >> 5;
@@ -1508,7 +1508,7 @@ extern "C" __global__ void __launch_bounds__(256) dec_matvec(const unsigned char
     float a0 = 0.0f, a1 = 0.0f;
     for (int u = lane; u < units; u += 32) {
         float o[32];
-        const float *xp = xs + u * 32;
+        const float *xp = xs + u * 33;
         iq_decodificar(code, w0, u, o);
 #pragma unroll
         for (int l = 0; l < 32; l++) {
@@ -1533,12 +1533,12 @@ extern "C" __global__ void __launch_bounds__(256) dec_matvec(const unsigned char
 }
 
 /* Versiones «una fila por warp» de los expertos de decode (n = 1): más bloques que los tiles de tensor cores y sin relleno a 8 columnas. */
-extern "C" __global__ void __launch_bounds__(256) dec_moe_gateup_w(const unsigned long long *tg, const unsigned long long *tu, const int *idx, const float *xn,
+extern "C" __global__ void __launch_bounds__(256, 4) dec_moe_gateup_w(const unsigned long long *tg, const unsigned long long *tu, const int *idx, const float *xn,
                                                                   float *act, int ffn, int h, int dg, int du, long rbg, long rbu)
 {
     extern __shared__ float xs[];
     for (int i = (int)threadIdx.x; i < h; i += 256) {
-        xs[i] = xn[i];
+        xs[(i >> 5) * 33 + (i & 31)] = xn[i];
     }
     __syncthreads();
     int slot = (int)blockIdx.z;
@@ -1555,7 +1555,7 @@ extern "C" __global__ void __launch_bounds__(256) dec_moe_gateup_w(const unsigne
     float ag = 0.0f, au = 0.0f;
     for (int u = lane; u < units; u += 32) {
         float o[32];
-        const float *xp = xs + u * 32;
+        const float *xp = xs + u * 33;
         iq_decodificar(dg, wg, u, o);
 #pragma unroll
         for (int l = 0; l < 32; l++) {
@@ -1574,13 +1574,13 @@ extern "C" __global__ void __launch_bounds__(256) dec_moe_gateup_w(const unsigne
     }
 }
 
-extern "C" __global__ void __launch_bounds__(256) dec_moe_down_w(const unsigned long long *td, const int *idx, const float *act, float *ys, int rows, int cols,
+extern "C" __global__ void __launch_bounds__(256, 4) dec_moe_down_w(const unsigned long long *td, const int *idx, const float *act, float *ys, int rows, int cols,
                                                                 int dd, long rbd)
 {
     extern __shared__ float xs[];
     int slot = (int)blockIdx.z;
     for (int i = (int)threadIdx.x; i < cols; i += 256) {
-        xs[i] = act[(long)slot * cols + i];
+        xs[(i >> 5) * 33 + (i & 31)] = act[(long)slot * cols + i];
     }
     __syncthreads();
     int e = idx[slot];
@@ -1596,7 +1596,7 @@ extern "C" __global__ void __launch_bounds__(256) dec_moe_down_w(const unsigned 
     for (int u = lane; u < units; u += 32) {
         float o[32];
         iq_decodificar(dd, wr, u, o);
-        const float *xp = xs + u * 32;
+        const float *xp = xs + u * 33;
 #pragma unroll
         for (int l = 0; l < 32; l++) {
             acc += o[l] * xp[l];
@@ -1632,5 +1632,104 @@ extern "C" __global__ void __launch_bounds__(256) sgemm_nt(const float *W, const
     }
     if (r0 + tx < rows && t0 + ty < n) {
         Y[(long)(t0 + ty) * rows + r0 + tx] = acc;
+    }
+}
+
+/* ---------------------------------------------------------------------------------------------------------------------
+ * Decode con producto entero para Q8_0 (como el mmvq de llama.cpp): la activación se cuantiza a int8 por bloques de 32 (escala = máx|x| / 127)
+ * y cada `__dp4a` hace 4 productos de int8. Las cargas son de 16 B: 4 bloques de Q8_0 de sosomodel (36 B: escala f32 + 32 i8) = 144 B = 9 × 16 B
+ * alineados. Sólo para cols múltiplo de 128 y potencia de dos de grupos (cols / 128).
+ * ------------------------------------------------------------------------------------------------------------------ */
+/* xq[i] = round(x[i] / d), xd[b] = d con d = máx|x| / 127 del bloque b (32 valores). Un warp por bloque; grid = ceil(n / 32 / 8). */
+extern "C" __global__ void dec_quant_x(const float *x, signed char *xq, float *xd, int n)
+{
+    int warp = ((int)blockIdx.x * 256 + (int)threadIdx.x) >> 5;
+    int lane = (int)threadIdx.x & 31;
+    if (warp * 32 >= n) {
+        return;
+    }
+    float v = x[warp * 32 + lane];
+    float a = fabsf(v);
+    for (int o = 16; o > 0; o >>= 1) {
+        a = fmaxf(a, __shfl_xor_sync(0xffffffffu, a, o));
+    }
+    float d = a / 127.0f;
+    float id = a > 0.0f ? 127.0f / a : 0.0f;
+    xq[warp * 32 + lane] = (signed char)__float2int_rn(v * id);
+    if (lane == 0) {
+        xd[warp] = d;
+    }
+}
+
+/* y[r] = W[r] · x. grid = ceil(rows / (8 * rpw)), 256 hilos = 8 warps; rpw = filas por warp = max(1, 32 / gpr) con gpr = cols / 128 grupos por fila. */
+extern "C" __global__ void __launch_bounds__(256) dec_matvec_q8(const unsigned char *w, const signed char *xq, const float *xd, float *y, int rows, int cols, long rb)
+{
+    int gpr = cols >> 7;
+    int seg = gpr < 32 ? gpr : 32;       /* lanes que cooperan en una fila */
+    int rpw = 32 / seg;
+    int warp = (int)threadIdx.x >> 5;
+    int lane = (int)threadIdx.x & 31;
+    int row = (((int)blockIdx.x * 8 + warp) * rpw) + lane / seg;
+    int g0 = lane % seg;
+    float acc = 0.0f;
+    if (row < rows) {
+        const unsigned char *wr = w + (long)row * rb;
+        for (int g = g0; g < gpr; g += seg) {
+            const uint4 *wp = (const uint4 *)(wr + (long)g * 144);
+            const uint4 *xp = (const uint4 *)(xq + (long)g * 128);
+            uint4 wv[9];
+            uint4 xv[8];
+#pragma unroll
+            for (int i = 0; i < 9; i++) {
+                wv[i] = __ldg(wp + i);
+            }
+#pragma unroll
+            for (int i = 0; i < 8; i++) {
+                xv[i] = __ldg(xp + i);
+            }
+            const unsigned int *ww = (const unsigned int *)wv;
+            const unsigned int *xw = (const unsigned int *)xv;
+            float4 dx = __ldg((const float4 *)(xd + g * 4));
+            float dxs[4] = {dx.x, dx.y, dx.z, dx.w};
+#pragma unroll
+            for (int b = 0; b < 4; b++) {
+                int s = 0;
+#pragma unroll
+                for (int j = 0; j < 8; j++) {
+                    s = __dp4a((int)ww[9 * b + 1 + j], (int)xw[8 * b + j], s);
+                }
+                acc += __uint_as_float(ww[9 * b]) * dxs[b] * (float)s;
+            }
+        }
+    }
+    for (int o = seg >> 1; o > 0; o >>= 1) {
+        acc += __shfl_xor_sync(0xffffffffu, acc, o);
+    }
+    if (row < rows && g0 == 0) {
+        y[row] = acc;
+    }
+}
+
+/* y[r] = W[r] · x para W f32 (router, beta/alpha de GDN): una fila por warp con cargas float4 coalescidas. cols múltiplo de 4; grid = ceil(rows / 8). */
+extern "C" __global__ void __launch_bounds__(256) dec_matvec_f32(const float *w, const float *x, float *y, int rows, int cols)
+{
+    int warp = (int)threadIdx.x >> 5;
+    int lane = (int)threadIdx.x & 31;
+    int row = (int)blockIdx.x * 8 + warp;
+    if (row >= rows) {
+        return;
+    }
+    const float4 *wr = (const float4 *)(w + (long)row * cols);
+    const float4 *xv = (const float4 *)x;
+    float acc = 0.0f;
+    for (int i = lane; i < (cols >> 2); i += 32) {
+        float4 a = __ldg(wr + i), b = xv[i];
+        acc += a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
+    }
+    for (int o = 16; o > 0; o >>= 1) {
+        acc += __shfl_xor_sync(0xffffffffu, acc, o);
+    }
+    if (lane == 0) {
+        y[row] = acc;
     }
 }

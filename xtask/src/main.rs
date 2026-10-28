@@ -965,6 +965,7 @@ pub(crate) fn build_user() -> bool {
         "soso-web",
         "ask-modelo",
         "soso-update",
+        "soso-pkg",
         "soso-resize",
         "soso-ed",
         "soso-forja",
@@ -996,7 +997,31 @@ pub(crate) fn build_user() -> bool {
         }
     }
     cambiado |= sal::install(&root);
+    write_paquete_prueba(&root);
     cambiado
+}
+
+/// Fixture `/share/paquetes-prueba/{v1,v2}` para `cargo xtask test` (soso-pkg).
+fn write_paquete_prueba(root: &Path) {
+    use soso_update_core::hex_sha256;
+    let elf = root.join("target/user/x86_64-soso-user/release/pkg-demo");
+    let Ok(data) = std::fs::read(&elf) else {
+        eprintln!("xtask: aviso: no hay pkg-demo; omito paquetes-prueba");
+        return;
+    };
+    let hash = hex_sha256(&data);
+    let base = root.join("rootfs/share/paquetes-prueba");
+    for (ver, dir) in [("1.0.0", "v1"), ("1.1.0", "v2")] {
+        let dst = base.join(dir);
+        let _ = std::fs::create_dir_all(dst.join("bin"));
+        let man = format!(
+            "SOSOPKG v1\nnombre=demo\nversion={ver}\nf {hash} {} bin/pkg-demo\n",
+            data.len()
+        );
+        let _ = std::fs::write(dst.join("paquete.txt"), man);
+        let _ = std::fs::write(dst.join("paquete.pack"), &data);
+        let _ = std::fs::write(dst.join("bin/pkg-demo"), &data);
+    }
 }
 
 /// mtime más reciente de un árbol de directorios.

@@ -139,6 +139,7 @@ Docs operativos: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md),
 | `/bin/soso-install` | Instalador nativo desde el live: lista discos y uso, elige destino, guardas por tipo de partición, clon, `gptdisk::relayout` + GUID nuevos, y petición de entrada UEFI |
 | `/bin/soso-resize` | Amplía sosofs robando margen libre al final de modelos (`SYS_FS_RESIZE`; live/instalado GPT) |
 | `/bin/soso-update` | Releases GitHub: rootfs por fichero (sin rollback de binarios; progreso en `/etc/actualiza.estado`); kernel vía `SOSOUPD.TXT` + `SOSOKRN.BIN` + meta `SOSOKRN.MET` (recovery verificable) |
+| `/bin/soso-pkg` | Paquetes de aplicación en `/var/paquetes/` (fuera de `bin/`/`lib/`/`etc/` administrados por OTA); manifiesto `SOSOPKG v1`; índice HTTPS o `--origen`; sosh resuelve comandos vía `/var/paquetes/comandos` — plan **`docs/PLAN-PAQUETES.md`** |
 | `/bin/soso-web` | Navegador mínimo: HTTPS + HTML→texto (modo lectura) o framebuffer (modo `--grafico`) |
 | `/bin/{uname,ls,cat,echo,mkdir,rm,hexdump,grep,ip,ps,ping,halt,reboot,notifybug}` | Coreutils (`uname`: versión de `/etc/soso-release`, kernel en marcha, CPUs, tiempo encendido, memoria, disco, arranque y red; `-a` es lo mismo. `rm -r` borra un árbol; sin `-r` un directorio con contenido se rechaza; no borra `/`. `cat`/`grep`/`hexdump`: stdin si no hay ficheros; `-` sigue valiendo). **`notifybug`**: vuelca `/var/log` y abre issue en GitHub (`/etc/notifybug.conf`, `soso-notify-core`, POST `soso-http`) |
 
@@ -217,9 +218,15 @@ modo lectura (HTTPS + reflow HTML a texto en consola/SSH) y modo `--grafico`
 (framebuffer + ratón). Sin JavaScript. Cliente HTTPS vía `soso-http` +
 `TcpTransport` sobre syscalls de red. Modo lectura: `soso-web <url>` o
 `soso-web --local /ruta.html`; navegación `<n>` enlace, `u URL`, `b`, `q`.
-Modo gráfico: `soso-web --grafico <url>` (syscalls FB + `input_poll`, TTF en
-`/lib/fonts/DejaVuSans.ttf` vía fontdue, `--fuente` para otra ruta). Prueba local: `/etc/web-prueba.html`. Tests host: `cargo test -p soso-web-core`;
-E2E: paso `soso-web: HTML local` en `cargo xtask test`.
+Modo gráfico: `soso-web --grafico <url>` — cliente WM (`127.0.0.1:7430`, SHM,
+`libsoso::ventana`, `OP_DANIO`/`OP_TITULO`) con cromo (pestañas ≤4, URL,
+atrás/ir, marcadores, scroll); fallback pantalla completa. Árbol de cajas
+(`box_tree.rs`), cascada CSS (`css.rs`, `computed.rs`), layout (`gfx_layout.rs`:
+flex, grid, float, position, @media); PNG en `user/soso-web/src/png.rs`;
+formularios vía `https_post_full_typed` en `soso-http`; TTF DejaVu (fontdue).
+Marcadores: `/etc/web-marcadores`, página `soso:bookmarks`. Prueba:
+`/etc/web-prueba.html`. Tests host: `cargo test -p soso-web-core`, `cargo test -p soso-http`; E2E:
+`soso-web: HTML local` y `soso-wm: soso-web gráfico` (`--prueba-web`).
 
 **Escritorio `soso-wm`** (`user/sal/escritorio/`, binario Sal en `/bin/soso-wm`):
 WM en Sal (terminales PTY, clientes TCP `:7430`, SHM 32 B). Protocolo compartido con

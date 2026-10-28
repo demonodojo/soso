@@ -525,11 +525,22 @@ pub fn https_post_full<T: TcpTransport>(
     auth: Option<&str>,
     body: &[u8],
 ) -> Result<FullResponse, HttpError> {
+    https_post_full_typed(transport, url, auth, body, "application/json")
+}
+
+/// POST HTTPS con `Content-Type` explícito (p. ej. formularios urlencoded).
+pub fn https_post_full_typed<T: TcpTransport>(
+    transport: &T,
+    url: &str,
+    auth: Option<&str>,
+    body: &[u8],
+    content_type: &str,
+) -> Result<FullResponse, HttpError> {
     let (scheme, _, _, _) = parse_url(url)?;
     if scheme != "https" {
         return Err(HttpError::Parse);
     }
-    https_post_once(transport, url, auth, body, 120_000)
+    https_post_once(transport, url, auth, body, content_type, 120_000)
 }
 
 /// POST HTTPS; devuelve sólo estado y cuerpo de respuesta.
@@ -575,10 +586,21 @@ fn build_get(host: &str, path: &str, auth: Option<&str>) -> String {
     req
 }
 
-fn build_post_headers(host: &str, path: &str, auth: Option<&str>, content_len: usize) -> String {
+fn build_post_headers(
+    host: &str,
+    path: &str,
+    auth: Option<&str>,
+    content_len: usize,
+    content_type: &str,
+) -> String {
     let mut req = format!(
-        "POST {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {content_len}\r\nAccept: application/vnd.github+json\r\nUser-Agent: soso-notifybug\r\nAccept-Encoding: identity\r\n"
+        "POST {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Type: {content_type}\r\nContent-Length: {content_len}\r\nAccept-Encoding: identity\r\n"
     );
+    if content_type == "application/json" {
+        req.push_str("Accept: application/vnd.github+json\r\nUser-Agent: soso-notifybug\r\n");
+    } else {
+        req.push_str("User-Agent: soso-web\r\n");
+    }
     if let Some(tok) = auth {
         let _ = write!(req, "Authorization: Bearer {tok}\r\n");
     }
@@ -665,6 +687,7 @@ fn https_post_once<T: TcpTransport>(
     url: &str,
     auth: Option<&str>,
     body: &[u8],
+    content_type: &str,
     read_timeout_ms: u64,
 ) -> Result<FullResponse, HttpError> {
     let config = client_config()?;
@@ -712,7 +735,7 @@ fn https_post_once<T: TcpTransport>(
             return Err(e);
         }
     }
-    let head = build_post_headers(host, &path, auth, body.len());
+    let head = build_post_headers(host, &path, auth, body.len(), content_type);
     tls.write(head.as_bytes())?;
     if !body.is_empty() {
         tls.write(body)?;
@@ -1092,6 +1115,7 @@ mod tests {
             "/repos/demonodojo/soso/issues",
             Some("ghp_test"),
             42,
+            "application/json",
         );
         assert!(req.starts_with("POST /repos/demonodojo/soso/issues HTTP/1.1"));
         assert!(!req.starts_with("GET "));
@@ -1099,6 +1123,14 @@ mod tests {
         assert!(req.contains("User-Agent: soso-notifybug"));
         assert!(req.contains("Authorization: Bearer ghp_test"));
         assert!(req.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn build_post_headers_form() {
+        let req = build_post_headers("ex.com", "/q", None, 9, "application/x-www-form-urlencoded");
+        assert!(req.contains("Content-Type: application/x-www-form-urlencoded"));
+        assert!(req.contains("User-Agent: soso-web"));
+        assert!(!req.contains("notifybug"));
     }
 
     #[test]

@@ -35,6 +35,9 @@ pub(super) struct FnsDec {
     matvec: CuFunction,
     gateup_w: CuFunction,
     down_w: CuFunction,
+    quant: CuFunction,
+    matvec_q8: CuFunction,
+    matvec_f32: CuFunction,
 }
 
 #[derive(Clone, Copy)]
@@ -145,7 +148,9 @@ mod b {
     pub const DYN: usize = 29;
     pub const KST: usize = 30;
     pub const CPUOUT: usize = 31;
-    pub const N: usize = 32;
+    pub const XQ: usize = 32;
+    pub const XD: usize = 33;
+    pub const N: usize = 34;
 }
 
 pub(super) struct DecodeDev {
@@ -234,6 +239,9 @@ impl CudaGpu {
             matvec: get("dec_matvec")?,
             gateup_w: get("dec_moe_gateup_w")?,
             down_w: get("dec_moe_down_w")?,
+            quant: get("dec_quant_x")?,
+            matvec_q8: get("dec_matvec_q8")?,
+            matvec_f32: get("dec_matvec_f32")?,
         };
         if let Ok(v) = std::env::var("SOSO_DECODE_SALTAR") {
             for n in v.split(',') {
@@ -251,11 +259,25 @@ impl CudaGpu {
                     "pgate" => f.pgate,
                     "combine" => f.combine,
                     "matvec" => f.matvec,
+                    "q8" => f.matvec_q8,
+                    "f32" => f.matvec_f32,
+                    "quant" => f.quant,
                     "gateup" => f.gateup_w,
                     "down" => f.down_w,
                     _ => continue,
                 };
                 self.saltar.push(fp as usize);
+            }
+        }
+        if std::env::var_os("SOSO_DECODE_REGS").is_some() {
+            for (n, fp) in [("gateup_w", f.gateup_w), ("down_w", f.down_w), ("matvec", f.matvec), ("matvec_q8", f.matvec_q8), ("matvec_f32", f.matvec_f32), ("rmsnorm", f.rmsnorm), ("attn_split", f.attn_split), ("gdn_rec", f.gdn_rec)] {
+                let (mut regs, mut local, mut smem) = (0 as c_int, 0 as c_int, 0 as c_int);
+                unsafe {
+                    (self.api.func_attr)(&mut regs, 4, fp);
+                    (self.api.func_attr)(&mut local, 3, fp);
+                    (self.api.func_attr)(&mut smem, 1, fp);
+                }
+                eprintln!("[regs] {n}: {regs} registros, {local} B local, {smem} B smem estática");
             }
         }
         // 1) pesos densos y pequeños, todos residentes (si alguno no cabe o no tiene decodificador, no hay decode en GPU)
@@ -443,6 +465,8 @@ impl CudaGpu {
             z[b::DYN] = (b::DYN, 16);
             z[b::KST] = (b::KST, 2 * 2 * kv_dim.max(1) * n_attn.max(1));
             z[b::CPUOUT] = (b::CPUOUT, fl(h));
+            z[b::XQ] = (b::XQ, max_v.max(max_q).max(h).max(max_ffn).max(1) + 256);
+            z[b::XD] = (b::XD, fl((max_v.max(max_q).max(h).max(max_ffn).max(1) + 31) / 32 + 8));
             z
         };
         for (i, (_, bytes)) in sizes.iter().enumerate() {
@@ -528,6 +552,32 @@ impl CudaGpu {
         Ok(())
     }
 
+    /// Cuantiza a int8 (bloques de 32) las `n` primeras posiciones de `x` en `XQ`/`XD`, para los matvec Q8_0 de enteros.
+    fn dec_quant(&self, d: &DecodeDev, x: u64, n: usize) -> Result<(), String> {
+        let mut vals: Vec<u64> = vec![x, d.bufs[b::XQ].0, d.bufs[b::XD].0, n as u64];
+        let mut ptrs: Vec<*mut c_void> = vals.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
+        self.lanzar3s(d.f.quant, (((n / 32) as u32).div_ceil(8), 1, 1), (256, 1, 1), 0, &mut ptrs)
+    }
+
+    /// Matvec de un vector: con Q8_0 y `cols` múltiplo de 128 (potencia de dos de grupos), producto entero sobre `XQ`/`XD` (que el llamante dejó
+    /// cuantizados desde `x`); si no, el matvec por warp en f32.
+    fn dec_mv(&self, d: &DecodeDev, m: &MatDev, x: u64, y: u64) -> Result<(), String> {
+        let q8 = m.code == 1000 && m.cols % 128 == 0 && (m.cols / 128).is_power_of_two() && std::env::var_os("SOSO_DECODE_SIN_Q8").is_none();
+        if m.code == 1001 && m.cols % 4 == 0 && std::env::var_os("SOSO_DECODE_SIN_F32").is_none() {
+            let mut vals: Vec<u64> = vec![m.d, x, y, m.rows as u32 as u64, m.cols as u32 as u64];
+            let mut ptrs: Vec<*mut c_void> = vals.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
+            return self.lanzar3s(d.f.matvec_f32, ((m.rows as u32).div_ceil(8), 1, 1), (256, 1, 1), 0, &mut ptrs);
+        }
+        if !q8 {
+            return self.dec_mm1(d.f.matvec, m, x, y);
+        }
+        let gpr = m.cols / 128;
+        let rpw = if gpr < 32 { 32 / gpr } else { 1 };
+        let mut vals: Vec<u64> = vec![m.d, d.bufs[b::XQ].0, d.bufs[b::XD].0, y, m.rows as u32 as u64, m.cols as u32 as u64, m.rb as u64];
+        let mut ptrs: Vec<*mut c_void> = vals.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
+        self.lanzar3s(d.f.matvec_q8, ((m.rows as u32).div_ceil(8 * rpw as u32), 1, 1), (256, 1, 1), 0, &mut ptrs)
+    }
+
     fn dec_mm1(&self, f: CuFunction, m: &MatDev, x: u64, y: u64) -> Result<(), String> {
         if std::env::var("SOSO_DECODE_MMA").is_ok() {
             return self.lanzar_a(
@@ -539,7 +589,7 @@ impl CudaGpu {
         }
         let mut vals: Vec<u64> = vec![m.d, x, y, m.rows as u32 as u64, m.cols as u32 as u64, m.code as u32 as u64, m.rb as u64];
         let mut ptrs: Vec<*mut c_void> = vals.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
-        self.lanzar3s(f, ((m.rows as u32).div_ceil(16), 1, 1), (256, 1, 1), (m.cols * 4) as u32, &mut ptrs)
+        self.lanzar3s(f, ((m.rows as u32).div_ceil(16), 1, 1), (256, 1, 1), ((m.cols + m.cols / 32 + 1) * 4) as u32, &mut ptrs)
     }
 
     pub(super) fn decode_token_impl(
@@ -698,11 +748,12 @@ impl CudaGpu {
         for (ci, c) in d.capas.iter().enumerate().skip(desde) {
             // ---- mezcla de tokens (GDN o atención con puerta) ----
             rms(self, bf(b::HID), c.na, bf(b::XN), h)?;
+            self.dec_quant(d, bf(b::XN), h)?;
             if let Some(g) = &c.gdn {
-                self.dec_mm1(d.f.matvec, &c.mats[0], bf(b::XN), bf(b::QKV))?;
-                self.dec_mm1(d.f.matvec, &c.mats[1], bf(b::XN), bf(b::Z))?;
-                self.dec_mm1(d.f.matvec, &g.bw, bf(b::XN), bf(b::BRAW))?;
-                self.dec_mm1(d.f.matvec, &g.aw, bf(b::XN), bf(b::ARAW))?;
+                self.dec_mv(d, &c.mats[0], bf(b::XN), bf(b::QKV))?;
+                self.dec_mv(d, &c.mats[1], bf(b::XN), bf(b::Z))?;
+                self.dec_mv(d, &g.bw, bf(b::XN), bf(b::BRAW))?;
+                self.dec_mv(d, &g.aw, bf(b::XN), bf(b::ARAW))?;
                 self.lanzar_a(
                     d.f.gdn_params,
                     (blocks256(g.n_v), 1, 1),
@@ -721,13 +772,14 @@ impl CudaGpu {
                     (256, 1, 1),
                     &[Arg::P(bf(b::UP)), Arg::P(bf(b::Z)), Arg::P(bf(b::DECAY)), Arg::P(bf(b::BETA)), Arg::P(g.nw), Arg::P(g.s), Arg::P(bf(b::O)), Arg::I(1), Arg::I(g.n_k as i32), Arg::I(g.n_v as i32), Arg::F(d.eps)],
                 )?;
-                self.dec_mm1(d.f.matvec, &c.mats[2], bf(b::O), bf(b::Y))?;
+                self.dec_quant(d, bf(b::O), g.v_dim)?;
+                self.dec_mv(d, &c.mats[2], bf(b::O), bf(b::Y))?;
                 add(self, bf(b::HID), bf(b::Y), h)?;
             } else if let Some(g) = &c.gated {
                 let (kd, vd, _) = self.kvdev[&c.layer];
-                self.dec_mm1(d.f.matvec, &c.mats[0], bf(b::XN), bf(b::QF))?;
-                self.dec_mm1(d.f.matvec, &c.mats[1], bf(b::XN), bf(b::KK))?;
-                self.dec_mm1(d.f.matvec, &c.mats[2], bf(b::XN), bf(b::VV))?;
+                self.dec_mv(d, &c.mats[0], bf(b::XN), bf(b::QF))?;
+                self.dec_mv(d, &c.mats[1], bf(b::XN), bf(b::KK))?;
+                self.dec_mv(d, &c.mats[2], bf(b::XN), bf(b::VV))?;
                 let kst = bf(b::KST) + (g.attn_idx * 2 * g.kv_dim * 2) as u64;
                 let vst = kst + (g.kv_dim * 2) as u64;
                 self.lanzar_a(
@@ -761,13 +813,15 @@ impl CudaGpu {
                         Arg::I(g.hd as i32), Arg::I(CHUNK as i32), Arg::I(MAX_SPLIT as i32),
                     ],
                 )?;
-                self.dec_mm1(d.f.matvec, &c.mats[3], bf(b::ATT), bf(b::Y))?;
+                self.dec_quant(d, bf(b::ATT), g.heads * g.hd)?;
+                self.dec_mv(d, &c.mats[3], bf(b::ATT), bf(b::Y))?;
                 add(self, bf(b::HID), bf(b::Y), h)?;
             }
             // ---- FFN MoE ----
             let m = &c.moe;
             rms(self, bf(b::HID), c.nf, bf(b::XN), h)?;
-            self.dec_mm1(d.f.matvec, &m.router, bf(b::XN), bf(b::RLOG))?;
+            self.dec_quant(d, bf(b::XN), h)?;
+            self.dec_mv(d, &m.router, bf(b::XN), bf(b::RLOG))?;
             self.lanzar_a(
                 d.f.router,
                 (1, 1, 1),
@@ -776,20 +830,35 @@ impl CudaGpu {
             )?;
             if let Some(sh) = &m.sh {
                 self.lanzar_a(d.f.pgate, (1, 1, 1), (256, 1, 1), &[Arg::P(sh.pg), Arg::P(bf(b::XN)), Arg::P(bf(b::SG)), Arg::I(hh)])?;
-                self.dec_mm1(d.f.matvec, &sh.gate, bf(b::XN), bf(b::G1))?;
-                self.dec_mm1(d.f.matvec, &sh.up, bf(b::XN), bf(b::U1))?;
+                self.dec_mv(d, &sh.gate, bf(b::XN), bf(b::G1))?;
+                self.dec_mv(d, &sh.up, bf(b::XN), bf(b::U1))?;
                 self.lanzar_a(d.f.swiglu, (blocks256(sh.ffn), 1, 1), (256, 1, 1), &[Arg::P(bf(b::U1)), Arg::P(bf(b::G1)), Arg::I(sh.ffn as i32)])?;
-                self.dec_mm1(d.f.matvec, &sh.down, bf(b::U1), bf(b::YSH))?;
+                self.dec_quant(d, bf(b::U1), sh.ffn)?;
+                self.dec_mv(d, &sh.down, bf(b::U1), bf(b::YSH))?;
             }
             let ysh = if m.sh.is_some() { bf(b::YSH) } else { 0 };
             if m.en_gpu && !Self::salta("moe") {
                 {
                     let mut v1: Vec<u64> = vec![m.tg, m.tu, bf(b::RIDX), bf(b::XN), bf(b::ACT), m.ffn as u64, h as u64, m.dg as u32 as u64, m.du as u32 as u64, m.rbg as u64, m.rbu as u64];
                     let mut p1: Vec<*mut c_void> = v1.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
-                    self.lanzar3s(d.f.gateup_w, ((m.ffn as u32).div_ceil(8), 1, m.top_k as u32), (256, 1, 1), (h * 4) as u32, &mut p1)?;
+                    let crono = std::env::var_os("SOSO_DECODE_CRONO").is_some();
+                    if crono {
+                        ck(unsafe { (self.api.sync)() }, "sync")?;
+                    }
+                    let t0 = std::time::Instant::now();
+                    self.lanzar3s(d.f.gateup_w, ((m.ffn as u32).div_ceil(8), 1, std::env::var("SOSO_DECODE_Z").ok().and_then(|v| v.parse().ok()).unwrap_or(m.top_k as u32)), (256, 1, 1), ((h + h / 32 + 1) * 4) as u32, &mut p1)?;
+                    if crono {
+                        ck(unsafe { (self.api.sync)() }, "sync")?;
+                        eprintln!("[crono] gateup {:.1} us", t0.elapsed().as_secs_f64() * 1e6);
+                    }
                     let mut v2: Vec<u64> = vec![m.td, bf(b::RIDX), bf(b::ACT), bf(b::YS), h as u64, m.ffn as u64, m.dd as u32 as u64, m.rbd as u64];
                     let mut p2: Vec<*mut c_void> = v2.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
-                    self.lanzar3s(d.f.down_w, ((h as u32).div_ceil(8), 1, m.top_k as u32), (256, 1, 1), (m.ffn * 4) as u32, &mut p2)?;
+                    let t1 = std::time::Instant::now();
+                    self.lanzar3s(d.f.down_w, ((h as u32).div_ceil(8), 1, m.top_k as u32), (256, 1, 1), ((m.ffn + m.ffn / 32 + 1) * 4) as u32, &mut p2)?;
+                    if crono {
+                        ck(unsafe { (self.api.sync)() }, "sync")?;
+                        eprintln!("[crono] down {:.1} us", t1.elapsed().as_secs_f64() * 1e6);
+                    }
                 }
                 self.lanzar_a(
                     d.f.combine,
@@ -804,8 +873,9 @@ impl CudaGpu {
         }
         // ---- norma final y logits ----
         rms(self, bf(b::HID), d.nfin, bf(b::XN), h)?;
+        self.dec_quant(d, bf(b::XN), h)?;
         if !Self::salta("lm") {
-            self.dec_mm1(d.f.matvec, &d.lm, bf(b::XN), bf(b::LOGITS))?;
+            self.dec_mv(d, &d.lm, bf(b::XN), bf(b::LOGITS))?;
         }
         Ok(None)
     }

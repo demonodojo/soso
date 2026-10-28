@@ -897,6 +897,11 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 ssh_soso_web_local(key, port)
             });
         });
+        filter.if_step(sid, "soso-pkg: instalar local", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "soso-pkg: instalar local", || {
+                ssh_soso_pkg(key, port)
+            });
+        });
         filter.if_step(
             sid,
             "init test (syscalls, hilos, FPU, GPU)",
@@ -2651,6 +2656,36 @@ fn ssh_voz_wav(key: &Path, ssh_port: u16) -> Result<(), String> {
         return Err(format!(
             "voz WAV devolvió transcripción vacía o sin texto; stdout: {texto:?}"
         ));
+    }
+    Ok(())
+}
+
+fn ssh_soso_pkg(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let guion = "\
+soso-pkg instalar /share/paquetes-prueba/v1
+pkg-demo
+echo PKG=$?
+soso-pkg instalar /share/paquetes-prueba/v2 --forzar
+soso-pkg listar
+soso-pkg borrar demo
+echo BORRADO=$?
+exit
+";
+    let texto = ssh_guion(key, ssh_port, guion, Duration::from_secs(120))?;
+    if !texto.contains("pkg-demo: ok") {
+        return Err(format!("pkg-demo no ejecutó; stdout: {texto:?}"));
+    }
+    if !texto.contains("PKG=0") {
+        return Err(format!("pkg-demo salió mal; stdout: {texto:?}"));
+    }
+    if !texto.contains("1.1.0") {
+        return Err(format!("soso-pkg no actualizó a v2; stdout: {texto:?}"));
+    }
+    if !texto.contains("1.1.0") {
+        return Err(format!("listar sin v2; stdout: {texto:?}"));
+    }
+    if !texto.contains("BORRADO=0") {
+        return Err(format!("borrar demo falló; stdout: {texto:?}"));
     }
     Ok(())
 }

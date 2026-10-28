@@ -1,0 +1,14 @@
+[package]
+name = "soso-pkg-core"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+
+[features]
+default = []
+std = ["soso-update-core/std"]
+
+[dev-dependencies]
+
+[dependencies]
+soso-update-core = { path = "../soso-update-core", default-features = false, features = ["full"] }

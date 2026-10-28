@@ -39,6 +39,7 @@ const LINE_MAX: usize = 1024;
 /// Tope de un fichero de guion leído entero en memoria.
 const SCRIPT_MAX: usize = 256 * 1024;
 const CONF: &str = "/etc/llm.conf";
+const PAQ_COMANDOS: &str = "/var/paquetes/comandos";
 
 /// ET_EXEC de soso: cabecera y PT_LOAD en 0x400000 (p_offset 0).
 const ELF_BASE: usize = 0x400000;
@@ -800,6 +801,56 @@ fn resolver_dup(spec: &RedirSpec, stdin: u64, stdout: u64, actual: u64) -> u64 {
     }
 }
 
+fn resolver_ejecutable(prog: &str) -> String {
+    if prog.starts_with('/') {
+        return prog.to_string();
+    }
+    let en_bin = format!("/bin/{prog}");
+    let fd = sys::open(&en_bin, abi::O_RDONLY);
+    if fd >= 0 {
+        let _ = sys::close(fd as u64);
+        return en_bin;
+    }
+    if let Some(ruta) = lookup_paquete(prog) {
+        return ruta;
+    }
+    en_bin
+}
+
+fn lookup_paquete(cmd: &str) -> Option<String> {
+    let fd = sys::open(PAQ_COMANDOS, abi::O_RDONLY);
+    if fd < 0 {
+        return None;
+    }
+    let mut buf = [0u8; 512];
+    let mut acum = Vec::new();
+    loop {
+        let n = sys::read(fd as u64, &mut buf);
+        if n <= 0 {
+            break;
+        }
+        acum.extend_from_slice(&buf[..n as usize]);
+        if acum.len() > 16 * 1024 {
+            break;
+        }
+    }
+    let _ = sys::close(fd as u64);
+    let text = core::str::from_utf8(&acum).ok()?;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        let nombre = it.next()?;
+        let ruta = it.next()?;
+        if nombre == cmd {
+            return Some(ruta.into());
+        }
+    }
+    None
+}
+
 fn ejecutar_pipeline(cmds: &[CmdSpec], ctx: Option<usize>) -> u8 {
     let n = cmds.len();
     let mut pipes = Vec::new();
@@ -839,11 +890,7 @@ fn ejecutar_pipeline(cmds: &[CmdSpec], ctx: Option<usize>) -> u8 {
             pipes[i].1
         };
 
-        let path = if cmd.prog.starts_with('/') {
-            cmd.prog.clone()
-        } else {
-            format!("/bin/{}", cmd.prog)
-        };
+        let path = resolver_ejecutable(&cmd.prog);
 
         let stderr_fd = match open_redir(&cmd.stderr) {
             Ok(fd) => fd,
@@ -1253,7 +1300,7 @@ fn ayuda() {
     println!("voz:      voz             — dictar; Enter confirma la línea");
     println!("          voz ask         — prefija «ask » al dictado");
     println!("          F4              — push-to-talk en la línea");
-    println!("comandos: ELF de /bin o ruta absoluta (uname, ip, ls, cat, …)");
+    println!("comandos: ELF de /bin, paquetes en /var/paquetes, o ruta absoluta");
     println!("install:  soso-install  — clonar live a un NVMe (elige disco)");
     println!("          soso-install list | nvme1 --yes | status");
     println!("guion:    sosh /ruta  — una orden por línea; # comentario al inicio");

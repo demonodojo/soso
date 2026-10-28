@@ -37,6 +37,7 @@ el alcance: consultar o editar documentación no inicia su implementación.
 | Toolchain y compilación nativa | [SELF-HOSTING.md](../../../../docs/SELF-HOSTING.md); SI-6/SI-7 añaden agente e integración, no sustituyen los requisitos de toolchain |
 | Lenguaje Sal, runtime y utilidades | [PLAN-SAL.md](../../../../docs/PLAN-SAL.md), SAL-1–SAL-4; fuentes del compilador en el checkout hermano Sal |
 | Escritorio gráfico `soso-wm` | [PLAN-ESCRITORIO.md](../../../../docs/PLAN-ESCRITORIO.md), W1–W3 kernel, S0–S4 Sal, W6–W7 clientes y pruebas |
+| Paquetes de aplicaciones (`soso-pkg`) | [PLAN-PAQUETES.md](../../../../docs/PLAN-PAQUETES.md), P0–P3; apps en `/var/paquetes`, fuera del OTA |
 | Estado y evidencia física | [ESTADO.md](../../../../docs/ESTADO.md), [HW-MATRIX.md](../../../../docs/HW-MATRIX.md), [hw-matrix.json](../../../../docs/hw-matrix.json) y `docs/DIAGNOSTICO-*.md` |
 
 El mapa localiza documentos; no congela su estado. Contrastar revisión del

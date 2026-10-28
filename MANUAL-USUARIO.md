@@ -28,6 +28,7 @@ el [`README.md`](README.md) (en inglés). Guía operativa de desarrollo:
 | Web | **soso-web** | Leer páginas HTTPS o HTML local (consola o pantalla gráfica) |
 | Instalación | **soso-install** | Copiar el live a un disco NVMe desde soso, sin Linux |
 | Actualización | **soso-update** | Bajar e instalar releases nuevas (programas + kernel) |
+| Paquetes | **soso-pkg** | Instalar, actualizar y borrar aplicaciones en `/var/paquetes` (aparte del OTA) |
 | Desarrollo | **soso-ed**, **soso-forja** | Editar fuentes en `/src/soso`; bucle remoto o plan local (`docs/SELF-HOSTING.md`) |
 | Programación | **sal**, **sal-contar** (paquete opcional) | Compilar utilidades Sal sin red; contar bytes y saltos de línea |
 | Utilidades | **cp**, **mv**, **grep**, **diff**, **find**, **wc**, **head**, **tail**, **stat** | Coreutils mínimas para editar y depurar en el guest |
@@ -828,7 +829,9 @@ si el firmware lo expone como PS/2 o como HID USB relativo (no I2C-HID interno).
 ```
 
 Atajos habituales: **Alt+Intro** (terminal nueva), **Alt+Tab** (cambiar ventana),
-**Alt+Q** (cerrar), **Alt+T** (flotante / mosaico), **Alt+Mayús+E** (volver a consola).
+**Alt+Q** (cerrar), **Alt+T** (flotante / mosaico), **Alt+W** (abrir **soso-web** en ventana),
+**Alt+Mayús+E** (volver a consola). En la barra superior del escritorio, el botón **Web**
+(lado izquierdo) abre el mismo navegador de prueba.
 **Ctrl+Alt+Retroceso** recupera la consola si el gestor deja de responder.
 
 Arranque recomendado para navegar en ventana:
@@ -839,8 +842,10 @@ soso-web --grafico --local /etc/web-prueba.html
 # o: soso-web --grafico https://example.com
 ```
 
-`soso-web` intenta primero una ventana en `127.0.0.1:7430`; si no hay gestor, usa
-pantalla completa. Teclas en ventana: **q** salir, **b** atrás (igual que sin WM).
+`soso-web --grafico` intenta primero una ventana en `127.0.0.1:7430` (SHM + `DANIO`);
+si no hay gestor, usa pantalla completa (`SYS_FB_SET_MODE`). La ventana incluye barra
+**<<** (atrás), campo de URL e **Ir**; clic en enlaces; flechas / espacio para scroll;
+**f** adelante en el historial; **q** salir.
 
 Sal en el escritorio admite operadores `% & | ^ << >>`, el tipo `Bytes` y
 `syscall(...)` en programas compilados para soso (véase [PLAN-SAL.md](docs/PLAN-SAL.md)).
@@ -850,7 +855,7 @@ Sal en el escritorio admite operadores `% & | ^ << >>`, el tipo `Bytes` y
 ```sh
 soso-web https://example.com          # modo lectura (texto en consola)
 soso-web --local /etc/web-prueba.html # HTML local (pruebas sin red)
-soso-web --grafico https://example.com  # modo gráfico (framebuffer)
+soso-web --grafico https://example.com  # ventana WM o pantalla completa
 ```
 
 Tras abrir una página, el prompt `[soso-web]` acepta:
@@ -863,9 +868,16 @@ Tras abrir una página, el prompt `[soso-web]` acepta:
 | `q` | Salir |
 
 Modo lectura: parseo HTML tolerante, sin JavaScript, word-wrap configurable
-(`--ancho N`, default 72). Modo gráfico: requiere framebuffer GOP; el kernel
-cede la consola de texto mientras pinta la app (`SYS_FB_SET_MODE`). Texto con
-DejaVu Sans TTF en `/lib/fonts/DejaVuSans.ttf` (fontdue; `--fuente` para otra ruta).
+(`--ancho N`, default 72). Modo gráfico: navegador de lectura — bloques HTML,
+enlaces clicables, **CSS en `<style>`** con layout **flex**, **grid**, **float**,
+**position** y **@media** por ancho (sin animaciones ni hojas externas), imágenes
+**PNG** locales o HTTPS (hasta 8, 256 KiB, lado 512 px),
+formularios **GET/POST** urlencoded (campos de texto y botón), hasta **4 pestañas**
+(fila superior: nueva, cerrar, cambiar) y **marcadores** en `/etc/web-marcadores`
+(estrella en la barra; lista interna `soso:bookmarks`). Sin JavaScript ni hojas
+externas. Fuente DejaVu Sans en `/lib/fonts/DejaVuSans.ttf` (`--fuente` para otra
+ruta). Con gestor activo el WM compone la ventana; sin gestor, pantalla completa.
+Prueba sin red: `/etc/web-prueba.html` (CSS, PNG y formulario GET).
 
 ### ask — preguntarle al modelo
 
@@ -1040,6 +1052,33 @@ soso-resize rootfs +8G   # roba 8 GiB del margen libre de modelos
 Solo funciona en pendrive live o instalación GPT (no en QEMU virtio sin tabla
 GPT: ahí el rootfs ya crece solo al arrancar si `SOSO_ROOTFS_SIZE` es mayor que
 el empaquetado).
+
+### soso-pkg — paquetes de aplicación
+
+Instala programas **fuera** del árbol que administra `soso-update` (`/bin`, `/lib`,
+`/etc/` del sistema). Los paquetes viven en `/var/paquetes/<nombre>/`; los
+comandos declarados en `bin/` del paquete se ejecutan desde **sosh** como si
+estuvieran en el `PATH` (mapa en `/var/paquetes/comandos`).
+
+```sh
+soso-pkg listar
+soso-pkg buscar [texto]              # requiere url= en /etc/paquetes.conf
+soso-pkg instalar demo               # desde el repositorio configurado
+soso-pkg instalar /ruta/al/paquete   # directorio con paquete.txt (+ paquete.pack o ficheros sueltos)
+soso-pkg actualizar                  # todos los instalados con versión remota mayor
+soso-pkg borrar demo
+```
+
+Configuración remota en `/etc/paquetes.conf`:
+
+```text
+url=https://ejemplo.org/mis-paquetes
+```
+
+Para probar sin red: `soso-pkg instalar /share/paquetes-prueba/v1` (fixture en la
+imagen de prueba). Sin `--forzar` solo se instala una versión **mayor**; para
+reinstalar o bajar versión, añade `--forzar`. `--origen DIR` usa un índice y
+paquetes locales en lugar de HTTPS.
 
 ### soso-update — actualizar soso instalado
 

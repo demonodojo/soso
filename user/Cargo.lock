@@ -276,6 +276,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "paquete-demo"
+version = "0.1.0"
+dependencies = [
+ "libsoso",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -575,6 +582,24 @@ version = "0.1.0"
 [[package]]
 name = "soso-notify-core"
 version = "0.1.0"
+
+[[package]]
+name = "soso-pkg"
+version = "0.1.0"
+dependencies = [
+ "libsoso",
+ "soso-abi",
+ "soso-http",
+ "soso-pkg-core",
+ "soso-update-core",
+]
+
+[[package]]
+name = "soso-pkg-core"
+version = "0.1.0"
+dependencies = [
+ "soso-update-core",
+]
 
 [[package]]
 name = "soso-red-core"

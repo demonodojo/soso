@@ -132,6 +132,7 @@ struct Api {
     ev_elapsed: unsafe extern "C" fn(*mut f32, *mut c_void, *mut c_void) -> CuResult,
     module_load: unsafe extern "C" fn(*mut CuModule, *const c_void) -> CuResult,
     module_fn: unsafe extern "C" fn(*mut CuFunction, CuModule, *const c_char) -> CuResult,
+    func_attr: unsafe extern "C" fn(*mut c_int, c_int, CuFunction) -> CuResult,
     launch: unsafe extern "C" fn(
         CuFunction,
         u32,
@@ -217,6 +218,7 @@ impl Api {
             ev_elapsed: simbolo(lib, "cuEventElapsedTime")?,
             module_load: simbolo(lib, "cuModuleLoadData")?,
             module_fn: simbolo(lib, "cuModuleGetFunction")?,
+            func_attr: simbolo(lib, "cuFuncGetAttribute")?,
             launch: simbolo(lib, "cuLaunchKernel")?,
             mem_info: simbolo(lib, "cuMemGetInfo_v2")?,
             sync: simbolo(lib, "cuCtxSynchronize")?,
@@ -785,7 +787,7 @@ impl CudaGpu {
                     &mut a5 as *mut _ as *mut c_void,
                     &mut a6 as *mut _ as *mut c_void,
                 ];
-                self.lanzar3s(self.f_iq, ((rows as u32).div_ceil(8), 1, 1), (256, 1, 1), (cols * 4) as u32, &mut args)?;
+                self.lanzar3s(self.f_iq, ((rows as u32).div_ceil(8), 1, 1), (256, 1, 1), ((cols + cols / 32 + 1) * 4) as u32, &mut args)?;
             }
             d if es_iq_gpu(d) => {
                 // Varios tokens: el kernel descodifica cada bloque de pesos una vez y lo usa para IQ_TILE tokens.

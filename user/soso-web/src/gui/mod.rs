@@ -1,5 +1,6 @@
 //! Modo gráfico: framebuffer, entrada y layout básico.
 
+pub mod chrome;
 pub mod fb;
 pub mod input;
 pub mod layout;

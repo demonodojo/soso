@@ -21,6 +21,7 @@ members = [
     "crates/soso-http",
     "crates/soso-web-core",
     "crates/soso-update-core",
+    "crates/soso-pkg-core",
     "crates/soso-std",
     "crates/soso-rt",
     "crates/soso-alloc",

@@ -7,6 +7,7 @@ const WM_PORT: u16 = 7430;
 const MSG_LEN: usize = 32;
 
 const OP_DANIO: u32 = 3;
+const OP_TITULO: u32 = 4;
 const OP_CERRAR_CLI: u32 = 5;
 const OP_VENTANA: u32 = 16;
 const OP_TECLA: u32 = 17;
@@ -201,6 +202,22 @@ impl Superficie {
         *stride = w;
         *len = (w as u64 * h as u64 * 4) as usize;
         *ptr = va;
+        Ok(())
+    }
+
+    /// Actualiza el título en la barra del WM (máx. 16 bytes).
+    pub fn enviar_titulo(&self, titulo: &str) -> Result<(), i64> {
+        let Superficie::Wm { sock, .. } = self else {
+            return Ok(());
+        };
+        let mut m = [0u8; MSG_LEN];
+        put_u32(&mut m, 0, OP_TITULO);
+        put_u32(&mut m, 12, 16);
+        let tlen = titulo.len().min(16);
+        m[16..16 + tlen].copy_from_slice(&titulo.as_bytes()[..tlen]);
+        if sys::write(*sock, &m) != MSG_LEN as i64 {
+            return Err(-abi::EIO);
+        }
         Ok(())
     }
 

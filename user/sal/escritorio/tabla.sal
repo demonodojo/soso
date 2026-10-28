@@ -120,6 +120,19 @@ fn tab_titulo_set(tab: Int, i: Int, titulo: String) -> Int ! alloc
         j = j + 1
     0
 
+fn tab_titulo_desde_msg(tab: Int, i: Int, msg: Int) -> Int ! alloc
+    dst = bytes_view_mem(tab + tab_slot_off(i) + tab_titulo_off(), 32)
+    src = bytes_view_mem(msg, 32)
+    j = 0
+    while j < 16
+        ch = bytes_get_u8(src, 16 + j)
+        bytes_set_u8(dst, j, ch)
+        j = j + 1
+    while j < 32
+        bytes_set_u8(dst, j, 32)
+        j = j + 1
+    0
+
 fn tab_acc_reset(tab: Int, i: Int) -> Int ! alloc
     _l = tab_set(tab, i, tab_acc_len(), 0)
     0

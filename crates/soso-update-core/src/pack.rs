@@ -145,6 +145,8 @@ mod tests {
         assert!(!PackWriter::should_pack("var/t42/ud/vendor-crates/num-bigint-dig-0.8.6/src/macro.rs"));
         assert!(!PackWriter::should_pack("var/t41/Cargo.toml"));
         assert!(!PackWriter::should_pack("var/t80/main.rs"));
+        assert!(!PackWriter::should_pack("var/paquetes/demo/paquete.txt"));
+        assert!(!PackWriter::should_pack("etc/paquetes.conf"));
         assert!(PackWriter::should_pack("bin/soso-update"));
         assert!(PackWriter::should_pack("lib/firmware/nvidia/gb205/gsp/fmc-570.144.bin"));
     }

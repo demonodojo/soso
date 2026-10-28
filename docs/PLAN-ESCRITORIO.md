@@ -16,6 +16,7 @@ Gestor de ventanas gráfico en Sal con terminales sobre PTY, clientes vía TCP
 | W6 | Hecho | `crates/soso-wm-proto`, `libsoso::ventana`, `soso-web --grafico` (Danio bajo demanda en WM) |
 | W7 | En curso | `init test` pty/shm; xtask usa `--prueba` sin `&` en sosh |
 | WM+web | Hecho | Bucle WM (`wm.sal`), `demo-cliente`, `soso-web` en ventana SHM + E2E xtask |
+| W8 | Hecho | Navegador de lectura: motor CSS (flex/grid/float/position, @media), PNG, formularios, 4 pestañas, marcadores, cromo URL, Alt+W / `--prueba-web` |
 
 ## Atajos (`soso-wm`)
 
@@ -23,6 +24,7 @@ Gestor de ventanas gráfico en Sal con terminales sobre PTY, clientes vía TCP
 - Alt+Tab — siguiente ventana  
 - Alt+Q — cerrar ventana  
 - Alt+T — flotante / mosaico  
+- Alt+W — abrir `soso-web --grafico --local /etc/web-prueba.html`  
 - Alt+Mayús+E — salir a consola  
 - Ctrl+Alt+Retroceso — mata al dueño de pantalla (kernel)
 

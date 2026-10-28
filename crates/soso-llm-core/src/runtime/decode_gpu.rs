@@ -267,20 +267,49 @@ impl Runtime {
         let mut cpu_moe = |capa: usize, xn: &[f32], idx: &[u32], wt: &[f32], out: &mut [f32]| -> Result<(), ()> {
             let ffn = ffn[capa];
             let prefix = format!("L{capa:02}");
-            let (mut gate, mut up, mut y) = (vec![0.0f32; ffn], vec![0.0f32; ffn], vec![0.0f32; h]);
+            // Vistas en serie (la fuente no es compartible entre hilos) y luego un experto por hilo: sin barreras por matvec.
+            let mut vistas: Vec<[(usize, usize, u8, usize); 3]> = Vec::with_capacity(idx.len());
+            for &e in idx {
+                let mut v = [(0usize, 0usize, 0u8, 0usize); 3];
+                for (i, suf) in ["ffn_gate", "ffn_up", "ffn_down"].iter().enumerate() {
+                    let vista = source.tensor_view(&format!("{prefix}.E{e:02}.{suf}"))?;
+                    v[i] = (vista.bytes.as_ptr() as usize, vista.bytes.len(), vista.dtype, vista.elems);
+                }
+                vistas.push(v);
+            }
+            let mut ys = vec![0.0f32; idx.len() * h];
+            let ys_p = ys.as_mut_ptr() as usize;
+            let fallo = core::sync::atomic::AtomicBool::new(false);
+            let seq = Sequential;
+            par.for_rows(idx.len(), &|k0, k1| {
+                let mut gate = vec![0.0f32; ffn];
+                let mut up = vec![0.0f32; ffn];
+                for k in k0..k1 {
+                    let vista = |i: usize| TensorView {
+                        bytes: unsafe { core::slice::from_raw_parts(vistas[k][i].0 as *const u8, vistas[k][i].1) },
+                        dtype: vistas[k][i].2,
+                        elems: vistas[k][i].3,
+                    };
+                    // SAFETY: cada hilo escribe sólo la fila `k` de `ys`.
+                    let y = unsafe { core::slice::from_raw_parts_mut((ys_p as *mut f32).add(k * h), h) };
+                    let ok = matvec_view_par(&vista(0), ffn, h, xn, &mut gate, &seq).is_ok()
+                        && matvec_view_par(&vista(1), ffn, h, xn, &mut up, &seq).is_ok()
+                        && {
+                            crate::gemm::swiglu_inplace(&mut up, &gate);
+                            matvec_view_par(&vista(2), h, ffn, &up, y, &seq).is_ok()
+                        };
+                    if !ok {
+                        fallo.store(true, core::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            });
+            if fallo.load(core::sync::atomic::Ordering::Relaxed) {
+                return Err(());
+            }
             out.fill(0.0);
-            for (&e, &w) in idx.iter().zip(wt) {
-                let ep = format!("{prefix}.E{e:02}");
-                let (n1, n2, n3) = (format!("{ep}.ffn_gate"), format!("{ep}.ffn_up"), format!("{ep}.ffn_down"));
-                let v = source.tensor_view(&n1)?;
-                matvec_view_par(&v, ffn, h, xn, &mut gate, par)?;
-                let v = source.tensor_view(&n2)?;
-                matvec_view_par(&v, ffn, h, xn, &mut up, par)?;
-                crate::gemm::swiglu_inplace(&mut up, &gate);
-                let v = source.tensor_view(&n3)?;
-                matvec_view_par(&v, h, ffn, &up, &mut y, par)?;
+            for (k, &w) in wt.iter().enumerate() {
                 for i in 0..h {
-                    out[i] += y[i] * w;
+                    out[i] += ys[k * h + i] * w;
                 }
             }
             Ok(())

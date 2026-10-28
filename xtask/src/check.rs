@@ -201,6 +201,11 @@ pub(crate) fn host_test_batches() -> &'static [HostTestBatch] {
             std: true,
         },
         HostTestBatch {
+            label: "soso-pkg-core",
+            pkgs: &["soso-pkg-core"],
+            std: true,
+        },
+        HostTestBatch {
             label: "soso-resize-core",
             pkgs: &["soso-resize-core"],
             std: false,

@@ -1,0 +1,16 @@
+[package]
+name = "soso-pkg"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+
+[[bin]]
+name = "soso-pkg"
+path = "src/main.rs"
+
+[dependencies]
+soso-abi = { workspace = true }
+libsoso = { workspace = true }
+soso-http = { path = "../../crates/soso-http" }
+soso-pkg-core = { path = "../../crates/soso-pkg-core" }
+soso-update-core = { path = "../../crates/soso-update-core", default-features = false, features = ["full"] }
