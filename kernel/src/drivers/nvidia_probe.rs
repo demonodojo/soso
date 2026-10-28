@@ -25,13 +25,13 @@ pub fn init() {
     let devs = pci::devices();
     let Some(gpu) = devs.iter().find(|d| d.vendor_id == VENDOR_NVIDIA && d.class == 0x03)
     else {
-        crate::println!("nvidia: sin GPU NVIDIA en PCI");
+        crate::klogln!("nvidia: sin GPU NVIDIA en PCI");
         NVIDIA_CHIPSET.call_once(|| None);
         NVIDIA_DEVICE.call_once(|| None);
         return;
     };
     if gpu.bar0 == 0 || gpu.bar0_size == 0 {
-        crate::println!(
+        crate::klogln!(
             "nvidia: GPU {:04x}:{:04x} bus {:02x}:{:02x}.{} sin BAR0",
             gpu.vendor_id,
             gpu.device_id,
@@ -47,13 +47,13 @@ pub fn init() {
     mm::ensure_mmio_mapped(gpu.bar0, gpu.bar0_size.min(16 * 1024 * 1024));
     let boot0 = unsafe { mm::phys_to_virt(gpu.bar0).as_ptr::<u32>().read_volatile() };
     if boot0 == 0xffffffff {
-        crate::println!(
+        crate::klogln!(
             "nvidia: GPU {:04x}:{:04x} NV_PMC_BOOT_0=0xffffffff (fuera del bus / sin D0)",
             gpu.vendor_id,
             gpu.device_id
         );
     } else {
-        crate::println!(
+        crate::klogln!(
             "nvidia: GPU {:04x}:{:04x} NV_PMC_BOOT_0=0x{:08x}",
             gpu.vendor_id,
             gpu.device_id,

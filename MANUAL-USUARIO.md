@@ -116,6 +116,10 @@ la misma terminal donde corre QEMU.
 
 En **placa real** (live USB, sin adaptador serie), la consola es el **framebuffer**
 de la pantalla: el teclado integrado o USB alimenta la shell directamente.
+Durante el arranque la pantalla muestra la versión, los marcadores `boot:` y el
+resultado (IP, WiFi, GPU); el detalle de drivers, red y GPU va al log del kernel
+(`dmesg`, `/var/log/kernel.log`, y en live también `SOSOLOG.TXT` si hay puerto
+serie o tras persistir el log).
 
 #### Teclado y UTF-8 en consola física
 
@@ -837,8 +841,8 @@ Atajos habituales: **Alt+Intro** (terminal nueva), **Alt+Tab** (cambiar ventana)
 Arranque recomendado para navegar en ventana:
 
 ```text
-soso-wm --ejecutar /bin/soso-web --grafico --local /etc/web-prueba.html
-soso-web --grafico --local /etc/web-prueba.html
+soso-wm --ejecutar soso-web --grafico --local /var/paquetes/soso-web/share/ejemplo/web-prueba.html
+sosh -c 'soso-web --grafico --local /var/paquetes/soso-web/share/ejemplo/web-prueba.html'
 # o: soso-web --grafico https://example.com
 ```
 
@@ -853,8 +857,9 @@ Sal en el escritorio admite operadores `% & | ^ << >>`, el tipo `Bytes` y
 ### soso-web — navegador mínimo
 
 ```sh
-soso-web https://example.com          # modo lectura (texto en consola)
-soso-web --local /etc/web-prueba.html # HTML local (pruebas sin red)
+soso-pkg instalar /share/paquetes/soso-web/1.0.0   # si no viene precargado en la imagen
+soso-web https://example.com          # modo lectura (texto en consola; vía sosh / paquetes/comandos)
+soso-web --local /var/paquetes/soso-web/share/ejemplo/web-prueba.html
 soso-web --grafico https://example.com  # ventana WM o pantalla completa
 ```
 
@@ -875,9 +880,10 @@ enlaces clicables, **CSS en `<style>`** con layout **flex**, **grid**, **float**
 formularios **GET/POST** urlencoded (campos de texto y botón), hasta **4 pestañas**
 (fila superior: nueva, cerrar, cambiar) y **marcadores** en `/etc/web-marcadores`
 (estrella en la barra; lista interna `soso:bookmarks`). Sin JavaScript ni hojas
-externas. Fuente DejaVu Sans en `/lib/fonts/DejaVuSans.ttf` (`--fuente` para otra
-ruta). Con gestor activo el WM compone la ventana; sin gestor, pantalla completa.
-Prueba sin red: `/etc/web-prueba.html` (CSS, PNG y formulario GET).
+externas. El paquete `soso-web` trae DejaVu en
+`share/fonts/DejaVuSans.ttf` (`--fuente` para otra ruta; fallback `/lib/fonts/…`
+si existe). Con gestor activo el WM compone la ventana; sin gestor, pantalla completa.
+Prueba sin red: `share/ejemplo/web-prueba.html` del paquete (CSS, PNG y formulario GET).
 
 ### ask — preguntarle al modelo
 
@@ -1076,7 +1082,9 @@ url=https://ejemplo.org/mis-paquetes
 ```
 
 Para probar sin red: `soso-pkg instalar /share/paquetes-prueba/v1` (fixture en la
-imagen de prueba). Sin `--forzar` solo se instala una versión **mayor**; para
+imagen de prueba). El navegador **soso-web** suele venir precargado en
+`/var/paquetes/soso-web/`; también puedes instalarlo con
+`soso-pkg instalar /share/paquetes/soso-web/1.0.0`. Sin `--forzar` solo se instala una versión **mayor**; para
 reinstalar o bajar versión, añade `--forzar`. `--origen DIR` usa un índice y
 paquetes locales en lugar de HTTPS.
 
@@ -1312,7 +1320,7 @@ Tras el arranque, el filesystem **sosofs** expone al menos:
 
 ```
 /
-├── bin/          # Programas (init, sosh, soso-llm, soso-update, soso-web, …)
+├── bin/          # Programas del sistema (init, sosh, soso-llm, soso-update, soso-pkg, …)
 ├── etc/
 │   ├── soso-release    # Versión instalada (version/build/fecha)
 │   ├── actualiza.conf  # URL de releases para soso-update
@@ -1326,13 +1334,14 @@ Tras el arranque, el filesystem **sosofs** expone al menos:
 │   └── ssh_host_key    # Semilla de la host key del servidor SSH
 ├── lib/
 │   ├── firmware/       # Firmware WiFi, NVIDIA GSP, …
-│   └── fonts/          # TTF para soso-web --grafico
+│   └── fonts/          # TTF del sistema (legacy; el paquete soso-web trae la suya)
 ├── models/       # Modelos LLM y ASR (disco sosomfs, solo lectura)
 │   ├── tiny/             # Modelo sintético denso (4 capas)
 │   ├── tiny-moe/         # Modelo MoE sintético (4 expertos, top-2)
 │   ├── whisper-tiny/     # ASR Whisper (live con fetch-whisper)
 │   └── …                 # Modelos importados (soso-hf, mkfs, …)
 ├── var/
+│   ├── paquetes/         # Apps instaladas (p. ej. soso-web) + comandos para sosh
 │   ├── log/              # Logs persistentes en instalación (kernel, apps, OTA)
 │   └── actualiza-prueba/ # Solo en imágenes de prueba (E2E actualización)
 └── hola.txt      # Fichero de ejemplo
@@ -1360,7 +1369,7 @@ Comandos principales:
 | Comando | Descripción |
 |---|---|
 | `help` | Lista todos los comandos |
-| `dmesg` | Log de consola paginado (espacio/enter = más, `q` = salir); el FB solo muestra ~40 líneas |
+| `dmesg` | Log del kernel (incluye trazas de arranque que ya no se pintan en pantalla); paginado (espacio/enter = más, `q` = salir); el FB solo muestra ~40 líneas |
 | `dmesg save` | Persistir el log ahora: `/var/log/kernel.log` y, en live, `SOSOLOG.TXT` (también se hace solo cada ~2 s) |
 | `logfs` | Estado de los logs de `/var/log`: bytes escritos, perdidos y fallos por flujo |
 | `ls [ruta]` | Listar directorio (por defecto `/`) |
@@ -2367,7 +2376,7 @@ soso-hf pull org/repo --name mi-modelo
 
 # Voz y web
 voz                         # dictado → línea (Enter confirma)
-soso-web --local /etc/web-prueba.html
+soso-web --local /var/paquetes/soso-web/share/ejemplo/web-prueba.html
 soso-web https://example.com
 
 # Red (placa real)

@@ -1886,6 +1886,7 @@ dependencies = [
  "soso-abi",
  "soso-improve-core",
  "soso-llm-api",
+ "soso-pkg-core",
  "soso-resize-core",
  "soso-update-core",
  "sosofs",

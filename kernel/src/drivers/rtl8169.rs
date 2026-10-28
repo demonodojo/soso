@@ -8,7 +8,7 @@
 use crate::arch::irq;
 use crate::drivers::{dma, pci};
 use crate::mm;
-use crate::println;
+use crate::{klogln, println};
 use core::ptr::{addr_of, addr_of_mut};
 use core::sync::atomic::{AtomicBool, Ordering, compiler_fence};
 use spin::{Mutex, Once};
@@ -563,7 +563,7 @@ fn rtl_hw_start_8168h_1(nic: &mut Nic, bus: u8, dev: u8, func: u8) {
     mac_ocp_write(nic.mmio, 0xe63e, 0x0000);
     mac_ocp_write(nic.mmio, 0xc094, 0x0000);
     mac_ocp_write(nic.mmio, 0xc09e, 0x0000);
-    println!("rtl8169: rtl_hw_start_8168h_1 (VER_46) ok");
+    klogln!("rtl8169: rtl_hw_start_8168h_1 (VER_46) ok");
 }
 
 const RTL_FW_OPCODE_SIZE: usize = 4;
@@ -773,7 +773,7 @@ fn load_phy_firmware(nic: &mut Nic) -> bool {
     }
     rtl_fw_apply(nic, &pa);
     wait_bmcr_reset_clear(nic);
-    println!(
+    klogln!(
         "rtl8169: firmware PHY cargado ({}, {} opcodes)",
         path,
         pa.code.len() / RTL_FW_OPCODE_SIZE
@@ -877,7 +877,7 @@ fn rtl8168h_hw_phy_config(nic: &mut Nic) {
     phy_modify_paged(nic, 0x0a43, 0x10, 1 << 2, 0);
     phy_modify_paged(nic, 0x0a43, 0x11, 0, 1 << 4);
 
-    println!("rtl8169: PHY 8168H config Linux (ioffset={ioffset:#06x} rlen={rlen})");
+    klogln!("rtl8169: PHY 8168H config Linux (ioffset={ioffset:#06x} rlen={rlen})");
 }
 
 fn rtl_hw_init_8168g(bar: u64) {
@@ -935,7 +935,7 @@ fn log_link(nic: &Nic, phy: u8, bmsr: u16, up: bool) {
     } else {
         ""
     };
-    println!(
+    klogln!(
         "rtl8169: phystatus {phy:#04x} bmsr {bmsr:#06x}{tbi} → enlace {} {} {}",
         if up { "UP" } else { "DOWN" },
         velocidad(phy),
@@ -1010,7 +1010,7 @@ pub fn init() -> Option<[u8; 6]> {
         .find(|d| d.vendor_id == VENDOR_REALTEK && DEVICE_IDS.contains(&d.device_id))?;
 
     let rev = pci::read8(dev.bus, dev.device, dev.function, 0x08);
-    println!(
+    klogln!(
         "rtl8169: {:04x}:{:04x} rev {:02x} en {:02x}:{:02x}.{}",
         dev.vendor_id, dev.device_id, rev, dev.bus, dev.device, dev.function
     );
@@ -1043,7 +1043,7 @@ pub fn init() -> Option<[u8; 6]> {
 
     let xid_raw = (r32(bar, REG_TXCONFIG) >> 20) as u16;
     let ver = mac_version(xid_raw);
-    println!(
+    klogln!(
         "rtl8169: xid {xid_raw:#05x} → {ver:#05x} ({})",
         mac_version_name(ver)
     );
@@ -1060,7 +1060,7 @@ pub fn init() -> Option<[u8; 6]> {
         println!("rtl8169: MAC ilegible");
         return None;
     }
-    println!(
+    klogln!(
         "rtl8169: mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     );
@@ -1150,7 +1150,7 @@ pub fn init() -> Option<[u8; 6]> {
     spin_n(200_000);
     let bmcr = phy_read(&mut nic, MII_BMCR);
     let adv = phy_read(&mut nic, MII_ADVERTISE);
-    println!(
+    klogln!(
         "rtl8169: autoneg bmcr={bmcr:#06x} advertise={adv:#06x} ocp={:#x}",
         nic.ocp_base
     );
@@ -1162,7 +1162,7 @@ pub fn init() -> Option<[u8; 6]> {
     if let Some(msix) = pci::find_msix(dev.bus, dev.device, dev.function) {
         if let Some(vec) = irq::allocate(rtl_irq) {
             if pci::msix_setup(&msix, 0, vec, pci::msix_default_dest()).is_ok() {
-                println!("rtl8169: MSI-X vector={vec:#x}");
+                klogln!("rtl8169: MSI-X vector={vec:#x}");
             }
         }
     }

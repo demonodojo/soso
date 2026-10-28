@@ -74,7 +74,7 @@ fn ayuda() {
     println!("  soso-web <url>           Abre URL HTTPS");
     println!("  soso-web --local <ruta>  HTML local (pruebas)");
     println!("  soso-web --grafico <url> Modo gráfico");
-    println!("  soso-web --fuente <ruta>   TTF para modo gráfico (default /lib/fonts/DejaVuSans.ttf)");
+    println!("  soso-web --fuente <ruta>   TTF para modo gráfico (paquete o /lib/fonts/…)");
     println!("  --ancho N                Ancho de línea (modo lectura)");
     println!("Comandos: <n> enlace | u <url> | b atrás | q salir");
 }
@@ -170,7 +170,8 @@ static mut ULTIMO_REFLOW: Option<ReflowOutput> = None;
 
 fn cargar_y_mostrar(url: &str, ancho: usize) -> Result<(), fetch::FetchError> {
     let (html, final_url) = if url.starts_with("file://") {
-        let path = url.strip_prefix("file://").unwrap_or("/etc/web-prueba.html");
+        let demo = soso_web::rutas::demo_html_local();
+        let path = url.strip_prefix("file://").unwrap_or(&demo);
         let html = fetch::fetch_local(path)?;
         (html, url.to_string())
     } else {
@@ -413,7 +414,8 @@ fn modo_grafico(a: Args) -> u8 {
             return 1;
         }
     };
-    let font_path = a.fuente.as_deref().unwrap_or(render::DEFAULT_FONT);
+    let font_default = soso_web::rutas::fuente_por_defecto();
+    let font_path = a.fuente.as_deref().unwrap_or(&font_default);
     let mut renderer = match render::Renderer::open(font_path) {
         Some(r) => r,
         None => {
@@ -560,7 +562,7 @@ fn modo_grafico(a: Args) -> u8 {
                             tab_cache.push(None);
                         }
                         page = gfx_navigate(
-                            chrome::DEFAULT_TAB_URL,
+                            &soso_web::rutas::demo_tab_url(),
                             &mut chrome_st,
                             fb_w,
                             &fb_dev,

@@ -124,7 +124,7 @@ fn escribir_marca_listo(prefault_ms: i64) {
         return;
     }
     let marca_ms = sys::uptime_ms().saturating_sub(t0);
-    println!("sosh: marca lista pid={pid} prefault={prefault_ms}ms write={marca_ms}ms");
+    libsoso::logln!("sosh: marca lista pid={pid} prefault={prefault_ms}ms write={marca_ms}ms");
 }
 
 fn main(args: &[alloc::string::String]) -> u8 {

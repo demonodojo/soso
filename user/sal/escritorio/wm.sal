@@ -291,7 +291,7 @@ fn wm_barra_web_ancho() -> Int
     48
 
 fn wm_lanzar_web() -> Int ! io, alloc
-    spawn_io_4(d"/bin/soso-web", d"--grafico", d"--local", d"/etc/web-prueba.html", 0, 0, 0, fd_kernel_log())
+    spawn_io_4(d"/var/paquetes/soso-web/bin/soso-web", d"--grafico", d"--local", d"/var/paquetes/soso-web/share/ejemplo/web-prueba.html", 0, 0, 0, fd_kernel_log())
 
 fn prueba_web_pixel_ok(tab: Int, i: Int) -> Int ! alloc
     if tab_get(tab, i, tab_fase()) != 2

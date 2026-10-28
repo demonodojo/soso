@@ -1,7 +1,7 @@
 //! Driver GPU: NVIDIA (L6) + Intel iGPU fallback.
 
 use crate::drivers::{nvidia_compute, nvidia_probe, pci};
-use crate::println;
+use crate::{klogln, println};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use soso_abi::{self as abi, GpuInfo};
@@ -236,11 +236,11 @@ pub fn shutdown() {
         return;
     }
     if !crate::qemu::bajo_hypervisor() {
-        crate::println!("gpu: GSP se deja (placa; no hay reset VFIO)");
+        crate::klogln!("gpu: GSP se deja (placa; no hay reset VFIO)");
         return;
     }
     if gsp_fini() {
-        crate::println!("gpu: GSP apagado, la tarjeta se puede soltar");
+        crate::klogln!("gpu: GSP apagado, la tarjeta se puede soltar");
     }
 }
 
@@ -386,7 +386,7 @@ fn aviso_sin_pool() {
     use core::sync::atomic::{AtomicBool, Ordering};
     static DICHO: AtomicBool = AtomicBool::new(false);
     if !DICHO.swap(true, Ordering::Relaxed) {
-        println!(
+        klogln!(
             "gpu: GPU_ALLOC_VRAM sin pool (fase={}) — el cómputo se queda en CPU",
             gsp_label()
         );
@@ -586,7 +586,7 @@ fn aviso_rebote(motivo: Motivo, user_ptr: u64, n: usize) {
         Motivo::PhysPages => "páginas del origen sin materializar",
         Motivo::CapaC => "el CE rechazó el lote",
     };
-    println!(
+    klogln!(
         "gpu: subida a VRAM por rebote — {} (origen en +{}, {} B). El camino DMA sin copia NO se está usando",
         que,
         user_ptr % 4096,
@@ -778,7 +778,7 @@ fn enable_soft() -> Result<u64, i64> {
     g.vram_total = 256 * 1024 * 1024;
     g.vram_used = 0;
     g.buffers.clear();
-    println!("gpu: dispositivo software activado (cómputo en CPU, para pruebas)");
+    klogln!("gpu: dispositivo software activado (cómputo en CPU, para pruebas)");
     Ok(0)
 }
 
@@ -797,7 +797,7 @@ fn disable_soft() -> Result<u64, i64> {
     g.vram_total = 0;
     g.vram_used = 0;
     g.buffers.clear();
-    println!("gpu: dispositivo software apagado");
+    klogln!("gpu: dispositivo software apagado");
     Ok(0)
 }
 

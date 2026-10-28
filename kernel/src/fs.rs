@@ -1,7 +1,7 @@
 //! Montaje de sosofs (virtio-blk 0 o NVMe 0) y sosomfs (NVMe 1 / NVMe 0 / virtio-blk 1).
 
 use crate::drivers::blkstat;
-use crate::println;
+use crate::{klogln, println};
 use block_dev::{Block, BlockDevice, BlockError, BLOCK_SIZE};
 use sosofs::{CachedBlockDevice, Sosofs};
 use sosomfs::Sosomfs;
@@ -101,7 +101,7 @@ fn grow_root_if_needed(fs: &mut Fs, part_blocks: u64) {
         return;
     }
     match fs.grow_to(part_blocks) {
-        Ok(()) => println!(
+        Ok(()) => klogln!(
             "fs: sosofs grow → {} bloques (partición {})",
             fs.block_count(),
             part_blocks
@@ -124,7 +124,7 @@ fn grow_models_if_needed(mfs: &mut ModelsFs, part_blocks: u64) {
         println!("fs: sosomfs reload tras grow falló");
         return;
     }
-    println!(
+    klogln!(
         "fs: sosomfs grow → {} bloques (partición {})",
         mfs.total_blocks(),
         part_blocks
@@ -355,7 +355,7 @@ fn mount_live() {
     match Sosofs::mount(cached) {
         Ok(mut fs) => {
             grow_root_if_needed(&mut fs, part_blocks);
-            println!(
+            klogln!(
                 "fs: sosofs live (generación {}, {} bloques)",
                 fs.generation(),
                 fs.block_count()
@@ -375,14 +375,14 @@ fn mount_live() {
             ) {
                 Ok(mut mfs) => {
                     grow_models_if_needed(&mut mfs, part_blocks);
-                    println!(
+                    klogln!(
                         "fs: sosomfs live (generación {}, {} bloques, caché {})",
                         mfs.generation(),
                         mfs.total_blocks(),
                         cache_blocks
                     );
                     for m in &mfs.catalog.models {
-                        println!("fs:   modelo {} ({} shards)", m.name, m.shards.len());
+                        klogln!("fs:   modelo {} ({} shards)", m.name, m.shards.len());
                     }
                     MODELS.call_once(|| Mutex::new(mfs));
                 }
@@ -390,7 +390,7 @@ fn mount_live() {
             }
         }
     } else {
-        println!("fs: sosomfs ya montado (recovery shrink)");
+        klogln!("fs: sosomfs ya montado (recovery shrink)");
     }
     crate::fs_resize::finalize_after_mount();
 }
@@ -402,7 +402,7 @@ fn pick_root_backend() -> Option<RootDev> {
     }
     #[cfg(feature = "drv-nvme")]
     if crate::drivers::nvme::present_slot(0) {
-        println!("fs: sosofs en NVMe");
+        klogln!("fs: sosofs en NVMe");
         return Some(RootDev::Nvme);
     }
     None
@@ -411,17 +411,17 @@ fn pick_root_backend() -> Option<RootDev> {
 fn pick_models_backend(root_on_virtio: bool) -> Option<ModelsDev> {
     #[cfg(feature = "drv-nvme")]
     if crate::drivers::nvme::present_slot(1) {
-        println!("fs: sosomfs en NVMe (ctrl 1)");
+        klogln!("fs: sosomfs en NVMe (ctrl 1)");
         return Some(ModelsDev::Nvme(1));
     }
     #[cfg(all(feature = "drv-nvme", feature = "drv-virtio-blk"))]
     if crate::drivers::nvme::present_slot(0) && root_on_virtio {
-        println!("fs: sosomfs en NVMe");
+        klogln!("fs: sosomfs en NVMe");
         return Some(ModelsDev::Nvme(0));
     }
     #[cfg(feature = "drv-virtio-blk")]
     if crate::drivers::virtio_blk::BLK1.get().is_some() {
-        println!("fs: sosomfs en virtio-blk 1");
+        klogln!("fs: sosomfs en virtio-blk 1");
         return Some(ModelsDev::Virtio(VirtioDev1));
     }
     None
@@ -444,7 +444,7 @@ pub fn init() {
     match Sosofs::mount(cached) {
         Ok(mut fs) => {
             grow_root_if_needed(&mut fs, part_blocks);
-            println!(
+            klogln!(
                 "fs: sosofs montado (generación {}, {} bloques, caché 512)",
                 fs.generation(),
                 fs.block_count()
@@ -465,14 +465,14 @@ pub fn init() {
         match Sosomfs::mount_with_cache(sosomfs::SingleDev::new(dev), cache_blocks) {
             Ok(mut mfs) => {
                 grow_models_if_needed(&mut mfs, part_blocks);
-                println!(
+                klogln!(
                     "fs: sosomfs montado (generación {}, {} bloques, caché {})",
                     mfs.generation(),
                     mfs.total_blocks(),
                     cache_blocks
                 );
                 for m in &mfs.catalog.models {
-                    println!("fs:   modelo {} ({} shards)", m.name, m.shards.len());
+                    klogln!("fs:   modelo {} ({} shards)", m.name, m.shards.len());
                 }
                 MODELS.call_once(|| Mutex::new(mfs));
             }

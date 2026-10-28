@@ -214,7 +214,7 @@ fn prueba_web_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: I
         msg = bytes_ptr(bytes_new(msg_len()))
         st = st_nuevo(evt, msg)
         _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo())
-        _p = spawn_io_4(d"/bin/soso-web", d"--grafico", d"--local", d"/etc/web-prueba.html", 0, 0, 0, fd_kernel_log())
+        _p = spawn_io_4(d"/var/paquetes/soso-web/bin/soso-web", d"--grafico", d"--local", d"/var/paquetes/soso-web/share/ejemplo/web-prueba.html", 0, 0, 0, fd_kernel_log())
         t0 = uptime_ms()
         ok = 0
         while ok == 0

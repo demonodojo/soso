@@ -1,7 +1,7 @@
 //! Registro central de drivers: metadatos PCI, estado compilado y hwscan.
 
 use crate::drivers::pci::PciDevice;
-use crate::println;
+use crate::{klogln, println};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write;
@@ -384,24 +384,24 @@ pub fn hwscan_entries() -> Vec<ScanEntry> {
     out
 }
 
-/// Imprime el informe por consola (serie / fb).
+/// Imprime el informe (log del kernel; `RED SIN DRIVER` también en pantalla).
 pub fn print_hwscan() {
     let lines = hwscan_lines();
-    println!(
+    klogln!(
         "hwscan: {} dispositivos PCI, {} con driver conocido",
         lines.len(),
         hwscan_entries().len()
     );
     for line in lines {
-        println!("{line}");
+        klogln!("{line}");
     }
     if missing_drivers() {
-        println!("hwscan: hay driver conocido sin compilar (líneas «ausente»)");
+        klogln!("hwscan: hay driver conocido sin compilar (líneas «ausente»)");
     }
     for nic in nics_sin_driver() {
         println!("hwscan: RED SIN DRIVER {nic}");
     }
-    println!(
+    klogln!(
         "hwscan: iommu {}",
         crate::arch::iommu::estado().texto()
     );

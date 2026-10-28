@@ -107,7 +107,7 @@ pub fn init() {
         let device = job.dev.device_id;
 
         crate::drivers::fatlog::flush_checkpoint();
-        crate::println!(
+        crate::klogln!(
             "lxdde-pci: probe {} {:04x}:{:04x}",
             job.name, vendor, device
         );
@@ -133,12 +133,12 @@ pub fn init() {
                     table.remove(pos);
                 }
             }
-            crate::println!(
+            crate::klogln!(
                 "lxdde-pci: {} probe {:04x}:{:04x} fail rc={}",
                 job.name, vendor, device, r
             );
         } else {
-            crate::println!(
+            crate::klogln!(
                 "lxdde-pci: {} probe {:04x}:{:04x} ok",
                 job.name, vendor, device
             );

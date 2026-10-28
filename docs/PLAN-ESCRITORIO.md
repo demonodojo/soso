@@ -24,7 +24,7 @@ Gestor de ventanas gráfico en Sal con terminales sobre PTY, clientes vía TCP
 - Alt+Tab — siguiente ventana  
 - Alt+Q — cerrar ventana  
 - Alt+T — flotante / mosaico  
-- Alt+W — abrir `soso-web --grafico --local /etc/web-prueba.html`  
+- Alt+W — abrir `soso-web --grafico --local /var/paquetes/soso-web/share/ejemplo/web-prueba.html`  
 - Alt+Mayús+E — salir a consola  
 - Ctrl+Alt+Retroceso — mata al dueño de pantalla (kernel)
 

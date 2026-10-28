@@ -2691,7 +2691,7 @@ exit
 }
 
 fn ssh_soso_web_local(key: &Path, ssh_port: u16) -> Result<(), String> {
-    let guion = "soso-web --local /etc/web-prueba.html\nq\nexit\n";
+    let guion = "soso-web --local /var/paquetes/soso-web/share/ejemplo/web-prueba.html\nq\nexit\n";
     let texto = ssh_guion(key, ssh_port, guion, Duration::from_secs(120))?;
     // El HTML va en UTF-8; por el canal SSH a veces llega como Latin-1 (PÃ¡gina).
     // Comprobamos cadenas ASCII que sí aparecen en la salida renderizada.

@@ -99,7 +99,7 @@ pub extern "C" fn lx_kfree(ptr: *mut c_void) {
         // asignador del kernel se estrelle después siguiendo una lista rota.
         let visto = unsafe { core::ptr::read_unaligned((addr + size) as *const u64) };
         if visto != CENTINELA {
-            crate::println!(
+            crate::klogln!(
                 "lxdde: BLOQUE DESBORDADO en {addr:#x} ({size} B): centinela {visto:#x}"
             );
             panic!("lxdde escribió más allá de un bloque de {size} B en {addr:#x}");
@@ -124,7 +124,7 @@ pub fn barrer_centinelas() -> Option<usize> {
     for (&addr, &(size, _)) in p.live.iter() {
         let visto = unsafe { core::ptr::read_unaligned((addr + size) as *const u64) };
         if visto != CENTINELA {
-            crate::println!(
+            crate::klogln!(
                 "lxdde: BLOQUE DESBORDADO (barrido) en {addr:#x} ({size} B): centinela {visto:#x}"
             );
             panic!("lxdde escribió más allá de un bloque de {size} B en {addr:#x}");
@@ -140,7 +140,7 @@ pub fn barrer_centinelas() -> Option<usize> {
 /// tamaño. Si no sale nada, el overflow no fue de este pool (Vec/smoltcp).
 pub fn avisar_desbordados_en_pf() {
     let Some(p) = POOL.try_lock() else {
-        crate::println!("lxdde: pool ocupado, no se pudieron mirar centinelas en el #PF");
+        crate::klogln!("lxdde: pool ocupado, no se pudieron mirar centinelas en el #PF");
         return;
     };
     let mut rotos = 0usize;
@@ -148,12 +148,12 @@ pub fn avisar_desbordados_en_pf() {
         let visto = unsafe { core::ptr::read_unaligned((addr + size) as *const u64) };
         if visto != CENTINELA {
             rotos += 1;
-            crate::println!(
+            crate::klogln!(
                 "lxdde: BLOQUE DESBORDADO (en #PF) en {addr:#x} ({size} B): centinela {visto:#x}"
             );
         }
     }
-    crate::println!(
+    crate::klogln!(
         "lxdde: centinelas en #PF: {} bloques vivos, {rotos} desbordados",
         p.live.len()
     );

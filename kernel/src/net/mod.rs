@@ -12,7 +12,7 @@ mod tcp_user;
 pub mod wifi_wpa;
 
 use crate::arch::pit;
-use crate::println;
+use crate::{klogln, println};
 use alloc::vec;
 use alloc::vec::Vec;
 use device::NicDev;
@@ -120,7 +120,7 @@ fn leer_red_conf() -> Option<RedEstatica> {
     match soso_red_core::parsear_red_conf(texto) {
         Ok(estatica) => estatica,
         Err(e) => {
-            println!("net: {} no vale ({}); uso DHCP", soso_red_core::RED_CONF, e.texto());
+            klogln!("net: {} no vale ({}); uso DHCP", soso_red_core::RED_CONF, e.texto());
             None
         }
     }
@@ -183,7 +183,7 @@ fn sondear_wifi(_asociada: bool) -> Option<[u8; 6]> {
 fn backend_wifi(mac: [u8; 6]) -> Option<([u8; 6], NicDev, BackendKind)> {
     #[cfg(feature = "lxdde")]
     {
-        println!("net: backend lx-wifi (Intel AX211/AX200)");
+        klogln!("net: backend lx-wifi (Intel AX211/AX200)");
         Some((mac, NicDev::LxWifi(device::LxWifiDev), BackendKind::Wifi))
     }
     #[cfg(not(feature = "lxdde"))]
@@ -206,7 +206,7 @@ fn net_backend() -> Option<([u8; 6], NicDev, BackendKind)> {
         }
     }
     if let Some((mac, dev, nombre)) = cable {
-        println!("net: backend {nombre}");
+        klogln!("net: backend {nombre}");
         return Some((mac, dev, BackendKind::Wired));
     }
     if let Some(mac) = sondear_wifi(false) {
@@ -214,7 +214,7 @@ fn net_backend() -> Option<([u8; 6], NicDev, BackendKind)> {
     }
     #[cfg(feature = "drv-virtio-net")]
     if let Some(mac) = virtio_net::init() {
-        println!("net: backend virtio-net");
+        klogln!("net: backend virtio-net");
         return Some((mac, NicDev::Virtio(device::SmolDev), BackendKind::Wired));
     }
     None
@@ -297,7 +297,7 @@ fn attach_stack(mac: [u8; 6], mut dev: NicDev, backend: BackendKind, dhcp_now: b
     if backend == BackendKind::Ninguno {
         println!("net: sin NIC — pila sólo para loopback (127.0.0.1)");
     } else {
-        println!(
+        klogln!(
             "net: dhcp… (mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
         );
@@ -419,7 +419,7 @@ fn sustituir_nic(
             n.dhcp_enabled = dhcp_now;
         }
     }
-    println!(
+    klogln!(
         "net: NIC encontrada tras arrancar sin ella (mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     );
@@ -537,9 +537,9 @@ pub fn on_wired_link_up() {
     if n.backend == BackendKind::Wired {
         reiniciar_ip(&mut n);
         if n.estatica.is_some() {
-            println!("net: enlace ethernet UP — ip estática");
+            klogln!("net: enlace ethernet UP — ip estática");
         } else {
-            println!("net: enlace ethernet UP — solicitando DHCP…");
+            klogln!("net: enlace ethernet UP — solicitando DHCP…");
         }
         return;
     }
@@ -554,7 +554,7 @@ pub fn on_wired_link_up() {
     }
     cambiar_dispositivo(&mut n, mac, dev, BackendKind::Wired);
     reiniciar_ip(&mut n);
-    println!("net: cable con enlace — vuelvo a ethernet ({nombre})");
+    klogln!("net: cable con enlace — vuelvo a ethernet ({nombre})");
 }
 
 /// Se soltó el cable: sin IP hasta que vuelva, igual que cuando cae el WiFi.
@@ -570,7 +570,7 @@ pub fn on_wired_link_down() {
         return;
     }
     if n.estatica.is_some() {
-        println!("net: enlace ethernet DOWN — conservo la ip estática");
+        klogln!("net: enlace ethernet DOWN — conservo la ip estática");
         return;
     }
     soltar_ip(&mut n);
@@ -579,7 +579,7 @@ pub fn on_wired_link_down() {
     if let Some(mac) = wifi_autorizada() {
         cambiar_dispositivo(&mut n, mac, NicDev::LxWifi(device::LxWifiDev), BackendKind::Wifi);
         reiniciar_ip(&mut n);
-        println!("net: sin cable — uso la WiFi autorizada");
+        klogln!("net: sin cable — uso la WiFi autorizada");
     }
 }
 
@@ -619,12 +619,12 @@ fn wifi_conectada(explicito: bool) {
             return;
         };
         if n.backend == BackendKind::Wired && !n.pref_wifi && n.dev.carrier() {
-            println!("net: wifi autorizada; sigo en ethernet (el cable tiene enlace)");
+            klogln!("net: wifi autorizada; sigo en ethernet (el cable tiene enlace)");
             return;
         }
         if n.backend != BackendKind::Wifi || n.mac != mac {
             cambiar_dispositivo(&mut n, mac, NicDev::LxWifi(device::LxWifiDev), BackendKind::Wifi);
-            println!("net: backend lx-wifi (Intel AX211/AX200)");
+            klogln!("net: backend lx-wifi (Intel AX211/AX200)");
         }
     } else if n.backend != BackendKind::Wifi {
         drop(n);
@@ -639,9 +639,9 @@ fn wifi_conectada(explicito: bool) {
     }
     reiniciar_ip(&mut n);
     if n.estatica.is_some() {
-        println!("net: wifi asociada — ip estática");
+        klogln!("net: wifi asociada — ip estática");
     } else {
-        println!("net: wifi asociada — solicitando DHCP…");
+        klogln!("net: wifi asociada — solicitando DHCP…");
     }
 }
 
@@ -663,7 +663,7 @@ pub fn on_wifi_lost() -> bool {
         return true;
     }
     if n.estatica.is_some() {
-        println!("net: wifi caída — conservo la ip estática");
+        klogln!("net: wifi caída — conservo la ip estática");
         return true;
     }
     soltar_ip(&mut n);
@@ -674,7 +674,7 @@ pub fn on_wifi_lost() -> bool {
         n.pref_wifi = false;
         cambiar_dispositivo(&mut n, mac, dev, BackendKind::Wired);
         reiniciar_ip(&mut n);
-        println!("net: cable con enlace — vuelvo a ethernet ({nombre})");
+        klogln!("net: cable con enlace — vuelvo a ethernet ({nombre})");
     }
     true
 }
@@ -741,7 +741,7 @@ fn poll_dhcp(
                 *dns = [None; 3];
                 for (hueco, servidor) in dns.iter_mut().zip(config.dns_servers.iter()) {
                     *hueco = Some(*servidor);
-                    println!("net: dns {servidor}");
+                    klogln!("net: dns {servidor}");
                 }
             }
             *configured = true;
@@ -858,7 +858,7 @@ pub fn poll() {
         // para no ahogar la consola.
         let fallos = LOCK_PERDIDO.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
         if fallos == 1 || fallos.is_multiple_of(1000) {
-            crate::println!("net: poll sin candado ({fallos} veces)");
+            crate::klogln!("net: poll sin candado ({fallos} veces)");
         }
         return;
     };
@@ -951,7 +951,7 @@ pub fn tcp_listen(port: u16) -> Result<usize, i64> {
         // opcional. Sin IP (NicDev::Ninguno) puede fallar, y si abortáramos
         // aquí el askd no levantaba nunca en placa sin driver de red.
         let r = tcp_user::listen_start(sockets, entry);
-        crate::println!(
+        crate::klogln!(
             "tcp: listen puerto {port} slot {slot} smoltcp={}",
             if r.is_ok() { "ok" } else { "no" }
         );

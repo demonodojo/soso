@@ -5,6 +5,8 @@
 
 extern crate alloc;
 
+#[cfg(feature = "std")]
+pub mod empaquetar;
 pub mod comandos;
 pub mod conf;
 pub mod fuente;

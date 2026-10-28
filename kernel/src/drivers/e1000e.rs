@@ -5,7 +5,7 @@
 use crate::arch::{apic, ioapic, irq};
 use crate::drivers::{dma, pci};
 use crate::mm;
-use crate::println;
+use crate::klogln;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::{Mutex, Once};
 
@@ -242,7 +242,7 @@ pub fn poll_link() -> Option<bool> {
     let was = nic.link_up;
     nic.link_up = up;
     if up != was {
-        println!(
+        klogln!(
             "e1000e: enlace {} status={status:#010x} bmsr={bmsr:#06x}",
             if up { "UP" } else { "DOWN" }
         );
@@ -258,7 +258,7 @@ pub fn init() -> Option<[u8; 6]> {
         .iter()
         .find(|d| d.vendor_id == VENDOR_INTEL && device_supported(d.device_id))?;
 
-    println!(
+    klogln!(
         "e1000e: {:04x}:{:04x} en {:02x}:{:02x}.{}",
         dev.vendor_id, dev.device_id, dev.bus, dev.device, dev.function
     );
@@ -294,7 +294,7 @@ pub fn init() -> Option<[u8; 6]> {
     if !mac_ok(&mac) {
         mac = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
     }
-    println!(
+    klogln!(
         "e1000e: mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     );
@@ -366,7 +366,7 @@ pub fn init() -> Option<[u8; 6]> {
     if let Some(msix) = pci::find_msix(dev.bus, dev.device, dev.function) {
         if let Some(vec) = irq::allocate(e1000_irq) {
             if pci::msix_setup(&msix, 0, vec, pci::msix_default_dest()).is_ok() {
-                println!("e1000e: MSI-X vector={vec:#x}");
+                klogln!("e1000e: MSI-X vector={vec:#x}");
             }
         }
     } else if let Some(vec) = irq::allocate(e1000_irq) {
@@ -374,16 +374,16 @@ pub fn init() -> Option<[u8; 6]> {
         let line = pci::read8(dev.bus, dev.device, dev.function, 0x3c);
         let dest = apic::id();
         if ioapic::route_isa(line, vec, dest).is_ok() {
-            println!("e1000e: INTx IRQ{line} → vector={vec:#x}");
+            klogln!("e1000e: INTx IRQ{line} → vector={vec:#x}");
         } else {
-            println!("e1000e: INTx route falló; solo polled");
+            klogln!("e1000e: INTx route falló; solo polled");
         }
     }
     rw(bar, REG_IMS, IMS_TXDW | IMS_TXQE | IMS_LSC | IMS_RXO | IMS_RXT0);
 
     let (link_up, status, bmsr) = read_link(bar, !qemu);
     if !qemu {
-        println!(
+        klogln!(
             "e1000e: ich phy status={status:#010x} bmsr={bmsr:#06x} → {}",
             if link_up { "UP" } else { "DOWN" }
         );

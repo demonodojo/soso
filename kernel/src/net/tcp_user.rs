@@ -262,7 +262,7 @@ pub fn ceder_establecida(
         l.role = TcpRole::Listening;
         l.ultimo_estado = tcp::State::Closed;
         if listen_start(sockets, l).is_err() {
-            crate::println!("tcp: no pude rearmar la escucha en {port}");
+            crate::klogln!("tcp: no pude rearmar la escucha en {port}");
         }
     }
     Ok(nuevo)
@@ -443,7 +443,7 @@ pub fn poll_entry(
                     // hay otra forma de enterarse desde fuera.
                     match s.connect(cx, remote, local) {
                         Ok(()) => entry.connect_started = true,
-                        Err(e) => crate::println!("tcp: connect rechazado ({e:?}) slot {slot}"),
+                        Err(e) => crate::klogln!("tcp: connect rechazado ({e:?}) slot {slot}"),
                     }
                 }
             } else {

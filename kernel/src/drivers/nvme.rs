@@ -8,7 +8,7 @@
 use crate::arch::irq;
 use crate::drivers::{dma, pci};
 use crate::mm;
-use crate::println;
+use crate::klogln;
 use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use spin::{Mutex, Once};
 
@@ -173,7 +173,7 @@ pub fn init() {
 }
 
 fn init_controller(dev: &pci::PciDevice, slot: usize) -> Result<(), ()> {
-    println!(
+    klogln!(
         "nvme[{slot}]: {:04x}:{:04x} en {:02x}:{:02x}.{}",
         dev.vendor_id, dev.device_id, dev.bus, dev.device, dev.function
     );
@@ -186,7 +186,7 @@ fn init_controller(dev: &pci::PciDevice, slot: usize) -> Result<(), ()> {
     let (bar, bar_size) = if dev.bar0 != 0 && dev.bar0_size != 0 {
         (dev.bar0, dev.bar0_size)
     } else {
-        println!("nvme[{slot}]: sin BAR0");
+        klogln!("nvme[{slot}]: sin BAR0");
         return Err(());
     };
     mm::ensure_mmio_mapped(bar, bar_size.max(0x2000));
@@ -195,7 +195,7 @@ fn init_controller(dev: &pci::PciDevice, slot: usize) -> Result<(), ()> {
     let dstrd = ((cap >> 32) & 0xf) as u32;
     let mps_min = ((cap >> 48) & 0xf) as u32;
     if mps_min > 0 {
-        println!("nvme[{slot}]: MPSMIN={mps_min} (solo 4KiB soportado)");
+        klogln!("nvme[{slot}]: MPSMIN={mps_min} (solo 4KiB soportado)");
         return Err(());
     }
 
@@ -219,7 +219,7 @@ fn init_controller(dev: &pci::PciDevice, slot: usize) -> Result<(), ()> {
     let cc = CC_EN | (6 << 16) | (4 << 20);
     reg_write32(bar, REG_CC, cc);
     if !wait_csts(bar, true) {
-        println!("nvme[{slot}]: timeout esperando CSTS.RDY");
+        klogln!("nvme[{slot}]: timeout esperando CSTS.RDY");
         return Err(());
     }
 
@@ -260,7 +260,7 @@ fn init_controller(dev: &pci::PciDevice, slot: usize) -> Result<(), ()> {
     // Identify Controller (valida admin queue).
     let (idc_phys, idc_v) = dma::alloc_zeroed_uc(1);
     if let Err(e) = admin_identify_ctrl(&mut ctrl, idc_phys) {
-        println!("nvme[{slot}]: identify ctrl: {e}");
+        klogln!("nvme[{slot}]: identify ctrl: {e}");
         dump_admin_cq(&ctrl);
         dma::free_pages(idc_phys, 1);
         return Err(());
@@ -277,7 +277,7 @@ fn init_controller(dev: &pci::PciDevice, slot: usize) -> Result<(), ()> {
     };
     ctrl.max_req_bytes = tope_ctrl.min(REBOTE_PAGINAS * dma::PAGE_SIZE);
     dma::free_pages(idc_phys, 1);
-    println!(
+    klogln!(
         "nvme[{slot}]: identify ctrl OK (dstrd={dstrd}, MDTS={mdts} → {} KiB/comando)",
         ctrl.max_req_bytes / 1024
     );
@@ -300,23 +300,23 @@ fn init_controller(dev: &pci::PciDevice, slot: usize) -> Result<(), ()> {
     ctrl.io.sq_virt = io_sq_v.as_ptr();
 
     if let Err(e) = admin_create_cq(&mut ctrl) {
-        println!("nvme[{slot}]: create CQ: {e}");
+        klogln!("nvme[{slot}]: create CQ: {e}");
         dump_admin_cq(&ctrl);
         return Err(());
     }
-    println!("nvme[{slot}]: I/O CQ creada");
+    klogln!("nvme[{slot}]: I/O CQ creada");
     if let Err(e) = admin_create_sq(&mut ctrl) {
-        println!("nvme[{slot}]: create SQ: {e}");
+        klogln!("nvme[{slot}]: create SQ: {e}");
         dump_admin_cq(&ctrl);
         return Err(());
     }
-    println!("nvme[{slot}]: I/O SQ creada");
+    klogln!("nvme[{slot}]: I/O SQ creada");
 
     // MSI-X tras las colas (solo wake; el I/O sigue siendo síncrono por phase bit).
     if let Some(msix) = pci::find_msix(dev.bus, dev.device, dev.function) {
         if let Some(vec) = irq::allocate(nvme_irq) {
             if pci::msix_setup(&msix, 0, vec, pci::msix_default_dest()).is_ok() {
-                println!("nvme[{slot}]: MSI-X vector={vec:#x}");
+                klogln!("nvme[{slot}]: MSI-X vector={vec:#x}");
             }
         }
     }
@@ -324,7 +324,7 @@ fn init_controller(dev: &pci::PciDevice, slot: usize) -> Result<(), ()> {
     // Identify namespace 1.
     let (id_phys, id_ptr) = dma::alloc_zeroed_uc(1);
     if let Err(e) = admin_identify_ns(&mut ctrl, id_phys) {
-        println!("nvme[{slot}]: identify: {e}");
+        klogln!("nvme[{slot}]: identify: {e}");
         dma::free_pages(id_phys, 1);
         return Err(());
     }
@@ -343,7 +343,7 @@ fn init_controller(dev: &pci::PciDevice, slot: usize) -> Result<(), ()> {
 
     let block_bytes = 1u64 << ctrl.lba_shift;
     let size_mib = ctrl.n_lba * block_bytes / (1024 * 1024);
-    println!(
+    klogln!(
         "nvme[{slot}]: ns1 {} LBA × {} B ({} MiB)",
         ctrl.n_lba, block_bytes, size_mib
     );
@@ -416,7 +416,7 @@ fn submit_sync(ctrl: &mut NvmeCtrl, admin: bool, sqe: &mut [u8; SQE_SIZE]) -> Re
             let qid = q.qid;
             doorbell_cq(ctrl, qid, head);
             if sc != 0 {
-                println!("nvme: cmd status SC={sc:#x} raw={dw3:#x}");
+                klogln!("nvme: cmd status SC={sc:#x} raw={dw3:#x}");
                 return Err("nvme status != 0");
             }
             return Ok(cid);
@@ -457,7 +457,7 @@ fn admin_create_sq(ctrl: &mut NvmeCtrl) -> Result<(), &'static str> {
 
 fn dump_admin_cq(ctrl: &NvmeCtrl) {
     let cq = ctrl.admin.cq_virt;
-    println!(
+    klogln!(
         "nvme: dump head={} phase={} sq_tail={}",
         ctrl.admin.cq_head, ctrl.admin.phase as u8, ctrl.admin.sq_tail
     );
@@ -468,7 +468,7 @@ fn dump_admin_cq(ctrl: &NvmeCtrl) {
             let d1 = core::ptr::read_volatile(e.add(4) as *const u32);
             let d2 = core::ptr::read_volatile(e.add(8) as *const u32);
             let d3 = core::ptr::read_volatile(e.add(12) as *const u32);
-            println!("nvme: CQ[{i}] {d0:#x} {d1:#x} {d2:#x} {d3:#x}");
+            klogln!("nvme: CQ[{i}] {d0:#x} {d1:#x} {d2:#x} {d3:#x}");
         }
     }
 }

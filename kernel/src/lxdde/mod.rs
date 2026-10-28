@@ -109,18 +109,30 @@ pub fn init(modes: LxddeModes) {
         }
         if modes.nouveau {
             let rc = gpu::init_module();
-            crate::println!("lxdde: nouveau init rc={rc} phase={}", gpu::gsp_phase());
+            if rc != 0 {
+                crate::println!("lxdde: nouveau init rc={rc} phase={}", gpu::gsp_phase());
+            } else {
+                crate::klogln!("lxdde: nouveau init rc={rc} phase={}", gpu::gsp_phase());
+            }
             crate::drivers::fatlog::flush_checkpoint();
         }
         if modes.iwlwifi {
             let rc = wifi::init();
-            crate::println!("lxdde: iwlwifi register rc={rc}");
+            if rc != 0 {
+                crate::println!("lxdde: iwlwifi register rc={rc}");
+            } else {
+                crate::klogln!("lxdde: iwlwifi register rc={rc}");
+            }
             crate::drivers::fatlog::flush_checkpoint();
         }
         #[cfg(feature = "lxdde-ath11k")]
         if modes.ath11k {
             let rc = lx_ath11k_init_module();
-            crate::println!("lxdde: ath11k register rc={rc}");
+            if rc != 0 {
+                crate::println!("lxdde: ath11k register rc={rc}");
+            } else {
+                crate::klogln!("lxdde: ath11k register rc={rc}");
+            }
         }
     }
 
@@ -128,11 +140,19 @@ pub fn init(modes: LxddeModes) {
 
     if modes.iwlwifi {
         let rc = wifi::start_firmware();
-        crate::println!(
-            "lxdde: iwlwifi start rc={rc} phase={} alive={}",
-            wifi::phase(),
-            wifi::alive()
-        );
+        if rc != 0 {
+            crate::println!(
+                "lxdde: iwlwifi start rc={rc} phase={} alive={}",
+                wifi::phase(),
+                wifi::alive()
+            );
+        } else {
+            crate::klogln!(
+                "lxdde: iwlwifi start rc={rc} phase={} alive={}",
+                wifi::phase(),
+                wifi::alive()
+            );
+        }
         crate::drivers::fatlog::flush_checkpoint();
     }
 
@@ -141,11 +161,19 @@ pub fn init(modes: LxddeModes) {
     if modes.ath11k {
         let rc = unsafe { lx_ath11k_start() };
         let fase = unsafe { core::ffi::CStr::from_ptr(lx_ath11k_phase()) };
-        crate::println!(
-            "lxdde: ath11k start rc={rc} fase={} alive={}",
-            fase.to_str().unwrap_or("?"),
-            unsafe { lx_ath11k_alive() }
-        );
+        if rc != 0 {
+            crate::println!(
+                "lxdde: ath11k start rc={rc} fase={} alive={}",
+                fase.to_str().unwrap_or("?"),
+                unsafe { lx_ath11k_alive() }
+            );
+        } else {
+            crate::klogln!(
+                "lxdde: ath11k start rc={rc} fase={} alive={}",
+                fase.to_str().unwrap_or("?"),
+                unsafe { lx_ath11k_alive() }
+            );
+        }
     }
 
     if modes.spike || modes.testdrv {

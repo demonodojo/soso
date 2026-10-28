@@ -1,7 +1,7 @@
 //! Discos virtio-blk sobre PCI (ECAM de q35). v1: blk0=sosofs, blk1=sosomfs.
 
 use crate::drivers::virtio_hal::HalImpl;
-use crate::println;
+use crate::klogln;
 use alloc::vec::Vec;
 use spin::{Mutex, Once};
 use virtio_drivers::device::blk::{SECTOR_SIZE, VirtIOBlk};
@@ -30,7 +30,7 @@ pub fn init() {
         if virtio_device_type(&info) != Some(DeviceType::Block) {
             continue;
         }
-        println!("pci: virtio-blk[{slot}] en {df} ({info})");
+        klogln!("pci: virtio-blk[{slot}] en {df} ({info})");
         root.set_command(
             df,
             Command::IO_SPACE | Command::MEMORY_SPACE | Command::BUS_MASTER,
@@ -38,7 +38,7 @@ pub fn init() {
         let transport = PciTransport::new::<HalImpl, _>(&mut root, df)
             .expect("fallo creando el transporte virtio PCI");
         let blk = VirtIOBlk::new(transport).expect("fallo inicializando virtio-blk");
-        println!(
+        klogln!(
             "blk[{slot}]: {} sectores ({} MiB)",
             blk.capacity(),
             blk.capacity() * SECTOR_SIZE as u64 / (1024 * 1024)
@@ -48,12 +48,12 @@ pub fn init() {
         } else if slot == 1 {
             BLK1.call_once(|| Mutex::new(blk));
         } else {
-            println!("blk: disco extra ignorado (slot {slot})");
+            klogln!("blk: disco extra ignorado (slot {slot})");
         }
         slot += 1;
     }
     if BLK0.get().is_none() {
-        println!("blk: no se encontró ningún virtio-blk en el bus PCI 0");
+        klogln!("blk: no se encontró ningún virtio-blk en el bus PCI 0");
     }
 }
 

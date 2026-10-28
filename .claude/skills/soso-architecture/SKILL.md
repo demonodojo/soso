@@ -64,7 +64,8 @@ soso/
 
 Skills de dominio: **`soso-dev`** (build/test), **`soso-gpu`**, **`soso-wifi`**,
 **`soso-live`** (USB/instalación), **`soso-update`** (OTA y vuelta atrás),
-**`soso-self-improvement`** (OpenCode / Txx / SI-*), **`soso-user-manual`**.
+**`soso-self-improvement`** (OpenCode / Txx / SI-*), **`soso-user-manual`**,
+**`soso-release`** (publicar versión: `/publicar-release`).
 
 Docs operativos: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md),
 [`docs/ESTADO.md`](../../docs/ESTADO.md), [`docs/HW-MATRIX.md`](../../docs/HW-MATRIX.md).
@@ -520,6 +521,19 @@ impacto:
    `write` sigue volcándose en el acto: el último `boot:` visible sigue
    acotando dónde se colgó el arranque. QEMU no mide nada de esto (KVM ignora
    el tipo de memoria del guest); la prueba visual es `cargo xtask fb-shot`.
+
+## Consola: pantalla vs log del kernel
+
+`println!` (`drivers/serial.rs`, `DualConsole`) escribe en el ring `logbuf`,
+serie y framebuffer. **`klog!` / `klogln!`** van al mismo ring y a serie, **sin**
+pintar en pantalla. `lx_printk` (nouveau, iwlwifi, …) usa ese canal.
+
+En placa sin COM1, la pantalla debe quedar legible: **`boot:`**, versión, una línea
+de resultado (`net: dhcp …`, `gpu: … detectada`, `wifi: conectado`) y fallos
+visibles. Progreso de drivers, EAPOL, hwscan línea a línea, etc. → `klogln!`.
+`hwscan: RED SIN DRIVER` sigue en pantalla. El detalle completo está en `dmesg`,
+`/var/log/kernel.log` y `SOSOLOG.TXT`. El fd 3 de userspace (`log`, `logln!`) es
+otro ring (`applog`), no sustituye al log del kernel.
 
 ## PCI: enumerar el bus no es una lectura pasiva
 

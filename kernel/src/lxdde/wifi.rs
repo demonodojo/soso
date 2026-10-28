@@ -189,11 +189,11 @@ fn vigilar_sondeo_gaps(now: u64, es_poll_wifi: bool) {
         let pid = crate::arch::percpu::current_pid();
         let (causa, extra) = causa_parada_sondeo(fails, fails_al_inicio);
         if extra > 0 {
-            crate::println!(
+            crate::klogln!(
                 "wifi: sondeo parado {gap} ms ({label}, pid={pid}, causa={causa} ~{extra} ms)"
             );
         } else {
-            crate::println!(
+            crate::klogln!(
                 "wifi: sondeo parado {gap} ms ({label}, pid={pid}, causa={causa})"
             );
         }
@@ -221,11 +221,11 @@ fn vigilar_sondeo_gaps(now: u64, es_poll_wifi: bool) {
     let max_gap = SONDEO_MAX_EN_VENTANA.load(core::sync::atomic::Ordering::Relaxed);
     let (causa, extra) = causa_parada_sondeo(fails, fails_al_inicio);
     if extra > 0 {
-        crate::println!(
+        crate::klogln!(
             "wifi: sondeo parado {n} veces en {SONDEO_RESUMEN_MS} ms (max {max_gap} ms, causa={causa} ~{extra} ms)"
         );
     } else {
-        crate::println!(
+        crate::klogln!(
             "wifi: sondeo parado {n} veces en {SONDEO_RESUMEN_MS} ms (max {max_gap} ms, causa={causa})"
         );
     }
@@ -255,7 +255,7 @@ pub fn vigilar_contadores(tx_err: u64) {
     }
     *u = (perdidas, tx_err, ahora);
     let sondeo_max = SONDEO_GAP_MAX_MS.load(core::sync::atomic::Ordering::Relaxed);
-    crate::println!(
+    crate::klogln!(
         "wifi: pérdidas tx_cola_llena={} tx_err={tx_err} rxq_llena={} eapolq_llena={} \
          rx_truncado={} rx_vid={} rx_datos_mal={} hcmd_lleno={} (rx_ok={} rb_multi={} caídas={} \
          sondeo_max={sondeo_max} ms)",
@@ -543,7 +543,7 @@ pub fn informar_dma_valor(valor: u64) {
         }
         let fin = r.pa + r.len;
         if (valor >= r.pa && valor < fin) || (page >= r.pa && page < fin) {
-            crate::println!(
+            crate::klogln!(
                 "lxdde: valor {valor:#x} cae en iwlwifi DMA pa={:#x} len={:#x}",
                 r.pa,
                 r.len

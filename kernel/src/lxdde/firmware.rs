@@ -43,7 +43,7 @@ pub extern "C" fn lx_request_firmware(
                 *out_data = data.as_ptr();
                 *out_len = len;
             }
-            crate::println!("lxdde-fw: cargado {} ({} bytes)", vfs_path, len);
+            crate::klogln!("lxdde-fw: cargado {} ({} bytes)", vfs_path, len);
             0
         }
         // Callar la ausencia a propósito: **todos** los llamantes usan esto

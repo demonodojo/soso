@@ -1,4 +1,4 @@
-//! Salida lx_emul → consola serie.
+//! Salida lx_emul → log del kernel (serie / dmesg), sin framebuffer.
 
 use core::ffi::c_char;
 
@@ -14,12 +14,12 @@ pub extern "C" fn lx_puts(s: *const c_char) {
         }
         let slice = core::slice::from_raw_parts(s as *const u8, len);
         if let Ok(txt) = core::str::from_utf8(slice) {
-            crate::print!("{txt}");
+            crate::klog!("{txt}");
         }
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn lx_putchar(c: u8) {
-    crate::print!("{}", c as char);
+    crate::klog!("{}", c as char);
 }

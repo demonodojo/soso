@@ -219,7 +219,7 @@ pub extern "C" fn lx_skb_put(skb: *mut LxSkBuff, len: u32) -> *mut u8 {
         let start = s.headroom + s.len;
         let add = len as usize;
         if start.saturating_add(add) > s.data.len() {
-            crate::println!(
+            crate::klogln!(
                 "lxdde: skb_put overflow start={start} +{add} cap={}",
                 s.data.len()
             );

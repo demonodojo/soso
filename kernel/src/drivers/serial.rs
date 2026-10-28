@@ -189,6 +189,20 @@ impl core::fmt::Write for DualConsole {
     }
 }
 
+/// Log del kernel sin framebuffer (dmesg, serie, SOSOLOG).
+struct KernelLogOnly;
+
+impl core::fmt::Write for KernelLogOnly {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        crate::drivers::logbuf::append(s.as_bytes());
+        if present() {
+            let mut port = SERIAL1.lock();
+            port.write_str(s)?;
+        }
+        Ok(())
+    }
+}
+
 #[doc(hidden)]
 pub fn _print(args: core::fmt::Arguments) {
     use core::fmt::Write;
@@ -202,6 +216,17 @@ pub fn _print(args: core::fmt::Arguments) {
     });
 }
 
+#[doc(hidden)]
+pub fn _kprint(args: core::fmt::Arguments) {
+    use core::fmt::Write;
+    let _guard = CONSOLE_LOCK.lock();
+    without_interrupts(|| {
+        KernelLogOnly
+            .write_fmt(args)
+            .expect("fallo escribiendo en log del kernel");
+    });
+}
+
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => ($crate::drivers::serial::_print(format_args!($($arg)*)));
@@ -211,4 +236,16 @@ macro_rules! print {
 macro_rules! println {
     () => ($crate::print!("\n"));
     ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
+}
+
+/// Como `print!`, pero no pinta en el framebuffer (solo logbuf y serie).
+#[macro_export]
+macro_rules! klog {
+    ($($arg:tt)*) => ($crate::drivers::serial::_kprint(format_args!($($arg)*)));
+}
+
+#[macro_export]
+macro_rules! klogln {
+    () => ($crate::klog!("\n"));
+    ($($arg:tt)*) => ($crate::klog!("{}\n", format_args!($($arg)*)));
 }

@@ -12,7 +12,8 @@ pub const CLOSE_TAB_W: f32 = 28.0;
 pub const BM_LIST_W: f32 = 36.0;
 pub const BM_STAR_W: f32 = 36.0;
 pub const MAX_TABS: usize = 4;
-pub const DEFAULT_TAB_URL: &str = "file:///etc/web-prueba.html";
+/// URL de pestaña nueva; en runtime usar [`crate::rutas::demo_tab_url`].
+pub const DEFAULT_TAB_URL: &str = "file:///var/paquetes/soso-web/share/ejemplo/web-prueba.html";
 
 #[derive(Clone, Debug, Default)]
 pub struct TabMeta {
@@ -111,7 +112,8 @@ impl Chrome {
         if !self.can_new_tab() {
             return false;
         }
-        self.tabs.push(TabMeta::new(String::from(DEFAULT_TAB_URL)));
+        self.tabs
+            .push(TabMeta::new(crate::rutas::demo_tab_url()));
         self.active = self.tabs.len() - 1;
         self.url_focus = false;
         self.field_focus = None;

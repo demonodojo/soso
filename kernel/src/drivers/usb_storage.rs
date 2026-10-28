@@ -7,7 +7,7 @@ use crate::arch::tsc;
 use crate::drivers::dma;
 use crate::drivers::pci;
 use crate::mm;
-use crate::println;
+use crate::{klogln, println};
 use alloc::vec::Vec;
 use spin::Mutex;
 use xhci_nostd::{set_allocator, set_delay_us, MassStorage, XhciController};
@@ -43,7 +43,7 @@ impl log::Log for SosoLog {
 
     fn log(&self, record: &log::Record) {
         if record.level() <= log::Level::Info {
-            println!("{}", record.args());
+            klogln!("{}", record.args());
         }
     }
 
@@ -78,7 +78,7 @@ fn pci_enable(bus: u8, dev: u8, func: u8) {
     let new = cmd | 0x6;
     pci::write16(bus, dev, func, 0x04, new);
     let after = pci::read16(bus, dev, func, 0x04);
-    println!("usb: PCI {:02x}:{:02x}.{func} cmd {cmd:#06x}→{after:#06x}", bus, dev);
+    klogln!("usb: PCI {:02x}:{:02x}.{func} cmd {cmd:#06x}→{after:#06x}", bus, dev);
 }
 
 fn is_xhci(d: &pci::PciDevice) -> bool {
@@ -89,7 +89,7 @@ fn try_probe_ctrl(
     xdev: &pci::PciDevice,
     bar_va: usize,
 ) -> Option<(XhciController, Option<MassStorage>)> {
-    println!(
+    klogln!(
         "usb: probando xHCI {:04x}:{:04x} PCI {:02x}:{:02x}.{}",
         xdev.vendor_id,
         xdev.device_id,
@@ -105,7 +105,7 @@ fn try_probe_ctrl(
     let mut ctrl = match unsafe { XhciController::init(bar_va) } {
         Ok(c) => c,
         Err(e) => {
-            println!(
+            klogln!(
                 "usb: xHCI {:04x}:{:04x} PCI {:02x}:{:02x}.{} omitido ({e})",
                 xdev.vendor_id, xdev.device_id, xdev.bus, xdev.device, xdev.function
             );
@@ -123,12 +123,12 @@ fn try_probe_ctrl(
         }
     }
     if ctrl.has_keyboard() {
-        println!(
+        klogln!(
             "usb: xHCI {:04x}:{:04x} — teclado HID (sin mass storage)",
             xdev.vendor_id, xdev.device_id
         );
     } else {
-        println!(
+        klogln!(
             "usb: xHCI {:04x}:{:04x} — sin mass storage",
             xdev.vendor_id, xdev.device_id
         );
@@ -165,7 +165,7 @@ pub fn init() {
         };
 
         if let Some(ref ms) = ms {
-            println!(
+            klogln!(
                 "usb: mass storage {:04x}:{:04x} — {} sectores ({} MiB)",
                 xdev.vendor_id,
                 xdev.device_id,
@@ -189,7 +189,7 @@ pub fn init() {
         println!("usb: ¿lineas «boot port N ccs=1» arriba? si todas ccs=0, UEFI suelto el bus");
         println!("usb: alternativa: instalar en disco con /dev/sda4/SOSOINSTALL/install-soso.sh");
     } else {
-        println!("usb: {n} xHCI activos ms={} kbd={}", has_ms, has_kbd);
+        klogln!("usb: {n} xHCI activos ms={} kbd={}", has_ms, has_kbd);
     }
 }
 
@@ -468,7 +468,7 @@ pub fn rescan() {
         }
         if host.ms.is_none() && ctrl.any_root_port_connected() {
             if let Some(ms) = ctrl.enumerate_usb_devices() {
-                println!(
+                klogln!(
                     "usb: mass storage (rescan) — {} sectores ({} MiB)",
                     ms.sectors,
                     ms.sectors * SECTOR as u64 / (1024 * 1024)

@@ -33,7 +33,7 @@ pub fn init() {
         gpu_path: false,
         last_result: 0.0,
     });
-    crate::println!(
+    crate::klogln!(
         "nvidia-compute: GSP={} SASS sm_86 saxpy {} B / matvec {} B; \
          sm_120 saxpy {} B / matvec {} B",
         gsp_status(),

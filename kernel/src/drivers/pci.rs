@@ -3,7 +3,7 @@
 use crate::arch::acpi;
 use crate::arch::apic;
 use crate::mm;
-use crate::println;
+use crate::klogln;
 use alloc::vec::Vec;
 use spin::Once;
 
@@ -29,7 +29,7 @@ pub fn init_ecam() {
                 bus_end: m.bus_end,
             }
         } else {
-            println!("pci: ECAM fallback {:#x} buses 0-0", ECAM_FALLBACK);
+            klogln!("pci: ECAM fallback {:#x} buses 0-0", ECAM_FALLBACK);
             EcamInfo {
                 base: ECAM_FALLBACK,
                 bus_start: 0,
@@ -255,10 +255,10 @@ pub fn devices() -> &'static [PciDevice] {
 pub fn init() {
     init_ecam();
     let devs = devices();
-    println!("pci: {} dispositivos", devs.len());
+    klogln!("pci: {} dispositivos", devs.len());
     for d in devs {
         if d.class == 0x03 {
-            println!(
+            klogln!(
                 "pci: GPU {:04x}:{:04x} bar0={:#x} ({} KiB) bar1={:#x} ({} MiB)",
                 d.vendor_id,
                 d.device_id,

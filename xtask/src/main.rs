@@ -17,6 +17,7 @@ mod heap_scan;
 mod heap_hueco;
 
 mod sal;
+mod pkg_pack;
 
 fn main() {
     as_user::restore_invoking_env();
@@ -163,6 +164,10 @@ fn main() {
         }
         "test-resize" => {
             test_resize::run();
+        }
+        "pkg-pack" => {
+            let args: Vec<String> = std::env::args().skip(2).collect();
+            pkg_pack::run(&args);
         }
         "check" => {
             check::run();
@@ -962,7 +967,6 @@ pub(crate) fn build_user() -> bool {
         "soso-install",
         "soso-hf",
         "soso-voz",
-        "soso-web",
         "ask-modelo",
         "soso-update",
         "soso-pkg",
@@ -998,6 +1002,9 @@ pub(crate) fn build_user() -> bool {
     }
     cambiado |= sal::install(&root);
     write_paquete_prueba(&root);
+    if let Err(e) = pkg_pack::materializar_soso_web_en_rootfs(&root) {
+        eprintln!("xtask: aviso: paquete soso-web: {e}");
+    }
     cambiado
 }
 

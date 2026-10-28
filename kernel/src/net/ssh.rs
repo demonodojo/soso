@@ -120,14 +120,14 @@ pub fn init() {
             SignKey::Ed25519(ed25519_dalek::SigningKey::from_bytes(&s))
         }
         _ => {
-            crate::println!("ssh: /etc/ssh_host_key ausente, generando host key efímera");
+            crate::klogln!("ssh: /etc/ssh_host_key ausente, generando host key efímera");
             SignKey::generate(sunset::KeyType::Ed25519, None)
                 .expect("no se pudo generar la host key ed25519")
         }
     };
     if let sunset::PubKey::Ed25519(pk) = key.pubkey() {
         let b = pk.key.0;
-        crate::println!(
+        crate::klogln!(
             "ssh: host key ed25519 {:02x}{:02x}{:02x}{:02x}…{:02x}{:02x}",
             b[0], b[1], b[2], b[3], b[30], b[31]
         );
@@ -139,11 +139,11 @@ pub fn init() {
         Some(k) if k.len() >= 32 => {
             let mut a = [0u8; 32];
             a.copy_from_slice(&k[..32]);
-            crate::println!("ssh: auth por clave pública ed25519 (/etc/authorized_key)");
+            crate::klogln!("ssh: auth por clave pública ed25519 (/etc/authorized_key)");
             Some(a)
         }
         _ => {
-            crate::println!("ssh: sin /etc/authorized_key: se rechazarán todos los logins");
+            crate::klogln!("ssh: sin /etc/authorized_key: se rechazarán todos los logins");
             None
         }
     };
@@ -218,7 +218,7 @@ fn reciclar_listen(
 ) {
     if guard.is_some() {
         teardown(slot, guard);
-        crate::println!("ssh[{slot}]: sesión cerrada ({motivo})");
+        crate::klogln!("ssh[{slot}]: sesión cerrada ({motivo})");
     }
     match socket.state() {
         tcp::State::Closed | tcp::State::TimeWait => {
@@ -277,7 +277,7 @@ pub fn poll(slot: usize, socket: &mut tcp::Socket) {
         drive(sess, socket).err()
     };
     if let Some(e) = drive_err {
-        crate::println!("ssh[{slot}]: sesión terminada ({e:?})");
+        crate::klogln!("ssh[{slot}]: sesión terminada ({e:?})");
         reciclar_listen(slot, socket, &mut guard, "error");
     }
 }
@@ -505,7 +505,7 @@ fn lanzar_shell(sess: &mut SshSession) {
     match task::spawn_console("/bin/sosh", "", 0, console) {
         Ok(pid) => {
             task::session_leader(pid, console);
-            crate::println!("ssh[{slot}]: sesión abierta, /bin/sosh pid {pid}");
+            crate::klogln!("ssh[{slot}]: sesión abierta, /bin/sosh pid {pid}");
             sess.shell_pid = Some(pid);
             sess.tuvo_shell = true;
         }

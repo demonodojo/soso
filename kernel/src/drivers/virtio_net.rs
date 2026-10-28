@@ -6,7 +6,7 @@
 use crate::arch::irq;
 use crate::drivers::pci;
 use crate::drivers::virtio_hal::HalImpl;
-use crate::println;
+use crate::klogln;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::{Mutex, Once};
@@ -56,7 +56,7 @@ fn probe() -> Option<[u8; 6]> {
         if virtio_device_type(&info) != Some(DeviceType::Network) {
             continue;
         }
-        println!("pci: virtio-net en {df} ({info})");
+        klogln!("pci: virtio-net en {df} ({info})");
         root.set_command(
             df,
             Command::IO_SPACE | Command::MEMORY_SPACE | Command::BUS_MASTER,
@@ -70,11 +70,11 @@ fn probe() -> Option<[u8; 6]> {
 
         // MSI-X después de crear el dispositivo (colas ya habilitadas).
         if let Err(e) = try_enable_msix(df) {
-            println!("net: MSI-X no disponible ({e}); modo polled");
+            klogln!("net: MSI-X no disponible ({e}); modo polled");
         }
         return Some(mac);
     }
-    println!("net: no se encontró ningún virtio-net");
+    klogln!("net: no se encontró ningún virtio-net");
     None
 }
 
@@ -94,7 +94,7 @@ fn try_enable_msix(df: DeviceFunction) -> Result<(), &'static str> {
     bind_virtio_msix_vectors(bus, dev, func, 0)?;
 
     MSI_ARMED.store(true, Ordering::SeqCst);
-    println!(
+    klogln!(
         "net: MSI-X armado vector={vector:#x} dest_apic={dest} entradas={}",
         msix.table_size
     );
@@ -186,9 +186,9 @@ fn find_virtio_common_cfg(bus: u8, dev: u8, func: u8) -> Option<(u64, u32)> {
 fn net_irq_handler() {
     let n = MSI_IRQ_COUNT.fetch_add(1, Ordering::Relaxed);
     if n == 0 {
-        // `println!` sí es seguro desde IRQ: el serie toma su candado siempre
+        // `klogln!` sí es seguro desde IRQ: el serie toma su candado siempre
         // bajo `without_interrupts`, así que nadie puede sostenerlo con IF=1.
-        println!("net: primera IRQ MSI-X recibida");
+        klogln!("net: primera IRQ MSI-X recibida");
     }
     if let Some(nic) = NET.get() {
         if let Some(mut nic) = nic.try_lock() {

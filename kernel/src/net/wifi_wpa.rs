@@ -121,13 +121,13 @@ pub fn connect_open(ssid: &str) -> i32 {
 /// Conecta a red WPA2-PSK: assoc + 4-way EAPOL + claves CCMP.
 pub fn connect_wpa2(ssid: &str, passphrase: &str) -> i32 {
     let pmk = pbkdf2_psk(passphrase, ssid);
-    crate::println!("wifi-wpa: PSK derivada para '{ssid}'");
+    crate::klogln!("wifi-wpa: PSK derivada para '{ssid}'");
     conectar(ssid, Some(&pmk))
 }
 
 fn conectar(ssid: &str, pmk: Option<&[u8; 32]>) -> i32 {
     if CONECTANDO.swap(true, Ordering::AcqRel) {
-        crate::println!("wifi-wpa: ya hay una conexión en curso");
+        crate::klogln!("wifi-wpa: ya hay una conexión en curso");
         return -1;
     }
     ENLACE.store(false, Ordering::Release);
@@ -154,7 +154,7 @@ fn conectar(ssid: &str, pmk: Option<&[u8; 32]>) -> i32 {
 fn asociar_abierta(ssid: &str) -> i32 {
     let rc = crate::lxdde::wifi::connect_open(ssid);
     if rc == 0 {
-        crate::println!("wifi-wpa: asociado a '{ssid}' (abierta)");
+        crate::klogln!("wifi-wpa: asociado a '{ssid}' (abierta)");
     }
     rc
 }
@@ -168,7 +168,7 @@ fn asociar_wpa2(ssid: &str, pmk: &[u8; 32]) -> i32 {
         crate::println!("wifi-wpa: fallo AUTH+ASSOC 802.11 (¿la red ofrece WPA2-PSK/CCMP?)");
         return -1;
     }
-    crate::println!("wifi-wpa: AUTH+ASSOC 802.11 ok, 4-way EAPOL");
+    crate::klogln!("wifi-wpa: AUTH+ASSOC 802.11 ok, 4-way EAPOL");
 
     let Some(sup) = four_way_handshake(pmk) else {
         // Asociada pero sin autorizar: que nadie confunda el enlace con red.
@@ -177,7 +177,7 @@ fn asociar_wpa2(ssid: &str, pmk: &[u8; 32]) -> i32 {
     };
     *SESION.lock() = Some(sup);
     crate::lxdde::wifi::set_authorized(true);
-    crate::println!("wifi-wpa: 4-way completado, enlace autorizado");
+    crate::klogln!("wifi-wpa: 4-way completado, enlace autorizado");
     0
 }
 
@@ -217,22 +217,22 @@ fn atender_eapol() {
         };
         let out = sup.on_ethernet(&buf[..n]);
         if let Some(d) = out.dropped {
-            crate::println!("wifi-wpa: EAPOL tras el 4-way descartada ({})", motivo(d));
+            crate::klogln!("wifi-wpa: EAPOL tras el 4-way descartada ({})", motivo(d));
             continue;
         }
         if out.send && crate::lxdde::wifi_send(sup.tx()).is_err() {
-            crate::println!("wifi-wpa: no se pudo contestar al EAPOL del AP");
+            crate::klogln!("wifi-wpa: no se pudo contestar al EAPOL del AP");
         }
         if let Some(tk) = out.install_tk
             && crate::lxdde::wifi::install_key(&tk, 0) != 0
         {
-            crate::println!("wifi-wpa: el firmware rechazó la PTK renegociada");
+            crate::klogln!("wifi-wpa: el firmware rechazó la PTK renegociada");
         }
         if let Some(g) = out.install_gtk {
             if crate::lxdde::wifi::install_gtk(&g.key, g.key_id as i32, &g.rsc) != 0 {
-                crate::println!("wifi-wpa: el firmware rechazó la GTK renovada");
+                crate::klogln!("wifi-wpa: el firmware rechazó la GTK renovada");
             } else {
-                crate::println!("wifi-wpa: GTK renovada (key id {})", g.key_id);
+                crate::klogln!("wifi-wpa: GTK renovada (key id {})", g.key_id);
             }
         }
     }
@@ -269,7 +269,7 @@ fn reintentar() {
         if now.saturating_sub(ult) >= 60_000 {
             ULTIMO_ESTADO_MS.store(now, Ordering::Relaxed);
             let rest = en.saturating_sub(now);
-            crate::println!(
+            crate::klogln!(
                 "wifi: sin enlace; próximo intento en {} s (fase {})",
                 rest / 1000,
                 crate::lxdde::wifi::phase()
@@ -285,7 +285,7 @@ fn reintentar() {
         return;
     };
     let ssid = core::str::from_utf8(&red.ssid[..red.len]).unwrap_or("");
-    crate::println!("wifi: reconectando a '{ssid}' (recover + scan/assoc/4-way)…");
+    crate::klogln!("wifi: reconectando a '{ssid}' (recover + scan/assoc/4-way)…");
     // El intento anterior pudo dejar MAC/STA/colas a medias: firmware nuevo.
     crate::lxdde::wifi::reset_link();
     if conectar(ssid, red.pmk.as_ref()) == 0 {
@@ -303,20 +303,20 @@ fn reintentar() {
 /// claves instaladas; sigue haciendo falta para la renovación de grupo.
 fn four_way_handshake(pmk: &[u8; 32]) -> Option<Supplicant> {
     let Some(sta) = crate::lxdde::wifi_mac() else {
-        crate::println!("wifi-wpa: sin MAC de la estación");
+        crate::klogln!("wifi-wpa: sin MAC de la estación");
         return None;
     };
     let Some(bssid) = crate::lxdde::wifi_bssid() else {
-        crate::println!("wifi-wpa: sin BSSID; ¿de verdad está asociada?");
+        crate::klogln!("wifi-wpa: sin BSSID; ¿de verdad está asociada?");
         return None;
     };
     let Some(rsn_ie) = crate::lxdde::wifi::rsn_ie() else {
-        crate::println!("wifi-wpa: el driver no expone el RSN IE anunciado");
+        crate::klogln!("wifi-wpa: el driver no expone el RSN IE anunciado");
         return None;
     };
     let mut snonce = [0u8; 32];
     if getrandom::getrandom(&mut snonce).is_err() {
-        crate::println!("wifi-wpa: sin fuente de aleatoriedad para la SNonce");
+        crate::klogln!("wifi-wpa: sin fuente de aleatoriedad para la SNonce");
         return None;
     }
 
@@ -337,12 +337,12 @@ fn four_way_handshake(pmk: &[u8; 32]) -> Option<Supplicant> {
         if let Some(d) = out.dropped {
             // Un descarte silencioso era lo que dejaba el handshake colgado sin
             // decir en qué punto.
-            crate::println!("wifi-wpa: EAPOL descartada ({})", motivo(d));
+            crate::klogln!("wifi-wpa: EAPOL descartada ({})", motivo(d));
         }
         if out.send {
             let frame = sup.tx();
             if crate::lxdde::wifi_send(frame).is_err() {
-                crate::println!("wifi-wpa: no se pudo enviar la respuesta EAPOL");
+                crate::klogln!("wifi-wpa: no se pudo enviar la respuesta EAPOL");
                 return None;
             }
             // El reloj se reinicia con cada avance real del diálogo.
@@ -351,20 +351,20 @@ fn four_way_handshake(pmk: &[u8; 32]) -> Option<Supplicant> {
         if let Some(tk) = out.install_tk
             && crate::lxdde::wifi::install_key(&tk, 0) != 0
         {
-            crate::println!("wifi-wpa: el firmware rechazó la clave de pares");
+            crate::klogln!("wifi-wpa: el firmware rechazó la clave de pares");
             return None;
         }
         if let Some(g) = out.install_gtk
             && crate::lxdde::wifi::install_gtk(&g.key, g.key_id as i32, &g.rsc) != 0
         {
-            crate::println!("wifi-wpa: el firmware rechazó la clave de grupo");
+            crate::klogln!("wifi-wpa: el firmware rechazó la clave de grupo");
             return None;
         }
         if sup.state() == State::Authorized {
             return Some(sup);
         }
     }
-    crate::println!(
+    crate::klogln!(
         "wifi-wpa: 4-way sin terminar en estado {:?} ({frames} tramas EAPOL)",
         sup.state()
     );
@@ -408,7 +408,7 @@ fn write_etc_wifi_conf(text: &str) -> bool {
     match crate::vfs::create_file(etc, "wifi.conf", text.as_bytes(), mtime) {
         Ok(_) => true,
         Err(e) => {
-            crate::println!("wifi: no pude escribir /etc/wifi.conf ({e:?})");
+            crate::klogln!("wifi: no pude escribir /etc/wifi.conf ({e:?})");
             false
         }
     }
@@ -419,7 +419,7 @@ fn write_etc_wifi_conf(text: &str) -> bool {
 /// ESP primero (`SOSOWIFI.TXT`); `/etc/wifi.conf` como respaldo e instalación.
 pub fn persist_credentials(ssid: &str, psk: Option<&str>) {
     if !credenciales_validas(ssid, psk) {
-        crate::println!("wifi: no se guardan credenciales (SSID o clave inválidos)");
+        crate::klogln!("wifi: no se guardan credenciales (SSID o clave inválidos)");
         return;
     }
     let text = formatear_redes(&promover(leer_redes(false), RedWifi::new(ssid, psk)));
@@ -427,17 +427,17 @@ pub fn persist_credentials(ssid: &str, psk: Option<&str>) {
     #[cfg(feature = "drv-live-disk")]
     match crate::drivers::wificonf::write_text(&text) {
         Ok(true) => {
-            crate::println!("wifi: credenciales en SOSOWIFI.TXT");
+            crate::klogln!("wifi: credenciales en SOSOWIFI.TXT");
             ok = true;
         }
         Ok(false) => {}
-        Err(()) => crate::println!("wifi: no se pudo escribir SOSOWIFI.TXT"),
+        Err(()) => crate::klogln!("wifi: no se pudo escribir SOSOWIFI.TXT"),
     }
     if write_etc_wifi_conf(&text) {
-        crate::println!("wifi: credenciales en /etc/wifi.conf");
+        crate::klogln!("wifi: credenciales en /etc/wifi.conf");
         ok = true;
     }
     if !ok {
-        crate::println!("wifi: no se pudieron guardar las credenciales");
+        crate::klogln!("wifi: no se pudieron guardar las credenciales");
     }
 }

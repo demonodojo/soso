@@ -1,8 +1,10 @@
 //! `cargo xtask release [--bump [patch|minor|major]] [--publish]`
 //!
 //! Empaqueta y opcionalmente publica en GitHub Releases. `--bump` sube
-//! `VERSION`, la commitea (solo ese fichero) y evita el desfase tag/número
-//! que deja `gh release create` si se publica con el fichero sucio.
+//! `VERSION` y la commitea (solo ese fichero). `--publish` empuja `HEAD` y
+//! crea la release con `--target` en ese commit: sin eso, `gh release create`
+//! etiqueta la punta de la rama por defecto del remoto, que todavía no tiene
+//! el número nuevo.
 
 use std::path::Path;
 use std::process::{Command, exit};
@@ -143,26 +145,77 @@ pub fn run(args: &[String]) {
         exit(1);
     }
 
+    empujar_head(&root);
+    let destino = sha_head(&root);
+    let titulo = format!("soso {ver}");
+    let notas = notes.to_str().unwrap();
+    let mut gh_args = argumentos_gh(&tag, &titulo, notas, &destino);
+    gh_args.push(manifest_path.to_str().unwrap().to_string());
+    gh_args.push(pack_path.to_str().unwrap().to_string());
+    gh_args.push(kernel_dst.to_str().unwrap().to_string());
     let status = Command::new("gh")
-        .args([
-            "release",
-            "create",
-            &tag,
-            "--title",
-            &format!("soso {ver}"),
-            "--notes-file",
-            notes.to_str().unwrap(),
-        ])
-        .arg(&manifest_path)
-        .arg(&pack_path)
-        .arg(&kernel_dst)
+        .args(&gh_args)
         .status()
         .expect("gh release create");
     if !status.success() {
-        eprintln!("release: gh release create falló");
+        eprintln!("release: gh release create falló; el commit ya está en origin");
         exit(status.code().unwrap_or(1));
     }
-    println!("release: publicado {tag}");
+    println!("release: publicado {tag} ({destino})");
+}
+
+/// Argumentos de `gh release create`. `--target` es el commit empujado:
+/// el valor por defecto de gh es la punta remota de la rama por defecto.
+fn argumentos_gh(tag: &str, titulo: &str, notas: &str, destino: &str) -> Vec<String> {
+    [
+        "release",
+        "create",
+        tag,
+        "--target",
+        destino,
+        "--title",
+        titulo,
+        "--notes-file",
+        notas,
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn empujar_head(root: &Path) {
+    println!("release: git push origin HEAD");
+    let status = Command::new("git")
+        .args(["-C", root.to_str().unwrap(), "push", "origin", "HEAD"])
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("release: git push: {e}");
+            exit(1);
+        });
+    if !status.success() {
+        eprintln!("release: git push falló; no creo la release. Sin --force.");
+        exit(status.code().unwrap_or(1));
+    }
+}
+
+fn sha_head(root: &Path) -> String {
+    let out = Command::new("git")
+        .args(["-C", root.to_str().unwrap(), "rev-parse", "HEAD"])
+        .output()
+        .unwrap_or_else(|e| {
+            eprintln!("release: git rev-parse: {e}");
+            exit(1);
+        });
+    if !out.status.success() {
+        eprintln!("release: git rev-parse falló");
+        exit(1);
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if sha.len() != 40 {
+        eprintln!("release: HEAD no es un SHA completo: {sha}");
+        exit(1);
+    }
+    sha
 }
 
 fn parse_args(args: &[String]) -> (bool, Option<Bump>) {
@@ -462,6 +515,19 @@ mod tests {
         let (publish, bump) = parse_args(&args(&[]));
         assert!(!publish);
         assert_eq!(bump, None);
+    }
+
+    #[test]
+    fn la_etiqueta_apunta_al_commit_empujado() {
+        let gh = argumentos_gh(
+            "v0.3.26",
+            "soso 0.3.26",
+            "NOTES.md",
+            "0123456789abcdef0123456789abcdef01234567",
+        );
+        let target = gh.iter().position(|a| a == "--target").unwrap();
+        assert_eq!(gh[target + 1], "0123456789abcdef0123456789abcdef01234567");
+        assert!(gh.iter().any(|a| a == "v0.3.26"));
     }
 
     #[test]

@@ -68,28 +68,28 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     if let Some((start, info)) = fb {
         drivers::fb::init(start, info);
         if let Some((w, h, mapped_h, stride, bpp, cell)) = drivers::fb::info_log() {
-            println!("fb: {w}x{h} mapped_h={mapped_h} stride={stride} bpp={bpp} cell={cell}px");
+            klogln!("fb: {w}x{h} mapped_h={mapped_h} stride={stride} bpp={bpp} cell={cell}px");
         }
         if let Some((grados, lw, lh)) = drivers::fb::rot_log() {
-            println!("fb: rot={grados} consola {lw}x{lh}");
+            klogln!("fb: rot={grados} consola {lw}x{lh}");
         }
         // Tipo de memoria del GOP: sin WC cada scroll en placa son millones
         // de stores UC serializados (ROG 2026-09-11).
         match drivers::fb::mem_log() {
-            Some((phys, Some(n))) => println!("fb: fís=0x{phys:x} WC {n} páginas"),
-            Some((phys, None)) => println!("fb: fís=0x{phys:x} sin WC (PAT no disponible)"),
+            Some((phys, Some(n))) => klogln!("fb: fís=0x{phys:x} WC {n} páginas"),
+            Some((phys, None)) => klogln!("fb: fís=0x{phys:x} sin WC (PAT no disponible)"),
             None => {}
         }
     }
 
     // En placa sin COM1 la consola es sólo el framebuffer y el teclado PS/2.
     if drivers::serial::present() {
-        println!("serial: COM1 0x3F8 presente");
+        klogln!("serial: COM1 0x3F8 presente");
     } else {
-        println!("serial: COM1 0x3F8 ausente (consola = framebuffer + PS/2)");
+        klogln!("serial: COM1 0x3F8 ausente (consola = framebuffer + PS/2)");
     }
 
-    println!(
+    klogln!(
         "memoria: {} MiB libres tras el heap",
         mm::FRAME_ALLOC.get().unwrap().lock().free_frames() * 4096 / (1024 * 1024)
     );
@@ -116,7 +116,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             arch::ioapic::init();
             arch::smp::init(r);
         }
-        None => println!("smp: sin RSDP del bootloader; monocore"),
+        None => klogln!("smp: sin RSDP del bootloader; monocore"),
     }
 
     // Reloj fino, antes de que nadie mida o espere. El tick va a 100 Hz, así que
@@ -130,7 +130,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     // en marcha. El timer LAPIC no pasa por IOAPIC (x2APIC sin remap).
     if arch::pit::ticks() == 0 {
         arch::apic::timer_periodico(100);
-        println!("apic: timer BSP (IRQ0 mudo)");
+        klogln!("apic: timer BSP (IRQ0 mudo)");
     }
     arch::rtc::init();
 
@@ -255,7 +255,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             let _ = drivers::drvlog::flush();
             drivers::hw_inv::guardar();
         } else {
-            println!("hwscan: inventario sin cambios");
+            klogln!("hwscan: inventario sin cambios");
         }
     }
     #[cfg(not(feature = "drv-live-disk"))]
