@@ -87,10 +87,12 @@ static ULTIMO_PASADA_MS: AtomicU64 = AtomicU64::new(0);
 static MAX_PASADA_MS: AtomicU64 = AtomicU64::new(0);
 static BOOT_ID: AtomicU64 = AtomicU64::new(0);
 
+#[cfg_attr(not(feature = "lxdde"), allow(dead_code))]
 pub fn ultimo_pasada_ms() -> u64 {
     ULTIMO_PASADA_MS.load(Ordering::Relaxed)
 }
 
+#[allow(dead_code)]
 pub fn max_pasada_ms() -> u64 {
     MAX_PASADA_MS.load(Ordering::Relaxed)
 }

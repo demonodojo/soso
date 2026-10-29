@@ -293,6 +293,15 @@ pub fn fix_asus_nkey_descriptor(rdesc: &mut [u8], vendor_id: u16, product_id: u1
     }
 }
 
+/// HID sin colección de teclado pero con ejes X/Y: es un puntero (p. ej. la
+/// `usb-tablet` de QEMU, protocolo 0). Leer sus informes con el layout boot de
+/// teclado convierte coordenadas en teclas (0x3D = F4).
+pub fn descriptor_solo_puntero(rdesc: &[u8], vendor_id: u16, product_id: u16) -> bool {
+    let mut fixed = rdesc.to_vec();
+    fix_asus_nkey_descriptor(&mut fixed, vendor_id, product_id);
+    parse_keyboard_layout(&fixed).is_none() && parse_pointer_layout(&fixed).is_some()
+}
+
 const HID_USAGE_PAGE_GENERIC_DESKTOP: u16 = 0x01;
 const HID_USAGE_PAGE_KEYBOARD: u16 = 0x07;
 const HID_USAGE_KEYBOARD: u16 = 0x06;
@@ -871,7 +880,14 @@ fn parse_pointer_layout(rdesc: &[u8]) -> Option<(Option<u8>, PointerLayoutKind)>
                         }
                     } else if report_size >= 8 {
                         let max = logical_max.max(0) as u32;
-                        if usage_min == 0x30 {
+                        if report_count >= 2 {
+                            field.x_bit_off = Some(bit_offset);
+                            field.x_bit_len = report_size as usize;
+                            field.x_log_max = max;
+                            field.y_bit_off = Some(bit_offset + report_size as usize);
+                            field.y_bit_len = report_size as usize;
+                            field.y_log_max = max;
+                        } else if usage_min == 0x30 {
                             field.x_bit_off = Some(bit_offset);
                             field.x_bit_len = report_size as usize;
                             field.x_log_max = max;
@@ -1121,6 +1137,39 @@ mod tests {
             0x0c, 0x95, 0x01, 0x81, 0x02, 0x09, 0x31, 0x15, 0x00, 0x26, 0xff, 0x0f, 0x75, 0x0c,
             0x95, 0x01, 0x81, 0x02, 0xc0,
         ]
+    }
+
+    /// `qemu_tablet_hid_report_descriptor` de `hw/usb/dev-hid.c` (interfaz 03:00:00).
+    fn qemu_usb_tablet_descriptor() -> Vec<u8> {
+        vec![
+            0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x09, 0x01, 0xa1, 0x00, 0x05, 0x09, 0x19, 0x01,
+            0x29, 0x03, 0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02, 0x95, 0x01,
+            0x75, 0x05, 0x81, 0x01, 0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x00, 0x26, 0xff,
+            0x7f, 0x35, 0x00, 0x46, 0xff, 0x7f, 0x75, 0x10, 0x95, 0x02, 0x81, 0x02, 0x05, 0x01,
+            0x09, 0x38, 0x15, 0x81, 0x25, 0x7f, 0x35, 0x00, 0x45, 0x00, 0x75, 0x08, 0x95, 0x01,
+            0x81, 0x06, 0xc0, 0xc0,
+        ]
+    }
+
+    #[test]
+    fn qemu_usb_tablet_no_es_teclado() {
+        assert!(descriptor_solo_puntero(&qemu_usb_tablet_descriptor(), 0x0627, 0x0001));
+        assert!(!descriptor_solo_puntero(&sample_18c6_descriptor(), 0x0b05, 0x18c6));
+    }
+
+    #[test]
+    fn qemu_usb_tablet_absoluto() {
+        let layout = PointerReportLayout::from_descriptor(&qemu_usb_tablet_descriptor())
+            .expect("layout");
+        let mut st = PointerState::new(layout);
+        // botones, X=0x1234, Y=0x2345 (LE), rueda
+        st.process_raw_report(&[0x01, 0x34, 0x12, 0x45, 0x23, 0x00]);
+        let ev = st.next_event().expect("event");
+        assert!(ev.absolute);
+        assert_eq!(ev.buttons, 1);
+        assert_eq!(ev.dx, 0x1234);
+        assert_eq!(ev.dy, 0x2345);
+        assert_eq!(ev.abs_x_max, 0x7fff);
     }
 
     #[test]

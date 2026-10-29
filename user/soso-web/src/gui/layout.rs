@@ -2,7 +2,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use soso_web_core::gfx_layout::{LaidBox, LaidKind};
+use soso_web_core::gfx_layout::LaidKind;
 use soso_web_core::html::{
     layout_gfx_document, parse_gfx_document, GfxForm, GfxFormField, Link, TEXT_ALIGN_CENTER,
 };

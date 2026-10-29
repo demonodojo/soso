@@ -430,7 +430,6 @@ fn modo_grafico(a: Args) -> u8 {
     tab_cache[0] = Some(page.clone());
     let mut input_st = input::InputState::default();
     let mut scroll = 0.0f32;
-    let mut hover: Option<usize> = None;
     let mut dirty = true;
     let wm = fb_dev.es_wm();
     let fb_h = fb_dev.info.height as f32;
@@ -551,7 +550,7 @@ fn modo_grafico(a: Args) -> u8 {
             }
         }
 
-        hover = hover_enlace(&page.doc, &page.boxes, input_st.mouse_y, scroll);
+        let hover = hover_enlace(&page.doc, &page.boxes, input_st.mouse_y, scroll);
 
         if input_st.click_left() {
             let hit = chrome::hit_chrome(input_st.mouse_x, input_st.mouse_y, fb_w);

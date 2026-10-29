@@ -186,7 +186,7 @@ fn parse_at_rule(css: &str, start: usize) -> Option<(Vec<StyleRule>, usize)> {
             while j < inner.len() && inner.as_bytes()[j].is_ascii_whitespace() {
                 j += 1;
             }
-            if let Some((mut rule, next)) = parse_rule(inner, j, media.clone()) {
+            if let Some((rule, next)) = parse_rule(inner, j, media.clone()) {
                 rules.push(rule);
                 j = next;
             } else {
@@ -506,7 +506,7 @@ pub fn cascade_node(
     }
 
     if let Some(inline) = inline_attr {
-        for (k, v, imp) in parse_declarations(inline) {
+        for (k, v, _imp) in parse_declarations(inline) {
             style.apply_declaration(&k, &v, true);
         }
     }
@@ -538,7 +538,7 @@ fn selector_matches(
     let mut node_idx = 0usize;
     part_idx -= 1;
     loop {
-        let (comb, part) = &chain.parts[part_idx];
+        let part = &chain.parts[part_idx].1;
         if node_idx >= ctx.len() {
             return false;
         }
@@ -550,16 +550,10 @@ fn selector_matches(
             return true;
         }
         part_idx -= 1;
-        let next_comb = chain.parts[part_idx].0;
-        node_idx = match next_comb {
-            Combinator::Child | Combinator::Descendant => node_idx + 1,
-            Combinator::Adjacent | Combinator::Sibling => node_idx + 1,
-            _ => node_idx + 1,
-        };
+        node_idx += 1;
         if node_idx >= ctx.len() {
             return false;
         }
-        let _ = comb;
     }
 }
 

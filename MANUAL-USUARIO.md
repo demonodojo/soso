@@ -837,8 +837,10 @@ el **touchpad** interno entra por **HID-over-I2C** (`PNP0C50` tras el controlado
 
 Atajos habituales: **Alt+Intro** (terminal nueva), **Alt+Tab** (cambiar ventana),
 **Alt+Q** (cerrar), **Alt+T** (flotante / mosaico), **Alt+W** (abrir **soso-web** en ventana),
-**Alt+Mayús+E** (volver a consola). En la barra superior del escritorio, el botón **Web**
-(lado izquierdo) abre el mismo navegador de prueba.
+**Alt+Mayús+E** (volver a consola). La barra superior del escritorio tiene un lanzador:
+el botón **Aplicaciones** despliega un menú con **Terminal**, **Navegador web** y
+**Salir del escritorio**, y los accesos directos **Terminal** y **Web** abren lo mismo de
+un clic. Un clic fuera del menú lo cierra.
 **Ctrl+Alt+Retroceso** recupera la consola si el gestor deja de responder (PS/2 y teclado USB); el kernel mata al dueño de pantalla y repinta la consola de texto.
 
 Arranque recomendado para navegar en ventana:

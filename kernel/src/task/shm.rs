@@ -19,7 +19,6 @@ struct Segment {
 }
 
 static SEGMENTS: Mutex<Vec<Option<Segment>>> = Mutex::new(Vec::new());
-static NEXT_ID: Mutex<u64> = Mutex::new(1);
 
 fn align_len(len: u64) -> Result<u64, i64> {
     if len == 0 || len > SHM_MAX_BYTES {
@@ -51,12 +50,6 @@ pub fn create(len: u64) -> Result<u64, i64> {
     if segs.len() >= SHM_MAX_SEGMENTS && !segs.iter().any(|s| s.is_none()) {
         return Err(-soso_abi::EMFILE);
     }
-    let id = {
-        let mut next = NEXT_ID.lock();
-        let id = *next;
-        *next = next.saturating_add(1);
-        id
-    };
     let seg = Segment {
         frames,
         len,

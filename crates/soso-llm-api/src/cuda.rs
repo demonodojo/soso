@@ -267,8 +267,6 @@ pub struct CudaGpu {
     x_dev: u64,
     /// Búferes del prefill por bloques de expertos MoE: vectores del bloque, índices de token, activaciones y salidas.
     blq: [(u64, usize); 14],
-    f_gateup_n: CuFunction,
-    f_down_n: CuFunction,
     f_iq_matmul_n: CuFunction,
     f_gateup_multi: CuFunction,
     f_combinar: CuFunction,
@@ -302,9 +300,8 @@ pub struct CudaGpu {
     kv_gen: u64,
     /// Diagnóstico: funciones que no se lanzan (`SOSO_DECODE_SALTAR`).
     saltar: Vec<usize>,
-    /// Los expertos que no están residentes se suben de paso, por trozos, a `stg` (no se cachean).
+    /// Los expertos que no están residentes se suben de paso, por trozos, al doble búfer (no se cachean).
     flujo_expertos: bool,
-    stg: (u64, usize),
     /// Doble búfer del paso de expertos: dispositivo, anclado en el host y stream de copia (sin bloqueo con el stream por defecto).
     stg2: [(u64, usize); 2],
     pin: [(usize, usize); 2],
@@ -349,8 +346,8 @@ impl CudaGpu {
             let f_gemm_q4 = func(m4, "gemm_q4_0_tc")?;
             let mod_iq = cargar(PTX_IQ)?;
             let f_iq = func(mod_iq, "iq_matvec")?;
-            let f_gateup_n = func(mod_iq, "iq_gateup_n")?;
-            let f_down_n = func(mod_iq, "iq_down_n")?;
+            func(mod_iq, "iq_gateup_n")?;
+            func(mod_iq, "iq_down_n")?;
             let f_iq_matmul_n = func(mod_iq, "iq_matmul_mma")?;
             let f_attn_prefill = func(mod_iq, "attn_prefill_f16")?;
             let f_gateup_multi = func(mod_iq, "iq_gateup_mma")?;
@@ -391,8 +388,6 @@ impl CudaGpu {
                 losa_libre: 0,
                 x_dev: 0,
                 blq: [(0, 0); 14],
-                f_gateup_n,
-                f_down_n,
                 f_iq_matmul_n,
                 f_attn_prefill,
                 f_gateup_multi,
@@ -412,7 +407,6 @@ impl CudaGpu {
                 kv_gen: 0,
                 saltar: Vec::new(),
                 flujo_expertos: false,
-                stg: (0, 0),
                 stg2: [(0, 0); 2],
                 pin: [(0, 0); 2],
                 stream_copia: std::ptr::null_mut(),
@@ -1273,7 +1267,6 @@ impl CudaGpu {
             }
             if bytes > 0 && bytes + tam > TROZO_PASO {
                 trozos.push((std::mem::take(&mut cur), bytes));
-                bytes = 0;
                 // el experto se vuelve a colocar al principio del trozo nuevo
                 let mut desp2 = desp;
                 let mut t2 = 0usize;

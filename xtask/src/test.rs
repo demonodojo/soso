@@ -2858,7 +2858,7 @@ fn ssh_soso_wm_prueba(key: &Path, ssh_port: u16) -> Result<(), String> {
     let texto = ssh_guion_inner(
         key,
         ssh_port,
-        "soso-wm --prueba; echo WM_EXIT=$?\nexit\n",
+        "soso-wm --prueba && echo WM_EXIT=0\nexit\n",
         Duration::from_secs(120),
         true,
         None,

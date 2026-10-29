@@ -330,7 +330,10 @@ pub fn info() -> GpuInfo {
         let n = core::cmp::min(label.len(), phase.len() - 1);
         phase[..n].copy_from_slice(&label[..n]);
     }
+    #[cfg(feature = "lxdde")]
     let mut pad = [0u8; 4];
+    #[cfg(not(feature = "lxdde"))]
+    let pad = [0u8; 4];
     if g.vendor == GPU_VENDOR_NVIDIA {
         #[cfg(feature = "lxdde")]
         {
@@ -880,6 +883,8 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
             .and_then(|b| b.as_ref())
             .and_then(|b| b.device_va());
         drop(g);
+        #[cfg(not(feature = "lxdde"))]
+        let _ = (w, h, pitch, rgba, rt_va);
         #[cfg(feature = "lxdde")]
         {
             if !crate::lxdde::gfx3d_ready() {

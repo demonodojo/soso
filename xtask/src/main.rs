@@ -1520,6 +1520,13 @@ pub(crate) fn qemu_smp() -> String {
     std::env::var("SOSO_QEMU_SMP").unwrap_or_else(|_| "1".into())
 }
 
+/// Backend gráfico de QEMU (`-display`). Default `none` (CI y consola serie).
+/// Escritorio / `soso-wm`: `SOSO_QEMU_DISPLAY=gtk` o `sdl` (requiere `qemu-system-gui`
+/// y sesión gráfica con `DISPLAY` o `WAYLAND_DISPLAY`).
+pub(crate) fn qemu_display() -> String {
+    std::env::var("SOSO_QEMU_DISPLAY").unwrap_or_else(|_| "none".into())
+}
+
 /// `/dev/kvm` legible por el usuario actual.
 pub(crate) fn kvm_usable() -> bool {
     let kvm = Path::new("/dev/kvm");
@@ -2161,6 +2168,7 @@ pub(crate) fn run_qemu(img: &Path, gdb: bool) {
         build_user();
         mkfs(false)
     };
+    let display = qemu_display();
     let mut qemu = Command::new("qemu-system-x86_64");
     qemu.args(["-machine", "q35"])
         // -cpu max: expone RDRAND, que la cripto de sunset (getrandom con
@@ -2176,9 +2184,17 @@ pub(crate) fn run_qemu(img: &Path, gdb: bool) {
     apply_qemu_nic(&mut qemu);
     apply_qemu_gpu(&mut qemu);
     apply_qemu_audio(&mut qemu);
+    if display != "none" {
+        if std::env::var("DISPLAY").is_err() && std::env::var("WAYLAND_DISPLAY").is_err() {
+            eprintln!(
+                "xtask: aviso — SOSO_QEMU_DISPLAY={display} pero no hay DISPLAY ni WAYLAND_DISPLAY"
+            );
+        }
+        println!("xtask: QEMU -display {display}");
+    }
     // mon:stdio multiplexa monitor y serie: Ctrl-A X sale, Ctrl-A C monitor
     qemu.args(["-serial", "mon:stdio"])
-        .args(["-display", "none"])
+        .args(["-display", &display])
         // Dispositivo de salida para tests: out 0xf4 -> exit((valor << 1) | 1)
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
         .arg("-no-reboot");

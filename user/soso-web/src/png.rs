@@ -22,7 +22,6 @@ pub fn decode_png(data: &[u8]) -> Result<DecodedImage, ()> {
     let mut pos = 8usize;
     let mut width = 0u32;
     let mut height = 0u32;
-    let mut bit_depth = 0u8;
     let mut color_type = 0u8;
     let mut idat: Vec<u8> = Vec::new();
     while pos + 12 <= data.len() {
@@ -40,7 +39,7 @@ pub fn decode_png(data: &[u8]) -> Result<DecodedImage, ()> {
             }
             width = u32::from_be_bytes(chunk[0..4].try_into().map_err(|_| ())?);
             height = u32::from_be_bytes(chunk[4..8].try_into().map_err(|_| ())?);
-            bit_depth = chunk[8];
+            let bit_depth = chunk[8];
             color_type = chunk[9];
             if bit_depth != 8 || (color_type != 2 && color_type != 6) {
                 return Err(());

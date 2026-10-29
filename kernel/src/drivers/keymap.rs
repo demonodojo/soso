@@ -113,10 +113,6 @@ impl KeymapState {
         self.ctrl
     }
 
-    pub fn shift(&self) -> bool {
-        self.shift
-    }
-
     pub fn alt_left(&self) -> bool {
         self.alt_left
     }

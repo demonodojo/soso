@@ -98,6 +98,11 @@ Estado y matriz hardware: [`docs/ESTADO.md`](../../docs/ESTADO.md), [`docs/HW-MA
 
 **Exit QEMU:** `Ctrl-A X` (not Ctrl-C).
 
+**Ventana gráfica (soso-wm):** por defecto `-display none`. Con sesión gráfica en el host:
+`SOSO_QEMU_DISPLAY=gtk SOSO_QEMU_USB_TABLET=1 cargo xtask run` (paquete `qemu-system-gui`; alternativa `sdl`).
+Debe imprimir `xtask: QEMU -display gtk`. El teclado del escritorio va a la ventana QEMU, no al SSH.
+**F4** en sosh dispara dictado (`error mic 7` sin `SOSO_QEMU_AUDIO=1`).
+
 > **GPU / L6 (NVIDIA nouveau/GSP):** G1→G5 **GO** en GB205 — skill **`soso-gpu`**.
 > **WiFi Intel:** AX211/AX200, hostcheck y VFIO — skill **`soso-wifi`**.
 > **Live USB / install / OTA:** particiones, ESP, shim — skill **`soso-live`**.

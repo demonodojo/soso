@@ -1,0 +1,117 @@
+import "ventanas.sal"
+
+fn lanz_nada() -> Int
+    0
+
+fn lanz_menu() -> Int
+    1
+
+fn lanz_terminal() -> Int
+    2
+
+fn lanz_web() -> Int
+    3
+
+fn lanz_salir() -> Int
+    4
+
+fn lanz_margen() -> Int
+    8
+
+fn lanz_separacion() -> Int
+    4
+
+fn lanz_n_botones() -> Int
+    3
+
+fn lanz_boton_texto(i: Int) -> String ! alloc
+    if i == 0
+        d"Aplicaciones"
+    elsif i == 1
+        d"Terminal"
+    else
+        d"Web"
+
+fn lanz_boton_accion(i: Int) -> Int
+    if i == 0
+        lanz_menu()
+    elsif i == 1
+        lanz_terminal()
+    else
+        lanz_web()
+
+fn lanz_boton_ancho(i: Int) -> Int ! alloc
+    str_len(lanz_boton_texto(i)) * 8 + 2 * lanz_margen()
+
+fn lanz_boton_x0(i: Int) -> Int ! alloc
+    x = 0
+    k = 0
+    while k < i
+        x = x + lanz_boton_ancho(k) + lanz_separacion()
+        k = k + 1
+    x
+
+fn lanz_hit_barra(x: Int, y: Int) -> Int ! alloc
+    acc = lanz_nada()
+    if y >= 0
+        if y < barra_alto()
+            i = 0
+            while i < lanz_n_botones()
+                x0 = lanz_boton_x0(i)
+                if x >= x0
+                    if x < x0 + lanz_boton_ancho(i)
+                        acc = lanz_boton_accion(i)
+                i = i + 1
+    acc
+
+fn lanz_menu_n() -> Int
+    3
+
+fn lanz_menu_texto(k: Int) -> String ! alloc
+    if k == 0
+        d"Terminal"
+    elsif k == 1
+        d"Navegador web"
+    else
+        d"Salir del escritorio"
+
+fn lanz_menu_accion(k: Int) -> Int
+    if k == 0
+        lanz_terminal()
+    elsif k == 1
+        lanz_web()
+    else
+        lanz_salir()
+
+fn lanz_menu_item_alto() -> Int
+    22
+
+fn lanz_menu_x0() -> Int ! alloc
+    lanz_boton_x0(0)
+
+fn lanz_menu_y0() -> Int
+    barra_alto()
+
+fn lanz_menu_ancho() -> Int ! alloc
+    w = 0
+    k = 0
+    while k < lanz_menu_n()
+        w = max(w, str_len(lanz_menu_texto(k)) * 8)
+        k = k + 1
+    w + 2 * lanz_margen()
+
+fn lanz_menu_alto() -> Int
+    lanz_menu_n() * lanz_menu_item_alto()
+
+fn lanz_menu_item(x: Int, y: Int) -> Int ! alloc
+    if ventana_contiene(x, y, lanz_menu_x0(), lanz_menu_y0(), lanz_menu_ancho(), lanz_menu_alto()) == 0
+        -1
+    else
+        (y - lanz_menu_y0()) / lanz_menu_item_alto()
+
+fn lanz_hit_menu(x: Int, y: Int) -> Int ! alloc
+    k = lanz_menu_item(x, y)
+    if k < 0
+        lanz_nada()
+    else
+        lanz_menu_accion(k)

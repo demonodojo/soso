@@ -1,5 +1,6 @@
 //! Abstracción de lectura de artefactos (tests host y clientes).
 
+#[cfg(feature = "std")]
 use alloc::string::String;
 use alloc::vec::Vec;
 

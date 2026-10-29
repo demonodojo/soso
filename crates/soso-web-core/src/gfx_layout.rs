@@ -1,13 +1,12 @@
 //! Motor de layout: flujo, flex, grid, float y position.
 
 use alloc::string::{String, ToString};
-use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::box_tree::{BoxChild, BoxDocument, BoxNode};
 use crate::computed::{
-    resolve_length, resolve_length_opt, AlignItems, Clear, ComputedStyle, Display, Float,
-    FlexDirection, GridTrackSize, JustifyContent, Length, Position,
+    resolve_length, resolve_length_opt, ComputedStyle, Display, Float, FlexDirection,
+    GridTrackSize, Length, Position,
 };
 use crate::html::TEXT_ALIGN_CENTER;
 
@@ -54,7 +53,6 @@ pub struct LayoutResult {
 struct LayoutCtx<'a> {
     doc: &'a BoxDocument,
     out: Vec<LaidBox>,
-    viewport_w: f32,
     float_left: f32,
     float_right: f32,
     depth: usize,
@@ -65,7 +63,6 @@ pub fn layout_tree(doc: &BoxDocument, viewport_w: f32, pad_x: f32) -> LayoutResu
     let mut ctx = LayoutCtx {
         doc,
         out: Vec::new(),
-        viewport_w: content_w,
         float_left: 0.0,
         float_right: 0.0,
         depth: 0,
@@ -111,7 +108,7 @@ fn layout_node(
         Display::Block | Display::None => layout_block(ctx, &node, idx, x0, y, inner_w),
     };
 
-    let mut box_h = taken;
+    let box_h = taken;
     if node.style.position == Position::Absolute || node.style.position == Position::Fixed {
         let ax = x0 + offset_len(&node.style.left, inner_w);
         let ay = y + offset_len(&node.style.top, containing_h.unwrap_or(box_h));
@@ -170,7 +167,7 @@ fn layout_flex(ctx: &mut LayoutCtx, node: &BoxNode, idx: usize, x: f32, y: f32, 
     let cx = x + pad.left;
     let cw = (w - pad.left - pad.right).max(1.0);
     let gap = node.style.gap;
-    let mut child_idxs = element_children(ctx, idx);
+    let child_idxs = element_children(ctx, idx);
     if child_idxs.is_empty() {
         return pad.top + pad.bottom + node.style.font_size;
     }
@@ -286,7 +283,7 @@ fn layout_inline_box(ctx: &mut LayoutCtx, node: &BoxNode, idx: usize, x: f32, y:
 fn layout_flow_children(
     ctx: &mut LayoutCtx,
     node: &BoxNode,
-    idx: usize,
+    _idx: usize,
     x: f32,
     mut y: f32,
     w: f32,
@@ -462,7 +459,7 @@ fn element_children(ctx: &LayoutCtx, idx: usize) -> Vec<usize> {
 fn layout_absolute_children(
     ctx: &mut LayoutCtx,
     node: &BoxNode,
-    idx: usize,
+    _idx: usize,
     x: f32,
     y: f32,
     w: f32,

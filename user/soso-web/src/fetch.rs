@@ -129,15 +129,6 @@ pub fn fetch_bytes(spec: &str) -> Result<Vec<u8>, FetchError> {
     Ok(buf)
 }
 
-/// Carga HTML desde HTTPS o ruta/`file://`.
-pub fn fetch_page(spec: &str) -> Result<(String, String), FetchError> {
-    let p = fetch_page_ex(spec)?;
-    if p.status != 200 {
-        return Err(FetchError::Status(p.status));
-    }
-    Ok((p.html, p.base))
-}
-
 pub fn fetch_page_ex(spec: &str) -> Result<PageBody, FetchError> {
     if spec == bookmarks::SCHEME {
         return Ok(PageBody {

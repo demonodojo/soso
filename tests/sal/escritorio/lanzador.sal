@@ -1,0 +1,56 @@
+import "../../../user/sal/escritorio/lanzador.sal"
+
+fn botones_ok() -> Int ! alloc
+    ok = 0
+    i = 0
+    while i < lanz_n_botones()
+        if ok == 0
+            x0 = lanz_boton_x0(i)
+            x1 = x0 + lanz_boton_ancho(i)
+            cx = (x0 + x1) / 2
+            cy = barra_alto() / 2
+            if lanz_hit_barra(cx, cy) != lanz_boton_accion(i)
+                ok = 10 + i
+            if lanz_hit_barra(cx, barra_alto()) != lanz_nada()
+                ok = 20 + i
+            if i > 0
+                if x0 < lanz_boton_x0(i - 1) + lanz_boton_ancho(i - 1)
+                    ok = 30 + i
+                if lanz_hit_barra(x0 - 1, cy) != lanz_nada()
+                    ok = 40 + i
+        i = i + 1
+    ok
+
+fn menu_ok() -> Int ! alloc
+    ok = 0
+    k = 0
+    while k < lanz_menu_n()
+        if ok == 0
+            cy = lanz_menu_y0() + k * lanz_menu_item_alto() + lanz_menu_item_alto() / 2
+            cx = lanz_menu_x0() + lanz_menu_ancho() / 2
+            if lanz_hit_menu(cx, cy) != lanz_menu_accion(k)
+                ok = 50 + k
+            if str_len(lanz_menu_texto(k)) * 8 + 2 * lanz_margen() > lanz_menu_ancho()
+                ok = 60 + k
+        k = k + 1
+    ok
+
+fn main() -> Int ! alloc
+    if lanz_boton_accion(0) != lanz_menu()
+        1
+    elsif lanz_hit_barra(lanz_boton_x0(0) + 2, 2) != lanz_menu()
+        2
+    elsif botones_ok() != 0
+        botones_ok()
+    elsif menu_ok() != 0
+        menu_ok()
+    elsif lanz_hit_menu(lanz_menu_x0() + lanz_menu_ancho(), lanz_menu_y0() + 2) != lanz_nada()
+        3
+    elsif lanz_hit_menu(lanz_menu_x0() + 2, lanz_menu_y0() + lanz_menu_alto()) != lanz_nada()
+        4
+    elsif lanz_hit_menu(lanz_menu_x0() + 2, lanz_menu_y0() - 1) != lanz_nada()
+        5
+    elsif lanz_menu_accion(lanz_menu_n() - 1) != lanz_salir()
+        6
+    else
+        0

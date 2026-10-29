@@ -192,7 +192,7 @@ fn gdn_bloque<S: TensorSource>(
         source.load_f32(&format!("{prefix}.ssm_dt"), &mut dt)?;
         source.load_f32(&format!("{prefix}.ssm_a"), &mut a)?;
         source.load_f32(&format!("{prefix}.ssm_norm"), &mut norm_w)?;
-        let mut crudo = |source: &mut S, name: &str| -> Result<(usize, usize, u8, usize), ()> {
+        let crudo = |source: &mut S, name: &str| -> Result<(usize, usize, u8, usize), ()> {
             let v = source.tensor_view(name)?;
             Ok((v.bytes.as_ptr() as usize, v.bytes.len(), v.dtype, v.elems))
         };
@@ -392,7 +392,7 @@ fn atencion_bloque<S: TensorSource>(
     xs: &[f32],
     salida: &mut [f32],
     bs: &mut BlockScratch,
-    s: &mut LayerScratch,
+    _s: &mut LayerScratch,
     kv: &mut LayerKv,
     source: &mut S,
     par: &dyn RowParallel,

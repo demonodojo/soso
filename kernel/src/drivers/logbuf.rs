@@ -42,6 +42,7 @@ pub fn append(bytes: &[u8]) {
 }
 
 /// Borra del ring una contraseña u otro secreto que haya quedado en el eco.
+#[cfg_attr(not(feature = "lxdde"), allow(dead_code))]
 pub fn tachar(secreto: &[u8]) {
     if secreto.is_empty() {
         return;

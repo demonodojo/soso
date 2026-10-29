@@ -20,8 +20,9 @@ use crate::device::{
     USB_REQ_SET_CONFIGURATION, USB_TYPE_CLASS, USB_TYPE_STANDARD,
 };
 use crate::hid::{
-    KeyEvent, KeyboardReportLayout, KeyboardState, PointerEvent, PointerReportLayout,
-    PointerState, HID_PROTOCOL_BOOT, HID_REQ_SET_IDLE, HID_REQ_SET_PROTOCOL,
+    descriptor_solo_puntero, KeyEvent, KeyboardReportLayout, KeyboardState, PointerEvent,
+    PointerReportLayout, PointerState, HID_PROTOCOL_BOOT, HID_REQ_SET_IDLE,
+    HID_REQ_SET_PROTOCOL,
 };
 use crate::mass_storage::MassStorage;
 use crate::dma::delay_us;
@@ -2018,9 +2019,18 @@ impl XhciController {
             }
             KeyboardReportLayout::boot()
         } else if rdesc_len > 0 {
-            self.get_hid_report_descriptor(slot_id, iface_num, rdesc_len)
-                .map(|rdesc| KeyboardReportLayout::from_descriptor(&rdesc, vendor, product))
-                .unwrap_or_else(KeyboardReportLayout::boot)
+            match self.get_hid_report_descriptor(slot_id, iface_num, rdesc_len) {
+                Some(rdesc) if descriptor_solo_puntero(&rdesc, vendor, product) => {
+                    log::info!(
+                        "xhci: slot={} iface={} es puntero sin teclas; no se registra como teclado",
+                        slot_id,
+                        iface_num
+                    );
+                    return;
+                }
+                Some(rdesc) => KeyboardReportLayout::from_descriptor(&rdesc, vendor, product),
+                None => KeyboardReportLayout::boot(),
+            }
         } else {
             KeyboardReportLayout::boot()
         };

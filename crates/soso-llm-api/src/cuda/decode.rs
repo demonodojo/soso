@@ -858,7 +858,7 @@ impl CudaGpu {
             let ysh = if m.sh.is_some() { bf(b::YSH) } else { 0 };
             if m.en_gpu && !Self::salta("moe") {
                 // producto entero (dp4a) si los formatos son los del modelo: gate/up IQ2_S, down IQ3_XXS o IQ4_XS, ffn = 512
-                let dp4a = m.dg == 22 && m.du == 22 && (m.dd == 18 || m.dd == 23) && m.ffn == 512 && h % 256 == 0 && std::env::var_os("SOSO_DECODE_DP4A").is_some(); // opt-in hasta validar los ids de extremo a extremo con el modelo real
+                let dp4a = m.dg == 22 && m.du == 22 && (m.dd == 18 || m.dd == 23) && m.ffn == 512 && h % 256 == 0 && std::env::var_os("SOSO_DECODE_SIN_DP4A").is_none();
                 let crono = std::env::var_os("SOSO_DECODE_CRONO").is_some();
                 if dp4a {
                     self.dec_quant_a(d, bf(b::XN), h, b::EXQ, b::EXD)?;
@@ -960,7 +960,7 @@ impl CudaGpu {
         // bytes por superbloque y fila
         let (bytes_g, rb_g) = (82usize, (h / 256) * 82);
         let (bytes_d, rb_d) = (if dd == 18 { 98usize } else { 136usize }, (ffn / 256) * if dd == 18 { 98 } else { 136 });
-        let mut matriz = |filas: usize, rb: usize, bytes: usize, aleat: &mut dyn FnMut() -> u64| -> Vec<u8> {
+        let matriz = |filas: usize, rb: usize, bytes: usize, aleat: &mut dyn FnMut() -> u64| -> Vec<u8> {
             let mut v: Vec<u8> = (0..filas * rb).map(|_| (aleat() >> 24) as u8).collect();
             // la escala f16 de cada superbloque: un valor pequeño y finito
             for sb in 0..filas * rb / bytes {

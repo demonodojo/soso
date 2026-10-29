@@ -916,10 +916,6 @@ impl Write for FbWriter {
     }
 }
 
-pub fn set_graphics_mode(on: bool) {
-    let _ = set_graphics_mode_for(crate::task::current_pid(), on);
-}
-
 /// Entra o sale del modo gráfico. Solo un proceso vivo puede ser dueño.
 pub fn set_graphics_mode_for(pid: u64, on: bool) -> Result<(), i64> {
     use soso_abi::EBUSY;
@@ -971,14 +967,6 @@ pub fn release_owner_if(pid: u64) {
 
 pub fn framebuffer_owner() -> u64 {
     FB_OWNER.load(Ordering::Relaxed)
-}
-
-pub fn kill_framebuffer_owner() {
-    let pid = FB_OWNER.load(Ordering::Relaxed);
-    if pid != 0 {
-        crate::task::note_framebuffer_cad();
-        crate::task::kick_scheduler();
-    }
 }
 
 fn pixel_format_tag(fmt: PixelFormat) -> u8 {
@@ -1070,6 +1058,7 @@ pub fn present_from_user_rect(buf: &[u8], x: u32, y: u32, w: u32, h: u32) -> Res
 
 /// F1: rellena el shadow (p. ej. CE desde VRAM) y vuelca al GOP en una sola
 /// copia WC. `frame_bytes` no puede superar el shadow lógico.
+#[cfg_attr(not(feature = "lxdde"), allow(dead_code))]
 pub fn present_shadow_after<F, R>(frame_bytes: usize, fill: F) -> Result<R, ()>
 where
     F: FnOnce(*mut u8, u64) -> Result<R, ()>,

@@ -5,9 +5,10 @@ import "ventanas.sal"
 import "tabla.sal"
 import "term.sal"
 import "fuente.sal"
+import "lanzador.sal"
 
 fn st_size() -> Int
-    264
+    272
 
 fn st_cli_fd() -> Int
     0
@@ -107,6 +108,9 @@ fn st_grab_x() -> Int
 
 fn st_grab_y() -> Int
     256
+
+fn st_menu() -> Int
+    264
 
 fn wm_cursor_w() -> Int
     12
@@ -264,6 +268,7 @@ fn st_nuevo(evt_buf: Int, msg_buf: Int) -> Int ! alloc
     _dk = st_set(p, st_drag_kind(), 0)
     _gx = st_set(p, st_grab_x(), 0)
     _gy = st_set(p, st_grab_y(), 0)
+    _mn = st_set(p, st_menu(), 0)
     p
 
 fn wm_cargar_psf(st: Int) -> Int ! io, alloc
@@ -294,9 +299,6 @@ fn wm_term_rows(wh: Int) -> Int
         1
     else
         r
-
-fn wm_barra_web_ancho() -> Int
-    48
 
 fn wm_lanzar_web() -> Int ! io, alloc
     spawn_io_4(d"/var/paquetes/soso-web/bin/soso-web", d"--grafico", d"--local", d"/var/paquetes/soso-web/share/ejemplo/web-prueba.html", 0, 0, 0, fd_kernel_log())
@@ -337,15 +339,85 @@ fn prueba_web_pixel_ok(tab: Int, i: Int) -> Int ! alloc
                 else
                     0
 
-fn wm_pintar_barra(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
-    _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, barra_alto(), wm_color_barra())
+fn wm_color_texto_barra() -> Int
+    color_rgb(200, 220, 255)
+
+fn wm_color_boton() -> Int
+    color_rgb(64, 68, 92)
+
+fn wm_color_boton_activo() -> Int
+    color_rgb(88, 104, 144)
+
+fn wm_color_menu() -> Int
+    color_rgb(40, 42, 58)
+
+fn wm_color_menu_sel() -> Int
+    color_rgb(72, 88, 120)
+
+fn wm_texto(st: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int, s: String, x: Int, y: Int, fg: Int, bg: Int) -> Int ! alloc
     psf = st_get(st, st_psf())
     plen = st_get(st, st_psf_len())
     if psf > 0
-        _w = fuente_dibujar(psf, plen, compos, clen, stride, bpp, fmt, 87, color_rgb(200, 220, 255), wm_color_barra(), 8, 4)
-        _e = fuente_dibujar(psf, plen, compos, clen, stride, bpp, fmt, 101, color_rgb(200, 220, 255), wm_color_barra(), 16, 4)
-        _b = fuente_dibujar(psf, plen, compos, clen, stride, bpp, fmt, 98, color_rgb(200, 220, 255), wm_color_barra(), 24, 4)
+        n = str_len(s)
+        j = 0
+        while j < n
+            _d = fuente_dibujar(psf, plen, compos, clen, stride, bpp, fmt, str_char(s, j), fg, bg, x + j * 8, y)
+            j = j + 1
+    0
+
+fn wm_pintar_barra(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
+    _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, barra_alto(), wm_color_barra())
+    i = 0
+    while i < lanz_n_botones()
+        x0 = lanz_boton_x0(i)
+        bg = wm_color_boton()
+        if i == 0
+            if st_get(st, st_menu()) != 0
+                bg = wm_color_boton_activo()
+        _b = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, x0, 2, x0 + lanz_boton_ancho(i), barra_alto() - 2, bg)
+        _t = wm_texto(st, compos, clen, stride, bpp, fmt, lanz_boton_texto(i), x0 + lanz_margen(), 4, wm_color_texto_barra(), bg)
+        i = i + 1
     _d = wm_marcar_dirty(st, 0, 0, sw, barra_alto())
+    0
+
+fn wm_pintar_menu(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
+    if st_get(st, st_menu()) != 0
+        x0 = lanz_menu_x0()
+        y0 = lanz_menu_y0()
+        x1 = x0 + lanz_menu_ancho()
+        alto = lanz_menu_item_alto()
+        _f = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, x0, y0, x1, y0 + lanz_menu_alto(), wm_color_boton())
+        sel = lanz_menu_item(st_get(st, st_mx()), st_get(st, st_my()))
+        k = 0
+        while k < lanz_menu_n()
+            iy = y0 + k * alto
+            bg = wm_color_menu()
+            if k == sel
+                bg = wm_color_menu_sel()
+            _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, x0 + 1, iy + 1, x1 - 1, iy + alto - 1, bg)
+            _t = wm_texto(st, compos, clen, stride, bpp, fmt, lanz_menu_texto(k), x0 + lanz_margen(), iy + 3, wm_color_texto_barra(), bg)
+            k = k + 1
+        _d = wm_marcar_dirty(st, x0, y0, x1, y0 + lanz_menu_alto())
+    0
+
+fn wm_menu_poner(st: Int, abierto: Int) -> Int ! alloc
+    _s = st_set(st, st_menu(), abierto)
+    x0 = lanz_menu_x0()
+    y0 = lanz_menu_y0()
+    _d = wm_marcar_dirty(st, x0, y0, x0 + lanz_menu_ancho(), y0 + lanz_menu_alto())
+    0
+
+fn wm_ejecutar(st: Int, accion: Int, sw: Int, sh: Int) -> Int ! io, alloc
+    if accion == lanz_menu()
+        _m = wm_menu_poner(st, 1 - st_get(st, st_menu()))
+    else
+        _c = wm_menu_poner(st, 0)
+        if accion == lanz_terminal()
+            _t = wm_abrir_terminal(st, sw, sh)
+        if accion == lanz_web()
+            _w = wm_lanzar_web()
+        if accion == lanz_salir()
+            _s = st_set(st, st_salir(), 1)
     0
 
 fn wm_hit_test(st: Int, x: Int, y: Int) -> Int ! alloc
@@ -463,6 +535,7 @@ fn wm_compose(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bp
         i = z_get(z, k)
         _r = wm_repintar_slot(st, tab, i, compos, clen, sw, sh, stride, bpp, fmt)
         k = k + 1
+    _men = wm_pintar_menu(st, compos, clen, sw, sh, stride, bpp, fmt)
     _cur = wm_pintar_cursor(st, compos, clen, sw, sh, stride, bpp, fmt)
     0
 
@@ -817,10 +890,15 @@ fn wm_raton_btn(st: Int, x: Int, y: Int, botones: Int, compos: Int, clen: Int, s
         _d = st_set(st, st_drag_ix(), -1)
         _k = st_set(st, st_drag_kind(), 0)
     if botones != 0
+        if st_get(st, st_menu()) != 0
+            acc = lanz_hit_menu(x, y)
+            if acc == lanz_nada()
+                acc = lanz_hit_barra(x, y)
+            _em = wm_ejecutar(st, acc, sw, sh)
+            return 0
         if y < barra_alto()
-            if x < wm_barra_web_ancho()
-                _lw = wm_lanzar_web()
-                return 0
+            _eb = wm_ejecutar(st, lanz_hit_barra(x, y), sw, sh)
+            return 0
         i = wm_hit_test(st, x, y)
         if i >= 0
             _f = wm_foco_a(st, i)

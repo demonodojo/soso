@@ -72,11 +72,13 @@ pub fn flush_checkpoint() {
 }
 
 /// Duración del último volcado completo a la ESP (ms).
+#[cfg_attr(not(feature = "lxdde"), allow(dead_code))]
 pub fn ultimo_volcado_ms() -> u64 {
     ULTIMO_VOLCADO_MS.load(Ordering::Relaxed)
 }
 
 /// Máximo observado desde el arranque.
+#[allow(dead_code)]
 pub fn max_volcado_ms() -> u64 {
     MAX_VOLCADO_MS.load(Ordering::Relaxed)
 }

@@ -73,6 +73,7 @@ pub fn free_pages(paddr: PhysAddr, pages: usize) {
 }
 
 /// Libera DMA a cuarentena: envenena y no vuelve a `alloc_pages`.
+#[cfg_attr(not(feature = "lxdde"), allow(dead_code))]
 pub fn free_pages_cuarentena(paddr: PhysAddr, pages: usize) {
     let pages = pages.max(1);
     let bytes = pages * PAGE_SIZE;

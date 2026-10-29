@@ -441,7 +441,7 @@ pub fn resolve_length(len: Length, containing: f32, _font_size: f32) -> f32 {
     .max(0.0)
 }
 
-pub fn resolve_length_opt(len: Length, containing: f32, font_size: f32) -> Option<f32> {
+pub fn resolve_length_opt(len: Length, containing: f32, _font_size: f32) -> Option<f32> {
     match len {
         Length::Auto => None,
         Length::Px(n) => Some(n),
