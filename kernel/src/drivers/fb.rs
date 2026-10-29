@@ -942,6 +942,7 @@ pub fn set_graphics_mode_for(pid: u64, on: bool) -> Result<(), i64> {
     if let Some(st) = guard.as_mut() {
         erase_cursor(st);
         draw_cursor(st);
+        flush_all(st);
     }
     Ok(())
 }
@@ -964,13 +965,19 @@ pub fn release_owner_if(pid: u64) {
     if let Some(st) = guard.as_mut() {
         erase_cursor(st);
         draw_cursor(st);
+        flush_all(st);
     }
+}
+
+pub fn framebuffer_owner() -> u64 {
+    FB_OWNER.load(Ordering::Relaxed)
 }
 
 pub fn kill_framebuffer_owner() {
     let pid = FB_OWNER.load(Ordering::Relaxed);
     if pid != 0 {
-        crate::task::kill_pid(pid);
+        crate::task::note_framebuffer_cad();
+        crate::task::kick_scheduler();
     }
 }
 

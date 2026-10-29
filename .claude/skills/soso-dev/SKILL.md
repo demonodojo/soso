@@ -33,7 +33,7 @@ Automejora (Txx, SI-*, OpenCode, `soso-improve`): skill
 esa ruta desde aquí.
 
 Escritorio: `cargo xtask sal-build` ( `soso-wm`, `demo-cliente` ); pruebas guest
-`soso-wm --prueba` / `--prueba-web` (sin `&` en sosh; `--prueba` debe imprimir `soso-wm: prueba OK`). Host:
+`soso-wm --prueba` / `--prueba-web` / `--prueba-layout` (sin `&` en sosh; `--prueba` debe imprimir `soso-wm: prueba OK`; `--prueba-layout` debe imprimir `soso-wm: prueba-layout OK`). Host:
 `cargo xtask check` (incluye `tests/sal/escritorio/probar_host.py`).
 
 Guía operativa: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md).

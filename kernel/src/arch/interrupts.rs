@@ -54,6 +54,9 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     idt[PIC_1_OFFSET + 1].set_handler_fn(kbd_pic_handler);
     instalar_excepciones_restantes(&mut idt);
     install_pic_fallback_handlers(&mut idt);
+    // IRQ12 auxiliar PS/2. El fallback solo hacía EOI y el byte se quedaba
+    // en el i8042; se instala después para sustituir ese vector.
+    idt[PIC_2_OFFSET + 4].set_handler_fn(mouse_pic_handler);
     crate::arch::irq::install_stubs(&mut idt);
     idt
 });
@@ -256,7 +259,6 @@ pic_fallback_handlers! {
     41 => pic_vec_41,
     42 => pic_vec_42,
     43 => pic_vec_43,
-    44 => pic_vec_44,
     45 => pic_vec_45,
     46 => pic_vec_46,
     47 => pic_vec_47,
@@ -621,6 +623,15 @@ extern "x86-interrupt" fn kbd_pic_handler(stack_frame: InterruptStackFrame) {
     });
     unsafe {
         PICS.lock().notify_end_of_interrupt(PIC_1_OFFSET + 1);
+    }
+}
+
+extern "x86-interrupt" fn mouse_pic_handler(stack_frame: InterruptStackFrame) {
+    crate::arch::irq::con_contexto(desde_usuario(&stack_frame), || {
+        crate::drivers::kbd::handle_irq()
+    });
+    unsafe {
+        PICS.lock().notify_end_of_interrupt(PIC_2_OFFSET + 4);
     }
 }
 

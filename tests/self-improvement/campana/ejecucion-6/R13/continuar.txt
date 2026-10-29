@@ -1,5 +1,0 @@
-  base de «campana-R13» publicada (generación 0)
-  ejecutado: r-R13/lanzar/0
-  ejecutado: r-R13/exportar/0
-  ejecutado: r-R13/validar/0
-tarea: Rechazado

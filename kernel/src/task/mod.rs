@@ -160,6 +160,9 @@ static FG_SSH: [AtomicU64; crate::net::ssh::SSH_SESSIONS] =
     [const { AtomicU64::new(0) }; crate::net::ssh::SSH_SESSIONS];
 static SERIAL_SIGINT: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
+/// Ctrl+Alt+Retroceso: el handler de teclado no mata procesos; lo hace el scheduler.
+static FB_CAD: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 /// Contexto de usuario para reanudar con iretq. El orden de los 15
 /// registros coincide con los push del timer_isr (memoria ascendente).
@@ -313,6 +316,10 @@ pub fn note_serial_sigint() {
     SERIAL_SIGINT.store(true, core::sync::atomic::Ordering::Relaxed);
 }
 
+pub fn note_framebuffer_cad() {
+    FB_CAD.store(true, core::sync::atomic::Ordering::Relaxed);
+}
+
 /// Marca un proceso para morir. No libera su espacio aquí. Si está
 /// `Running` en un core, solo pone `kill_pending` para que ese core lo
 /// convierta en Zombie al desalojar (marcar Zombie mientras sigue en ring 3
@@ -378,29 +385,25 @@ fn signal_one(procs: &mut Vec<Process>, pid: u64, sig: u8) -> bool {
         return true;
     }
     if sig == soso_abi::SIGINT as u8 || sig == soso_abi::SIGTERM as u8 {
-        // T70: sólo SIGINT interrumpe (`EINTR`): es lo que hace Ctrl+C sobre el
-        // prompt de la shell sin matarla. soso no tiene manejadores, así que un
-        // SIGTERM que sólo despertara al proceso lo dejaría seguir como si nada
-        // y quien lo manda (el timeout de una herramienta) vería un exit normal.
-        let bloqueado = sig == soso_abi::SIGINT as u8
-            && matches!(
+        // T70: SIGTERM siempre mata (también bloqueados). SIGINT sólo interrumpe
+        // (`EINTR`) a la shell líder en primer plano; el resto del grupo en primer
+        // plano muere con 130 para que sosh recupere el prompt.
+        if sig == soso_abi::SIGINT as u8 && es_shell_en_primer_plano(&procs[idx]) {
+            let bloqueado = matches!(
                 procs[idx].state,
                 State::WaitingTty { .. }
                     | State::WaitingSocket { .. }
                     | State::WaitingPipe { .. }
                     | State::Sleeping(_)
             );
-        if bloqueado {
-            procs[idx].sigint_pendiente = false;
-            procs[idx].ctx.rax = (-soso_abi::EINTR) as u64;
-            procs[idx].state = State::Runnable;
-            return true;
-        }
-        // `ask` es un builtin: la shell es el grupo en primer plano y, mientras
-        // copia la respuesta, está `Running`. Matarla cierra la sesión SSH y no
-        // corta la pregunta. La siguiente syscall devuelve `EINTR` y sosh suelta
-        // el socket; askd (otro grupo) se entera y para.
-        if sig == soso_abi::SIGINT as u8 && es_shell_en_primer_plano(&procs[idx]) {
+            if bloqueado {
+                procs[idx].sigint_pendiente = false;
+                procs[idx].ctx.rax = (-soso_abi::EINTR) as u64;
+                procs[idx].state = State::Runnable;
+                return true;
+            }
+            // `ask`: la shell copia la respuesta en `Running`; la siguiente
+            // syscall devuelve `EINTR` y sosh suelta el socket.
             procs[idx].sigint_pendiente = true;
             return true;
         }
@@ -498,6 +501,17 @@ fn poll_pending_tty_signals(procs: &mut Vec<Process>) {
         let pgid = Console::Serial.fg_pgid();
         if pgid != 0 {
             signal_pgid(procs, pgid, soso_abi::SIGINT as u8);
+        }
+    }
+    if FB_CAD.swap(false, core::sync::atomic::Ordering::Relaxed) {
+        let owner = crate::drivers::fb::framebuffer_owner();
+        if owner != 0 {
+            let pgid = procs
+                .iter()
+                .find(|p| p.pid == owner)
+                .map(|p| p.pgid)
+                .unwrap_or(owner);
+            signal_pgid(procs, pgid, soso_abi::SIGKILL as u8);
         }
     }
 }

@@ -925,6 +925,11 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 ssh_soso_wm_prueba(key, port)
             });
         });
+        filter.if_step(sid, "soso-wm: prueba-layout", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "soso-wm: prueba-layout", || {
+                ssh_soso_wm_prueba_layout(key, port)
+            });
+        });
         filter.if_step(sid, "soso-wm: demo-cliente", || {
             report.paso_ssh_sys(&mut qemu, slot, sid, "soso-wm: demo-cliente", || {
                 ssh_soso_wm_demo_cliente(key, port)
@@ -2863,6 +2868,24 @@ fn ssh_soso_wm_prueba(key: &Path, ssh_port: u16) -> Result<(), String> {
     }
     if !texto.contains("WM_EXIT=0") {
         return Err(format!("soso-wm --prueba no devolvió 0: {texto:?}"));
+    }
+    Ok(())
+}
+
+fn ssh_soso_wm_prueba_layout(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let texto = ssh_guion_inner(
+        key,
+        ssh_port,
+        "soso-wm --prueba-layout && echo LAYOUT_OK\nexit\n",
+        Duration::from_secs(120),
+        true,
+        None,
+    )?;
+    if !texto.contains("soso-wm: prueba-layout OK") {
+        return Err(format!("soso-wm --prueba-layout sin línea OK: {texto:?}"));
+    }
+    if !texto.contains("LAYOUT_OK") {
+        return Err(format!("soso-wm --prueba-layout falló (exit distinto de 0): {texto:?}"));
     }
     Ok(())
 }

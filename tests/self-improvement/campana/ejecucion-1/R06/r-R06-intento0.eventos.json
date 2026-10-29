@@ -1,1 +1,0 @@
-{"detalle":"entorno: el servidor contestó Some(429): {\"error\":{\"message\":\"generacion en curso\",\"type\":\"invalid_request_error\",\"code\":\"busy\"}}","eventos":[],"fin":"ErrorModelo","herramientas":0,"intento":0,"limites_en_vivo":true,"log_truncado":false,"pasos":1,"tokens_entrada":0,"tokens_salida":0}

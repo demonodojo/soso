@@ -823,20 +823,23 @@ soso-wm                 # gestor de ventanas (terminales y clientes gráficos)
 soso-wm --prueba        # autoprueba en RAM; debe imprimir `soso-wm: prueba OK`
 soso-wm --prueba-web    # cliente gráfico mínimo; imprime `soso-wm: prueba-web OK`
 soso-wm --fotograma     # un instante de escritorio y vuelve a la consola; imprime `soso-wm: fotograma OK`
-
-En modo gráfico el teclado lo consume el WM (Ctrl+C de la shell no mata el proceso).
-Salir: **Ctrl+C** dentro del WM, o **Alt+Mayús+E** (vuelta a consola). **Alt+Intro** abre una terminal.
-
-El WM dibuja un **puntero** en pantalla. Entrada: ratón **PS/2** (aux) y **USB HID**
-(relativo; p. ej. `-device usb-mouse` en QEMU). El **touchpad** del portátil solo funciona
-si el firmware lo expone como PS/2 o como HID USB relativo (no I2C-HID interno).
+soso-wm --prueba-layout # mosaico, arrastre y geometría flotante; imprime `soso-wm: prueba-layout OK`
 ```
+
+En modo gráfico el teclado lo consume el WM, pero **Ctrl+C** también envía SIGINT al grupo en primer plano (p. ej. cierra `soso-wm` y devuelve el prompt de la shell que lo lanzó).
+Salir: **Ctrl+C**, **Alt+Mayús+E** (vuelta a consola), o **Alt+Intro** para una terminal.
+
+El WM dibuja un **puntero** en pantalla. Entrada: ratón **PS/2** (aux), **USB HID** relativo
+(p. ej. `usb-mouse` en QEMU) e informes **HID absolutos** (coordenadas de pantalla). En placa,
+el **touchpad** interno entra por **HID-over-I2C** (`PNP0C50` tras el controlador ACPI
+`AMDI0010`). En QEMU no hay ese bus; para probar el mismo parser absoluto usa
+`SOSO_QEMU_USB_TABLET=1` (añade `usb-tablet` al xHCI).
 
 Atajos habituales: **Alt+Intro** (terminal nueva), **Alt+Tab** (cambiar ventana),
 **Alt+Q** (cerrar), **Alt+T** (flotante / mosaico), **Alt+W** (abrir **soso-web** en ventana),
 **Alt+Mayús+E** (volver a consola). En la barra superior del escritorio, el botón **Web**
 (lado izquierdo) abre el mismo navegador de prueba.
-**Ctrl+Alt+Retroceso** recupera la consola si el gestor deja de responder.
+**Ctrl+Alt+Retroceso** recupera la consola si el gestor deja de responder (PS/2 y teclado USB); el kernel mata al dueño de pantalla y repinta la consola de texto.
 
 Arranque recomendado para navegar en ventana:
 

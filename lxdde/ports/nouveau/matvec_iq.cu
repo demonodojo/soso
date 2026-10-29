@@ -1733,3 +1733,157 @@ extern "C" __global__ void __launch_bounds__(256) dec_matvec_f32(const float *w,
         y[row] = acc;
     }
 }
+
+/* ---------------------------------------------------------------------------------------------------------------------
+ * Expertos de decode con producto entero (como el mmvq de llama.cpp): cada lane procesa un sub-bloque de 8 pesos (`item`) y los multiplica con
+ * 8 valores int8 de la activación cuantizada (`__dp4a`). Los items de una fila son independientes: el compilador los desenrolla y las cargas de
+ * pesos se solapan (antes cada lane decodificaba 32 pesos a f32 con una cadena de cargas dependientes).
+ * ------------------------------------------------------------------------------------------------------------------ */
+/* 4 bits de signo → máscara de bytes 0x00 / 0xFF (byte i = bit i). */
+__device__ __forceinline__ unsigned iq_mascara4(unsigned bits)
+{
+    return (((bits & 0xFu) * 0x00204081u) & 0x01010101u) * 0xFFu;
+}
+
+/* IQ2_S: item (u = sub-bloque de 32, l = grupo de 8). `b` = superbloque de 82 B; `ib = u & 7`. */
+__device__ __forceinline__ float iq2s_item(const unsigned char *b, int ib, int l, int2 xv, float xdu)
+{
+    float d = iq_f16(b);
+    const unsigned char *qs = b + 2;
+    const unsigned char *qh = b + 66;
+    unsigned s = b[74 + ib];
+    float sc = (float)(l < 2 ? (s & 0xf) : (s >> 4));
+    unsigned long long g = IQ2S_GRID_D[qs[ib * 4 + l] | (((int)qh[ib] << (8 - 2 * l)) & 0x300)];
+    unsigned sg = qs[32 + ib * 4 + l];
+    unsigned m0 = iq_mascara4(sg), m1 = iq_mascara4(sg >> 4);
+    int g0 = __vsub4((int)((unsigned)g ^ m0), (int)m0);
+    int g1 = __vsub4((int)((unsigned)(g >> 32) ^ m1), (int)m1);
+    int sum = __dp4a(g1, xv.y, __dp4a(g0, xv.x, 0));
+    return d * (0.5f + sc) * 0.25f * xdu * (float)sum;
+}
+
+/* IQ3_XXS: item (u, l). `b` = superbloque de 98 B; `ib = u & 7`. */
+__device__ __forceinline__ float iq3xxs_item(const unsigned char *b, int ib, int l, int2 xv, float xdu)
+{
+    float d = iq_f16(b);
+    const unsigned char *qs = b + 2;
+    const unsigned char *ga = qs + 64 + 4 * ib; /* sin alinear (bloques de 98 B): se lee por bytes */
+    unsigned aux = (unsigned)ga[0] | ((unsigned)ga[1] << 8) | ((unsigned)ga[2] << 16) | ((unsigned)ga[3] << 24);
+    float db = d * (0.5f + (float)(aux >> 28)) * 0.5f;
+    unsigned sg = KSIGNS_IQ2XS_D[(aux >> (7 * l)) & 127];
+    unsigned g1 = IQ3XXS_GRID_D[qs[ib * 8 + 2 * l]];
+    unsigned g2 = IQ3XXS_GRID_D[qs[ib * 8 + 2 * l + 1]];
+    unsigned m0 = iq_mascara4(sg), m1 = iq_mascara4(sg >> 4);
+    int w0 = __vsub4((int)(g1 ^ m0), (int)m0);
+    int w1 = __vsub4((int)(g2 ^ m1), (int)m1);
+    int sum = __dp4a(w1, xv.y, __dp4a(w0, xv.x, 0));
+    return db * xdu * (float)sum;
+}
+
+/* 8 nibbles (4 bytes) → 2 × 4 int8 de la tabla `kvalues_iq4nl` (.x: nibbles bajos, .y: altos), con `__byte_perm` (igual que llama.cpp). */
+__device__ __forceinline__ int2 iq4_tabla16(unsigned q4)
+{
+    const unsigned t0 = 0xbfad9881u, t1 = 0xf6eaddcfu, t2 = 0x26190d01u, t3 = 0x71594535u;
+    unsigned tmp[2];
+    const unsigned sel = 0x32103210u | ((q4 & 0x88888888u) >> 1);
+#pragma unroll
+    for (unsigned i = 0; i < 2; i++) {
+        unsigned sh = 16 * i;
+        unsigned lo = __byte_perm(t0, t1, q4 >> sh);
+        unsigned hi = __byte_perm(t2, t3, q4 >> sh);
+        tmp[i] = __byte_perm(lo, hi, sel >> sh);
+    }
+    return make_int2((int)__byte_perm(tmp[0], tmp[1], 0x6420), (int)__byte_perm(tmp[0], tmp[1], 0x7531));
+}
+
+/* IQ4_XS: item (u, w): 4 bytes de qs (8 pesos: 4 bajos + 4 altos). `b` = superbloque de 136 B; `xq32` = activación del sub-bloque (32 int8). */
+__device__ __forceinline__ float iq4xs_item(const unsigned char *b, int ib, int w, const signed char *xq32, float xdu)
+{
+    float d = iq_f16(b);
+    unsigned sh = (unsigned)b[2] | ((unsigned)b[3] << 8);
+    unsigned sl = b[4 + (ib >> 1)];
+    int ls = (int)((sl >> (4 * (ib & 1))) & 0xf) | (int)(((sh >> (2 * ib)) & 3u) << 4);
+    float dl = d * (float)(ls - 32);
+    unsigned q4 = *(const unsigned *)(b + 8 + 16 * ib + 4 * w);
+    int2 v = iq4_tabla16(q4);
+    int xa = *(const int *)(xq32 + 4 * w);
+    int xb = *(const int *)(xq32 + 16 + 4 * w);
+    int sum = __dp4a(v.y, xb, __dp4a(v.x, xa, 0));
+    return dl * xdu * (float)sum;
+}
+
+/* gate/up + SwiGLU de los `top_k` expertos (gate y up IQ2_S). grid = (ceil(ffn / 8), 1, top_k); 256 hilos = 8 warps = 8 filas. xq/xd: activación cuantizada. */
+extern "C" __global__ void __launch_bounds__(256) dec_moe_gateup_s(const unsigned long long *tg, const unsigned long long *tu, const int *idx,
+                                                                   const signed char *xq, const float *xd, float *act, int ffn, int h, long rbg, long rbu)
+{
+    int slot = (int)blockIdx.z;
+    int e = idx[slot];
+    int warp = (int)threadIdx.x >> 5;
+    int lane = (int)threadIdx.x & 31;
+    int row = (int)blockIdx.x * 8 + warp;
+    if (row >= ffn) {
+        return;
+    }
+    const unsigned char *wg = (const unsigned char *)tg[e] + (long)row * rbg;
+    const unsigned char *wu = (const unsigned char *)tu[e] + (long)row * rbu;
+    int nitems = h >> 3;
+    float ag = 0.0f, au = 0.0f;
+#pragma unroll 4
+    for (int t = lane; t < nitems; t += 32) {
+        int u = t >> 2, l = t & 3;
+        int sb = u >> 3, ib = u & 7;
+        int2 xv = *(const int2 *)(xq + (long)t * 8);
+        float xdu = xd[u];
+        ag += iq2s_item(wg + (long)sb * 82, ib, l, xv, xdu);
+        au += iq2s_item(wu + (long)sb * 82, ib, l, xv, xdu);
+    }
+    ag = iq_warp_sum(ag);
+    au = iq_warp_sum(au);
+    if (lane == 0) {
+        act[(long)slot * ffn + row] = (ag / (1.0f + expf(-ag))) * au;
+    }
+}
+
+/* down de los `top_k` expertos (IQ3_XXS o IQ4_XS), con cols = 512: cada warp calcula 4 filas (256 items = 8 por lane). grid = (ceil(rows / 32), 1, top_k). */
+extern "C" __global__ void __launch_bounds__(256) dec_moe_down_s(const unsigned long long *td, const int *idx, const signed char *aq, const float *ad, float *ys,
+                                                                 int rows, int cols, int dd, long rbd)
+{
+    int slot = (int)blockIdx.z;
+    int e = idx[slot];
+    int warp = (int)threadIdx.x >> 5;
+    int lane = (int)threadIdx.x & 31;
+    int row0 = ((int)blockIdx.x * 8 + warp) * 4;
+    const unsigned char *w = (const unsigned char *)td[e];
+    const signed char *xqs = aq + (long)slot * cols;
+    const float *xds = ad + (long)slot * (cols >> 5);
+    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    int nitems = cols >> 3; /* 64 */
+#pragma unroll
+    for (int k = 0; k < 8; k++) {
+        int t = lane + 32 * k;
+        int r = t >> 6; /* = k >> 1 */
+        int ti = t & 63;
+        int row = row0 + r;
+        if (row < rows) {
+            int u = ti >> 2, q = ti & 3;
+            int sb = u >> 3, ib = u & 7;
+            const unsigned char *b = w + (long)row * rbd + (long)sb * (dd == IQ_GGML_IQ3_XXS ? 98 : 136);
+            float xdu = xds[u];
+            float v;
+            if (dd == IQ_GGML_IQ3_XXS) {
+                int2 xv = *(const int2 *)(xqs + (long)ti * 8);
+                v = iq3xxs_item(b, ib, q, xv, xdu);
+            } else {
+                v = iq4xs_item(b, ib, q, xqs + (long)u * 32, xdu);
+            }
+            acc[r] += v;
+        }
+    }
+#pragma unroll
+    for (int r = 0; r < 4; r++) {
+        float a = iq_warp_sum(acc[r]);
+        if (lane == 0 && row0 + r < rows) {
+            ys[(long)slot * rows + row0 + r] = a;
+        }
+    }
+}

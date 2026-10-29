@@ -58,56 +58,76 @@ fn ventana_hit_resize(x: Int, y: Int, wx: Int, wy: Int, ww: Int, wh: Int) -> Int
     else
         1
 
-fn ventana_mosaico_wx(i: Int, total: Int, pantalla_w: Int, pantalla_h: Int) -> Int
-    if total <= 0
-        0
+fn ventana_mosaico_cols(total: Int) -> Int
+    if total <= 1
+        1
     else
-        if total == 1
-            0
+        if total <= 4
+            2
         else
-            if i == 0
-                0
-            else
-                pantalla_w / 2
+            4
+
+fn ventana_mosaico_filas(total: Int, cols: Int) -> Int
+    if cols <= 0
+        1
+    else
+        (total + cols - 1) / cols
+
+fn ventana_mosaico_wx(i: Int, total: Int, pantalla_w: Int, pantalla_h: Int) -> Int
+    cols = ventana_mosaico_cols(total)
+    col = mod_pos(i, cols)
+    base_w = pantalla_w / cols
+    col * base_w
 
 fn ventana_mosaico_wy(i: Int, total: Int, pantalla_w: Int, pantalla_h: Int) -> Int
-    barra_alto()
+    cols = ventana_mosaico_cols(total)
+    filas = ventana_mosaico_filas(total, cols)
+    row = i / cols
+    area_h = pantalla_h - barra_alto()
+    base_h = area_h / filas
+    barra_alto() + row * base_h
 
 fn ventana_mosaico_ww(i: Int, total: Int, pantalla_w: Int, pantalla_h: Int) -> Int
-    if total <= 0
-        pantalla_w
+    cols = ventana_mosaico_cols(total)
+    col = mod_pos(i, cols)
+    base_w = pantalla_w / cols
+    wx = ventana_mosaico_wx(i, total, pantalla_w, pantalla_h)
+    if col == cols - 1
+        pantalla_w - wx
     else
-        if total == 1
-            pantalla_w
-        else
-            if i == 0
-                pantalla_w / 2
-            else
-                pantalla_w - pantalla_w / 2
+        base_w
 
 fn ventana_mosaico_wh(i: Int, total: Int, pantalla_w: Int, pantalla_h: Int) -> Int
-    pantalla_h - barra_alto()
+    cols = ventana_mosaico_cols(total)
+    filas = ventana_mosaico_filas(total, cols)
+    row = i / cols
+    wy = ventana_mosaico_wy(i, total, pantalla_w, pantalla_h)
+    if row == filas - 1
+        pantalla_h - wy
+    else
+        area_h = pantalla_h - barra_alto()
+        area_h / filas
 
-fn ventana_recortar_pantalla(wx: Int, wy: Int, ww: Int, wh: Int, sw: Int, sh: Int) -> Int
-    # Devuelve wx*1e9+wy*1e6+ww*1e3+wh recortado (solo uso interno WM legacy).
-    nx = max(0, wx)
-    ny = max(barra_alto(), wy)
+fn ventana_recortar_nx(wx: Int) -> Int
+    if wx < 0
+        0
+    else
+        wx
+
+fn ventana_recortar_ny(wy: Int) -> Int
+    if wy < barra_alto()
+        barra_alto()
+    else
+        wy
+
+fn ventana_recortar_nw(wx: Int, ww: Int, sw: Int, nx: Int) -> Int
     nw = ww
-    nh = wh
     if nx + nw > sw
         nw = max(ventana_min_ancho(), sw - nx)
+    nw
+
+fn ventana_recortar_nh(wh: Int, sh: Int, ny: Int) -> Int
+    nh = wh
     if ny + nh > sh
         nh = max(ventana_min_alto() + barra_alto(), sh - ny)
-    nx * 1000000000 + ny * 1000000 + nw * 1000 + nh
-
-fn ventana_clip_wx(p: Int) -> Int
-    p / 1000000000
-
-fn ventana_clip_wy(p: Int) -> Int
-    mod_pos(p / 1000000, 1000)
-
-fn ventana_clip_ww(p: Int) -> Int
-    mod_pos(p / 1000, 1000)
-
-fn ventana_clip_wh(p: Int) -> Int
-    mod_pos(p, 1000)
+    nh

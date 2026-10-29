@@ -31,5 +31,5 @@ Gestor de ventanas gráfico en Sal con terminales sobre PTY, clientes vía TCP
 ## Pruebas
 
 - Host: `cargo xtask check` o `python3 tests/sal/escritorio/probar_host.py` (terminal, utf8, ventanas, proto, fuente)
-- Guest: `init test` (pty + shm), `soso-wm --prueba` en `cargo xtask test`
+- Guest: `init test` (pty + shm), `soso-wm --prueba` y `soso-wm --prueba-layout` en `cargo xtask test`
 - Visual opcional: `cargo xtask fb-shot`

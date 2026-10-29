@@ -1,5 +1,42 @@
 import "../../../user/sal/escritorio/ventanas.sal"
 
+fn mosaico_ok_4(sw: Int, sh: Int) -> Int ! alloc
+    ok = 0
+    i = 0
+    while i < 4
+        if ok != 0
+            wx = ventana_mosaico_wx(i, 4, sw, sh)
+            wy = ventana_mosaico_wy(i, 4, sw, sh)
+            ww = ventana_mosaico_ww(i, 4, sw, sh)
+            wh = ventana_mosaico_wh(i, 4, sw, sh)
+            if ww < ventana_min_ancho()
+                ok = 10 + i
+            if wh < ventana_min_alto() + barra_alto()
+                ok = 20 + i
+            if wy < barra_alto()
+                ok = 30 + i
+            if wx + ww > sw
+                ok = 40 + i
+            if wy + wh > sh
+                ok = 50 + i
+            j = i + 1
+            while j < 4
+                if ok != 0
+                    j = 4
+                if ok == 0
+                    wx2 = ventana_mosaico_wx(j, 4, sw, sh)
+                    wy2 = ventana_mosaico_wy(j, 4, sw, sh)
+                    ww2 = ventana_mosaico_ww(j, 4, sw, sh)
+                    wh2 = ventana_mosaico_wh(j, 4, sw, sh)
+                    if wx < wx2 + ww2
+                        if wx2 < wx + ww
+                            if wy < wy2 + wh2
+                                if wy2 < wy + wh
+                                    ok = 60 + i * 4 + j
+                j = j + 1
+        i = i + 1
+    ok
+
 fn main() -> Int ! alloc
     sw = 1920
     sh = 1080
@@ -12,14 +49,31 @@ fn main() -> Int ! alloc
             if ventana_mosaico_ww(1, 2, sw, sh) != sw - sw / 2
                 3
             else
-                wx = 1000
-                wy = barra_alto()
-                ww = 400
-                cx = wx + ww - 10
-                if ventana_hit_cerrar(cx, wy + 2, wx, wy, ww) == 0
-                    4
+                if ventana_mosaico_cols(4) != 2
+                    6
                 else
-                    if ventana_hit_resize(wx + ww - 6, wy + 300 - 6, wx, wy, ww, 300) == 0
-                        5
+                    if mosaico_ok_4(sw, sh) != 0
+                        7
                     else
-                        0
+                        wx = 1000
+                        wy = barra_alto()
+                        ww = 400
+                        wh = 300
+                        nx = ventana_recortar_nx(wx)
+                        ny = ventana_recortar_ny(wy)
+                        nw = ventana_recortar_nw(wx, ww, sw, nx)
+                        nh = ventana_recortar_nh(wh, sh, ny)
+                        if nx + nw > sw
+                            8
+                        else
+                            if ny + nh > sh
+                                9
+                            else
+                                cx = wx + ww - 10
+                                if ventana_hit_cerrar(cx, wy + 2, wx, wy, ww) == 0
+                                    4
+                                else
+                                    if ventana_hit_resize(wx + ww - 6, wy + 300 - 6, wx, wy, ww, 300) == 0
+                                        5
+                                    else
+                                        0

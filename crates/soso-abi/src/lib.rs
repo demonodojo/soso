@@ -326,7 +326,9 @@ pub struct InputEvent {
     pub _pad: [u8; 3],
 }
 
-/// Máscara de modificadores en `InputEvent.button` para `INPUT_KEY`.
+/// `InputEvent.button` en `INPUT_MOUSE_MOVE` y `INPUT_MOUSE_BTN` es la máscara
+/// de botones (bit0 izquierdo, bit1 derecho, bit2 central), también mientras
+/// el puntero solo se desplaza. En `INPUT_KEY` son modificadores.
 pub const INPUT_MOD_SHIFT: u32 = 1 << 0;
 pub const INPUT_MOD_CTRL: u32 = 1 << 1;
 pub const INPUT_MOD_ALT: u32 = 1 << 2;

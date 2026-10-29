@@ -1,3 +1,0 @@
-ejecución r-R18 · tarea R18 · estado rechazada
-  intento 0 verificando  herramientas 5 tokens 26078 artefactos 1
-  intentos restantes: 0

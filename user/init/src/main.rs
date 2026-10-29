@@ -581,7 +581,8 @@ fn suite() -> u8 {
     check!(sys::kill(sleeper, abi::SIGPROBE) > 0, "kill(0) sondea sleeper vivo");
     check!(sys::kill(1, abi::SIGPROBE) > 0, "kill(0) a PID 1 existe");
     check!(sys::kill(99_999, abi::SIGPROBE) < 0, "kill(0) ESRCH si no existe");
-    check!(sys::kill(sleeper, abi::SIGINT) > 0, "kill SIGINT al sleeper");
+    let _ = sys::sleep_ms(200);
+    check!(sys::kill(sleeper, abi::SIGINT) > 0, "kill SIGINT al sleeper dormido");
     check!(
         sys::wait() == Ok((sleeper as u64, abi::exit_by_signal(abi::SIGINT as u8))),
         "wait sleeper interrumpido (130)"
@@ -594,7 +595,8 @@ fn suite() -> u8 {
     check!(g1 > 0 && g2 > 0, "spawn par para kill de grupo");
     check!(sys::setpgid(g1 as u64, g1 as u64) == 0, "setpgid líder");
     check!(sys::setpgid(g2 as u64, g1 as u64) == 0, "setpgid segundo al grupo");
-    check!(sys::kill(-(g1 as i64), abi::SIGINT) >= 2, "kill(-pgid) al par");
+    let _ = sys::sleep_ms(200);
+    check!(sys::kill(-(g1 as i64), abi::SIGINT) >= 2, "kill(-pgid) al par dormido");
     let mut interrumpidos = 0u8;
     for _ in 0..2 {
         if let Ok((_, code)) = sys::wait() {

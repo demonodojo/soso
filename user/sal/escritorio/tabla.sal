@@ -6,7 +6,7 @@ fn tab_cap() -> Int
     16
 
 fn tab_slot_bytes() -> Int
-    192
+    216
 
 fn tab_tipo() -> Int
     0
@@ -64,6 +64,12 @@ fn tab_titulo_off() -> Int
 
 fn tab_acc_off() -> Int
     168
+
+fn tab_fww() -> Int
+    200
+
+fn tab_fwh() -> Int
+    208
 
 fn tab_slot_off(i: Int) -> Int
     i * tab_slot_bytes()
@@ -161,15 +167,17 @@ fn tab_acc_copiar_msg(tab: Int, i: Int, dst: Int) -> Int ! alloc
 fn tab_guardar_float(tab: Int, i: Int) -> Int ! alloc
     _x = tab_set(tab, i, tab_fwx(), tab_get(tab, i, tab_wx()))
     _y = tab_set(tab, i, tab_fwy(), tab_get(tab, i, tab_wy()))
+    _w = tab_set(tab, i, tab_fww(), tab_get(tab, i, tab_ww()))
+    _h = tab_set(tab, i, tab_fwh(), tab_get(tab, i, tab_wh()))
     0
 
 fn tab_restaurar_float(tab: Int, i: Int) -> Int ! alloc
-    fx = tab_get(tab, i, tab_fwx())
-    fy = tab_get(tab, i, tab_fwy())
-    if fx > 0
-        _x = tab_set(tab, i, tab_wx(), fx)
-    if fy > 0
-        _y = tab_set(tab, i, tab_wy(), fy)
+    fw = tab_get(tab, i, tab_fww())
+    if fw > 0
+        _x = tab_set(tab, i, tab_wx(), tab_get(tab, i, tab_fwx()))
+        _y = tab_set(tab, i, tab_wy(), tab_get(tab, i, tab_fwy()))
+        _w = tab_set(tab, i, tab_ww(), fw)
+        _h = tab_set(tab, i, tab_wh(), tab_get(tab, i, tab_fwh()))
     0
 
 fn tab_contar_tipo(tab: Int, tipo: Int) -> Int

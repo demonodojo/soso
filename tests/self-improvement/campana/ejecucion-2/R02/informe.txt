@@ -1,4 +1,0 @@
-ejecución r-R02 · tarea R02 · estado rechazada
-  intento 0 bloqueada    herramientas ? (caída sin efectos en la copia) tokens ? (caída sin efectos en la copia) artefactos 0
-  intento 1 verificando  herramientas 5 tokens 30200 artefactos 1
-  intentos restantes: 0

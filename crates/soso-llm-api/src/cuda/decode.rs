@@ -38,6 +38,8 @@ pub(super) struct FnsDec {
     quant: CuFunction,
     matvec_q8: CuFunction,
     matvec_f32: CuFunction,
+    gateup_s: CuFunction,
+    down_s: CuFunction,
 }
 
 #[derive(Clone, Copy)]
@@ -150,7 +152,11 @@ mod b {
     pub const CPUOUT: usize = 31;
     pub const XQ: usize = 32;
     pub const XD: usize = 33;
-    pub const N: usize = 34;
+    pub const EXQ: usize = 34;
+    pub const EXD: usize = 35;
+    pub const AQ: usize = 36;
+    pub const AD: usize = 37;
+    pub const N: usize = 38;
 }
 
 pub(super) struct DecodeDev {
@@ -242,6 +248,8 @@ impl CudaGpu {
             quant: get("dec_quant_x")?,
             matvec_q8: get("dec_matvec_q8")?,
             matvec_f32: get("dec_matvec_f32")?,
+            gateup_s: get("dec_moe_gateup_s")?,
+            down_s: get("dec_moe_down_s")?,
         };
         if let Ok(v) = std::env::var("SOSO_DECODE_SALTAR") {
             for n in v.split(',') {
@@ -263,6 +271,8 @@ impl CudaGpu {
                     "f32" => f.matvec_f32,
                     "quant" => f.quant,
                     "gateup" => f.gateup_w,
+                    "gateup_s" => f.gateup_s,
+                    "down_s" => f.down_s,
                     "down" => f.down_w,
                     _ => continue,
                 };
@@ -465,6 +475,10 @@ impl CudaGpu {
             z[b::DYN] = (b::DYN, 16);
             z[b::KST] = (b::KST, 2 * 2 * kv_dim.max(1) * n_attn.max(1));
             z[b::CPUOUT] = (b::CPUOUT, fl(h));
+            z[b::EXQ] = (b::EXQ, h + 256);
+            z[b::EXD] = (b::EXD, fl(h / 32 + 8));
+            z[b::AQ] = (b::AQ, max_top.max(1) * max_ffn.max(1) + 256);
+            z[b::AD] = (b::AD, fl(max_top.max(1) * max_ffn.max(1) / 32 + 8));
             z[b::XQ] = (b::XQ, max_v.max(max_q).max(h).max(max_ffn).max(1) + 256);
             z[b::XD] = (b::XD, fl((max_v.max(max_q).max(h).max(max_ffn).max(1) + 31) / 32 + 8));
             z
@@ -554,7 +568,12 @@ impl CudaGpu {
 
     /// Cuantiza a int8 (bloques de 32) las `n` primeras posiciones de `x` en `XQ`/`XD`, para los matvec Q8_0 de enteros.
     fn dec_quant(&self, d: &DecodeDev, x: u64, n: usize) -> Result<(), String> {
-        let mut vals: Vec<u64> = vec![x, d.bufs[b::XQ].0, d.bufs[b::XD].0, n as u64];
+        self.dec_quant_a(d, x, n, b::XQ, b::XD)
+    }
+
+    /// Como `dec_quant`, hacia los búferes `qi` (int8) y `di` (escalas) elegidos.
+    fn dec_quant_a(&self, d: &DecodeDev, x: u64, n: usize, qi: usize, di: usize) -> Result<(), String> {
+        let mut vals: Vec<u64> = vec![x, d.bufs[qi].0, d.bufs[di].0, n as u64];
         let mut ptrs: Vec<*mut c_void> = vals.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
         self.lanzar3s(d.f.quant, (((n / 32) as u32).div_ceil(8), 1, 1), (256, 1, 1), 0, &mut ptrs)
     }
@@ -838,15 +857,39 @@ impl CudaGpu {
             }
             let ysh = if m.sh.is_some() { bf(b::YSH) } else { 0 };
             if m.en_gpu && !Self::salta("moe") {
-                {
-                    let mut v1: Vec<u64> = vec![m.tg, m.tu, bf(b::RIDX), bf(b::XN), bf(b::ACT), m.ffn as u64, h as u64, m.dg as u32 as u64, m.du as u32 as u64, m.rbg as u64, m.rbu as u64];
-                    let mut p1: Vec<*mut c_void> = v1.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
-                    let crono = std::env::var_os("SOSO_DECODE_CRONO").is_some();
+                // producto entero (dp4a) si los formatos son los del modelo: gate/up IQ2_S, down IQ3_XXS o IQ4_XS, ffn = 512
+                let dp4a = m.dg == 22 && m.du == 22 && (m.dd == 18 || m.dd == 23) && m.ffn == 512 && h % 256 == 0 && std::env::var_os("SOSO_DECODE_DP4A").is_some(); // opt-in hasta validar los ids de extremo a extremo con el modelo real
+                let crono = std::env::var_os("SOSO_DECODE_CRONO").is_some();
+                if dp4a {
+                    self.dec_quant_a(d, bf(b::XN), h, b::EXQ, b::EXD)?;
                     if crono {
                         ck(unsafe { (self.api.sync)() }, "sync")?;
                     }
                     let t0 = std::time::Instant::now();
-                    self.lanzar3s(d.f.gateup_w, ((m.ffn as u32).div_ceil(8), 1, std::env::var("SOSO_DECODE_Z").ok().and_then(|v| v.parse().ok()).unwrap_or(m.top_k as u32)), (256, 1, 1), ((h + h / 32 + 1) * 4) as u32, &mut p1)?;
+                    let mut v1: Vec<u64> = vec![m.tg, m.tu, bf(b::RIDX), bf(b::EXQ), bf(b::EXD), bf(b::ACT), m.ffn as u64, h as u64, m.rbg as u64, m.rbu as u64];
+                    let mut p1: Vec<*mut c_void> = v1.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
+                    self.lanzar3s(d.f.gateup_s, ((m.ffn as u32).div_ceil(8), 1, m.top_k as u32), (256, 1, 1), 0, &mut p1)?;
+                    if crono {
+                        ck(unsafe { (self.api.sync)() }, "sync")?;
+                        eprintln!("[crono] gateup {:.1} us", t0.elapsed().as_secs_f64() * 1e6);
+                    }
+                    self.dec_quant_a(d, bf(b::ACT), m.top_k * m.ffn, b::AQ, b::AD)?;
+                    let t1 = std::time::Instant::now();
+                    let mut v2: Vec<u64> = vec![m.td, bf(b::RIDX), bf(b::AQ), bf(b::AD), bf(b::YS), h as u64, m.ffn as u64, m.dd as u32 as u64, m.rbd as u64];
+                    let mut p2: Vec<*mut c_void> = v2.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
+                    self.lanzar3s(d.f.down_s, ((h as u32).div_ceil(32), 1, m.top_k as u32), (256, 1, 1), 0, &mut p2)?;
+                    if crono {
+                        ck(unsafe { (self.api.sync)() }, "sync")?;
+                        eprintln!("[crono] down {:.1} us", t1.elapsed().as_secs_f64() * 1e6);
+                    }
+                } else {
+                    let mut v1: Vec<u64> = vec![m.tg, m.tu, bf(b::RIDX), bf(b::XN), bf(b::ACT), m.ffn as u64, h as u64, m.dg as u32 as u64, m.du as u32 as u64, m.rbg as u64, m.rbu as u64];
+                    let mut p1: Vec<*mut c_void> = v1.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
+                    if crono {
+                        ck(unsafe { (self.api.sync)() }, "sync")?;
+                    }
+                    let t0 = std::time::Instant::now();
+                    self.lanzar3s(d.f.gateup_w, ((m.ffn as u32).div_ceil(8), 1, m.top_k as u32), (256, 1, 1), ((h + h / 32 + 1) * 4) as u32, &mut p1)?;
                     if crono {
                         ck(unsafe { (self.api.sync)() }, "sync")?;
                         eprintln!("[crono] gateup {:.1} us", t0.elapsed().as_secs_f64() * 1e6);
@@ -878,5 +921,121 @@ impl CudaGpu {
             self.dec_mv(d, &d.lm, bf(b::XN), bf(b::LOGITS))?;
         }
         Ok(None)
+    }
+}
+
+/// Resultado de [`CudaGpu::probar_expertos_dp4a`].
+#[derive(Debug, Clone, Copy)]
+pub struct ProbaExpertos {
+    /// Error máximo de `act` (gate/up + SwiGLU) respecto al camino f32, relativo al rms de la referencia.
+    pub err_gateup: f32,
+    /// Lo mismo para la salida del `down`, alimentando ambos caminos con la MISMA activación f32 (aísla el kernel de la cuantización de la entrada).
+    pub err_down: f32,
+    /// Error extremo a extremo (gate/up → cuantizar → down) respecto al camino f32.
+    pub err_total: f32,
+    /// Microsegundos por (gate/up + down): camino f32 y camino dp4a (media de 50 pasadas con sincronización).
+    pub us_f32: f64,
+    pub us_dp4a: f64,
+}
+
+impl CudaGpu {
+    /// Diagnóstico sin modelo: expertos aleatorios (gate/up IQ2_S, down `dd` = 18 IQ3_XXS ó 23 IQ4_XS) con los kernels de decode f32 y dp4a.
+    /// Para `tests/cuda_expertos_dp4a.rs`.
+    pub fn probar_expertos_dp4a(&mut self, dd: i32, n_exp: usize, top_k: usize, ffn: usize, h: usize, semilla: u64) -> Result<ProbaExpertos, String> {
+        unsafe { ck((self.api.ctx_set_current)(self.ctx), "cuCtxSetCurrent")? };
+        let get = |n: &str| -> Result<CuFunction, String> {
+            let c = CString::new(n).unwrap();
+            let mut f: CuFunction = std::ptr::null_mut();
+            ck(unsafe { (self.api.module_fn)(&mut f, self.modulo_iq, c.as_ptr()) }, n)?;
+            Ok(f)
+        };
+        let (f_gw, f_dw, f_gs, f_ds, f_q) = (get("dec_moe_gateup_w")?, get("dec_moe_down_w")?, get("dec_moe_gateup_s")?, get("dec_moe_down_s")?, get("dec_quant_x")?);
+        let mut estado = semilla.max(1);
+        let mut aleatorio = move || {
+            estado ^= estado << 13;
+            estado ^= estado >> 7;
+            estado ^= estado << 17;
+            estado
+        };
+        // bytes por superbloque y fila
+        let (bytes_g, rb_g) = (82usize, (h / 256) * 82);
+        let (bytes_d, rb_d) = (if dd == 18 { 98usize } else { 136usize }, (ffn / 256) * if dd == 18 { 98 } else { 136 });
+        let mut matriz = |filas: usize, rb: usize, bytes: usize, aleat: &mut dyn FnMut() -> u64| -> Vec<u8> {
+            let mut v: Vec<u8> = (0..filas * rb).map(|_| (aleat() >> 24) as u8).collect();
+            // la escala f16 de cada superbloque: un valor pequeño y finito
+            for sb in 0..filas * rb / bytes {
+                v[sb * bytes] = 0x00;
+                v[sb * bytes + 1] = 0x24 + (aleat() & 3) as u8; // ~0,25 – 0,5
+            }
+            v
+        };
+        let (mut tg, mut tu, mut td) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..n_exp {
+            for (t, filas, rb, bytes) in [(&mut tg, ffn, rb_g, bytes_g), (&mut tu, ffn, rb_g, bytes_g), (&mut td, h, rb_d, bytes_d)] {
+                let m = matriz(filas, rb, bytes, &mut aleatorio);
+                let d = self.alloc(m.len())?;
+                self.subir(d, &m)?;
+                t.push(d);
+            }
+        }
+        let (ptg, ptu, ptd) = (self.u64_a_dev(&tg)?, self.u64_a_dev(&tu)?, self.u64_a_dev(&td)?);
+        let idx: Vec<i32> = (0..top_k).map(|i| ((i * 7 + 3) % n_exp) as i32).collect();
+        let didx = self.alloc(top_k * 4)?;
+        self.subir(didx, unsafe { std::slice::from_raw_parts(idx.as_ptr() as *const u8, top_k * 4) })?;
+        let x: Vec<f32> = (0..h).map(|_| ((aleatorio() >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0) as f32).collect();
+        let dx = self.alloc(h * 4)?;
+        self.subir(dx, unsafe { std::slice::from_raw_parts(x.as_ptr() as *const u8, h * 4) })?;
+        let (exq, exd) = (self.alloc(h)?, self.alloc(h / 32 * 4)?);
+        let (act_w, act_s, aq, ad) = (self.alloc(top_k * ffn * 4)?, self.alloc(top_k * ffn * 4)?, self.alloc(top_k * ffn)?, self.alloc(top_k * ffn / 32 * 4)?);
+        let (ys_w, ys_s, ys_d) = (self.alloc(top_k * h * 4)?, self.alloc(top_k * h * 4)?, self.alloc(top_k * h * 4)?);
+        let lanzar = |s: &CudaGpu, f: CuFunction, grid: (u32, u32, u32), smem: u32, vals: &[u64]| -> Result<(), String> {
+            let mut v = vals.to_vec();
+            let mut p: Vec<*mut c_void> = v.iter_mut().map(|x| x as *mut u64 as *mut c_void).collect();
+            s.lanzar3s(f, grid, (256, 1, 1), smem, &mut p)
+        };
+        let (rbg, rbd, dd64) = (rb_g as u64, rb_d as u64, dd as u32 as u64);
+        let (hh, ff) = (h as u64, ffn as u64);
+        let quant = |s: &CudaGpu, x: u64, q: u64, d: u64, n: usize| lanzar(s, f_q, (((n / 32) as u32).div_ceil(8), 1, 1), 0, &[x, q, d, n as u64]);
+        let camino_f32 = |s: &CudaGpu, act: u64, ys: u64| -> Result<(), String> {
+            lanzar(s, f_gw, ((ffn as u32).div_ceil(8), 1, top_k as u32), ((h + h / 32 + 1) * 4) as u32, &[ptg, ptu, didx, dx, act, ff, hh, 22, 22, rbg, rbg])?;
+            lanzar(s, f_dw, ((h as u32).div_ceil(8), 1, top_k as u32), ((ffn + ffn / 32 + 1) * 4) as u32, &[ptd, didx, act, ys, hh, ff, dd64, rbd])
+        };
+        let camino_dp4a = |s: &CudaGpu, act: u64, ys: u64| -> Result<(), String> {
+            quant(s, dx, exq, exd, h)?;
+            lanzar(s, f_gs, ((ffn as u32).div_ceil(8), 1, top_k as u32), 0, &[ptg, ptu, didx, exq, exd, act, ff, hh, rbg, rbg])?;
+            quant(s, act, aq, ad, top_k * ffn)?;
+            lanzar(s, f_ds, ((h as u32).div_ceil(32), 1, top_k as u32), 0, &[ptd, didx, aq, ad, ys, hh, ff, dd64, rbd])
+        };
+        let bajar = |s: &CudaGpu, d: u64, n: usize| -> Result<Vec<f32>, String> {
+            let mut v = vec![0f32; n];
+            ck(unsafe { (s.api.dtoh)(v.as_mut_ptr() as *mut c_void, d, n * 4) }, "cuMemcpyDtoH")?;
+            Ok(v)
+        };
+        let sinc = |s: &CudaGpu| ck(unsafe { (s.api.sync)() }, "cuCtxSynchronize");
+        camino_f32(self, act_w, ys_w)?;
+        camino_dp4a(self, act_s, ys_s)?;
+        // `down` aislado: el kernel dp4a recibe la activación f32 de referencia (cuantizada), el de referencia la suya sin cuantizar
+        quant(self, act_w, aq, ad, top_k * ffn)?;
+        lanzar(self, f_ds, ((h as u32).div_ceil(32), 1, top_k as u32), 0, &[ptd, didx, aq, ad, ys_d, hh, ff, dd64, rbd])?;
+        sinc(self)?;
+        let (aw, as_, yw, ys, yd) = (bajar(self, act_w, top_k * ffn)?, bajar(self, act_s, top_k * ffn)?, bajar(self, ys_w, top_k * h)?, bajar(self, ys_s, top_k * h)?, bajar(self, ys_d, top_k * h)?);
+        let rel = |a: &[f32], r: &[f32]| -> f32 {
+            let rms = (r.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / r.len() as f64).sqrt() as f32;
+            a.iter().zip(r).map(|(x, y)| (x - y).abs()).fold(0f32, f32::max) / rms.max(1e-20)
+        };
+        // tiempos
+        let t = std::time::Instant::now();
+        for _ in 0..50 {
+            camino_f32(self, act_w, ys_w)?;
+            sinc(self)?;
+        }
+        let us_f32 = t.elapsed().as_secs_f64() * 1e6 / 50.0;
+        let t = std::time::Instant::now();
+        for _ in 0..50 {
+            camino_dp4a(self, act_s, ys_s)?;
+            sinc(self)?;
+        }
+        let us_dp4a = t.elapsed().as_secs_f64() * 1e6 / 50.0;
+        Ok(ProbaExpertos { err_gateup: rel(&as_, &aw), err_down: rel(&yd, &yw), err_total: rel(&ys, &yw), us_f32, us_dp4a })
     }
 }

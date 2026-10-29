@@ -1,7 +1,7 @@
 //! Polling de ratón y teclado.
 
 use libsoso::sys;
-use soso_abi::{InputEvent, INPUT_KEY, INPUT_MOUSE_BTN, INPUT_MOUSE_MOVE};
+use soso_abi::{INPUT_KEY, INPUT_MOUSE_BTN, INPUT_MOUSE_MOVE, InputEvent};
 
 pub struct InputState {
     pub mouse_x: i32,
@@ -143,6 +143,7 @@ pub fn poll_input(st: &mut InputState) {
             INPUT_MOUSE_MOVE => {
                 st.mouse_x = ev.x;
                 st.mouse_y = ev.y;
+                st.btn_left = ev.button & 1 != 0;
             }
             INPUT_MOUSE_BTN => {
                 st.btn_left = ev.button & 1 != 0;

@@ -160,6 +160,20 @@ fn find_table(rsdp_phys: u64, sig: &[u8; 4]) -> Option<u64> {
 }
 
 /// `true` si el RSDP es válido. `f` devuelve `true` para dejar de recorrer.
+/// Invoca `visit` por cada tabla ACPI con la firma dada (DSDT, SSDT, …).
+pub fn each_table(sig: &[u8; 4], mut visit: impl FnMut(&[u8])) {
+    let Some(rsdp_phys) = RSDP.get().copied() else {
+        return;
+    };
+    let _ = visitar_tablas(rsdp_phys, sig, |table| {
+        let len = leer::<u32>(table + 4) as usize;
+        if len >= 36 {
+            visit(bytes(table, len));
+        }
+        false
+    });
+}
+
 fn visitar_tablas(rsdp_phys: u64, sig: &[u8; 4], mut f: impl FnMut(u64) -> bool) -> bool {
     let rsdp = bytes(rsdp_phys, 36);
     if &rsdp[0..8] != b"RSD PTR " {

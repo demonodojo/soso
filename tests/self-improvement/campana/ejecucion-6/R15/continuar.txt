@@ -1,5 +1,0 @@
-  base de «campana-R15» publicada (generación 0)
-  ejecutado: r-R15/lanzar/0
-  ejecutado: r-R15/exportar/0
-  ejecutado: r-R15/validar/0
-tarea: aceptada

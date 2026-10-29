@@ -1,4 +1,0 @@
-  ejecutado: r-R12/lanzar/0
-  ejecutado: r-R12/exportar/0
-  ejecutado: r-R12/validar/0
-tarea: aceptada

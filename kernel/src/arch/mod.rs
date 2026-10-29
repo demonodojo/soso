@@ -1,4 +1,5 @@
 pub mod acpi;
+pub mod acpi_hid_i2c;
 pub mod apic;
 pub mod fpu;
 pub mod gdt;

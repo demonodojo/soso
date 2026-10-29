@@ -278,10 +278,14 @@ fn ctrl_byte(out: keymap::KeyOutput) -> keymap::KeyOutput {
     }
 }
 
+fn anotar_ctrl_c() {
+    crate::task::note_serial_sigint();
+    crate::task::kick_scheduler();
+}
+
 fn emit_tty_byte(b: u8) {
     if b == 0x03 {
-        crate::task::note_serial_sigint();
-        crate::task::kick_scheduler();
+        anotar_ctrl_c();
         return;
     }
     let mut rx = RX.lock();
@@ -292,8 +296,7 @@ fn emit_tty_byte(b: u8) {
 /// Variante IRQ-safe: nunca bloquea en `RX` ni en el scheduler.
 fn emit_tty_byte_try(b: u8) -> bool {
     if b == 0x03 {
-        crate::task::note_serial_sigint();
-        crate::task::kick_if_tty_waiting();
+        anotar_ctrl_c();
         return true;
     }
     let Some(mut rx) = RX.try_lock() else {
@@ -309,6 +312,9 @@ fn emit_key_bytes(km: &KeymapState, buf: &[u8]) {
     let exclusive = crate::drivers::fb::fb_input_exclusive();
     for &b in buf {
         if exclusive {
+            if b == 0x03 {
+                anotar_ctrl_c();
+            }
             crate::drivers::input::push_key(b as u32, true, mods);
         } else {
             emit_tty_byte(b);
@@ -352,6 +358,9 @@ fn enqueue_output_try(km: &mut KeymapState, out: keymap::KeyOutput) {
     let exclusive = crate::drivers::fb::fb_input_exclusive();
     for &b in &buf[..n] {
         if exclusive {
+            if b == 0x03 {
+                anotar_ctrl_c();
+            }
             crate::drivers::input::push_key(b as u32, true, mods);
         } else if !emit_tty_byte_try(b) {
             return;
@@ -368,6 +377,9 @@ fn enqueue_output_try(km: &mut KeymapState, out: keymap::KeyOutput) {
         let n2 = keymap::output_bytes(pending, &mut buf);
         for &b in &buf[..n2] {
             if exclusive {
+                if b == 0x03 {
+                    anotar_ctrl_c();
+                }
                 crate::drivers::input::push_key(b as u32, true, mods);
             } else if !emit_tty_byte_try(b) {
                 return;
@@ -443,7 +455,8 @@ fn handle_scancode(sc: u8) {
             return;
         }
         0x0E if km.ctrl() && km.alt_left() => {
-            crate::drivers::fb::kill_framebuffer_owner();
+            crate::task::note_framebuffer_cad();
+            crate::task::kick_scheduler();
             return;
         }
         0x3A => {
@@ -509,7 +522,8 @@ fn handle_scancode_try(sc: u8) {
             return;
         }
         0x0E if km.ctrl() && km.alt_left() => {
-            crate::drivers::fb::kill_framebuffer_owner();
+            crate::task::note_framebuffer_cad();
+            crate::task::kick_scheduler();
             return;
         }
         0x3A => {
@@ -524,6 +538,15 @@ fn handle_scancode_try(sc: u8) {
 }
 
 #[cfg(feature = "drv-usb")]
+fn usb_cad(evt: &crate::drivers::usb_storage::UsbKbdEvent) -> bool {
+    use xhci_nostd::hid::{MOD_LEFT_ALT, MOD_LEFT_CTRL};
+    if !evt.pressed || evt.scancode != 0x2A {
+        return false;
+    }
+    evt.modifiers & MOD_LEFT_CTRL != 0 && evt.modifiers & MOD_LEFT_ALT != 0
+}
+
+#[cfg(feature = "drv-usb")]
 fn handle_usb_event(evt: crate::drivers::usb_storage::UsbKbdEvent) {
     if evt.scancode == 0 && evt.usage_id < 0xE0 {
         return;
@@ -535,9 +558,16 @@ fn handle_usb_event(evt: crate::drivers::usb_storage::UsbKbdEvent) {
         match evt.usage_id {
             0xE1 | 0xE5 => km.shift_press(evt.pressed),
             0xE0 | 0xE4 => km.ctrl_press(evt.pressed),
+            0xE2 => km.alt_left_press(evt.pressed),
             0xE6 => km.altgr_press(evt.pressed),
             _ => {}
         }
+        return;
+    }
+
+    if usb_cad(&evt) {
+        crate::task::note_framebuffer_cad();
+        crate::task::kick_scheduler();
         return;
     }
 
@@ -563,9 +593,16 @@ fn handle_usb_event_try(evt: crate::drivers::usb_storage::UsbKbdEvent) {
         match evt.usage_id {
             0xE1 | 0xE5 => km.shift_press(evt.pressed),
             0xE0 | 0xE4 => km.ctrl_press(evt.pressed),
+            0xE2 => km.alt_left_press(evt.pressed),
             0xE6 => km.altgr_press(evt.pressed),
             _ => {}
         }
+        return;
+    }
+
+    if usb_cad(&evt) {
+        crate::task::note_framebuffer_cad();
+        crate::task::kick_scheduler();
         return;
     }
 
@@ -601,7 +638,14 @@ fn poll_i8042(from_irq: bool) {
     }
 }
 
+/// Un solo vaciado del i8042 y del HID. La IRQ 12 llega a la BSP y
+/// `input_poll` puede correr en otro núcleo: sin este candado los dos leen
+/// el puerto 0x60 y deshacen el paquete PS/2. Quien llama ya tiene las
+/// interrupciones cerradas en su núcleo (o está dentro de la IRQ).
+static HW_POLL: Mutex<()> = Mutex::new(());
+
 fn poll_hw(from_irq: bool) {
+    let _poll = HW_POLL.lock();
     poll_i8042(from_irq);
     #[cfg(feature = "drv-usb")]
     if from_irq {
@@ -609,18 +653,35 @@ fn poll_hw(from_irq: bool) {
             handle_usb_event_try(evt);
         }
         while let Some(evt) = crate::drivers::usb_storage::poll_pointer_event() {
-            crate::drivers::mouse::apply_button_mask(evt.buttons);
-            crate::drivers::mouse::apply_relative(evt.dx, evt.dy);
+            dispatch_pointer_event(evt);
         }
     } else {
         while let Some(evt) = crate::drivers::usb_storage::poll_keyboard_event() {
             handle_usb_event(evt);
         }
         while let Some(evt) = crate::drivers::usb_storage::poll_pointer_event() {
-            crate::drivers::mouse::apply_button_mask(evt.buttons);
-            crate::drivers::mouse::apply_relative(evt.dx, evt.dy);
+            dispatch_pointer_event(evt);
         }
     }
+}
+
+#[cfg(feature = "drv-usb")]
+fn dispatch_pointer_event(evt: xhci_nostd::PointerEvent) {
+    crate::drivers::mouse::apply_hid_pointer(evt);
+}
+
+/// Vacía teclado y ratón hacia la cola de `input_poll`.
+///
+/// La IRQ 1 no basta: el auxiliar PS/2 avisa por la IRQ 12, y el HID USB solo
+/// entra si alguien sondea el xHCI. El escritorio no lee la tty.
+pub fn poll_devices() {
+    crate::drivers::mouse::refresh_bounds();
+    crate::drivers::hid_i2c::poll();
+    without_interrupts(|| poll_hw(false));
+}
+
+pub fn i8042_ready() -> bool {
+    I8042_OK.load(Ordering::Relaxed)
 }
 
 pub fn handle_irq() {
@@ -737,6 +798,32 @@ fn unmask_pic_irq1() {
         let mut pics = PICS.lock();
         unsafe {
             pics.write_masks(!0b0001_0111, 0xFF);
+        }
+    });
+}
+
+/// IRQ 12 (auxiliar PS/2) al mismo vaciado que la IRQ 1.
+pub fn route_aux_irq() {
+    if let Some(vec) = irq::allocate(handle_irq) {
+        let dest = apic::id();
+        match ioapic::route_isa(12, vec, dest) {
+            Ok(()) => println!("mouse: ps2 irq12 vector={vec:#x} (ioapic)"),
+            Err(e) => println!("mouse: ioapic irq12 fallo ({e}); pic"),
+        }
+    } else {
+        println!("mouse: sin vector libre; pic/polling");
+    }
+    unmask_pic_irq12();
+}
+
+fn unmask_pic_irq12() {
+    use crate::arch::interrupts::PICS;
+    without_interrupts(|| {
+        let mut pics = PICS.lock();
+        unsafe {
+            let [master, mut slave] = pics.read_masks();
+            slave &= !(1 << 4);
+            pics.write_masks(master, slave);
         }
     });
 }

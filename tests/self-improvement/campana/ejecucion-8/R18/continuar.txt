@@ -1,5 +1,0 @@
-  base de «campana-R18» publicada (generación 0)
-  ejecutado: r-R18/lanzar/0
-  ejecutado: r-R18/exportar/0
-  ejecutado: r-R18/validar/0
-tarea: aceptada

@@ -1,4 +1,0 @@
-  base de «campana-R04» publicada (generación 0)
-  ejecutado: r-R04/lanzar/0
-tarea: BLOQUEADA — el candidato no cambió nada
-  comprobación necesaria: revisar el registro del intento

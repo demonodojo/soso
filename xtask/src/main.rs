@@ -1583,6 +1583,7 @@ pub(crate) struct QemuGuestConfig {
     pub live_usb: bool,
     pub xhci_model: String,
     pub usb_kbd: bool,
+    pub usb_tablet: bool,
     pub usb_hub: bool,
     pub trace_usb: bool,
     pub nvme: bool,
@@ -1598,6 +1599,7 @@ impl Default for QemuGuestConfig {
             live_usb: false,
             xhci_model: String::from("qemu"),
             usb_kbd: false,
+            usb_tablet: false,
             usb_hub: false,
             trace_usb: false,
             nvme: false,
@@ -1614,6 +1616,7 @@ impl QemuGuestConfig {
             live_usb: qemu_live_usb(),
             xhci_model: qemu_xhci_model(),
             usb_kbd: qemu_usb_kbd(),
+            usb_tablet: qemu_usb_tablet(),
             usb_hub: qemu_usb_hub(),
             trace_usb: qemu_trace_usb(),
             nvme: qemu_nvme(),
@@ -1644,6 +1647,7 @@ pub(crate) fn qemu_nvme_root() -> bool {
 /// `SOSO_QEMU_LIVE_USB=1`: mismo disco vía xHCI + usb-storage (prueba BOT).
 /// `SOSO_QEMU_XHCI=qemu|nec`: modelo del controlador (default `qemu`).
 /// `SOSO_QEMU_USB_KBD=1`: añade `usb-kbd` al bus xHCI (HID boot).
+/// `SOSO_QEMU_USB_TABLET=1`: añade `usb-tablet` (HID absoluto, prueba touchpad).
 /// `SOSO_QEMU_USB_HOST=VID:PID`: passthrough de dispositivo USB real (requiere acceso a `/dev/bus/usb`).
 /// `SOSO_QEMU_TRACE_USB=1`: trazas `usb_xhci_*` en `target/qemu-usb-trace.log`.
 pub(crate) fn qemu_live() -> bool {
@@ -1675,6 +1679,10 @@ pub(crate) fn qemu_xhci_model() -> String {
 /// `SOSO_QEMU_USB_KBD=1`: teclado HID emulado en el bus xHCI.
 pub(crate) fn qemu_usb_kbd() -> bool {
     env_flag("SOSO_QEMU_USB_KBD")
+}
+
+pub(crate) fn qemu_usb_tablet() -> bool {
+    env_flag("SOSO_QEMU_USB_TABLET")
 }
 
 /// `SOSO_QEMU_USB_HUB=1`: storage/kbd detrás de `usb-hub` en xHCI.
@@ -1945,8 +1953,9 @@ pub(crate) fn apply_qemu_usb(qemu: &mut Command, cfg: &QemuGuestConfig) {
     let live_storage = cfg.live_usb && cfg.live;
     let host = qemu_usb_host();
     let kbd = cfg.usb_kbd;
+    let tablet = cfg.usb_tablet;
     let hub = cfg.usb_hub;
-    let need_xhci = live_storage || kbd || host.is_some();
+    let need_xhci = live_storage || kbd || tablet || host.is_some();
 
     if need_xhci {
         let model = cfg.xhci_model.to_ascii_lowercase();
@@ -1987,6 +1996,20 @@ pub(crate) fn apply_qemu_usb(qemu: &mut Command, cfg: &QemuGuestConfig) {
                 "xtask: usb-kbd en bus xHCI{}",
                 if hub { " (hub puerto 2)" } else { "" }
             );
+        }
+        if tablet {
+            let tablet_port = if hub {
+                if kbd { "1.3" } else { "1.2" }
+            } else if kbd {
+                "3"
+            } else {
+                "2"
+            };
+            qemu.args([
+                "-device",
+                &format!("usb-tablet,bus={storage_bus},port={tablet_port}"),
+            ]);
+            println!("xtask: usb-tablet en bus xHCI (puerto {tablet_port})");
         }
         if let Some((vid, pid)) = host {
             qemu.args([

@@ -1,5 +1,0 @@
-  base de «campana-R03» publicada (generación 0)
-  ejecutado: r-R03/lanzar/0
-  ejecutado: r-R03/exportar/0
-  ejecutado: r-R03/validar/0
-tarea: aceptada

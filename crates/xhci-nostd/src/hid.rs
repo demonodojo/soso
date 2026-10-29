@@ -590,14 +590,21 @@ impl KeyboardState {
 // ---------------------------------------------------------------------------
 
 const HID_USAGE_MOUSE: u16 = 0x02;
+const HID_USAGE_PAGE_DIGITIZER: u16 = 0x0D;
+const HID_USAGE_DIGITIZER_TOUCHPAD: u16 = 0x05;
+const HID_USAGE_TIP_SWITCH: u16 = 0x47;
 
-/// Movimiento relativo y botones de un informe HID.
+/// Movimiento relativo o posición absoluta lógica (mapeada en el kernel).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PointerEvent {
     pub dx: i32,
     pub dy: i32,
     /// bit0=izq, bit1=der, bit2=medio (como PS/2).
     pub buttons: u32,
+    pub absolute: bool,
+    /// Máximo lógico de X/Y cuando `absolute` (mínimo 0).
+    pub abs_x_max: u32,
+    pub abs_y_max: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -608,6 +615,17 @@ pub enum PointerLayoutKind {
         buttons_offset: usize,
         dx_offset: usize,
         dy_offset: usize,
+    },
+    ReportAbsolute {
+        report_len: usize,
+        buttons_offset: Option<usize>,
+        x_bit_off: usize,
+        x_bit_len: usize,
+        y_bit_off: usize,
+        y_bit_len: usize,
+        x_log_max: u32,
+        y_log_max: u32,
+        tip_bit_off: Option<usize>,
     },
 }
 
@@ -659,7 +677,63 @@ impl PointerReportLayout {
                 let dy = payload[dy_offset] as i8;
                 Some((buttons, dx, dy))
             }
+            PointerLayoutKind::ReportAbsolute { .. } => None,
         }
+    }
+
+    pub fn extract_absolute(&self, data: &[u8]) -> Option<(u32, u32, u32, u32, u32)> {
+        let payload = match self.report_id {
+            Some(id) if !data.is_empty() && data[0] == id => &data[1..],
+            Some(_) => return None,
+            None => data,
+        };
+        let PointerLayoutKind::ReportAbsolute {
+            report_len,
+            buttons_offset,
+            x_bit_off,
+            x_bit_len,
+            y_bit_off,
+            y_bit_len,
+            x_log_max,
+            y_log_max,
+            tip_bit_off,
+        } = self.kind
+        else {
+            return None;
+        };
+        if payload.len() < report_len {
+            return None;
+        }
+        let x = read_bits(payload, x_bit_off, x_bit_len);
+        let y = read_bits(payload, y_bit_off, y_bit_len);
+        let mut buttons = buttons_offset
+            .map(|o| payload.get(o).copied().unwrap_or(0))
+            .map(pointer_buttons_mask)
+            .unwrap_or(0);
+        if let Some(tip) = tip_bit_off {
+            if read_bits(payload, tip, 1) != 0 {
+                buttons |= 1;
+            }
+        }
+        Some((x, y, x_log_max, y_log_max, buttons))
+    }
+}
+
+fn read_bits(data: &[u8], bit_off: usize, bit_len: usize) -> u32 {
+    let mut val = 0u32;
+    for i in 0..bit_len {
+        let bit = (data[(bit_off + i) / 8] >> ((bit_off + i) % 8)) & 1;
+        val |= (bit as u32) << i;
+    }
+    val
+}
+
+fn aml_int(data: u32, data_size: usize) -> i32 {
+    match data_size {
+        1 => (data as u8) as i8 as i32,
+        2 => (data as u16) as i16 as i32,
+        4 => data as i32,
+        _ => data as i32,
     }
 }
 
@@ -674,19 +748,29 @@ struct PointerFieldLayout {
     buttons_offset: Option<usize>,
     dx_offset: Option<usize>,
     dy_offset: Option<usize>,
+    x_bit_off: Option<usize>,
+    x_bit_len: usize,
+    y_bit_off: Option<usize>,
+    y_bit_len: usize,
+    x_log_max: u32,
+    y_log_max: u32,
+    tip_bit_off: Option<usize>,
     report_len: usize,
 }
 
 fn parse_pointer_layout(rdesc: &[u8]) -> Option<(Option<u8>, PointerLayoutKind)> {
-    let mut best: Option<(Option<u8>, PointerFieldLayout)> = None;
+    let mut best_rel: Option<(Option<u8>, PointerFieldLayout)> = None;
+    let mut best_abs: Option<(Option<u8>, PointerFieldLayout)> = None;
     let mut i = 0usize;
     let mut report_id: Option<u8> = None;
     let mut usage_page: u16 = 0;
     let mut usage_min: u32 = 0;
     let mut report_size: u32 = 0;
     let mut report_count: u32 = 0;
+    let mut logical_min: i32 = 0;
+    let mut logical_max: i32 = 0;
     let mut collection_depth: u32 = 0;
-    let mut in_mouse_app = false;
+    let mut in_pointer_app = false;
     let mut bit_offset: usize = 0;
     let mut field = PointerFieldLayout::default();
 
@@ -721,54 +805,81 @@ fn parse_pointer_layout(rdesc: &[u8]) -> Option<(Option<u8>, PointerLayoutKind)>
             }
             (1, 7) => report_size = data,
             (1, 9) => report_count = data,
+            (1, 1) => logical_min = aml_int(data, data_size),
+            (1, 2) => logical_max = aml_int(data, data_size),
             (2, 0) | (2, 1) | (2, 2) => usage_min = data,
             (0, 10) => {
                 collection_depth += 1;
-                if collection_depth == 1
-                    && usage_page == HID_USAGE_PAGE_GENERIC_DESKTOP
-                    && usage_min == HID_USAGE_MOUSE as u32
-                {
-                    in_mouse_app = true;
-                    bit_offset = 0;
-                    field = PointerFieldLayout::default();
+                if collection_depth == 1 {
+                    let mouse = usage_page == HID_USAGE_PAGE_GENERIC_DESKTOP
+                        && usage_min == HID_USAGE_MOUSE as u32;
+                    let pad = usage_page == HID_USAGE_PAGE_DIGITIZER
+                        && usage_min == HID_USAGE_DIGITIZER_TOUCHPAD as u32;
+                    if mouse || pad {
+                        in_pointer_app = true;
+                        bit_offset = 0;
+                        field = PointerFieldLayout::default();
+                    }
                 }
             }
             (0, 12) => {
-                if in_mouse_app && collection_depth == 1 {
+                if in_pointer_app && collection_depth == 1 {
                     let report_len = (bit_offset + 7) / 8;
-                    if field.dx_offset.is_some() && field.dy_offset.is_some() && report_len > 0 {
-                        let id = report_id;
-                        let layout = PointerFieldLayout {
-                            report_len,
-                            buttons_offset: field
-                                .buttons_offset
-                                .or(Some(0))
-                                .filter(|_| field.buttons_offset.is_some()),
-                            ..field
-                        };
-                        if layout.dx_offset.is_some() {
-                            best = Some((id, layout));
-                        }
+                    field.report_len = report_len;
+                    let id = report_id;
+                    if field.x_bit_off.is_some()
+                        && field.y_bit_off.is_some()
+                        && field.x_bit_len >= 12
+                        && report_len > 0
+                    {
+                        best_abs = Some((id, field));
+                    } else if field.dx_offset.is_some()
+                        && field.dy_offset.is_some()
+                        && report_len > 0
+                    {
+                        best_rel = Some((id, field));
                     }
-                    in_mouse_app = false;
+                    in_pointer_app = false;
                     field = PointerFieldLayout::default();
                     bit_offset = 0;
                 }
                 collection_depth = collection_depth.saturating_sub(1);
             }
-            (0, 8) if in_mouse_app => {
+            (0, 8) if in_pointer_app => {
                 let byte_off = bit_offset / 8;
-                if usage_page == 0x09 && report_size == 1 {
+                if usage_page == 0x09 && report_size == 1 && report_count <= 8 {
                     field.buttons_offset = Some(byte_off);
                 }
-                if usage_page == HID_USAGE_PAGE_GENERIC_DESKTOP && report_size == 8 {
-                    if report_count >= 2 && usage_min == 0x31 {
-                        field.dx_offset = Some(byte_off);
-                        field.dy_offset = Some(byte_off + 1);
-                    } else if usage_min == 0x30 {
-                        field.dx_offset = Some(byte_off);
-                    } else if usage_min == 0x31 {
-                        field.dy_offset = Some(byte_off);
+                if usage_page == HID_USAGE_PAGE_DIGITIZER
+                    && usage_min == HID_USAGE_TIP_SWITCH as u32
+                    && report_size == 1
+                {
+                    field.tip_bit_off = Some(bit_offset);
+                }
+                let desktop_xy = usage_page == HID_USAGE_PAGE_GENERIC_DESKTOP
+                    || usage_page == HID_USAGE_PAGE_DIGITIZER;
+                if desktop_xy && (usage_min == 0x30 || usage_min == 0x31) {
+                    let rel = report_size == 8 && logical_min < 0;
+                    if rel {
+                        if report_count >= 2 && (usage_min == 0x30 || usage_min == 0x31) {
+                            field.dx_offset = Some(byte_off);
+                            field.dy_offset = Some(byte_off + 1);
+                        } else if usage_min == 0x30 {
+                            field.dx_offset = Some(byte_off);
+                        } else if usage_min == 0x31 {
+                            field.dy_offset = Some(byte_off);
+                        }
+                    } else if report_size >= 8 {
+                        let max = logical_max.max(0) as u32;
+                        if usage_min == 0x30 {
+                            field.x_bit_off = Some(bit_offset);
+                            field.x_bit_len = report_size as usize;
+                            field.x_log_max = max;
+                        } else {
+                            field.y_bit_off = Some(bit_offset);
+                            field.y_bit_len = report_size as usize;
+                            field.y_log_max = max;
+                        }
                     }
                 }
                 bit_offset += (report_size * report_count) as usize;
@@ -777,13 +888,28 @@ fn parse_pointer_layout(rdesc: &[u8]) -> Option<(Option<u8>, PointerLayoutKind)>
         }
     }
 
-    let (_, f) = best?;
-    let buttons_off = f.buttons_offset.unwrap_or(0);
+    if let Some((id, f)) = best_abs {
+        return Some((
+            id,
+            PointerLayoutKind::ReportAbsolute {
+                report_len: f.report_len,
+                buttons_offset: f.buttons_offset,
+                x_bit_off: f.x_bit_off?,
+                x_bit_len: f.x_bit_len,
+                y_bit_off: f.y_bit_off?,
+                y_bit_len: f.y_bit_len,
+                x_log_max: f.x_log_max.max(1),
+                y_log_max: f.y_log_max.max(1),
+                tip_bit_off: f.tip_bit_off,
+            },
+        ));
+    }
+    let (_, f) = best_rel?;
     Some((
         report_id,
         PointerLayoutKind::Report {
             report_len: f.report_len,
-            buttons_offset: buttons_off,
+            buttons_offset: f.buttons_offset.unwrap_or(0),
             dx_offset: f.dx_offset?,
             dy_offset: f.dy_offset?,
         },
@@ -805,6 +931,17 @@ impl PointerState {
     }
 
     pub fn process_raw_report(&mut self, data: &[u8]) {
+        if let Some((x, y, x_max, y_max, buttons)) = self.layout.extract_absolute(data) {
+            self.event_queue.push_back(PointerEvent {
+                dx: x as i32,
+                dy: y as i32,
+                buttons,
+                absolute: true,
+                abs_x_max: x_max,
+                abs_y_max: y_max,
+            });
+            return;
+        }
         let Some((buttons, dx, dy)) = self.layout.extract(data) else {
             return;
         };
@@ -812,6 +949,9 @@ impl PointerState {
             dx: dx as i32,
             dy: -(dy as i32),
             buttons: pointer_buttons_mask(buttons),
+            absolute: false,
+            abs_x_max: 0,
+            abs_y_max: 0,
         });
     }
 
@@ -970,5 +1110,51 @@ mod tests {
         assert_eq!(ev.dx, 2);
         assert_eq!(ev.dy, -1);
         assert_eq!(ev.buttons, 0);
+        assert!(!ev.absolute);
+    }
+
+    /// Touchpad absoluto: tip (1 bit) + X/Y 12 bits (máx 4095).
+    fn sample_absolute_touchpad_descriptor() -> Vec<u8> {
+        vec![
+            0x05, 0x0d, 0x09, 0x05, 0xa1, 0x01, 0x09, 0x47, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01,
+            0x95, 0x01, 0x81, 0x02, 0x05, 0x01, 0x09, 0x30, 0x15, 0x00, 0x26, 0xff, 0x0f, 0x75,
+            0x0c, 0x95, 0x01, 0x81, 0x02, 0x09, 0x31, 0x15, 0x00, 0x26, 0xff, 0x0f, 0x75, 0x0c,
+            0x95, 0x01, 0x81, 0x02, 0xc0,
+        ]
+    }
+
+    #[test]
+    fn absolute_touchpad_descriptor_layout() {
+        let layout = PointerReportLayout::from_descriptor(&sample_absolute_touchpad_descriptor());
+        assert!(matches!(
+            layout.expect("parse").kind,
+            PointerLayoutKind::ReportAbsolute { .. }
+        ));
+    }
+
+    fn set_bits(buf: &mut [u8], bit_off: usize, bit_len: usize, val: u32) {
+        for i in 0..bit_len {
+            if (val >> i) & 1 != 0 {
+                buf[(bit_off + i) / 8] |= 1 << ((bit_off + i) % 8);
+            }
+        }
+    }
+
+    #[test]
+    fn pointer_state_absolute_touchpad() {
+        let layout = PointerReportLayout::from_descriptor(&sample_absolute_touchpad_descriptor())
+            .expect("layout");
+        let mut st = PointerState::new(layout);
+        let mut report = [0u8; 4];
+        set_bits(&mut report, 0, 1, 1);
+        set_bits(&mut report, 1, 12, 100);
+        set_bits(&mut report, 13, 12, 200);
+        st.process_raw_report(&report);
+        let ev = st.next_event().expect("event");
+        assert!(ev.absolute);
+        assert_eq!(ev.buttons, 1);
+        assert_eq!(ev.dx, 100);
+        assert_eq!(ev.dy, 200);
+        assert_eq!(ev.abs_x_max, 4095);
     }
 }

@@ -173,6 +173,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     println!("boot: kbd");
     drivers::kbd::init();
     drivers::mouse::init();
+    drivers::hid_i2c::init();
     #[cfg(feature = "drv-live-disk")]
     drivers::fatlog::flush_checkpoint();
     #[cfg(feature = "drv-hda")]

@@ -1,9 +1,0 @@
-{
- "id": "R06",
- "resultado": "error",
- "intentos": 1,
- "segundos": 1,
- "nota": "error: entorno: el intento no termin\u00f3: ErrorModelo entorno: el servidor contest\u00f3 Some(429): {\"error\":{\"message\":\"generacion en curso\",\"type\":\"invalid_request_error\",\"code\":\"busy\"}}",
- "fallo": "infraestructura",
- "herramientas": 0
-}

@@ -7,7 +7,7 @@ import "term.sal"
 import "fuente.sal"
 
 fn st_size() -> Int
-    248
+    264
 
 fn st_cli_fd() -> Int
     0
@@ -101,6 +101,12 @@ fn st_my_prev() -> Int
 
 fn st_fondo() -> Int
     240
+
+fn st_grab_x() -> Int
+    248
+
+fn st_grab_y() -> Int
+    256
 
 fn wm_cursor_w() -> Int
     12
@@ -256,6 +262,8 @@ fn st_nuevo(evt_buf: Int, msg_buf: Int) -> Int ! alloc
     _pl = st_set(p, st_psf_len(), 0)
     _dr = st_set(p, st_drag_ix(), -1)
     _dk = st_set(p, st_drag_kind(), 0)
+    _gx = st_set(p, st_grab_x(), 0)
+    _gy = st_set(p, st_grab_y(), 0)
     p
 
 fn wm_cargar_psf(st: Int) -> Int ! io, alloc
@@ -395,17 +403,22 @@ fn wm_aplicar_mosaic(st: Int, sw: Int, sh: Int) -> Int ! alloc
         if tab_slot_activo(tab, i) != 0
             if mos == 0
                 _r = tab_restaurar_float(tab, i)
+                _tr = wm_term_redimensionar_si(st, tab, i)
             if mos != 0
                 _g = tab_guardar_float(tab, i)
                 wx = ventana_mosaico_wx(k, nz, sw, sh)
                 wy = ventana_mosaico_wy(k, nz, sw, sh)
                 ww = ventana_mosaico_ww(k, nz, sw, sh)
                 wh = ventana_mosaico_wh(k, nz, sw, sh)
-                clip = ventana_recortar_pantalla(wx, wy, ww, wh, sw, sh)
-                _x = tab_set(tab, i, tab_wx(), ventana_clip_wx(clip))
-                _y = tab_set(tab, i, tab_wy(), ventana_clip_wy(clip))
-                _w = tab_set(tab, i, tab_ww(), ventana_clip_ww(clip))
-                _h = tab_set(tab, i, tab_wh(), ventana_clip_wh(clip))
+                nx = ventana_recortar_nx(wx)
+                ny = ventana_recortar_ny(wy)
+                nw = ventana_recortar_nw(wx, ww, sw, nx)
+                nh = ventana_recortar_nh(wh, sh, ny)
+                _x = tab_set(tab, i, tab_wx(), nx)
+                _y = tab_set(tab, i, tab_wy(), ny)
+                _w = tab_set(tab, i, tab_ww(), nw)
+                _h = tab_set(tab, i, tab_wh(), nh)
+                _tr2 = wm_term_redimensionar_si(st, tab, i)
         k = k + 1
     _d = wm_marcar_dirty(st, 0, barra_alto(), sw, sh)
     0
@@ -476,6 +489,39 @@ fn wm_color_fondo() -> Int
 fn wm_color_barra() -> Int
     color_rgb(48, 48, 64)
 
+fn wm_color_barra_foco() -> Int
+    color_rgb(72, 88, 120)
+
+fn wm_term_redimensionar_si(st: Int, tab: Int, i: Int) -> Int ! alloc
+    if tab_get(tab, i, tab_tipo()) != tab_tipo_term()
+        0
+    else
+        ww = tab_get(tab, i, tab_ww())
+        wh = tab_get(tab, i, tab_wh())
+        cols = wm_term_cols(ww)
+        rows = wm_term_rows(wh)
+        grid = tab_get(tab, i, tab_shm_ptr())
+        tst = tab_get(tab, i, tab_term_st())
+        ow = term_st_get(tst, st_cols())
+        oh = term_st_get(tst, st_rows())
+        if cols == ow
+            if rows == oh
+                0
+            else
+                glen = ow * oh * celda_bytes()
+                newg = term_redimensionar(tst, grid, glen, ow, oh, cols, rows)
+                _g = tab_set(tab, i, tab_shm_ptr(), newg)
+                _c = tab_set(tab, i, tab_cw(), cols * 8)
+                _r = tab_set(tab, i, tab_ch(), rows * 16)
+                1
+        else
+            glen = ow * oh * celda_bytes()
+            newg = term_redimensionar(tst, grid, glen, ow, oh, cols, rows)
+            _g = tab_set(tab, i, tab_shm_ptr(), newg)
+            _c = tab_set(tab, i, tab_cw(), cols * 8)
+            _r = tab_set(tab, i, tab_ch(), rows * 16)
+            1
+
 fn wm_repintar_ventana(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
     wx = st_get(st, st_wx())
     wy = st_get(st, st_wy())
@@ -490,7 +536,7 @@ fn wm_repintar_ventana(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: In
     _d = wm_marcar_dirty(st, wx, wy, wx + ww, wy + wh)
     0
 
-fn wm_pintar_marco_titulo(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, wx: Int, wy: Int) -> Int ! alloc
+fn wm_pintar_marco_titulo(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, wx: Int, wy: Int, bg: Int) -> Int ! alloc
     psf = st_get(st, st_psf())
     plen = st_get(st, st_psf_len())
     if psf > 0
@@ -504,14 +550,17 @@ fn wm_pintar_marco_titulo(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw:
                 j = 16
             else
                 if ch != 32
-                    _d = fuente_dibujar(psf, plen, compos, clen, stride, bpp, fmt, ch, color_rgb(220, 224, 236), wm_color_barra(), cx, cy)
+                    _d = fuente_dibujar(psf, plen, compos, clen, stride, bpp, fmt, ch, color_rgb(220, 224, 236), bg, cx, cy)
                     cx = cx + 8
                 j = j + 1
     0
 
 fn wm_pintar_marco(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, wx: Int, wy: Int, ww: Int, wh: Int, st: Int, tab: Int, i: Int) -> Int ! alloc
-    rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, wx, wy, wx + ww, wy + wh, wm_color_barra())
-    _t = wm_pintar_marco_titulo(st, tab, i, compos, clen, sw, sh, stride, bpp, fmt, wx, wy)
+    col_m = wm_color_barra()
+    if st_get(st, st_focus()) == i
+        col_m = wm_color_barra_foco()
+    rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, wx, wy, wx + ww, wy + wh, col_m)
+    _t = wm_pintar_marco_titulo(st, tab, i, compos, clen, sw, sh, stride, bpp, fmt, wx, wy, col_m)
     rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, wx, wy + barra_alto(), wx + ww, wy + wh, color_rgb(20, 20, 28))
 
 fn wm_blit_cliente(compos: Int, clen: Int, cstride: Int, bpp: Int, fmt: Int, wx: Int, wy: Int, cw: Int, ch: Int, shm: Int, slen: Int, sx: Int, sy: Int, w: Int, h: Int) -> Int ! alloc
@@ -741,8 +790,8 @@ fn wm_raton_mover(st: Int, x: Int, y: Int, botones: Int, sw: Int, sh: Int) -> In
             ww = tab_get(tab, dix, tab_ww())
             wh = tab_get(tab, dix, tab_wh())
             if dk == 1
-                _x = tab_set(tab, dix, tab_wx(), x - st_get(st, st_dx0()))
-                _y = tab_set(tab, dix, tab_wy(), y - st_get(st, st_dy0()))
+                _x = tab_set(tab, dix, tab_wx(), x - st_get(st, st_grab_x()))
+                _y = tab_set(tab, dix, tab_wy(), y - st_get(st, st_grab_y()))
             if dk == 2
                 nw = max(ventana_min_ancho(), x - wx)
                 nh = max(ventana_min_alto() + barra_alto(), y - wy)
@@ -764,6 +813,7 @@ fn wm_raton_btn(st: Int, x: Int, y: Int, botones: Int, compos: Int, clen: Int, s
         if dix >= 0
             if dk == 2
                 _r = wm_redim_slot(st, tab, dix, fmt, compos, clen, sw, sh, stride, bpp)
+                _tr = wm_term_redimensionar_si(st, tab, dix)
         _d = st_set(st, st_drag_ix(), -1)
         _k = st_set(st, st_drag_kind(), 0)
     if botones != 0
@@ -793,8 +843,8 @@ fn wm_raton_btn(st: Int, x: Int, y: Int, botones: Int, compos: Int, clen: Int, s
                     if ventana_hit_titulo(x, y, wx, wy, ww) != 0
                         _di = st_set(st, st_drag_ix(), i)
                         _dk = st_set(st, st_drag_kind(), 1)
-                        _x0 = st_set(st, st_dx0(), x - wx)
-                        _y0 = st_set(st, st_dy0(), y - wy)
+                        _x0 = st_set(st, st_grab_x(), x - wx)
+                        _y0 = st_set(st, st_grab_y(), y - wy)
                     else
                         _r = wm_reenviar_raton_slot(st, tab, i, x, y, botones)
     0
@@ -887,6 +937,8 @@ fn wm_abrir_terminal(st: Int, sw: Int, sh: Int) -> Int ! io, alloc
             _c = tab_set(tab, si, tab_cw(), cols * 8)
             _r = tab_set(tab, si, tab_ch(), rows * 16)
             _p = tab_set(tab, si, tab_term_pos(), 0)
+            _fw = tab_set(tab, si, tab_fww(), 0)
+            _fh = tab_set(tab, si, tab_fwh(), 0)
             ok = 1
     ok
 
@@ -995,6 +1047,35 @@ fn wm_atender_todos(st: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt:
         _a = wm_slot_atender(st, tab, i, compos, clen, stride, bpp, fmt, sw, sh)
         i = i + 1
     0
+
+fn wm_prueba_anadir_terminal(st: Int, sw: Int, sh: Int) -> Int ! alloc
+    tab = st_get(st, st_tab())
+    z = st_get(st, st_z())
+    si = tab_buscar_libre(tab)
+    ok = 0
+    if si >= 0
+        _t = tab_set(tab, si, tab_tipo(), tab_tipo_term())
+        _f = tab_set(tab, si, tab_fd(), 0)
+        _p = tab_set(tab, si, tab_pid(), 0)
+        _x = tab_set(tab, si, tab_wx(), 40)
+        _y = tab_set(tab, si, tab_wy(), 40 + barra_alto())
+        _w = tab_set(tab, si, tab_ww(), 640)
+        _h = tab_set(tab, si, tab_wh(), 400 + barra_alto())
+        nz = st_get(st, st_nz())
+        nn = z_anadir(z, nz, si)
+        _n = st_set(st, st_nz(), nn)
+        _fo = st_set(st, st_focus(), si)
+        cols = wm_term_cols(640)
+        rows = wm_term_rows(400 + barra_alto())
+        grid = term_capa(cols, rows)
+        tst = term_st_nuevo(cols, rows)
+        _g = tab_set(tab, si, tab_shm_ptr(), grid)
+        _ts = tab_set(tab, si, tab_term_st(), tst)
+        _ti = tab_titulo_set(tab, si, d"Terminal")
+        _fw = tab_set(tab, si, tab_fww(), 0)
+        _fh = tab_set(tab, si, tab_fwh(), 0)
+        ok = 1
+    ok
 
 fn wm_drenar_input(st: Int, evt: Int, evt_len: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     lotes = 0

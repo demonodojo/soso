@@ -235,6 +235,149 @@ fn prueba_web_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: I
             ok = 0
     ok
 
+fn prueba_layout_solapan(tab: Int, z: Int, nz: Int, a: Int, b: Int) -> Int ! alloc
+    ia = z_get(z, a)
+    ib = z_get(z, b)
+    wx = tab_get(tab, ia, tab_wx())
+    wy = tab_get(tab, ia, tab_wy())
+    ww = tab_get(tab, ia, tab_ww())
+    wh = tab_get(tab, ia, tab_wh())
+    wx2 = tab_get(tab, ib, tab_wx())
+    wy2 = tab_get(tab, ib, tab_wy())
+    ww2 = tab_get(tab, ib, tab_ww())
+    wh2 = tab_get(tab, ib, tab_wh())
+    if wx < wx2 + ww2
+        if wx2 < wx + ww
+            if wy < wy2 + wh2
+                if wy2 < wy + wh
+                    1
+    0
+
+fn prueba_layout_mosaic(st: Int, sw: Int, sh: Int) -> Int ! alloc
+    tab = st_get(st, st_tab())
+    z = st_get(st, st_z())
+    nz = st_get(st, st_nz())
+    if nz != 4
+        100
+    else
+        _m = st_set(st, st_mosaic(), 1)
+        _a = wm_aplicar_mosaic(st, sw, sh)
+        ok = 0
+        k = 0
+        while k < nz
+            if ok == 0
+                i = z_get(z, k)
+                ww = tab_get(tab, i, tab_ww())
+                wh = tab_get(tab, i, tab_wh())
+                if ww < ventana_min_ancho()
+                    ok = 110 + k
+                if wh < ventana_min_alto() + barra_alto()
+                    ok = 120 + k
+            k = k + 1
+        a = 0
+        while a < nz
+            if ok == 0
+                b = a + 1
+                while b < nz
+                    if prueba_layout_solapan(tab, z, nz, a, b) != 0
+                        ok = 130 + a * 4 + b
+                    b = b + 1
+            a = a + 1
+        if ok == 0
+            _m0 = st_set(st, st_mosaic(), 0)
+            _r0 = wm_aplicar_mosaic(st, sw, sh)
+        ok
+
+fn prueba_layout_drag(st: Int, sw: Int, sh: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
+    tab = st_get(st, st_tab())
+    fi = st_get(st, st_focus())
+    if fi < 0
+        200
+    else
+        wx0 = tab_get(tab, fi, tab_wx())
+        wy0 = tab_get(tab, fi, tab_wy())
+        gx = 10
+        gy = 5
+        _di = st_set(st, st_drag_ix(), fi)
+        _dk = st_set(st, st_drag_kind(), 1)
+        _gx = st_set(st, st_grab_x(), gx)
+        _gy = st_set(st, st_grab_y(), gy)
+        nx = wx0 + 50
+        ny = wy0 + 40
+        _mv = wm_raton_mover(st, nx, ny, 1, sw, sh)
+        wx1 = tab_get(tab, fi, tab_wx())
+        wy1 = tab_get(tab, fi, tab_wy())
+        if wx1 != nx - gx
+            201
+        else
+            if wy1 != ny - gy
+                202
+            else
+                _c = wm_compose(st, compos, clen, sw, sh, stride, bpp, fmt)
+                if tab_get(tab, fi, tab_wx()) != wx1
+                    203
+                else
+                    0
+
+fn prueba_layout_float(st: Int, sw: Int, sh: Int) -> Int ! alloc
+    tab = st_get(st, st_tab())
+    i = 0
+    _x = tab_set(tab, i, tab_wx(), 0)
+    _y = tab_set(tab, i, tab_wy(), 40 + barra_alto())
+    _w = tab_set(tab, i, tab_ww(), 500)
+    _h = tab_set(tab, i, tab_wh(), 350 + barra_alto())
+    _fx = tab_set(tab, i, tab_fwx(), 0)
+    _fy = tab_set(tab, i, tab_fwy(), 40 + barra_alto())
+    _fw = tab_set(tab, i, tab_fww(), 500)
+    _fh = tab_set(tab, i, tab_fwh(), 350 + barra_alto())
+    rc = 0
+    if rc == 0
+        _m = st_set(st, st_mosaic(), 1)
+        _a = wm_aplicar_mosaic(st, sw, sh)
+        _m0 = st_set(st, st_mosaic(), 0)
+        _a2 = wm_aplicar_mosaic(st, sw, sh)
+        ww = tab_get(tab, i, tab_ww())
+        fw = tab_get(tab, i, tab_fww())
+        if tab_get(tab, i, tab_wx()) != 0
+            rc = 300
+        if rc == 0
+            if fw != 500
+                rc = 301
+        if rc == 0
+            if ww != 500
+                rc = 302
+    rc
+
+fn prueba_layout_preparar(st: Int, sw: Int, sh: Int) -> Int ! alloc
+    n = 0
+    while n < 4
+        _t = wm_prueba_anadir_terminal(st, sw, sh)
+        n = n + 1
+    0
+
+fn prueba_layout_mosaic_only(sw: Int, sh: Int) -> Int ! alloc
+    evt = bytes_ptr(bytes_new(24 * 8))
+    msg = bytes_ptr(bytes_new(msg_len()))
+    st = st_nuevo(evt, msg)
+    _prep = prueba_layout_preparar(st, sw, sh)
+    prueba_layout_mosaic(st, sw, sh)
+
+fn prueba_layout_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
+    evt = bytes_ptr(bytes_new(24 * 8))
+    msg = bytes_ptr(bytes_new(msg_len()))
+    st = st_nuevo(evt, msg)
+    _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo())
+    _prep = prueba_layout_preparar(st, sw, sh)
+    ok = prueba_layout_mosaic(st, sw, sh)
+    if ok == 0
+        ok = prueba_layout_drag(st, sw, sh, compos, clen, stride, bpp, fmt)
+    if ok == 0
+        ok = prueba_layout_float(st, sw, sh)
+    if ok == 0
+        _pr = print_str(d"soso-wm: prueba-layout OK\n")
+        ok = 0
+    ok
+
 fn fotograma() -> Int ! io, alloc
     info = fb_info_nuevo()
     r = fb_info(info)
@@ -307,8 +450,28 @@ fn main() -> Int ! io, alloc
                 compos = bytes_ptr(bytes_new(plen))
                 rc = prueba_modo(compos, plen, sw, sh, stride, bpp, fmt)
         if arg_flag(d"--prueba") == 0
-            if arg_flag(d"--fotograma") != 0
-                rc = fotograma()
-            if arg_flag(d"--fotograma") == 0
-                rc = bucle_grafico(d"")
+            if arg_flag(d"--prueba-layout") != 0
+                compos = compos_ram(1280, 800, 1280, 4)
+                rc = prueba_layout_modo(compos, compos_len(1280, 800, 4), 1280, 800, 1280, 4, fmt_bgr())
+                if rc == 0
+                    info = fb_info_nuevo()
+                    r = fb_info(info)
+                    if r >= 0
+                        if fb_info_leer(info) != 0
+                            sw = fb_info_ancho(info)
+                            sh = fb_info_alto(info)
+                            if sw != 1280
+                                rc2 = prueba_layout_mosaic_only(sw, sh)
+                                if rc2 != 0
+                                    rc = rc2
+                            if sw == 1280
+                                if sh != 800
+                                    rc2 = prueba_layout_mosaic_only(sw, sh)
+                                    if rc2 != 0
+                                        rc = rc2
+            if arg_flag(d"--prueba-layout") == 0
+                if arg_flag(d"--fotograma") != 0
+                    rc = fotograma()
+                if arg_flag(d"--fotograma") == 0
+                    rc = bucle_grafico(d"")
     rc

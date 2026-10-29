@@ -381,6 +381,7 @@ pub struct UsbKbdEvent {
     pub pressed: bool,
     pub shift: bool,
     pub altgr: bool,
+    pub modifiers: u8,
 }
 
 /// Sondea el teclado HID. No necesita el candado del vector si otro hilo está
@@ -406,6 +407,7 @@ pub fn poll_keyboard_event() -> Option<UsbKbdEvent> {
             let shift = evt.modifiers & (MOD_LEFT_SHIFT | MOD_RIGHT_SHIFT) != 0;
             let altgr = evt.modifiers & MOD_RIGHT_ALT != 0;
             return Some(UsbKbdEvent {
+                modifiers: evt.modifiers,
                 scancode: evt.scancode,
                 usage_id: evt.usage_id,
                 pressed: evt.pressed,
