@@ -107,12 +107,32 @@ unsafe extern "C" {
     fn lx_nouveau_set_boot0(boot0: u32, device_id: u32);
     fn lx_nouveau_gsp_fini() -> i32;
     fn lx_nouveau_gfx3d_ready() -> i32;
+    fn lx_nouveau_nvdisp_ready() -> i32;
+    fn lx_nouveau_nvdisp_present(
+        rt_va: u64,
+        pitch: u32,
+        pres_x: u32,
+        pres_y: u32,
+        pres_w: u32,
+        pres_h: u32,
+        full_frame: i32,
+    ) -> i32;
     fn lx_nouveau_gfx3d_clear(
         rt_va: u64,
         width: u32,
         height: u32,
         pitch: u32,
         rgba: u32,
+    ) -> i32;
+    fn lx_nouveau_gfx3d_blit_tex(
+        rt_va: u64,
+        rt_pitch: u32,
+        dx: u32,
+        dy: u32,
+        tex_va: u64,
+        tex_pitch: u32,
+        width: u32,
+        height: u32,
     ) -> i32;
 }
 
@@ -271,6 +291,41 @@ pub fn gfx3d_ready() -> bool {
     unsafe { lx_nouveau_gfx3d_ready() != 0 }
 }
 
+pub fn nvdisp_ready() -> bool {
+    unsafe { lx_nouveau_nvdisp_ready() != 0 }
+}
+
+/// N5: VRAM compositor RT → FB scanout (sin shadow GOP).
+pub fn nvdisp_present(
+    rt_va: u64,
+    pitch: u32,
+    pres_x: u32,
+    pres_y: u32,
+    pres_w: u32,
+    pres_h: u32,
+    full_frame: bool,
+) -> Result<(), ()> {
+    if rt_va == 0 || pitch == 0 || pres_w == 0 || pres_h == 0 {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_nvdisp_present(
+            rt_va,
+            pitch,
+            pres_x,
+            pres_y,
+            pres_w,
+            pres_h,
+            if full_frame { 1 } else { 0 },
+        )
+    };
+    if rc < 0 {
+        Err(())
+    } else {
+        Ok(())
+    }
+}
+
 pub fn submit_3d_clear(
     rt_va: u64,
     width: u32,
@@ -282,6 +337,31 @@ pub fn submit_3d_clear(
         return Err(());
     }
     let rc = unsafe { lx_nouveau_gfx3d_clear(rt_va, width, height, pitch, rgba) };
+    if rc < 0 {
+        Err(())
+    } else {
+        Ok(rc != 0)
+    }
+}
+
+/// F2: rectángulo de textura A8B8G8R8 en el render target (CE pitched blit).
+pub fn submit_3d_blit_tex(
+    rt_va: u64,
+    rt_pitch: u32,
+    dx: u32,
+    dy: u32,
+    tex_va: u64,
+    tex_pitch: u32,
+    width: u32,
+    height: u32,
+) -> Result<bool, ()> {
+    if rt_va == 0 || tex_va == 0 || width == 0 || height == 0 || rt_pitch == 0 || tex_pitch == 0
+    {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_gfx3d_blit_tex(rt_va, rt_pitch, dx, dy, tex_va, tex_pitch, width, height)
+    };
     if rc < 0 {
         Err(())
     } else {

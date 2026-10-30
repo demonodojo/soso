@@ -223,6 +223,7 @@ mod hw_matrix;
 mod pci_stable;
 #[cfg(test)]
 mod elf_mmap_rules;
+mod elf_wx;
 mod install_disk;
 mod llm_ports;
 mod live_models;

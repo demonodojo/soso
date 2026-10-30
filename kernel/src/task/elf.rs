@@ -1,8 +1,11 @@
 //! Carga de ELFs estáticos (ET_EXEC, enlazados a USER_BASE) en un
 //! espacio de direcciones de proceso.
 
-use super::addrspace::{AddrSpace, BRK_MAX, USER_BASE};
+use super::addrspace::{AddrSpace, UserProt, BRK_MAX, USER_BASE};
 use crate::mm;
+use alloc::collections::BTreeMap;
+use x86_64::structures::paging::{FrameAllocator, Mapper, Page, Size4KiB};
+use x86_64::VirtAddr;
 use xmas_elf::ElfFile;
 use xmas_elf::header;
 use xmas_elf::program::Type;
@@ -73,6 +76,9 @@ fn collect_load_phs(elf: &ElfFile<'_>, file_limit: u64) -> Result<alloc::vec::Ve
                 }
             }
             spans.push((start, end));
+            if ph.flags().is_write() && ph.flags().is_execute() {
+                return Err("segmento W+X en el mismo PT_LOAD");
+            }
             out.push(LoadPh {
                 vaddr,
                 memsz,
@@ -110,6 +116,21 @@ fn check_exec(elf: &ElfFile<'_>) -> Result<(), &'static str> {
     Ok(())
 }
 
+fn ph_user_prot(write: bool, exec: bool) -> UserProt {
+    match (write, exec) {
+        (false, false) => UserProt::R,
+        (true, false) => UserProt::Rw,
+        (false, true) => UserProt::Rx,
+        (true, true) => UserProt::Rwx,
+    }
+}
+
+fn merge_page_prot(map: &mut BTreeMap<u64, UserProt>, page: u64, want: UserProt) {
+    map.entry(page)
+        .and_modify(|cur| *cur = cur.merge(want))
+        .or_insert(want);
+}
+
 /// Carga los segmentos PT_LOAD y PT_TLS. Devuelve (entry, brk, tls_base).
 pub fn load(space: &AddrSpace, data: &[u8]) -> Result<(u64, u64, u64), &'static str> {
     let elf = ElfFile::new(data)?;
@@ -118,6 +139,32 @@ pub fn load(space: &AddrSpace, data: &[u8]) -> Result<(u64, u64, u64), &'static 
     let entry = elf.header.pt2.entry_point();
     if !entry_in_exec_load(entry, &loads) {
         return Err("entry fuera de segmentos cargados");
+    }
+
+    let mut page_prot = BTreeMap::new();
+    for ph in elf.program_iter() {
+        let ty = ph.get_type()?;
+        if ty != Type::Load && ty != Type::Tls {
+            continue;
+        }
+        let vaddr = ph.virtual_addr();
+        let memsz = ph.mem_size();
+        if memsz == 0 {
+            continue;
+        }
+        let want = ph_user_prot(ph.flags().is_write(), ph.flags().is_execute());
+        let first_page = vaddr & !0xfff;
+        let mut page = first_page;
+        while page < vaddr + memsz {
+            merge_page_prot(&mut page_prot, page, want);
+            page += 4096;
+        }
+    }
+    for prot in page_prot.values() {
+        if *prot == UserProt::Rwx {
+            crate::klogln!("elf: página W+X compartida entre segmentos PT_LOAD (transición W^X)");
+            break;
+        }
     }
 
     let mut brk = USER_BASE;
@@ -138,7 +185,23 @@ pub fn load(space: &AddrSpace, data: &[u8]) -> Result<(u64, u64, u64), &'static 
         let first_page = vaddr & !0xfff;
         let mut page = first_page;
         while page < vaddr + memsz {
-            let frame = space.ensure_mapped(page).ok_or("sin memoria")?;
+            let prot = page_prot.get(&page).copied().unwrap_or(UserProt::Rw);
+            let page_idx = Page::<Size4KiB>::containing_address(VirtAddr::new(page));
+            let mut mapper = space.mapper();
+            use x86_64::structures::paging::Translate;
+            let frame = if let Ok(f) = mapper.translate_page(page_idx) {
+                f
+            } else {
+                drop(mapper);
+                let mut fa = mm::FRAME_ALLOC.get().ok_or("sin memoria")?.lock();
+                let f = FrameAllocator::<Size4KiB>::allocate_frame(&mut *fa).ok_or("sin memoria")?;
+                unsafe {
+                    mm::phys_to_virt(f.start_address().as_u64())
+                        .as_mut_ptr::<[u8; 4096]>()
+                        .write([0; 4096]);
+                }
+                f
+            };
             let seg_start = vaddr.max(page);
             let seg_end = (vaddr + filesz).min(page + 4096);
             if seg_start < seg_end {
@@ -149,6 +212,7 @@ pub fn load(space: &AddrSpace, data: &[u8]) -> Result<(u64, u64, u64), &'static 
                     core::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr(), src.len())
                 };
             }
+            space.map_page(page, frame, prot).ok_or("map_page")?;
             page += 4096;
         }
         brk = brk.max(vaddr + memsz);
@@ -196,6 +260,9 @@ pub fn load_lazy(
         if memsz == 0 {
             continue;
         }
+        if ty == Type::Load && ph.flags().is_write() && ph.flags().is_execute() {
+            return Err("segmento W+X en el mismo PT_LOAD");
+        }
         let page_delta = vaddr & 0xfff;
         let virt_start = vaddr - page_delta;
         let file_offset = offset - page_delta;
@@ -208,6 +275,7 @@ pub fn load_lazy(
                 file_offset,
                 file_len: core::cmp::min(offset.saturating_add(filesz), file_size),
                 writable: ph.flags().is_write(),
+                exec: ph.flags().is_execute(),
                 sin_acceso: false,
                 shm_id: 0,
             });

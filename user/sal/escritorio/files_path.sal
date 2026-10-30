@@ -1,0 +1,79 @@
+import "mate.sal"
+
+fn path_is_root(p: String) -> Int ! alloc
+    str_eq(p, d"/")
+
+fn path_parent_matches(p: String, want: String) -> Int ! alloc
+    if path_is_root(p) != 0
+        str_eq(want, d"/")
+    else
+        n = str_len(p)
+        slash = 0
+        i = n - 1
+        while i > 0
+            if slash == 0
+                if str_char(p, i) == 47
+                    slash = i
+            i = i - 1
+        if slash == 0
+            str_eq(want, d"/")
+        else
+            en = str_len(want)
+            if en != slash
+                0
+            else
+                j = 0
+                ok = 1
+                while j < en
+                    if ok != 0
+                        if str_char(p, j) != str_char(want, j)
+                            ok = 0
+                    j = j + 1
+                ok
+
+fn path_join_matches(base: String, name: String, want: String) -> Int ! alloc
+    bl = str_len(base)
+    nl = str_len(name)
+    wl = str_len(want)
+    need = bl + 1 + nl
+    if path_is_root(base) != 0
+        need = 1 + nl
+    if wl != need
+        0
+    else
+        j = 0
+        ok = 1
+        if path_is_root(base) != 0
+            if ok != 0
+                if str_char(want, 0) != 47
+                    ok = 0
+            j = 1
+            k = 0
+            while k < nl
+                if ok != 0
+                    if str_char(want, j) != str_char(name, k)
+                        ok = 0
+                j = j + 1
+                k = k + 1
+        else
+            k = 0
+            while k < bl
+                if ok != 0
+                    if str_char(want, k) != str_char(base, k)
+                        ok = 0
+                k = k + 1
+            if ok != 0
+                if str_char(want, bl) != 47
+                    ok = 0
+            j = bl + 1
+            k = 0
+            while k < nl
+                if ok != 0
+                    if str_char(want, j) != str_char(name, k)
+                        ok = 0
+                j = j + 1
+                k = k + 1
+        ok
+
+fn path_row_is_parent(name: String) -> Int ! alloc
+    str_eq(name, d"..")

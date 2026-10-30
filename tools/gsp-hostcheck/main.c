@@ -353,6 +353,12 @@ static uint32_t gsp_mmio_rd32(uint32_t off)
 static int gsp_mmio_alive(void) { return !fake_gpu_gone; }
 static int gsp_mmio_pci_recover(void) { fake_recover_calls++; return fake_recover_ret; }
 static int gsp_mmio_pri_error(uint32_t v) { return (v & 0xffff0000u) == 0xbadf0000u; }
+static int gsp_mmio_gfw_wait(unsigned timeout_ms, const char *when)
+{
+    (void)timeout_ms;
+    (void)when;
+    return 0;
+}
 
 /* Doorbell del canal. El literal es inevitable —este mock está ANTES del
  * `#include "nvrm_r570.h"`, así que aquí `NV_VFN_DOORBELL` todavía no existe—,
@@ -464,6 +470,22 @@ static int falcon_lx_start(unsigned base)
 #include "gsp_vram_body.inc"
 #include "gsp_chip_body.inc"
 #include "gsp_pramin_body.inc"
+#include "gsp_rom_body.inc"
+#include "nvdisp_probe_body.inc"
+#include "nvdisp_head_body.inc"
+/* N8 hostcheck: sin CE bringup completo → blit devuelve -1 y scanout usa PRAMIN. */
+static int gsp_vram_blit_pitch(uint64_t dst_va, uint32_t dst_pitch, uint64_t src_va,
+                               uint32_t src_pitch, uint32_t line_bytes, uint32_t lines)
+{
+    (void)dst_va;
+    (void)dst_pitch;
+    (void)src_va;
+    (void)src_pitch;
+    (void)line_bytes;
+    (void)lines;
+    return -1;
+}
+#include "nvdisp_scanout_body.inc"
 #include "gsp_vmm_body.inc"
 #include "gsp_top_body.inc"
 #include "gsp_chan_body.inc"
@@ -3085,6 +3107,26 @@ static int check_3d_encode(void)
     return 0;
 }
 
+static int check_ce_blit_encode(void)
+{
+    struct gsp_chan c;
+    unsigned char pb[GSP_CHAN_PB_SIZE];
+
+    memset(&c, 0, sizeof(c));
+    c.pushbuf.va = pb;
+    c.pushbuf.size = sizeof(pb);
+    c.ready = 1;
+    c.pb_pos = 0;
+    if (gsp_ce_selftest_encode_blit(&c, BLACKWELL_DMA_COPY_B, 0x80300000ull, 512u,
+                                    0x80400000ull, 256u, 128u, 32u) != 0) {
+        printf("FALLO: gsp_ce_selftest_encode_blit (cabecera SET_OBJECT)\n");
+        return -1;
+    }
+    printf("OK: pushbuffer CE blit pitched (cls Blackwell 0x%04x)\n",
+           BLACKWELL_DMA_COPY_B);
+    return 0;
+}
+
 /* El plan del contexto de GR: aritmética pura sobre lo que contesta RM, y por eso
  * probable sin GPU. Aquí no hay mensajes de error posibles —un búfer del tamaño o
  * la alineación equivocados sale del silicio como "el gráfico lee fuera"—, así que
@@ -3412,6 +3454,47 @@ static int check_hs_v2_blob(const char *path, unsigned expect_data_off)
     printf("OK: HS v2 %s payload@0x%x patch=0x%x sigs=%u\n", path,
            hdr->data_offset, patch_off, cnt);
     free(data);
+    return 0;
+}
+
+/* N2: layout GNVD = GPRES (25 B); tag de 5 bytes con pad tras «GNVD». */
+static int check_gnvd_submit_layout(void)
+{
+    unsigned char cmd[25];
+    uint64_t rt_h = 0x42ull;
+    uint32_t w = 640u, h = 480u, pitch = 2560u;
+
+    memset(cmd, 0, sizeof(cmd));
+    memcpy(cmd, "GNVD", 4);
+    if (cmd[4] != 0) {
+        printf("FALLO: GNVD byte 4 debe ser 0\n");
+        return -1;
+    }
+    memcpy(cmd + 5, &rt_h, 8);
+    memcpy(cmd + 13, &w, 4);
+    memcpy(cmd + 17, &h, 4);
+    memcpy(cmd + 21, &pitch, 4);
+    if (memcmp(cmd, "GPRES", 5) == 0) {
+        printf("FALLO: GNVD no debe coincidir con GPRES\n");
+        return -1;
+    }
+    if (sizeof(cmd) != 25u) {
+        printf("FALLO: GNVD len\n");
+        return -1;
+    }
+    {
+        uint64_t rh;
+        uint32_t rw, rht, rp;
+        memcpy(&rh, cmd + 5, 8);
+        memcpy(&rw, cmd + 13, 4);
+        memcpy(&rht, cmd + 17, 4);
+        memcpy(&rp, cmd + 21, 4);
+        if (rh != rt_h || rw != w || rht != h || rp != pitch) {
+            printf("FALLO: GNVD campos desalineados\n");
+            return -1;
+        }
+    }
+    printf("OK: GNVD SYS_GPU_SUBMIT (25 B, tag GNVD\\0)\n");
     return 0;
 }
 
@@ -5947,6 +6030,19 @@ static int check_cot(const struct gsp_wpr *wpr)
     if (check_cpu_seq() != 0)
         return -1;
     if (check_3d_encode() != 0)
+        return -1;
+    if (check_ce_blit_encode() != 0)
+        return -1;
+    if (nvdisp_probe_selftest() != 0)
+        return -1;
+    printf("OK: NVDisplay probe DCB (N1 hostcheck)\n");
+    if (nvdisp_head_selftest() != 0)
+        return -1;
+    printf("OK: NVDisplay head layout 640x480 (N4 hostcheck)\n");
+    if (nvdisp_scanout_selftest() != 0)
+        return -1;
+    printf("OK: NVDisplay scanout clip (N5 hostcheck)\n");
+    if (check_gnvd_submit_layout() != 0)
         return -1;
     if (check_g4e_chan_ce(&lo) != 0)
         return -1;

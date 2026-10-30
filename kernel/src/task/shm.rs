@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 use spin::Mutex;
 use x86_64::structures::paging::{FrameAllocator, FrameDeallocator, PhysFrame, Size4KiB};
 
-use super::addrspace::AddrSpace;
+use super::addrspace::{AddrSpace, UserProt};
 use super::mmap::{self, MmapRegion};
 use crate::mm;
 
@@ -15,6 +15,8 @@ struct Segment {
     frames: Vec<PhysFrame<Size4KiB>>,
     len: u64,
     creator: u64,
+    creador_as: u64,
+    concedidos: Vec<u64>,
     refs: u32,
 }
 
@@ -46,6 +48,7 @@ pub fn create(len: u64) -> Result<u64, i64> {
         }
     }
     let pid = super::current_pid();
+    let creador_as = super::current_space_id().ok_or(-soso_abi::EINVAL)?;
     let mut segs = SEGMENTS.lock();
     if segs.len() >= SHM_MAX_SEGMENTS && !segs.iter().any(|s| s.is_none()) {
         return Err(-soso_abi::EMFILE);
@@ -54,6 +57,8 @@ pub fn create(len: u64) -> Result<u64, i64> {
         frames,
         len,
         creator: pid,
+        creador_as,
+        concedidos: Vec::new(),
         refs: 1,
     };
     if let Some(hole) = segs.iter().position(|s| s.is_none()) {
@@ -65,15 +70,41 @@ pub fn create(len: u64) -> Result<u64, i64> {
     }
 }
 
+fn permitido(seg: &Segment, as_id: u64) -> bool {
+    seg.creador_as == as_id || seg.concedidos.iter().any(|&a| a == as_id)
+}
+
+pub fn grant(id: u64, pid: u64) -> Result<(), i64> {
+    if id == 0 {
+        return Err(-soso_abi::EINVAL);
+    }
+    let caller = super::current_space_id().ok_or(-soso_abi::EINVAL)?;
+    let target_as = super::space_id_for_pid(pid).ok_or(-soso_abi::ESRCH)?;
+    let idx = (id - 1) as usize;
+    let mut segs = SEGMENTS.lock();
+    let seg = segs.get_mut(idx).and_then(|s| s.as_mut()).ok_or(-soso_abi::EINVAL)?;
+    if seg.creador_as != caller {
+        return Err(-soso_abi::EPERM);
+    }
+    if !seg.concedidos.iter().any(|&a| a == target_as) {
+        seg.concedidos.push(target_as);
+    }
+    Ok(())
+}
+
 pub fn map(id: u64, space: AddrSpace) -> Result<u64, i64> {
     if id == 0 {
         return Err(-soso_abi::EINVAL);
     }
+    let as_id = space.id();
     let idx = (id - 1) as usize;
     let mut segs = SEGMENTS.lock();
     let Some(seg) = segs.get_mut(idx).and_then(|s| s.as_mut()) else {
         return Err(-soso_abi::EINVAL);
     };
+    if !permitido(seg, as_id) {
+        return Err(-soso_abi::EPERM);
+    }
     seg.refs = seg.refs.saturating_add(1);
     let len = seg.len;
     let frames = seg.frames.clone();
@@ -88,6 +119,7 @@ pub fn map(id: u64, space: AddrSpace) -> Result<u64, i64> {
             file_offset: 0,
             file_len: 0,
             writable: true,
+            exec: false,
             sin_acceso: false,
             shm_id: id,
         });
@@ -96,7 +128,10 @@ pub fn map(id: u64, space: AddrSpace) -> Result<u64, i64> {
 
     let mut off = 0u64;
     for f in frames {
-        if space.map_page(virt + off, f, true).is_none() {
+        if space
+            .map_page(virt + off, f, UserProt::Rw)
+            .is_none()
+        {
             return Err(-soso_abi::ENOMEM);
         }
         off += 4096;

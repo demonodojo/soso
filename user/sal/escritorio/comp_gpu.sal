@@ -1,0 +1,45 @@
+import "soso.sal"
+import "comp_gfram_layout.sal"
+
+fn comp_gpu_try_init(st: Int, clen: Int, w: Int, h: Int, pitch: Int) -> Int ! io, alloc
+    info = bytes_ptr(bytes_new(gpu_info_size()))
+    if gpu_info(info) < 0
+        _g = comp_st_set(st, comp_st_gpu_ok(), 0)
+        0
+    else
+        if gpu_gfx3d_ready(info) == 0
+            _g = comp_st_set(st, comp_st_gpu_ok(), 0)
+            0
+        else
+            rt = gpu_alloc_vram(clen)
+            if rt < 0
+                _g = comp_st_set(st, comp_st_gpu_ok(), 0)
+                0
+            else
+                tex = gpu_alloc_vram(clen)
+                if tex < 0
+                    _f = gpu_free(rt)
+                    _g = comp_st_set(st, comp_st_gpu_ok(), 0)
+                    0
+                else
+                    _r = comp_st_set(st, comp_st_rt_h(), rt)
+                    _t = comp_st_set(st, comp_st_tex_h(), tex)
+                    _p = comp_gpu_patch_gfram(st, rt, tex, w, h, pitch, 4281344048)
+                    _ok = comp_st_set(st, comp_st_gpu_ok(), 1)
+                    1
+
+fn comp_gpu_present(st: Int, compos: Int, dx: Int, dy: Int, rw: Int, rh: Int) -> Int ! io, alloc
+    if comp_st_get(st, comp_st_gpu_ok()) == 0
+        0
+    else
+        cmd = st + comp_st_cmd_gfram()
+        b = bytes_view_mem(cmd, comp_gfram_len())
+        _s = bytes_set_i64(b, 21, compos)
+        _x = bytes_set_u32(b, 41, dx)
+        _y = bytes_set_u32(b, 45, dy)
+        _w = bytes_set_u32(b, 49, rw)
+        _h = bytes_set_u32(b, 53, rh)
+        if gpu_submit(cmd, comp_gfram_len()) < 0
+            0
+        else
+            1

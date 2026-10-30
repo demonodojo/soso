@@ -37,7 +37,7 @@ pub fn wait_or_resume(
     {
         let mut waiters = WAITERS.lock();
         let mut procs = PROCS.lock();
-        let actual = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
+        let actual = super::uaccess::read_u32_user(uaddr).unwrap_or(expected.wrapping_add(1));
         if actual != expected {
             if let Some(p) = procs.iter_mut().find(|p| p.pid == pid) {
                 p.ctx = ctx;

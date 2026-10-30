@@ -77,6 +77,22 @@ void gsp_ce_drain_events(struct gsp_ce *ce);
 int gsp_ce_copy_sync(struct gsp_ce *ce, uint64_t dst_va, uint64_t src_va,
                      uint32_t size, unsigned ms);
 
+/* Copia 2D pitched (F2 compositor): `line_bytes` × `lines` desde `src_va` con
+ * `src_pitch` hacia `dst_va` con `dst_pitch`. */
+int gsp_ce_encode_blit(struct gsp_ce *ce, uint64_t dst_va, uint32_t dst_pitch,
+                       uint64_t src_va, uint32_t src_pitch, uint32_t line_bytes,
+                       uint32_t lines, unsigned *pb_off, unsigned *pb_len);
+
+int gsp_ce_blit_sync(struct gsp_ce *ce, uint64_t dst_va, uint32_t dst_pitch,
+                     uint64_t src_va, uint32_t src_pitch, uint32_t line_bytes,
+                     uint32_t lines, unsigned ms);
+
+/* Hostcheck: codifica un blit pitched y comprueba cabecera SET_OBJECT. */
+int gsp_ce_selftest_encode_blit(struct gsp_chan *c, uint32_t ce_cls,
+                                uint64_t dst_va, uint32_t dst_pitch,
+                                uint64_t src_va, uint32_t src_pitch,
+                                uint32_t line_bytes, uint32_t lines);
+
 /* Copia de prueba G4e: scratch → VRAM → scratch y compara el patrón.
  * En hardware exige canal+CE vivos; devuelve 0 solo si el readback cuadra.
  * Sin GPU real devuelve -1 (no miente con on_gpu). */

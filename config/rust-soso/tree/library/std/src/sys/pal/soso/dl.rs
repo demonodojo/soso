@@ -240,6 +240,34 @@ pub fn cargar(ruta: &Path) -> Result<usize, String> {
         }
     }
 
+    const PF_X: u32 = 1;
+    const PF_W: u32 = 2;
+    for i in 0..phnum {
+        let o = phoff + i * phentsize;
+        if u32_at(b, o).ok_or("ELF truncado")? != PT_LOAD {
+            continue;
+        }
+        let pf = u32_at(b, o + 4).ok_or("ELF truncado")?;
+        let va = u64_at(b, o + 16).ok_or("ELF truncado")? as usize;
+        let memsz = u64_at(b, o + 40).ok_or("ELF truncado")? as usize;
+        if memsz == 0 {
+            continue;
+        }
+        let mut prot = soso_abi::PROT_READ;
+        if pf & PF_W != 0 {
+            prot |= soso_abi::PROT_WRITE;
+        }
+        if pf & PF_X != 0 {
+            prot |= soso_abi::PROT_EXEC;
+        }
+        let start = base + va - nominal;
+        let len = (memsz + PAGE - 1) & !(PAGE - 1);
+        let r = unsafe { soso_rt::syscall3(soso_rt::SYS_MPROTECT, start as u64, len as u64, prot) };
+        if r < 0 {
+            return Err(crate::format!("mprotect del objeto en {start:#x} falló ({r})"));
+        }
+    }
+
     if let Some((va, off, filesz, memsz, align)) = tls {
         let propio = TLS_PROPIO.load(Ordering::Relaxed);
         if propio > PM_TLS_BIAS {

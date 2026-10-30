@@ -414,6 +414,48 @@ fn atencion_bloque<S: TensorSource>(
     let rope_n = if spec.qk_rope_head_dim > 0 { spec.qk_rope_head_dim as usize } else { hd };
 
     let mut tp = perfil_ahora();
+    // Con GPU, la capa entera en el dispositivo (q/k/v, normas, rope, KV, atención, puerta y salida) sin pasar las activaciones por el bus.
+    if use_gpu && kv.dropped == 0 && !kv.mla_latent && kv.dtype == crate::kv::KvDtype::F16 && kv.tokens(kv_dim) == pos0 && rope_n <= hd {
+        let nombres = [format!("{prefix}.attn_q"), format!("{prefix}.attn_k"), format!("{prefix}.attn_v"), format!("{prefix}.attn_output")];
+        let mut nq = vec![0.0f32; hd];
+        let mut nk = vec![0.0f32; hd];
+        source.load_f32(&format!("{prefix}.attn_q_norm"), &mut nq)?;
+        source.load_f32(&format!("{prefix}.attn_k_norm"), &mut nk)?;
+        let mut crudos = [(0usize, 0usize, u8::MAX, 0usize); 4];
+        for (i, nombre) in nombres.iter().enumerate() {
+            let v = source.tensor_view(nombre)?;
+            crudos[i] = (v.bytes.as_ptr() as usize, v.bytes.len(), v.dtype, v.elems);
+        }
+        let mk = |r: (usize, usize, u8, usize)| crate::layer::TensorView { bytes: unsafe { core::slice::from_raw_parts(r.0 as *const u8, r.1) }, dtype: r.2, elems: r.3 };
+        let vistas = [mk(crudos[0]), mk(crudos[1]), mk(crudos[2]), mk(crudos[3])];
+        let capa = crate::gpu::AtencionCapa {
+            claves: [nombres[0].as_str(), nombres[1].as_str(), nombres[2].as_str(), nombres[3].as_str()],
+            vistas: [&vistas[0], &vistas[1], &vistas[2], &vistas[3]],
+            qnorm: &nq,
+            knorm: &nk,
+            heads,
+            kv_heads,
+            hd,
+            rope_n,
+            theta,
+            eps,
+        };
+        let mut k_nuevo = vec![0u16; n * kv_dim];
+        let mut v_nuevo = vec![0u16; n * kv_dim];
+        let mut filas = kv.gpu_kv_filas;
+        let ok = gpu.as_deref_mut().is_some_and(|g| {
+            matches!(
+                g.atencion_capa(layer, &capa, xs, n, h, pos0, &mut filas, kv.k_f16_slice(), kv.v_f16_slice(), &mut k_nuevo, &mut v_nuevo, salida),
+                Ok(true)
+            )
+        });
+        if ok {
+            kv.gpu_kv_filas = filas;
+            kv.append_filas_f16(&k_nuevo, &v_nuevo, n);
+            perfil_marca(&mut tp, FASE_ATENCION);
+            return Ok(());
+        }
+    }
     let mut qf = vec![0.0f32; n * q_full];
     let mut k = vec![0.0f32; n * kv_dim];
     let mut v = vec![0.0f32; n * kv_dim];

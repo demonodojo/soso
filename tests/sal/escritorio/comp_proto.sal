@@ -1,0 +1,32 @@
+import "../../../user/sal/escritorio/comp_proto.sal"
+
+fn main() -> Int ! alloc
+    m = msg_nuevo()
+    _e = msg_encode_comp_escena(m, 42, 1280, 800, 5120, 4, 1, 1)
+    if msg_get_op(m) != op_comp_escena()
+        1
+    else
+        if msg_get_u32(m, 28) != 1
+            2
+        else
+            _b = msg_encode_comp_bind(m, 3, 9, 640, 480, 2560)
+            if msg_get_op(m) != op_comp_bind()
+                3
+            else
+                if msg_get_u32(m, 4) != 3
+                    4
+                else
+                    _g = msg_encode_comp_geom(m, 3, 10, 20, 100, 50, 0, 11)
+                    if msg_get_u32(m, 28) != 11
+                        5
+                    else
+                        _d = msg_encode_comp_dmap(m, 3, 0, 0, 100, 16)
+                        _c = msg_encode_comp_commit(m, 0, 0, 640, 480, comp_commit_clear_rt())
+                        if msg_get_op(m) != op_comp_commit()
+                            6
+                        else
+                            _fr = msg_encode_comp_frame(m, 10, 20, 100, 50)
+                            if msg_get_u32(m, 12) != 100
+                                7
+                            else
+                                0

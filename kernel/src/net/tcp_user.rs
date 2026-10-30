@@ -355,11 +355,7 @@ pub fn try_read(
     if n == 0 {
         return Ok(0);
     }
-    for i in 0..n {
-        unsafe {
-            *((buf + i as u64) as *mut u8) = tmp[i];
-        }
-    }
+    crate::task::uaccess::copy_to_user(buf, &tmp[..n])?;
     Ok(n as u64)
 }
 
@@ -383,9 +379,7 @@ pub fn try_write(
     }
     let mut tmp = [0u8; 4096];
     let chunk = src_len.min(tmp.len());
-    for i in 0..chunk {
-        tmp[i] = unsafe { *((buf + i as u64) as *const u8) };
-    }
+    crate::task::uaccess::copy_from_user(buf, &mut tmp[..chunk])?;
     let n = s.send_slice(&tmp[..chunk]).unwrap_or(0);
     Ok(n as u64)
 }

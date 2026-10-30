@@ -1,0 +1,36 @@
+import "../../../user/sal/escritorio/comp_gscen_layout.sal"
+
+fn main() -> Int ! alloc
+    if comp_guprc_len() != 41
+        1
+    else
+        if comp_gscen_hdr_len() != 53
+            2
+        else
+            if comp_gscen_quad_len() != 36
+                6
+            else
+                buf = bytes_ptr(bytes_new(comp_gscen_buf_len()))
+                _p = comp_guprc_patch(buf, 5, 4096, 2560, 4, 8, 12, 16)
+                b = bytes_view_mem(buf, comp_guprc_len())
+                if bytes_get_u8(b, 4) != 67
+                    3
+                else
+                    _h = comp_gscen_patch_hdr(buf, 7, 640, 480, 2560, 0, 0, 640, 480, 0, 4281344048, 1)
+                    _q = comp_gscen_patch_quad(buf, 0, 9, 10, 20, 100, 50, 400, 4, 8)
+                    hb = bytes_view_mem(buf, comp_gscen_hdr_len())
+                    if bytes_get_i64(hb, 5) != 7
+                        4
+                    else
+                        full = bytes_view_mem(buf, comp_gscen_buf_len())
+                        if bytes_get_i64(full, comp_gscen_hdr_len()) != 9
+                            5
+                        else
+                            qoff = comp_gscen_hdr_len()
+                            if bytes_get_u32(full, qoff + 28) != 4
+                                7
+                            else
+                                if bytes_get_u32(full, qoff + 32) != 8
+                                    8
+                                else
+                                    0

@@ -195,9 +195,9 @@ fn enlazar(args: &[String]) -> Result<(), String> {
     let mut cursor = align_up(hdr, 16);
     colocar(&mut objs, Clase::Text, &mut cursor);
     colocar(&mut objs, Clase::Ro, &mut cursor);
-    let text_end = cursor;
+    let text_end = align_up(cursor, PAGE);
 
-    cursor = align_up(cursor, PAGE);
+    cursor = text_end;
     let tls_file = cursor;
     let tls_va = base() + cursor;
     colocar(&mut objs, Clase::Tdata, &mut cursor);

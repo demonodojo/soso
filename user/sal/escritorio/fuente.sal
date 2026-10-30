@@ -2,7 +2,7 @@ import "mate.sal"
 import "superficie.sal"
 
 fn psf2_magic() -> Int
-    2252299634
+    2253043058
 
 fn psf2_magic_ok(ptr: Int, len: Int) -> Int ! alloc
     if len < 32
@@ -36,25 +36,28 @@ fn psf2_headersize(ptr: Int, len: Int) -> Int ! alloc
     else
         hs
 
+fn psf2_tabla_off() -> Int
+    32
+
 fn psf2_glyph_index(ptr: Int, len: Int, cp: Int) -> Int ! alloc
     fl = psf2_flags(ptr, len)
     if (fl & 1) == 0
         cp
     else
-        hs = psf2_headersize(ptr, len)
         b = bytes_view_mem(ptr, len)
         n = psf2_num(ptr, len)
+        base = psf2_tabla_off()
         i = 0
         ix = -1
         while i < n
-            c = bytes_get_u32(b, hs + i * 4)
+            c = bytes_get_u32(b, base + i * 4)
             if c == cp
                 ix = i
             i = i + 1
         if ix < 0
             j = 0
             while j < n
-                c2 = bytes_get_u32(b, hs + j * 4)
+                c2 = bytes_get_u32(b, base + j * 4)
                 if c2 == 63
                     ix = j
                 j = j + 1
@@ -71,12 +74,26 @@ fn psf2_offset_glifo(ptr: Int, len: Int, cp: Int) -> Int ! alloc
         if ix < 0
             psf2_offset_glifo(ptr, len, 63)
         else
-            hs = psf2_headersize(ptr, len)
-            fl = psf2_flags(ptr, len)
-            base = hs
-            if (fl & 1) != 0
-                base = hs + psf2_num(ptr, len) * 4
+            base = psf2_headersize(ptr, len)
             base + ix * psf2_bytes_glifo(ptr, len)
+
+fn psf2_bit_mask(bit: Int) -> Int
+    if bit == 0
+        1
+    elsif bit == 1
+        2
+    elsif bit == 2
+        4
+    elsif bit == 3
+        8
+    elsif bit == 4
+        16
+    elsif bit == 5
+        32
+    elsif bit == 6
+        64
+    else
+        128
 
 fn psf2_glifo_byte(ptr: Int, len: Int, cp: Int, row: Int, col: Int) -> Int ! alloc
     off = psf2_offset_glifo(ptr, len, cp)
@@ -98,7 +115,7 @@ fn psf2_glifo_byte(ptr: Int, len: Int, cp: Int, row: Int, col: Int) -> Int ! all
             byte_i = row * ((gw + 7) / 8) + col / 8
             bit = 7 - mod_pos(col, 8)
             v = bytes_get_u8(psf, off + byte_i)
-            mask = 1 << bit
+            mask = psf2_bit_mask(bit)
             if mod_pos(v, mask * 2) >= mask
                 1
             else

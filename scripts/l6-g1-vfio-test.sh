@@ -628,6 +628,21 @@ if grep -q 'GPU fuera del bus\|se ha caído del bus' "$log"; then
 fi
 if [[ -n "$boot0" ]] && (( boot0 != 0xffffffff && boot0 != 0 )); then
   grep 'nvidia:' "$log" || true
+  if grep -q 'scanout:' "$log"; then
+    echo ""
+    echo "scanout (arranque):"
+    grep 'scanout:' "$log" | tail -3
+  fi
+  if grep -q 'NVDisplay:' "$log"; then
+    echo ""
+    echo "NVDisplay:"
+    grep 'NVDisplay:' "$log" | head -5
+  fi
+  if [[ "${SOSO_G1_REQUIRE_SCANOUT_LOG:-0}" == 1 ]] && ! grep -q 'scanout:' "$log"; then
+    echo ""
+    echo "FAIL: SOSO_G1_REQUIRE_SCANOUT_LOG=1 pero no hay línea scanout: en ${log}" >&2
+    exit 1
+  fi
   echo ""
   echo "GO: NV_PMC_BOOT_0 legible desde soso (${boot0})."
   exit 0

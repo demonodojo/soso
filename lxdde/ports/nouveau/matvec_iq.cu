@@ -1209,6 +1209,66 @@ extern "C" __global__ void dec_attn_prep(const float *qf, const float *qnw, cons
     }
 }
 
+/* Preparación de la atención de un BLOQUE de `n` tokens (misma cuenta que dec_attn_prep): grid = (heads + kv_heads, n). Cada bloque normaliza y
+ * rota una cabeza de consulta o KV del token `blockIdx.y` (posición `pos0 + t`), separa la puerta, y escribe K y V (f16) en la fila `pos0 + t` del
+ * KV del dispositivo. */
+extern "C" __global__ void att_prep_bloque(const float *qf, const float *qnw, const float *knw, const float *kk, const float *vv, float *q_out,
+                                           float *gate_out, unsigned short *Kc, unsigned short *Vc, int pos0, int heads, int kv_heads, int hd,
+                                           int rope_n, float theta, float eps)
+{
+    __shared__ float red[8];
+    __shared__ float xs[256];
+    int b = (int)blockIdx.x;
+    int t = (int)blockIdx.y;
+    int tid = (int)threadIdx.x;
+    int pos = pos0 + t;
+    int kv_dim = kv_heads * hd;
+    int q_full = 2 * heads * hd;
+    int es_q = b < heads;
+    float v = 0.0f, gt = 0.0f;
+    if (tid < hd) {
+        if (es_q) {
+            v = qf[(long)t * q_full + (long)b * 2 * hd + tid];
+            gt = qf[(long)t * q_full + (long)b * 2 * hd + hd + tid];
+        } else {
+            v = kk[(long)t * kv_dim + (long)(b - heads) * hd + tid];
+        }
+    }
+    float ss = dec_bsum256(v * v, red);
+    float sc = rsqrtf(ss / (float)hd + eps);
+    float xn = v * sc * (tid < hd ? (es_q ? qnw[tid] : knw[tid]) : 0.0f);
+    xs[tid] = xn;
+    __syncthreads();
+    float out = xn;
+    if (tid < rope_n) {
+        int i = tid >> 1;
+        float freq = powf(theta, -2.0f * (float)i / (float)rope_n);
+        float ang = (float)pos * freq;
+        float sn, cs;
+        sincosf(ang, &sn, &cs);
+        float a = xs[2 * i], bb = xs[2 * i + 1];
+        out = (tid & 1) ? (a * sn + bb * cs) : (a * cs - bb * sn);
+    }
+    if (tid < hd) {
+        if (es_q) {
+            q_out[((long)t * heads + b) * hd + tid] = out;
+            gate_out[((long)t * heads + b) * hd + tid] = gt;
+        } else {
+            int kh = b - heads;
+            Kc[(long)pos * kv_dim + kh * hd + tid] = mm_h(out);
+            Vc[(long)pos * kv_dim + kh * hd + tid] = mm_h(vv[(long)t * kv_dim + (long)kh * hd + tid]);
+        }
+    }
+}
+
+/* attn[i] *= sigmoid(gate[i]) */
+extern "C" __global__ void att_puerta(float *attn, const float *gate, int total)
+{
+    int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i < total)
+        attn[i] *= 1.0f / (1.0f + expf(-gate[i]));
+}
+
 /* Atención de decodificación partida por trozos de contexto: grid = (kv_heads, trozos máximos). Cada bloque calcula, para las `group` cabezas de
  * consulta de su cabeza KV, la suma ponderada SIN normalizar y (máximo, suma) del trozo `[s * chunk, min((s + 1) * chunk, seq))`. */
 extern "C" __global__ void dec_attn_split(const float *q, const unsigned short *K, const unsigned short *V, float *po, float *pml, const int *dyn,

@@ -3,7 +3,7 @@ import "../../../user/sal/escritorio/fuente.sal"
 fn main() -> Int ! alloc
     buf = bytes_ptr(bytes_new(4096))
     b = bytes_view_mem(buf, 4096)
-    bytes_set_u32(b, 0, 2252299634)
+    bytes_set_u32(b, 0, psf2_magic())
     bytes_set_u32(b, 8, 32)
     bytes_set_u32(b, 12, 0)
     bytes_set_u32(b, 16, 16)

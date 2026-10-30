@@ -1,6 +1,7 @@
 pub mod acpi;
 pub mod acpi_hid_i2c;
 pub mod apic;
+pub mod cpu_hardening;
 pub mod fpu;
 pub mod gdt;
 pub mod hwbp;
@@ -23,4 +24,7 @@ pub fn init() {
     // puede leer/escribir `percpu::current_pid()` etc.
     percpu::init(0, gdt::kstack_top().as_u64());
     interrupts::init();
+    cpu_hardening::enable_smep();
+    cpu_hardening::enable_smap();
+    cpu_hardening::log_line();
 }

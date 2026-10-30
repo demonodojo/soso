@@ -15,6 +15,7 @@
 #include "gsp_vmm.h"
 #include "gsp_chan.h"
 #include "gsp_ce.h"
+#include "gsp_vram_copy.h"
 #include "gsp_compute.h"
 #include "gsp_3d.h"
 #include "gsp_grctx.h"
@@ -26,6 +27,9 @@
 
 void *memset(void *dst, int c, unsigned long n);
 #include "gsp_fwsec.h"
+#include "gsp_rom.h"
+#include "nvdisp_engine.h"
+#include "nvdisp_head.h"
 #include "gsp_chip.h"
 #include "gsp_dma.h"
 #include "falcon_lx.h"
@@ -1123,6 +1127,7 @@ static int run_gsp_rm_chain(void)
         if (gsp_static_info_get(&g_rm_obj, g_vram_bytes, &g_static) == 0 &&
             (run_bar1_probe(), run_vmm_stage() == 0)) {
             g_phase = GSP_RM_VMM;
+            (void)nvdisp_head_bringup();
             if (run_chan_ce_stage() == 0) {
                 (void)run_compute_stage();
             }
@@ -1202,6 +1207,8 @@ int lx_nouveau_gsp_init(struct lx_pci_dev *pdev)
      * runlists sin inferir índices de la tabla de RM. Va aquí porque sólo necesita
      * BAR0 y porque su volcado sirve de referencia para todo lo que viene. */
     (void)gsp_top_probe();
+
+    (void)nvdisp_engine_init();
 
     /* Ola 3: ejercita el grafo nvkm real (device+subdev GSP+falcon) con BAR0.
      * Best-effort — la construcción no toca MMIO; el boot HW real llega tras G1. */
@@ -1734,6 +1741,36 @@ int lx_nouveau_3d_clear(uint64_t rt_va, unsigned width, unsigned height,
     return 1;
 }
 
+int lx_nouveau_3d_blit_tex(uint64_t rt_va, unsigned rt_pitch, unsigned dx,
+                           unsigned dy, uint64_t tex_va, unsigned tex_pitch,
+                           unsigned width, unsigned height)
+{
+    uint64_t dst;
+    uint32_t line_bytes;
+
+    if (!threed_usable() || !g_ce.ready || !rt_va || !tex_va || !width ||
+        !height || !rt_pitch || !tex_pitch) {
+        return -1;
+    }
+    if (width > 0xffffu || height > 0xffffu) {
+        return -1;
+    }
+    line_bytes = width * 4u;
+    if (line_bytes > rt_pitch || line_bytes > tex_pitch) {
+        return -1;
+    }
+    if ((uint64_t)dy * rt_pitch + (uint64_t)dx * 4u + (uint64_t)height * rt_pitch >
+        (uint64_t)1 << 40) {
+        return -1;
+    }
+    dst = rt_va + (uint64_t)dy * rt_pitch + (uint64_t)dx * 4u;
+    if (gsp_ce_blit_sync(&g_ce, dst, rt_pitch, tex_va, tex_pitch, line_bytes,
+                         height, GSP_CE_WAIT_MS) != 0) {
+        return -1;
+    }
+    return 1;
+}
+
 void lx_nouveau_compute_batch_begin(void)
 {
     if (g_compute.ready && g_compute.chan) {
@@ -1790,4 +1827,18 @@ int lx_nouveau_enqueue_matvec_q_resident(uint64_t w_va, unsigned dtype,
         return -1;
     }
     return 0;
+}
+
+int gsp_vram_blit_pitch(uint64_t dst_va, uint32_t dst_pitch, uint64_t src_va,
+                        uint32_t src_pitch, uint32_t line_bytes, uint32_t lines)
+{
+    if (!g_ce_verified || !g_ce.ready || g_ce.stuck) {
+        return -1;
+    }
+    if (dst_va == 0 || src_va == 0 || !dst_pitch || !src_pitch || !line_bytes ||
+        !lines) {
+        return -1;
+    }
+    return gsp_ce_blit_sync(&g_ce, dst_va, dst_pitch, src_va, src_pitch,
+                            line_bytes, lines, GSP_CE_WAIT_MS);
 }

@@ -19,6 +19,7 @@ pub mod pipe;
 pub mod pty;
 pub mod shm;
 pub mod syscall;
+pub mod uaccess;
 
 use crate::arch::gdt;
 use addrspace::{AddrSpace, STACK_MAX, STACK_SIZE, STACK_TOP};
@@ -304,6 +305,18 @@ pub fn interrupt_requested() -> bool {
 
 pub fn current_pid() -> u64 {
     crate::arch::percpu::current_pid()
+}
+
+pub fn current_space_id() -> Option<u64> {
+    with_current(|p| p.space.as_ref().map(|s| s.id()))
+}
+
+pub fn space_id_for_pid(pid: u64) -> Option<u64> {
+    PROCS
+        .lock()
+        .iter()
+        .find(|p| p.pid == pid)
+        .and_then(|p| p.space.as_ref().map(|s| s.id()))
 }
 
 /// ¿Existe un proceso vivo (no zombie) con este pid?
@@ -669,7 +682,10 @@ fn racimo(space: &AddrSpace, region: &mmap::MmapRegion, addr: u64) -> bool {
                 .as_mut_ptr::<[u8; 4096]>()
         };
         dst.copy_from_slice(&buf[i * 4096..(i + 1) * 4096]);
-        if space.map_page(va, frame, false).is_none() {
+        if space
+            .map_page(va, frame, addrspace::UserProt::R)
+            .is_none()
+        {
             unsafe {
                 crate::mm::FRAME_ALLOC.get().unwrap().lock().deallocate_frame(frame);
             }
@@ -788,7 +804,18 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
             // El bool `is_write` no es el bit 1 del código de error: una
             // lectura de `.rodata` ya presente (o servida en este mismo
             // fallo) entraba aquí con wr=1 y se quedaba sin matar al proceso.
-            let escritura = crate::arch::interrupts::exc_extra() & 2 != 0;
+            let extra = crate::arch::interrupts::exc_extra();
+            let escritura = extra & 2 != 0;
+            if extra & 0x10 != 0 {
+                use x86_64::structures::paging::PageTableFlags;
+                if space
+                    .translate_flags(addr & !0xfff)
+                    .is_some_and(|f| f.contains(PageTableFlags::NO_EXECUTE))
+                {
+                    mmap_fault_fail(addr, false, "ejecución en página no ejecutable");
+                    return false;
+                }
+            }
             if escritura && !space.range_ok(addr, 1, true) {
                 mmap_fault_fail(addr, true, "mprotect sin permiso de escritura");
                 return false;
@@ -846,7 +873,9 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
                     )
                 };
                 if crate::fs::load_file_range(region.inode, off_2m as usize, dst).is_ok()
-                    && space.map_page_2m(va_2m, frame, region.writable).is_some()
+                    && space
+                        .map_page_2m(va_2m, frame, mmap::region_prot(&region))
+                        .is_some()
                 {
                     if !region.writable && region.inode != 0 {
                         crate::mm::reclaim::register(&space, va_2m, true);
@@ -921,7 +950,10 @@ pub fn handle_mmap_fault(addr: u64, is_write: bool) -> bool {
                 return false;
             }
         }
-        if space.map_page(page_va, frame, region.writable).is_none() {
+        if space
+            .map_page(page_va, frame, mmap::region_prot(&region))
+            .is_none()
+        {
             free_frame(frame);
             mmap_fault_fail(addr, is_write, "map_page falló");
             return false;
@@ -1891,8 +1923,17 @@ pub(crate) fn tty_tomar(console: Console, dst: &mut [u8]) -> LecturaTty {
 }
 
 fn tty_read_into(console: Console, buf: u64, len: u64) -> LecturaTty {
-    let dst = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
-    tty_tomar(console, dst)
+    let mut tmp = alloc::vec![0u8; len as usize];
+    match tty_tomar(console, &mut tmp) {
+        LecturaTty::Datos(n) => {
+            let n = n as usize;
+            if n > 0 && uaccess::copy_to_user(buf, &tmp[..n]).is_err() {
+                return LecturaTty::Nada;
+            }
+            LecturaTty::Datos(n as u64)
+        }
+        other => other,
+    }
 }
 
 /// Reanuda un contexto de usuario con iretq. Interrupciones deshabilitadas
@@ -2102,6 +2143,7 @@ pub extern "C" fn ap_timer_isr() {
 
 /// Devuelve 1 si hay que replanificar (el contexto ya quedó guardado).
 extern "C" fn timer_tick(f: &mut TrapFrame) -> u64 {
+    crate::arch::cpu_hardening::clac_en_entrada_isr();
     // ¿Quién llega con DF puesto? `f.rflags` es el valor **guardado** por la
     // CPU, así que el `cld` de la entrada no lo tapa. Se avisa una sola vez:
     // con DF=1 todo `rep movs` del kernel copiaría hacia atrás, y el destrozo
@@ -2146,6 +2188,7 @@ extern "C" fn timer_tick(f: &mut TrapFrame) -> u64 {
 /// este mismo vector es el reloj del sistema: avanza `pit::ticks`, atiende
 /// la red y puede cortar un `ask` con Ctrl-C.
 extern "C" fn ap_timer_tick(f: &mut TrapFrame) -> u64 {
+    crate::arch::cpu_hardening::clac_en_entrada_isr();
     if crate::arch::percpu::cpu_index() == 0 {
         crate::arch::pit::tick();
         if f.cs & 3 == 3 {

@@ -1,0 +1,33 @@
+fn dirent_size() -> Int
+    272
+
+fn dirent_off_file_type() -> Int
+    8
+
+fn dirent_off_name_len() -> Int
+    9
+
+fn dirent_off_name() -> Int
+    10
+
+fn ft_file() -> Int
+    1
+
+fn ft_dir() -> Int
+    2
+
+fn main() -> Int
+    if dirent_size() != 272
+        1
+    elsif dirent_off_file_type() != 8
+        2
+    elsif dirent_off_name_len() != 9
+        3
+    elsif dirent_off_name() != 10
+        4
+    elsif ft_file() != 1
+        5
+    elsif ft_dir() != 2
+        6
+    else
+        0

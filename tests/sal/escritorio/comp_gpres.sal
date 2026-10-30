@@ -1,0 +1,26 @@
+import "../../../user/sal/escritorio/comp_gpres_layout.sal"
+
+fn main() -> Int ! alloc
+    if comp_gpres_len() != 25
+        1
+    else
+        buf = bytes_ptr(bytes_new(comp_gpres_len()))
+        _g = comp_gpres_patch_gpres(buf, 7, 640, 480, 2560)
+        b = bytes_view_mem(buf, comp_gpres_len())
+        if bytes_get_u8(b, 0) != 71
+            2
+        else
+            if bytes_get_u8(b, 4) != 83
+                3
+            else
+                _n = comp_gpres_patch_gnvd(buf, 9, 1920, 1080, 7680)
+                if bytes_get_u8(b, 3) != 68
+                    4
+                else
+                    if bytes_get_u8(b, 4) != 0
+                        5
+                    else
+                        if bytes_get_i64(b, 5) != 9
+                            6
+                        else
+                            0

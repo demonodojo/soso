@@ -3,6 +3,8 @@
 use alloc::vec::Vec;
 use soso_abi::{MMAP_BASE, MMAP_LIMIT};
 
+use super::addrspace::UserProt;
+
 /// Región de fichero mapeada con paginación bajo demanda.
 #[derive(Clone)]
 pub struct MmapRegion {
@@ -14,6 +16,7 @@ pub struct MmapRegion {
     /// dónde puede servirse un fault con página de 2 MiB completa.
     pub file_len: u64,
     pub writable: bool,
+    pub exec: bool,
     /// Región **sin acceso** (`PROT_NONE`, N-002).
     ///
     /// No es «no escribible»: es que tocarla —leer o escribir— tiene que matar
@@ -26,6 +29,20 @@ pub struct MmapRegion {
     pub sin_acceso: bool,
     /// Segmento compartido (`SYS_SHM_*`); 0 si no aplica.
     pub shm_id: u64,
+}
+
+pub fn region_prot(r: &MmapRegion) -> UserProt {
+    if r.exec {
+        if r.writable {
+            UserProt::Rwx
+        } else {
+            UserProt::Rx
+        }
+    } else if r.writable {
+        UserProt::Rw
+    } else {
+        UserProt::R
+    }
 }
 
 /// Alineación de mapeos grandes: permite servir faults con páginas de 2 MiB
@@ -81,6 +98,7 @@ pub fn split_prot(
     addr: u64,
     len: u64,
     writable: bool,
+    exec: bool,
     sin_acceso: bool,
 ) -> bool {
     let Some(end) = addr.checked_add(len) else {
@@ -103,6 +121,7 @@ pub fn split_prot(
                 file_offset: r.file_offset,
                 file_len: r.file_len,
                 writable: r.writable,
+                exec: r.exec,
                 sin_acceso: r.sin_acceso,
                 shm_id: r.shm_id,
             });
@@ -117,6 +136,7 @@ pub fn split_prot(
                 file_offset: r.file_offset.saturating_add(mid_start - r.virt_start),
                 file_len: r.file_len,
                 writable,
+                exec,
                 sin_acceso,
                 shm_id: r.shm_id,
             });
@@ -129,6 +149,7 @@ pub fn split_prot(
                 file_offset: r.file_offset.saturating_add(end - r.virt_start),
                 file_len: r.file_len,
                 writable: r.writable,
+                exec: r.exec,
                 sin_acceso: r.sin_acceso,
                 shm_id: r.shm_id,
             });

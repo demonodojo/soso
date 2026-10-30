@@ -1,0 +1,69 @@
+import "mate.sal"
+
+fn comp_guprc_len() -> Int
+    41
+
+fn comp_gscen_hdr_len() -> Int
+    53
+
+fn comp_gscen_quad_len() -> Int
+    36
+
+fn comp_gscen_max_quads() -> Int
+    19
+
+fn comp_gscen_buf_len() -> Int
+    comp_gscen_hdr_len() + comp_gscen_max_quads() * comp_gscen_quad_len()
+
+fn comp_gscen_flag_clear() -> Int
+    1
+
+fn comp_gscen_patch_hdr(buf: Int, rt_h: Int, fb_w: Int, fb_h: Int, pitch: Int, px: Int, py: Int, pw: Int, ph: Int, flags: Int, rgba: Int, n: Int) -> Int ! alloc
+    b = bytes_view_mem(buf, comp_gscen_buf_len())
+    _t = bytes_set_u8(b, 0, 71)
+    _t2 = bytes_set_u8(b, 1, 83)
+    _t3 = bytes_set_u8(b, 2, 67)
+    _t4 = bytes_set_u8(b, 3, 69)
+    _t5 = bytes_set_u8(b, 4, 78)
+    _r = bytes_set_i64(b, 5, rt_h)
+    _w = bytes_set_u32(b, 13, fb_w)
+    _h = bytes_set_u32(b, 17, fb_h)
+    _p = bytes_set_u32(b, 21, pitch)
+    _x = bytes_set_u32(b, 25, px)
+    _y = bytes_set_u32(b, 29, py)
+    _pw = bytes_set_u32(b, 33, pw)
+    _ph = bytes_set_u32(b, 37, ph)
+    _f = bytes_set_u32(b, 41, flags)
+    _c = bytes_set_u32(b, 45, rgba)
+    _n0 = bytes_set_u8(b, 49, n)
+    _n1 = bytes_set_u8(b, 50, 0)
+    0
+
+fn comp_gscen_patch_quad(buf: Int, qi: Int, tex_h: Int, dx: Int, dy: Int, w: Int, h: Int, tex_pitch: Int, sx: Int, sy: Int) -> Int ! alloc
+    off = comp_gscen_hdr_len() + qi * comp_gscen_quad_len()
+    b = bytes_view_mem(buf, comp_gscen_buf_len())
+    _t = bytes_set_i64(b, off, tex_h)
+    _x = bytes_set_u32(b, off + 8, dx)
+    _y = bytes_set_u32(b, off + 12, dy)
+    _w = bytes_set_u32(b, off + 16, w)
+    _h = bytes_set_u32(b, off + 20, h)
+    _p = bytes_set_u32(b, off + 24, tex_pitch)
+    _sx = bytes_set_u32(b, off + 28, sx)
+    _sy = bytes_set_u32(b, off + 32, sy)
+    0
+
+fn comp_guprc_patch(buf: Int, tex_h: Int, src_ptr: Int, pitch: Int, dx: Int, dy: Int, rw: Int, rh: Int) -> Int ! alloc
+    b = bytes_view_mem(buf, comp_guprc_len())
+    _t = bytes_set_u8(b, 0, 71)
+    _u = bytes_set_u8(b, 1, 85)
+    _p = bytes_set_u8(b, 2, 80)
+    _r = bytes_set_u8(b, 3, 82)
+    _c = bytes_set_u8(b, 4, 67)
+    _h = bytes_set_i64(b, 5, tex_h)
+    _s = bytes_set_i64(b, 13, src_ptr)
+    _pi = bytes_set_u32(b, 21, pitch)
+    _x = bytes_set_u32(b, 25, dx)
+    _y = bytes_set_u32(b, 29, dy)
+    _w = bytes_set_u32(b, 33, rw)
+    _hh = bytes_set_u32(b, 37, rh)
+    0

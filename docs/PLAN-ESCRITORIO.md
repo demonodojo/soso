@@ -1,7 +1,8 @@
 # Plan escritorio: `soso-wm` en Sal
 
 Gestor de ventanas gráfico en Sal con terminales sobre PTY, clientes vía TCP
-`127.0.0.1:7430` y superficies en memoria compartida.
+`127.0.0.1:7430` y superficies en memoria compartida. Skills Cursor/Claude:
+**`soso-wm`** (WM) y **`soso-comp`** (compositor GPU `:7432`).
 
 ## Fases
 
@@ -14,10 +15,10 @@ Gestor de ventanas gráfico en Sal con terminales sobre PTY, clientes vía TCP
 | S3 | Hecho (host) | Ventanas/mosaico sin empaquetado en API; `tabla.sal` acumulador 32 B; clics/arrastre en `wm.sal`; `proto.sal` + `cargo test -p soso-wm-proto` |
 | S4 | Hecho (build) | WM: ≤8 PTYs, barra, ratón, mosaico Alt+T, acumulador cliente, `--prueba` imprime `soso-wm: prueba OK`; guest: `cargo xtask test` |
 | W6 | Hecho | `crates/soso-wm-proto`, `libsoso::ventana`, `soso-web --grafico` (Danio bajo demanda en WM) |
-| W7 | En curso | `init test` pty/shm; xtask usa `--prueba` sin `&` en sosh |
+| W7 | Hecho | `init test` pty/shm; xtask usa `--prueba` sin `&` en sosh |
 | WM+web | Hecho | Bucle WM (`wm.sal`), `demo-cliente`, `soso-web` en ventana SHM + E2E xtask |
 | W8 | Hecho | Navegador de lectura: motor CSS (flex/grid/float/position, @media), PNG, formularios, 4 pestañas, marcadores, cromo URL, Alt+W / `--prueba-web` |
-| W9 | En curso | Lanzador en la barra (`lanzador.sal`): menú Aplicaciones (Terminal, Navegador web, Salir) y accesos directos Terminal/Web. Pendiente: explorador de ficheros |
+| W9 | Hecho | Lanzador (`lanzador.sal`): menú Aplicaciones (Terminal, Web, Archivos, Salir), accesos directos Terminal/Web; cliente `soso-files` (`getdents`, SHM, DANIO) |
 
 ## Atajos (`soso-wm`)
 
@@ -31,6 +32,6 @@ Gestor de ventanas gráfico en Sal con terminales sobre PTY, clientes vía TCP
 
 ## Pruebas
 
-- Host: `cargo xtask check` o `python3 tests/sal/escritorio/probar_host.py` (terminal, utf8, ventanas, lanzador, proto, fuente)
+- Host: `cargo xtask check` o `python3 tests/sal/escritorio/probar_host.py` (terminal, utf8, ventanas, lanzador, files_path, files_dirent, proto, fuente)
 - Guest: `init test` (pty + shm), `soso-wm --prueba` y `soso-wm --prueba-layout` en `cargo xtask test`
 - Visual opcional: `cargo xtask fb-shot`

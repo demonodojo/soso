@@ -130,15 +130,18 @@ fn bucle_grafico(ejecutar: String) -> Int ! io, alloc
             bpp = fb_info_bpp(info)
             fmt = fb_info_formato(info)
             plen = compos_len(stride, sh, bpp)
-            compos = bytes_ptr(bytes_new(plen))
             evt = bytes_ptr(bytes_new(24 * 8))
             msg = bytes_ptr(bytes_new(msg_len()))
+            st = st_nuevo(evt, msg)
+            sin_comp = arg_flag(d"--sin-comp")
+            compos = wm_comp_ensure(st, sw, sh, stride, sin_comp)
+            if compos < 0
+                compos = bytes_ptr(bytes_new(plen))
             _bg = rellenar_rect(compos, plen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo())
             listener = tcp_listen(puerto_wm())
             if listener < 0
                 rc = 4
             if listener >= 0
-                st = st_nuevo(evt, msg)
                 _ic = wm_iniciar_cursor(st, sw, sh)
                 _d0 = wm_marcar_dirty(st, 0, 0, sw, sh)
                 _sp = lanzar_ejecutar()

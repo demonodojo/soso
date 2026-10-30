@@ -35,7 +35,7 @@ strip_module() {
 
 # Orden = orden de dependencias entre módulos.
 for m in gsp_dma gsp_rm gsp_wpr gsp_libos fmc_lx fsp_lx gsp_cpu_seq gsp_rpc gsp_cmdq gsp_rm_obj \
-         gsp_vram gsp_vmm gsp_top gsp_chip gsp_pramin gsp_chan gsp_ce gsp_bar1 gsp_grctx gsp_buf gsp_compute gsp_3d gsp_fini; do
+         gsp_vram gsp_vmm gsp_top gsp_chip gsp_pramin gsp_rom nvdisp_probe nvdisp_head nvdisp_scanout gsp_chan gsp_ce gsp_bar1 gsp_grctx gsp_buf gsp_compute gsp_3d gsp_fini; do
     guard="$(echo "$m" | tr '[:lower:]' '[:upper:]')_H"
     { strip_module "$src/$m.h" "$guard"; strip_module "$src/$m.c" "$guard"; } \
         > "$out/${m}_body.inc"
@@ -185,6 +185,71 @@ if [[ -d "$root/lxdde/reference" ]]; then
 else
     echo "OK: encoder Ampere en nvrm_r570.h (lxdde/reference ausente — CI)"
 fi
+
+echo "=== N1: NVDisplay probe VBIOS/DCB ==="
+if ! grep -q 'nvdisp_engine_init()' "$src/gsp_bringup.c"; then
+    echo "FALLO: gsp_bringup.c no llama nvdisp_engine_init() tras BAR0" >&2
+    exit 1
+fi
+if ! grep -q 'subdev/bios/bit.c' "$src/source.list"; then
+    echo "FALLO: source.list sin nvkm bios N3 (bit.c)" >&2
+    exit 1
+fi
+echo "OK: bring-up invoca nvdisp_engine (N3 ola 0 bios nvkm)"
+if ! grep -q 'engine/disp/base.c' "$src/source.list"; then
+    echo "FALLO: source.list sin engine/disp N3 ola 1 (base.c)" >&2
+    exit 1
+fi
+if ! grep -q 'engine/disp/ga102.c' "$src/source.list"; then
+    echo "FALLO: source.list sin engine/disp Ampere (ga102.c)" >&2
+    exit 1
+fi
+echo "OK: source.list incluye engine/disp (N3 ola 1)"
+if ! grep -q 'engine/disp/dp.c' "$src/source.list"; then
+    echo "FALLO: source.list sin DisplayPort N3 ola 2 (dp.c)" >&2
+    exit 1
+fi
+if ! grep -q 'subdev/i2c/base.c' "$src/source.list"; then
+    echo "FALLO: source.list sin subdev/i2c N3 ola 2 (base.c)" >&2
+    exit 1
+fi
+echo "OK: source.list incluye dp + i2c (N3 ola 2)"
+if ! grep -q 'engine/disp/hdmi.c' "$src/source.list"; then
+    echo "FALLO: source.list sin hdmi N3 ola 3 (hdmi.c)" >&2
+    exit 1
+fi
+if ! grep -q 'subdev/gpio/ga102.c' "$src/source.list"; then
+    echo "FALLO: source.list sin gpio Ampere N3 ola 3 (ga102.c)" >&2
+    exit 1
+fi
+if ! grep -q 'subdev/i2c/gf119.c' "$src/source.list"; then
+    echo "FALLO: source.list sin i2c gf119 N3 ola 3" >&2
+    exit 1
+fi
+echo "OK: source.list incluye hdmi/gpio/i2c gf119 (N3 ola 3)"
+if ! grep -q 'nvdisp_head.c' "$src/source.list"; then
+    echo "FALLO: source.list sin N4 nvdisp_head.c" >&2
+    exit 1
+fi
+if ! grep -q 'nvdisp_head_bringup()' "$src/gsp_bringup.c"; then
+    echo "FALLO: gsp_bringup.c no llama nvdisp_head_bringup tras VMM" >&2
+    exit 1
+fi
+echo "OK: N4 head bringup tras GSP-RM VMM"
+if ! grep -q 'nvdisp_scanout.c' "$src/source.list"; then
+    echo "FALLO: source.list sin N5 nvdisp_scanout.c" >&2
+    exit 1
+fi
+echo "OK: N5 scanout VRAM→FB en source.list"
+if ! grep -q 'NV_FAM_BLACKWELL' "$src/nvdisp_head.c"; then
+    echo "FALLO: nvdisp_head.c sin gate Blackwell N8" >&2
+    exit 1
+fi
+if ! grep -q 'gsp_vram_blit_pitch' "$src/gsp_bringup.c"; then
+    echo "FALLO: gsp_bringup.c sin CE tile blit N8" >&2
+    exit 1
+fi
+echo "OK: N8 Blackwell + scanout tile CE en árbol"
 
 echo "=== L6 — pasos 3 a 6 de la cadena FSP/COT + recepción de RPC ==="
 SOSO_ROOT="$root" "$out/hostcheck" "$ucode" "$boot" "$fmc"

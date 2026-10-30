@@ -275,6 +275,8 @@ pub struct CudaGpu {
     f_gdn_conv2: CuFunction,
     f_gdn_params: CuFunction,
     f_gdn_cola: CuFunction,
+    f_att_prep: CuFunction,
+    f_att_puerta: CuFunction,
     f_sgemm: CuFunction,
     f_topk: CuFunction,
     /// Matrices de router (f32) subidas por clave.
@@ -357,6 +359,8 @@ impl CudaGpu {
             let f_gdn_conv2 = func(mod_iq, "gdn_conv_silu2")?;
             let f_gdn_params = func(mod_iq, "gdn_params")?;
             let f_gdn_cola = func(mod_iq, "gdn_cola")?;
+            let f_att_prep = func(mod_iq, "att_prep_bloque")?;
+            let f_att_puerta = func(mod_iq, "att_puerta")?;
             let f_sgemm = func(mod_iq, "sgemm_nt")?;
             let f_topk = func(mod_iq, "dec_router_topk")?;
             let f_down_multi = func(mod_iq, "iq_down_mma")?;
@@ -397,6 +401,8 @@ impl CudaGpu {
                 f_gdn_conv2,
                 f_gdn_params,
                 f_gdn_cola,
+                f_att_prep,
+                f_att_puerta,
                 f_sgemm,
                 f_topk,
                 router_w: HashMap::new(),
@@ -1015,6 +1021,142 @@ impl CudaGpu {
         Ok(true)
     }
 
+    /// Asegura el KV espejado de la capa (capacidad para `total` filas) y sube del host las filas `valid..hasta` que el dispositivo no tenga.
+    /// `filas_validas` pasa a valer `hasta`. Devuelve los punteros (K, V) del dispositivo.
+    #[allow(clippy::too_many_arguments)]
+    fn kv_espejo(&mut self, capa: u32, total: usize, hasta: usize, filas_validas: &mut usize, seq_antes: usize, k: &[u16], v: &[u16], kv_dim: usize) -> Result<(u64, u64), String> {
+        let valid = (*filas_validas).min(seq_antes);
+        let (mut kd, mut vd, cap) = self.kvdev.get(&capa).copied().unwrap_or((0, 0, 0));
+        if total > cap {
+            let ncap = total.div_ceil(4096) * 4096 + 4096;
+            let (nk, nv) = (self.alloc(ncap * kv_dim * 2)?, self.alloc(ncap * kv_dim * 2)?);
+            if kd != 0 && valid > 0 {
+                ck(unsafe { (self.api.dtod)(nk, kd, valid * kv_dim * 2) }, "cuMemcpyDtoD")?;
+                ck(unsafe { (self.api.dtod)(nv, vd, valid * kv_dim * 2) }, "cuMemcpyDtoD")?;
+            }
+            if kd != 0 {
+                unsafe {
+                    (self.api.mem_free)(kd);
+                    (self.api.mem_free)(vd);
+                }
+            }
+            (kd, vd) = (nk, nv);
+            self.kvdev.insert(capa, (kd, vd, ncap));
+            self.kv_gen += 1;
+        }
+        let (ini, fin) = (valid * kv_dim, hasta * kv_dim);
+        if fin > ini {
+            self.subir(kd + (ini * 2) as u64, unsafe { std::slice::from_raw_parts(k.as_ptr().add(ini) as *const u8, (fin - ini) * 2) })?;
+            self.subir(vd + (ini * 2) as u64, unsafe { std::slice::from_raw_parts(v.as_ptr().add(ini) as *const u8, (fin - ini) * 2) })?;
+        }
+        *filas_validas = hasta;
+        Ok((kd, vd))
+    }
+
+    /// Capa de atención (Gated) entera de un bloque en el dispositivo: ver [`GpuDispatch::atencion_capa`].
+    #[allow(clippy::too_many_arguments)]
+    fn atencion_capa_gpu(
+        &mut self,
+        layer: u32,
+        c: &soso_llm_core::gpu::AtencionCapa<'_>,
+        xs: &[f32],
+        n: usize,
+        h: usize,
+        seq_antes: usize,
+        filas_validas: &mut usize,
+        k_host: &[u16],
+        v_host: &[u16],
+        k_nuevo: &mut [u16],
+        v_nuevo: &mut [u16],
+        salida: &mut [f32],
+    ) -> Result<bool, String> {
+        let (heads, kv_heads, hd, rope_n) = (c.heads, c.kv_heads, c.hd, c.rope_n);
+        if std::env::var_os("SOSO_SIN_ATENCION_CAPA").is_some() {
+            return Ok(false);
+        }
+        let traza = std::env::var_os("SOSO_TRAZA_GPU").is_some();
+        let group = if kv_heads == 0 { 0 } else { heads / kv_heads };
+        if n == 0 || hd > 256 || group == 0 || group > 16 || heads % kv_heads != 0 || rope_n > hd || rope_n % 2 != 0 {
+            if traza {
+                eprintln!("[gpu] atencion_capa rechazada: n {n} hd {hd} heads {heads} kv_heads {kv_heads} rope {rope_n}");
+            }
+            return Ok(false);
+        }
+        let (q_dim, kv_dim) = (heads * hd, kv_heads * hd);
+        let q_full = 2 * q_dim;
+        let total = seq_antes + n;
+        if xs.len() != n * h || salida.len() != n * h || k_nuevo.len() != n * kv_dim || v_nuevo.len() != n * kv_dim
+            || k_host.len() < seq_antes * kv_dim || v_host.len() < seq_antes * kv_dim || c.qnorm.len() != hd || c.knorm.len() != hd
+        {
+            return Ok(false);
+        }
+        unsafe { ck((self.api.ctx_set_current)(self.ctx), "cuCtxSetCurrent")? };
+        let dims = [(q_full, h), (kv_dim, h), (kv_dim, h), (h, q_dim)];
+        let mut w = [0u64; 4];
+        let mut cod = [(0i32, 0i64); 4];
+        for k in 0..4 {
+            let Some(cr) = codigo_mma(c.vistas[k].dtype, dims[k].1) else {
+                if traza {
+                    eprintln!("[gpu] atencion_capa: sin código para {} dtype {} cols {}", c.claves[k], c.vistas[k].dtype, dims[k].1);
+                }
+                return Ok(false);
+            };
+            cod[k] = cr;
+            if !self.pesos.contains_key(c.claves[k]) {
+                let p = self.subir_peso(c.vistas[k], dims[k].0, dims[k].1)?;
+                self.pesos.insert(c.claves[k].to_string(), p);
+            }
+            match self.pesos.get(c.claves[k]) {
+                Some(Some(p)) if p.dtype == c.vistas[k].dtype && p.rows == dims[k].0 && p.cols == dims[k].1 => w[k] = p.d,
+                _ => {
+                    if traza {
+                        eprintln!("[gpu] atencion_capa: {} no residente", c.claves[k]);
+                    }
+                    return Ok(false);
+                }
+            }
+        }
+        let f = |v: &[f32]| unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) };
+        let x_dev = self.gbuf_asegurar(0, xs.len() * 4)?;
+        let qf_dev = self.gbuf_asegurar(1, n * q_full * 4)?;
+        let k_dev = self.gbuf_asegurar(2, n * kv_dim * 4)?;
+        let v_dev = self.gbuf_asegurar(3, n * kv_dim * 4)?;
+        let q_dev = self.gbuf_asegurar(4, n * q_dim * 4)?;
+        let g_dev = self.gbuf_asegurar(5, n * q_dim * 4)?;
+        let a_dev = self.gbuf_asegurar(6, n * q_dim * 4)?;
+        let y_dev = self.gbuf_asegurar(7, n * h * 4)?;
+        let nw_dev = self.gbuf_asegurar(8, 2 * hd * 4)?;
+        self.subir(x_dev, f(xs))?;
+        self.subir(nw_dev, f(c.qnorm))?;
+        self.subir(nw_dev + (hd * 4) as u64, f(c.knorm))?;
+        // KV del dispositivo: capacidad para el bloque y las filas anteriores que le falten (las nuevas las escribe `att_prep_bloque`)
+        let (kd, vd) = self.kv_espejo(layer, total, seq_antes, filas_validas, seq_antes, k_host, v_host, kv_dim)?;
+        let nn = n as i32;
+        let mm = |s: &Self, w: u64, rows: usize, cols: usize, dtype: i32, rb: i64, x: u64, y: u64| {
+            s.lanzar_a(s.f_iq_matmul_n, ((rows as u32).div_ceil(64), (n as u32).div_ceil(64), 1), (128, 1, 1),
+                &[Arg::P(w), Arg::P(x), Arg::P(y), Arg::I(rows as i32), Arg::I(cols as i32), Arg::I(nn), Arg::I(dtype), Arg::L(rb)])
+        };
+        mm(self, w[0], q_full, h, cod[0].0, cod[0].1, x_dev, qf_dev)?;
+        mm(self, w[1], kv_dim, h, cod[1].0, cod[1].1, x_dev, k_dev)?;
+        mm(self, w[2], kv_dim, h, cod[2].0, cod[2].1, x_dev, v_dev)?;
+        self.lanzar_a(self.f_att_prep, ((heads + kv_heads) as u32, n as u32, 1), (256, 1, 1),
+            &[Arg::P(qf_dev), Arg::P(nw_dev), Arg::P(nw_dev + (hd * 4) as u64), Arg::P(k_dev), Arg::P(v_dev), Arg::P(q_dev), Arg::P(g_dev), Arg::P(kd), Arg::P(vd),
+              Arg::I(seq_antes as i32), Arg::I(heads as i32), Arg::I(kv_heads as i32), Arg::I(hd as i32), Arg::I(rope_n as i32), Arg::F(c.theta), Arg::F(c.eps)])?;
+        let tb = 16 / group;
+        self.lanzar_a(self.f_attn_prefill, (kv_heads as u32, (n as u32).div_ceil(tb as u32), 1), (256, 1, 1),
+            &[Arg::P(q_dev), Arg::P(kd), Arg::P(vd), Arg::P(a_dev), Arg::I(nn), Arg::I(seq_antes as i32), Arg::I(heads as i32), Arg::I(kv_heads as i32), Arg::I(hd as i32), Arg::I(group as i32)])?;
+        self.lanzar_a(self.f_att_puerta, (((n * q_dim) as u32).div_ceil(256), 1, 1), (256, 1, 1),
+            &[Arg::P(a_dev), Arg::P(g_dev), Arg::I((n * q_dim) as i32)])?;
+        mm(self, w[3], h, q_dim, cod[3].0, cod[3].1, a_dev, y_dev)?;
+        ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
+        ck(unsafe { (self.api.dtoh)(salida.as_mut_ptr() as *mut c_void, y_dev, salida.len() * 4) }, "cuMemcpyDtoH")?;
+        ck(unsafe { (self.api.dtoh)(k_nuevo.as_mut_ptr() as *mut c_void, kd + (seq_antes * kv_dim * 2) as u64, k_nuevo.len() * 2) }, "cuMemcpyDtoH")?;
+        ck(unsafe { (self.api.dtoh)(v_nuevo.as_mut_ptr() as *mut c_void, vd + (seq_antes * kv_dim * 2) as u64, v_nuevo.len() * 2) }, "cuMemcpyDtoH")?;
+        *filas_validas = total;
+        self.stats.launches += 1;
+        Ok(true)
+    }
+
     /// Atención del prefill de un bloque en la GPU: ver [`GpuDispatch::atencion_prefill`].
     #[allow(clippy::too_many_arguments)]
     fn atencion_prefill_gpu(
@@ -1042,29 +1184,7 @@ impl CudaGpu {
         }
         unsafe { ck((self.api.ctx_set_current)(self.ctx), "cuCtxSetCurrent")? };
         // 1) KV espejado: capacidad, y subir las filas que el dispositivo no tenga válidas
-        let valid = (*filas_validas).min(seq_antes);
-        let (mut kd, mut vd, mut cap) = self.kvdev.get(&capa).copied().unwrap_or((0, 0, 0));
-        if total > cap {
-            let ncap = total.div_ceil(4096) * 4096 + 4096;
-            let (nk, nv) = (self.alloc(ncap * kv_dim * 2)?, self.alloc(ncap * kv_dim * 2)?);
-            if kd != 0 && valid > 0 {
-                ck(unsafe { (self.api.dtod)(nk, kd, valid * kv_dim * 2) }, "cuMemcpyDtoD")?;
-                ck(unsafe { (self.api.dtod)(nv, vd, valid * kv_dim * 2) }, "cuMemcpyDtoD")?;
-            }
-            if kd != 0 {
-                unsafe {
-                    (self.api.mem_free)(kd);
-                    (self.api.mem_free)(vd);
-                }
-            }
-            (kd, vd, cap) = (nk, nv, ncap);
-            self.kvdev.insert(capa, (kd, vd, cap));
-            self.kv_gen += 1;
-        }
-        let (ini, fin) = (valid * kv_dim, total * kv_dim);
-        self.subir(kd + (ini * 2) as u64, unsafe { std::slice::from_raw_parts(k.as_ptr().add(ini) as *const u8, (fin - ini) * 2) })?;
-        self.subir(vd + (ini * 2) as u64, unsafe { std::slice::from_raw_parts(v.as_ptr().add(ini) as *const u8, (fin - ini) * 2) })?;
-        *filas_validas = total;
+        let (kd, vd) = self.kv_espejo(capa, total, total, filas_validas, seq_antes, k, v, kv_dim)?;
         // 2) consultas, lanzamiento, resultado
         let q_dev = self.blq_asegurar(0, q.len() * 4)?;
         let o_dev = self.blq_asegurar(3, out.len() * 4)?;
@@ -1904,6 +2024,34 @@ impl GpuDispatch for CudaGpu {
         eps: f32,
     ) -> Result<bool, ()> {
         match self.gdn_bloque_gpu(hist, conv, z, decay, beta, norma, estado, salida, n, n_k, n_v, d, kernel, eps) {
+            Ok(b) => Ok(b),
+            Err(e) => {
+                if !self.avisado {
+                    eprintln!("cuda: {e}; sigo en CPU");
+                    self.avisado = true;
+                }
+                Err(())
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn atencion_capa(
+        &mut self,
+        layer: u32,
+        capa: &soso_llm_core::gpu::AtencionCapa<'_>,
+        xs: &[f32],
+        n: usize,
+        h: usize,
+        seq_antes: usize,
+        filas_validas: &mut usize,
+        k_host: &[u16],
+        v_host: &[u16],
+        k_nuevo: &mut [u16],
+        v_nuevo: &mut [u16],
+        salida: &mut [f32],
+    ) -> Result<bool, ()> {
+        match self.atencion_capa_gpu(layer, capa, xs, n, h, seq_antes, filas_validas, k_host, v_host, k_nuevo, v_nuevo, salida) {
             Ok(b) => Ok(b),
             Err(e) => {
                 if !self.avisado {

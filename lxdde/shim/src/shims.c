@@ -120,6 +120,18 @@ int memcmp(const void *a, const void *b, unsigned long n)
     return 0;
 }
 
+void *memchr(const void *s, int c, unsigned long n)
+{
+    const unsigned char *p = (const unsigned char *)s;
+    unsigned char ch = (unsigned char)c;
+
+    for (unsigned long i = 0; i < n; i++) {
+        if (p[i] == ch)
+            return (void *)(p + i);
+    }
+    return 0;
+}
+
 /* --- Página física para nvkm (flush_page de fb): memoria real de PAGE_SIZE. --- */
 extern void *lx_kzalloc(unsigned long size, unsigned flags);
 extern void lx_kfree(void *ptr);

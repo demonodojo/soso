@@ -1,0 +1,23 @@
+import "mate.sal"
+
+fn comp_gpres_len() -> Int
+    25
+
+fn comp_gpres_patch(buf: Int, tag0: Int, tag1: Int, tag2: Int, tag3: Int, tag4: Int, rt_h: Int, w: Int, h: Int, pitch: Int) -> Int ! alloc
+    b = bytes_view_mem(buf, comp_gpres_len())
+    _a = bytes_set_u8(b, 0, tag0)
+    _b = bytes_set_u8(b, 1, tag1)
+    _c = bytes_set_u8(b, 2, tag2)
+    _d = bytes_set_u8(b, 3, tag3)
+    _e = bytes_set_u8(b, 4, tag4)
+    _r = bytes_set_i64(b, 5, rt_h)
+    _w = bytes_set_u32(b, 13, w)
+    _h = bytes_set_u32(b, 17, h)
+    _p = bytes_set_u32(b, 21, pitch)
+    0
+
+fn comp_gpres_patch_gpres(buf: Int, rt_h: Int, w: Int, h: Int, pitch: Int) -> Int ! alloc
+    comp_gpres_patch(buf, 71, 80, 82, 69, 83, rt_h, w, h, pitch)
+
+fn comp_gpres_patch_gnvd(buf: Int, rt_h: Int, w: Int, h: Int, pitch: Int) -> Int ! alloc
+    comp_gpres_patch(buf, 71, 78, 86, 68, 0, rt_h, w, h, pitch)

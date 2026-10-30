@@ -21,12 +21,20 @@ use x86_64::registers::rflags::RFlags;
 pub fn init_msrs() {
     let s = gdt::selectors();
     unsafe {
-        Efer::update(|f| f.insert(EferFlags::SYSTEM_CALL_EXTENSIONS));
+        Efer::update(|f| {
+            f.insert(EferFlags::SYSTEM_CALL_EXTENSIONS);
+            f.insert(EferFlags::NO_EXECUTE_ENABLE);
+        });
         Star::write(s.ucode, s.udata, s.kcode, s.kdata).expect("layout GDT inválido para STAR");
         LStar::write(VirtAddr::new(syscall_entry as *const () as u64));
         // La CPU limpia estos flags al entrar: interrupciones fuera hasta
         // que la pila de kernel esté puesta.
-        SFMask::write(RFlags::INTERRUPT_FLAG | RFlags::TRAP_FLAG | RFlags::DIRECTION_FLAG);
+        SFMask::write(
+            RFlags::INTERRUPT_FLAG
+                | RFlags::TRAP_FLAG
+                | RFlags::DIRECTION_FLAG
+                | RFlags::ALIGNMENT_CHECK,
+        );
     }
 }
 
@@ -38,10 +46,18 @@ pub fn init_msrs() {
 pub fn init_msrs_ap() {
     let s = gdt::selectors();
     unsafe {
-        Efer::update(|f| f.insert(EferFlags::SYSTEM_CALL_EXTENSIONS));
+        Efer::update(|f| {
+            f.insert(EferFlags::SYSTEM_CALL_EXTENSIONS);
+            f.insert(EferFlags::NO_EXECUTE_ENABLE);
+        });
         Star::write(s.ucode, s.udata, s.kcode, s.kdata).expect("layout GDT inválido para STAR");
         LStar::write(VirtAddr::new(ap_syscall_entry as *const () as u64));
-        SFMask::write(RFlags::INTERRUPT_FLAG | RFlags::TRAP_FLAG | RFlags::DIRECTION_FLAG);
+        SFMask::write(
+            RFlags::INTERRUPT_FLAG
+                | RFlags::TRAP_FLAG
+                | RFlags::DIRECTION_FLAG
+                | RFlags::ALIGNMENT_CHECK,
+        );
     }
 }
 
@@ -363,6 +379,8 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_SHM_CREATE => sys_shm_create(a1),
         abi::SYS_SHM_MAP => sys_shm_map(a1),
         abi::SYS_SHM_FREE => sys_shm_free(a1),
+        abi::SYS_SHM_GRANT => sys_shm_grant(a1, a2),
+        abi::SYS_TCP_PEER_PID => sys_tcp_peer_pid(a1),
         abi::SYS_VERSION => sys_version(a1, a2),
         abi::SYS_UPD_WRITE => sys_upd_write(a1, a2, a3, a4),
         abi::SYS_UPD_READ => sys_upd_read(a1, a2, a3, a4),
@@ -498,25 +516,61 @@ fn user_range_ok_bulk(ptr: u64, len: u64, need_write: bool) -> bool {
 }
 
 pub(crate) fn user_slice(ptr: u64, len: u64) -> Result<&'static [u8], i64> {
-    // Un `ptr` nulo con `len == 0` es legítimo (`Vec` vacío en C, `&[]` en
-    // Rust) y `from_raw_parts` aborta el kernel con un puntero nulo.
     if len == 0 {
         return Ok(&[]);
     }
     if !user_range_ok(ptr, len, false) {
         return Err(-abi::EFAULT);
     }
-    Ok(unsafe { core::slice::from_raw_parts(ptr as *const u8, len as usize) })
+    let mut v = alloc::vec![0u8; len as usize];
+    super::uaccess::copy_from_user(ptr, &mut v)?;
+    Ok(alloc::boxed::Box::leak(v.into_boxed_slice()))
 }
 
-pub(crate) fn user_slice_mut(ptr: u64, len: u64) -> Result<&'static mut [u8], i64> {
+pub(crate) fn user_slice_mut(ptr: u64, len: u64) -> Result<UserBufMut, i64> {
     if len == 0 {
-        return Ok(&mut []);
+        return Ok(UserBufMut {
+            ptr,
+            data: &mut [],
+        });
     }
     if !user_range_ok(ptr, len, true) {
         return Err(-abi::EFAULT);
     }
-    Ok(unsafe { core::slice::from_raw_parts_mut(ptr as *mut u8, len as usize) })
+    let mut v = alloc::vec![0u8; len as usize];
+    super::uaccess::copy_from_user(ptr, &mut v)?;
+    Ok(UserBufMut {
+        ptr,
+        data: alloc::boxed::Box::leak(v.into_boxed_slice()),
+    })
+}
+
+pub struct UserBufMut {
+    ptr: u64,
+    data: &'static mut [u8],
+}
+
+impl UserBufMut {
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        self.data
+    }
+
+    pub fn flush(self) -> Result<(), i64> {
+        super::uaccess::copy_to_user(self.ptr, self.data)
+    }
+}
+
+impl core::ops::Deref for UserBufMut {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        self.data
+    }
+}
+
+impl core::ops::DerefMut for UserBufMut {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        self.data
+    }
 }
 
 pub(crate) fn user_str(ptr: u64, len: u64) -> Result<&'static str, i64> {
@@ -1052,7 +1106,7 @@ fn sys_read(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i6
     // quien lee en bucle sigue. `cargo` lee la salida de `rustc` con `read_to_end`, que pide
     // todo el hueco de un `Vec` que ya pasa de 16 MiB, y daba EFAULT («bad address»).
     let len = len.min(MAX_SYSCALL_BUF);
-    let dst = user_slice_mut(buf, len)?;
+    let mut dst = user_slice_mut(buf, len)?;
     let pipe_id = with_fd(fd, |slot| {
         Ok(match slot {
             Fd::PipeRead(id) => Some(*id),
@@ -1069,8 +1123,9 @@ fn sys_read(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i6
         if len == 0 {
             return Ok(0);
         }
-        let n = super::pty::master_try_read(slot, dst);
+        let n = super::pty::master_try_read(slot, dst.as_mut_slice());
         if n > 0 {
+            dst.flush()?;
             return Ok(n as u64);
         }
         return Err(-abi::EAGAIN);
@@ -1142,8 +1197,11 @@ fn sys_read(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i6
             return Ok(0);
         }
         let console = super::with_current(|p| p.console);
-        match super::tty_tomar(console, dst) {
-            super::LecturaTty::Datos(n) => return Ok(n),
+        match super::tty_tomar(console, dst.as_mut_slice()) {
+            super::LecturaTty::Datos(n) => {
+                dst.flush()?;
+                return Ok(n);
+            }
             super::LecturaTty::Eof => return Ok(0),
             super::LecturaTty::Nada => {}
         }
@@ -1154,16 +1212,18 @@ fn sys_read(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i6
         Fd::File { inode, pos } => {
             // Se lee de la caché, no de una copia del descriptor: por eso un
             // lector abierto antes ve lo que escribe otro (N-001).
-            let n = super::fcache::leer(*inode, *pos, dst).ok_or(-abi::EIO)?;
+            let n = super::fcache::leer(*inode, *pos, dst.as_mut_slice()).ok_or(-abi::EIO)?;
             *pos += n;
+            dst.flush()?;
             Ok(n as u64)
         }
         // Un fichero abierto para escribir también se puede leer: `fatfs` abre su
         // imagen con `read(true).write(true)` y relee lo que acaba de formatear.
         // El contenido vive en la caché por inodo, así que se lee de ahí.
         Fd::WriteBuf { inode, pos, .. } => {
-            let n = super::fcache::leer(*inode, *pos, dst).ok_or(-abi::EIO)?;
+            let n = super::fcache::leer(*inode, *pos, dst.as_mut_slice()).ok_or(-abi::EIO)?;
             *pos += n;
+            dst.flush()?;
             Ok(n as u64)
         }
         Fd::LazyFile { inode, size, pos } => {
@@ -1171,8 +1231,9 @@ fn sys_read(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i6
             if n == 0 {
                 return Ok(0);
             }
-            with_vfs(|| crate::vfs::read_file_range(*inode, *pos, n, &mut dst[..n]))?;
+            with_vfs(|| crate::vfs::read_file_range(*inode, *pos, n, &mut dst.as_mut_slice()[..n]))?;
             *pos += n;
+            dst.flush()?;
             Ok(n as u64)
         }
         Fd::Dir { .. } => Err(-abi::EISDIR),
@@ -1466,8 +1527,8 @@ fn sys_stat(path_ptr: u64, path_len: u64, out: u64) -> Result<u64, i64> {
 }
 
 fn sys_getdents(fd: u64, buf: u64, len: u64) -> Result<u64, i64> {
-    let dst = user_slice_mut(buf, len)?;
-    with_fd(fd, |f| {
+    let mut dst = user_slice_mut(buf, len)?;
+    let n = with_fd(fd, |f| {
         let Fd::Dir { entries, pos } = f else { return Err(-abi::ENOTDIR) };
         let mut escrito = 0usize;
         while *pos < entries.len() && escrito + abi::DIRENT_SIZE <= dst.len() {
@@ -1483,7 +1544,9 @@ fn sys_getdents(fd: u64, buf: u64, len: u64) -> Result<u64, i64> {
             *pos += 1;
         }
         Ok(escrito as u64)
-    })
+    })?;
+    dst.flush()?;
+    Ok(n)
 }
 
 fn sys_mkdir(path_ptr: u64, path_len: u64) -> Result<u64, i64> {
@@ -1805,6 +1868,7 @@ fn sys_mmap(addr: u64, len: u64, fd: u64, offset: u64) -> Result<u64, i64> {
                 file_offset: offset,
                 file_len,
                 writable,
+                exec: false,
                 sin_acceso: false,
                 shm_id: 0,
             });
@@ -2658,8 +2722,9 @@ fn sys_dns_resolve(host_ptr: u64, host_len: u64, out_ptr: u64) -> Result<u64, i6
         return Err(-abi::EFAULT);
     }
     let sa = crate::net::dns::resolve_hostname(host)?;
-    let out = user_slice_mut(out_ptr, 4)?;
+    let mut out = user_slice_mut(out_ptr, 4)?;
     out.copy_from_slice(&sa.addr);
+    out.flush()?;
     Ok(0)
 }
 
@@ -3009,6 +3074,19 @@ fn sys_shm_free(id: u64) -> Result<u64, i64> {
     Ok(0)
 }
 
+fn sys_shm_grant(id: u64, pid: u64) -> Result<u64, i64> {
+    super::shm::grant(id, pid)?;
+    Ok(0)
+}
+
+fn sys_tcp_peer_pid(fd: u64) -> Result<u64, i64> {
+    let slot = with_fd(fd, |f| match f {
+        Fd::Tcp { slot } => Ok(*slot),
+        _ => Err(-abi::EBADF),
+    })?;
+    crate::net::tcp_peer_pid(slot)
+}
+
 fn sys_input_poll(out: u64, max: u64) -> Result<u64, i64> {
     if max == 0 || max > 64 {
         return Err(-abi::EINVAL);
@@ -3269,8 +3347,9 @@ fn sys_log_read(offset: u64, buf_ptr: u64, len: u64) -> Result<u64, i64> {
     if len == 0 {
         return Ok(0);
     }
-    let dst = user_slice_mut(buf_ptr, len)?;
-    let n = crate::drivers::applog::copy_from(offset as usize, dst);
+    let mut dst = user_slice_mut(buf_ptr, len)?;
+    let n = crate::drivers::applog::copy_from(offset as usize, dst.as_mut_slice());
+    dst.flush()?;
     Ok(n as u64)
 }
 
@@ -3434,8 +3513,8 @@ fn sys_getrandom(buf: u64, len: u64, _flags: u64) -> Result<u64, i64> {
     if len == 0 {
         return Ok(0);
     }
-    let dst = user_slice_mut(buf, len)?;
-    for chunk in dst.chunks_mut(8) {
+    let mut dst = user_slice_mut(buf, len)?;
+    for chunk in dst.as_mut_slice().chunks_mut(8) {
         let mut v: u64 = 0;
         let ok = unsafe { core::arch::x86_64::_rdrand64_step(&mut v) };
         if ok == 0 {
@@ -3445,6 +3524,7 @@ fn sys_getrandom(buf: u64, len: u64, _flags: u64) -> Result<u64, i64> {
             *b = (v >> (i * 8)) as u8;
         }
     }
+    dst.flush()?;
     Ok(len)
 }
 
@@ -3459,13 +3539,10 @@ fn sys_set_tls(base: u64) -> Result<u64, i64> {
 }
 
 fn sys_mprotect(addr: u64, len: u64, prot: u64) -> Result<u64, i64> {
-    // `prot == 0` es **sin acceso** (N-002), no un error: es lo que hace falta
-    // para una guarda de pila, y hasta ahora no se podía pedir.
-    //
-    // Lo que sigue rechazándose es escribir sin poder leer: x86 no lo
-    // distingue —no hay bit de «sólo escritura»— así que aceptarlo sería
-    // prometer algo que la tabla de páginas no puede cumplir.
-    if prot & !(abi::PROT_READ | abi::PROT_WRITE) != 0 {
+    if prot & !(abi::PROT_READ | abi::PROT_WRITE | abi::PROT_EXEC) != 0 {
+        return Err(-abi::EINVAL);
+    }
+    if prot & abi::PROT_WRITE != 0 && prot & abi::PROT_EXEC != 0 {
         return Err(-abi::EINVAL);
     }
     if prot != 0 && prot & abi::PROT_READ == 0 {
@@ -3473,9 +3550,30 @@ fn sys_mprotect(addr: u64, len: u64, prot: u64) -> Result<u64, i64> {
     }
     let sin_acceso = prot == 0;
     let writable = prot & abi::PROT_WRITE != 0;
+    let exec = prot & abi::PROT_EXEC != 0;
+    let user_prot = if sin_acceso {
+        super::addrspace::UserProt::R
+    } else if exec {
+        super::addrspace::UserProt::Rx
+    } else if writable {
+        super::addrspace::UserProt::Rw
+    } else {
+        super::addrspace::UserProt::R
+    };
     super::with_current(|p| {
         let space = p.space.as_ref().ok_or(-abi::EFAULT)?;
         let end = addr.saturating_add(len);
+        if exec
+            && space.with_mmap_mut(|book| {
+                book.regions.iter().any(|r| {
+                    (r.shm_id != 0 || r.inode != 0)
+                        && r.virt_start < end
+                        && r.virt_start.saturating_add(r.len) > addr
+                })
+            })
+        {
+            return Err(-abi::EINVAL);
+        }
         if space.with_mmap_mut(|book| {
             book.regions.iter().any(|r| {
                 r.shm_id != 0 && r.virt_start < end && r.virt_start.saturating_add(r.len) > addr
@@ -3492,10 +3590,17 @@ fn sys_mprotect(addr: u64, len: u64, prot: u64) -> Result<u64, i64> {
             va += 4096;
         }
         space
-            .set_prot(addr, len, writable, sin_acceso)
+            .set_prot(addr, len, user_prot, sin_acceso)
             .ok_or(-abi::EINVAL)?;
         space.with_mmap_mut(|book| {
-            crate::task::mmap::split_prot(&mut book.regions, addr, len, writable, sin_acceso);
+            crate::task::mmap::split_prot(
+                &mut book.regions,
+                addr,
+                len,
+                writable,
+                exec,
+                sin_acceso,
+            );
         });
         Ok(0)
     })

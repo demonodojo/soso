@@ -25,6 +25,9 @@ extern int lx_nouveau_compute_wait_fence(unsigned sem_slot);
 extern int lx_nouveau_3d_ready(void);
 extern int lx_nouveau_3d_clear(uint64_t rt_va, unsigned width, unsigned height,
                                unsigned pitch, uint32_t rgba);
+extern int lx_nouveau_3d_blit_tex(uint64_t rt_va, unsigned rt_pitch, unsigned dx,
+                                  unsigned dy, uint64_t tex_va, unsigned tex_pitch,
+                                  unsigned width, unsigned height);
 extern uint64_t lx_nouveau_vram_bytes(void);
 extern const char *lx_nouveau_gpu_name(void);
 extern uint64_t lx_nouveau_buf_alloc(uint64_t size);
@@ -203,8 +206,36 @@ int lx_nouveau_gfx3d_ready(void)
     return lx_nouveau_3d_ready();
 }
 
+int lx_nouveau_nvdisp_ready(void)
+{
+    extern int nvdisp_ready(void);
+    return nvdisp_ready();
+}
+
+int lx_nouveau_nvdisp_present(uint64_t rt_va, unsigned pitch, unsigned pres_x,
+                              unsigned pres_y, unsigned pres_w, unsigned pres_h,
+                              int full_frame)
+{
+    extern int nvdisp_scanout_full(uint64_t, unsigned, unsigned, unsigned);
+    extern int nvdisp_scanout_rect(uint64_t, unsigned, unsigned, unsigned,
+                                   unsigned, unsigned);
+
+    if (full_frame) {
+        return nvdisp_scanout_full(rt_va, pres_w, pres_h, pitch);
+    }
+    return nvdisp_scanout_rect(rt_va, pitch, pres_x, pres_y, pres_w, pres_h);
+}
+
 int lx_nouveau_gfx3d_clear(uint64_t rt_va, unsigned width, unsigned height,
                            unsigned pitch, uint32_t rgba)
 {
     return lx_nouveau_3d_clear(rt_va, width, height, pitch, rgba);
+}
+
+int lx_nouveau_gfx3d_blit_tex(uint64_t rt_va, unsigned rt_pitch, unsigned dx,
+                              unsigned dy, uint64_t tex_va, unsigned tex_pitch,
+                              unsigned width, unsigned height)
+{
+    return lx_nouveau_3d_blit_tex(rt_va, rt_pitch, dx, dy, tex_va, tex_pitch,
+                                  width, height);
 }

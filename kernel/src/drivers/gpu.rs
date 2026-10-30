@@ -120,9 +120,20 @@ struct GpuState {
     vram_total: u64,
     vram_used: u64,
     buffers: Vec<Option<GpuBuffer>>,
+    owners: Vec<u64>,
 }
 
 static GPU: Once<Mutex<GpuState>> = Once::new();
+
+fn require_buffer_owner(g: &GpuState, handle: u64) -> Result<(), i64> {
+    let h = handle as usize;
+    let want = crate::task::current_space_id().ok_or(abi::EINVAL)?;
+    let got = *g.owners.get(h).ok_or(abi::EINVAL)?;
+    if got != want {
+        return Err(abi::EINVAL);
+    }
+    Ok(())
+}
 
 fn nvidia_vram() -> u64 {
     #[cfg(feature = "lxdde")]
@@ -177,6 +188,7 @@ pub fn init() {
             vram_total: vram,
             vram_used: 0,
             buffers: Vec::new(),
+            owners: Vec::new(),
         }
     } else if let Some(gpu) = intel {
         if gpu.bar0 != 0 && gpu.bar0_size > 0 {
@@ -196,6 +208,7 @@ pub fn init() {
             vram_total: vram,
             vram_used: 0,
             buffers: Vec::new(),
+            owners: Vec::new(),
         }
     } else {
         println!("gpu: sin GPU; modo CPU");
@@ -207,6 +220,7 @@ pub fn init() {
             vram_total: 0,
             vram_used: 0,
             buffers: Vec::new(),
+            owners: Vec::new(),
         }
     };
     GPU.call_once(|| Mutex::new(state));
@@ -330,16 +344,19 @@ pub fn info() -> GpuInfo {
         let n = core::cmp::min(label.len(), phase.len() - 1);
         phase[..n].copy_from_slice(&label[..n]);
     }
-    #[cfg(feature = "lxdde")]
-    let mut pad = [0u8; 4];
-    #[cfg(not(feature = "lxdde"))]
-    let pad = [0u8; 4];
-    if g.vendor == GPU_VENDOR_NVIDIA {
+    let gfx3d = if g.vendor == GPU_VENDOR_NVIDIA {
         #[cfg(feature = "lxdde")]
         {
-            pad[0] = crate::lxdde::gfx3d_ready() as u8;
+            crate::lxdde::gfx3d_ready() as u8
         }
-    }
+        #[cfg(not(feature = "lxdde"))]
+        {
+            0
+        }
+    } else {
+        0
+    };
+    let pad = super::scanout::info_pad(gfx3d);
     GpuInfo {
         present: g.present as u8,
         vendor: g.vendor,
@@ -434,7 +451,9 @@ pub fn alloc(size: u64, domain: u64) -> Result<u64, i64> {
     } else {
         GpuBuffer::heap(size as usize)
     };
+    let owner = crate::task::current_space_id().unwrap_or(0);
     g.buffers.push(Some(buf));
+    g.owners.push(owner);
     g.vram_used += size;
     Ok(handle)
 }
@@ -450,6 +469,7 @@ pub fn free(handle: u64) -> Result<u64, i64> {
     if !g.present {
         return Err(abi::ENOSYS);
     }
+    require_buffer_owner(&g, handle)?;
     let slot = g.buffers.get_mut(handle as usize).ok_or(abi::EINVAL)?;
     let buf = slot.as_ref().ok_or(abi::EINVAL)?;
     let bytes = buf.len() as u64;
@@ -471,6 +491,7 @@ pub fn free(handle: u64) -> Result<u64, i64> {
 /// comprobar con el candado tomado.
 pub fn buffer_len(handle: u64) -> Result<u64, i64> {
     let g = gpu().lock();
+    require_buffer_owner(&g, handle)?;
     g.buffers
         .get(handle as usize)
         .and_then(|b| b.as_ref())
@@ -480,6 +501,7 @@ pub fn buffer_len(handle: u64) -> Result<u64, i64> {
 
 pub fn map_to_user(handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
     let g = gpu().lock();
+    require_buffer_owner(&g, handle)?;
     let buf = g
         .buffers
         .get(handle as usize)
@@ -518,9 +540,14 @@ const TROZO_SUBIDA: usize = 2 * 1024 * 1024;
 /// 1 MiB, sólo le faltaba aceptar un offset dentro del búfer.
 #[cfg(feature = "lxdde")]
 fn subir_por_trozos(va: u64, user_ptr: u64, n: usize) -> Result<u64, i64> {
+    subir_por_trozos_at(va, 0, user_ptr, n)
+}
+
+#[cfg(feature = "lxdde")]
+fn subir_por_trozos_at(va: u64, dev_off: u64, user_ptr: u64, n: usize) -> Result<u64, i64> {
     // Primero sin copias: el CE lee directamente de las páginas del proceso y
     // esto no toca un solo byte.
-    match subir_por_dma(va, user_ptr, n) {
+    match subir_por_dma_at(va, dev_off, user_ptr, n) {
         Ok(()) => {
             SUBIDAS_DMA.fetch_add(1, Ordering::Relaxed);
             return Ok(0);
@@ -540,7 +567,8 @@ fn subir_por_trozos(va: u64, user_ptr: u64, n: usize) -> Result<u64, i64> {
                 .ok_or(abi::EFAULT)?;
             Ok(0)
         })?;
-        crate::lxdde::device_buf_upload_at(va, off as u64, &tmp[..c]).map_err(|_| abi::EIO)?;
+        crate::lxdde::device_buf_upload_at(va, dev_off + off as u64, &tmp[..c])
+            .map_err(|_| abi::EIO)?;
         off += c;
     }
     Ok(0)
@@ -617,6 +645,11 @@ fn aviso_rebote(motivo: Motivo, user_ptr: u64, n: usize) {
 /// mitad del DMA.
 #[cfg(feature = "lxdde")]
 fn subir_por_dma(va: u64, user_ptr: u64, n: usize) -> Result<(), Motivo> {
+    subir_por_dma_at(va, 0, user_ptr, n)
+}
+
+#[cfg(feature = "lxdde")]
+fn subir_por_dma_at(va: u64, dev_off: u64, user_ptr: u64, n: usize) -> Result<(), Motivo> {
     if n == 0 {
         return Err(Motivo::Vacio);
     }
@@ -660,7 +693,7 @@ fn subir_por_dma(va: u64, user_ptr: u64, n: usize) -> Result<(), Motivo> {
                 }
                 crate::lxdde::device_buf_upload_dma(
                     va,
-                    off as u64,
+                    dev_off + off as u64,
                     &phys[..paginas],
                     lead_in as u32,
                     c as u64,
@@ -681,6 +714,16 @@ const LOTE_PRESENT: usize = 16 * 1024 * 1024 - 4096;
 /// CE: RT en VRAM → shadow del GOP (sysmem del kernel).
 #[cfg(feature = "lxdde")]
 fn descargar_vram_a_shadow(rt_va: u64, dst_virt: u64, size: usize) -> Result<(), i64> {
+    descargar_vram_a_shadow_at(rt_va, 0, dst_virt, size)
+}
+
+#[cfg(feature = "lxdde")]
+fn descargar_vram_a_shadow_at(
+    rt_va: u64,
+    rt_dev_off: u64,
+    dst_virt: u64,
+    size: usize,
+) -> Result<(), i64> {
     if rt_va == 0 || size == 0 {
         return Err(abi::EINVAL);
     }
@@ -711,11 +754,120 @@ fn descargar_vram_a_shadow(rt_va: u64, dst_virt: u64, size: usize) -> Result<(),
         for (i, slot) in phys.iter_mut().enumerate() {
             *slot = crate::mm::virt_to_phys(page_base + (i as u64) * 4096).ok_or(abi::EIO)?;
         }
-        crate::lxdde::device_buf_download_dma(rt_va, off as u64, &phys, dst_off, c as u64)
-            .map_err(|_| abi::EIO)?;
+        crate::lxdde::device_buf_download_dma(
+            rt_va,
+            rt_dev_off + off as u64,
+            &phys,
+            dst_off,
+            c as u64,
+        )
+        .map_err(|_| abi::EIO)?;
         off += c;
     }
     Ok(())
+}
+
+#[cfg(feature = "lxdde")]
+fn upload_compositor_rect_from_user(
+    tex_va: u64,
+    src_ptr: u64,
+    pitch: u32,
+    dx: u32,
+    dy: u32,
+    rw: u32,
+    rh: u32,
+) -> Result<(), i64> {
+    if rw == 0 || rh == 0 || pitch == 0 {
+        return Err(abi::EINVAL);
+    }
+    let row_bytes = (rw as u64).checked_mul(4).ok_or(abi::EINVAL)?;
+    for row in 0..rh {
+        let y = dy + row;
+        let dx_bytes = (dx as u64).checked_mul(4).ok_or(abi::EINVAL)?;
+        let byte_off = (y as u64)
+            .checked_mul(pitch as u64)
+            .and_then(|p| p.checked_add(dx_bytes))
+            .ok_or(abi::EINVAL)?;
+        subir_por_trozos_at(tex_va, byte_off, src_ptr + byte_off, row_bytes as usize)
+            .map_err(|_| abi::EIO)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "lxdde")]
+fn descargar_rt_rect_a_shadow(
+    rt_va: u64,
+    shadow_virt: u64,
+    pitch: u32,
+    dx: u32,
+    dy: u32,
+    rw: u32,
+    rh: u32,
+) -> Result<(), i64> {
+    if rw == 0 || rh == 0 || pitch == 0 {
+        return Err(abi::EINVAL);
+    }
+    let row_bytes = (rw as u64).checked_mul(4).ok_or(abi::EINVAL)? as usize;
+    for row in 0..rh {
+        let y = dy + row;
+        let dx_bytes = (dx as u64).checked_mul(4).ok_or(abi::EINVAL)?;
+        let byte_off = (y as u64)
+            .checked_mul(pitch as u64)
+            .and_then(|p| p.checked_add(dx_bytes))
+            .ok_or(abi::EINVAL)?;
+        descargar_vram_a_shadow_at(rt_va, byte_off, shadow_virt + byte_off, row_bytes)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "lxdde")]
+fn present_compositor_scanout(
+    rt_va: u64,
+    pitch: u32,
+    frame_bytes: usize,
+    pres_x: u32,
+    pres_y: u32,
+    pres_w: u32,
+    pres_h: u32,
+    full_pres: bool,
+) -> Result<u64, i64> {
+    match super::scanout::effective_backend()? {
+        super::scanout::ScanoutBackend::Gop => {
+            if full_pres {
+                return crate::drivers::fb::present_shadow_after(frame_bytes, |_ptr, virt| {
+                    descargar_vram_a_shadow(rt_va, virt, frame_bytes).map_err(|_| ())?;
+                    Ok(())
+                })
+                .map(|()| submit_bits(true))
+                .map_err(|_| abi::EIO);
+            }
+            return crate::drivers::fb::present_shadow_rect_after(
+                pres_x,
+                pres_y,
+                pres_w,
+                pres_h,
+                |_ptr, virt| {
+                    descargar_rt_rect_a_shadow(
+                        rt_va, virt, pitch, pres_x, pres_y, pres_w, pres_h,
+                    )
+                    .map_err(|_| ())?;
+                    Ok(())
+                },
+            )
+            .map(|()| submit_bits(true))
+            .map_err(|_| abi::EIO);
+        }
+        super::scanout::ScanoutBackend::Nvdisp => {
+            if !crate::lxdde::nvdisp_ready() {
+                return Err(abi::ENOTSUP);
+            }
+            crate::lxdde::nvdisp_present(
+                rt_va, pitch, pres_x, pres_y, pres_w, pres_h, full_pres,
+            )
+            .map_err(|_| abi::EIO)?;
+            Ok(submit_bits(true))
+        }
+    }
 }
 
 /// Sube `len` bytes del proceso al búfer. **Devuelve 0**, no la cuenta de bytes.
@@ -727,6 +879,7 @@ fn descargar_vram_a_shadow(rt_va: u64, dst_virt: u64, size: usize) -> Result<(),
 /// día hace falta la cuenta, que sea en las DOS y escrito aquí.
 pub fn upload_from_user(handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
     let mut g = gpu().lock();
+    require_buffer_owner(&g, handle)?;
     let slot = g
         .buffers
         .get_mut(handle as usize)
@@ -837,7 +990,17 @@ fn soft_sqrtf(x: f32) -> f32 {
 ///   tráfico y 8× menos VRAM que el plano f32.
 /// - `b"GFINI"` — apaga GSP-RM y deja la tarjeta sin DMA (irreversible)
 /// - `b"GCLR3"` + u64 rt_handle + u32 w + u32 h + u32 pitch + u32 rgba (A8B8G8R8)
+/// - `b"GQUAD"` + u64 rt_handle + u64 tex_handle + u32 dx + u32 dy + u32 w + u32 h
+///   + u32 rt_pitch + u32 tex_pitch — textura A8B8G8R8 → RT (F2, CE pitched blit)
 /// - `b"GPRES"` + u64 rt_handle + u32 w + u32 h + u32 pitch — CE VRAM→shadow GOP (F1)
+/// - `b"GNVD"` + mismo layout que `GPRES` — scanout NVDisplay (F8; N0 devuelve ENOTSUP)
+/// - `b"GUPRC"` (41 B) — sube un rectángulo de un búfer de usuario a textura VRAM.
+/// - `b"GSCEN"` — rt, fb, rect de present, flags, n×quad (tex, dest, tamaño);
+///   blitea en orden y presenta el daño (compositor por superficies).
+/// - `b"GFRAM"` — compositor (61 B): rt, tex, src_ptr, fb_w, fb_h, pitch, dx, dy,
+///   rw, rh, rgba — sube sólo el rectángulo sucio, clear completo sólo si rw×rh
+///   cubre el framebuffer entero; blit y present parciales en caso contrario.
+///   Layout legacy de 53 B (src_len + w/h de pantalla) sigue siendo aceptado.
 /// - `b"SOFTG"` / `b"SOFTX"` — enciende/apaga el dispositivo software de pruebas
 ///
 /// El valor de vuelta de SAXPY/MATVF/MATVQ lleva `abi::GPU_SUBMIT_ON_GPU` (lo hizo
@@ -898,6 +1061,41 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
         }
         return Err(abi::EINVAL);
     }
+    if cmd.len() >= 5 && &cmd[..5] == b"GQUAD" && cmd.len() >= 49 {
+        let rt_h = u64::from_le_bytes(cmd[5..13].try_into().unwrap_or([0; 8]));
+        let tex_h = u64::from_le_bytes(cmd[13..21].try_into().unwrap_or([0; 8]));
+        let dx = u32::from_le_bytes(cmd[21..25].try_into().unwrap_or([0; 4]));
+        let dy = u32::from_le_bytes(cmd[25..29].try_into().unwrap_or([0; 4]));
+        let w = u32::from_le_bytes(cmd[29..33].try_into().unwrap_or([0; 4]));
+        let h = u32::from_le_bytes(cmd[33..37].try_into().unwrap_or([0; 4]));
+        let rt_pitch = u32::from_le_bytes(cmd[37..41].try_into().unwrap_or([0; 4]));
+        let tex_pitch = u32::from_le_bytes(cmd[41..45].try_into().unwrap_or([0; 4]));
+        let rt_va = g
+            .buffers
+            .get(rt_h as usize)
+            .and_then(|b| b.as_ref())
+            .and_then(|b| b.device_va());
+        let tex_va = g
+            .buffers
+            .get(tex_h as usize)
+            .and_then(|b| b.as_ref())
+            .and_then(|b| b.device_va());
+        drop(g);
+        #[cfg(not(feature = "lxdde"))]
+        let _ = (dx, dy, w, h, rt_pitch, tex_pitch, rt_va, tex_va);
+        #[cfg(feature = "lxdde")]
+        {
+            if !crate::lxdde::gfx3d_ready() {
+                return Err(abi::ENOTSUP);
+            }
+            if let (Some(rt), Some(tex)) = (rt_va, tex_va) {
+                return crate::lxdde::submit_3d_blit_tex(rt, rt_pitch, dx, dy, tex, tex_pitch, w, h)
+                    .map(|on_gpu| submit_bits(on_gpu))
+                    .map_err(|_| abi::EIO);
+            }
+        }
+        return Err(abi::EINVAL);
+    }
     if cmd.len() >= 5 && &cmd[..5] == b"GPRES" && cmd.len() >= 25 {
         let rt_h = u64::from_le_bytes(cmd[5..13].try_into().unwrap_or([0; 8]));
         let w = u32::from_le_bytes(cmd[13..17].try_into().unwrap_or([0; 4]));
@@ -938,6 +1136,298 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
             let _ = (rt_va, w, h, pitch, frame_bytes);
             return Err(abi::ENOSYS);
         }
+    }
+    if cmd.len() >= 25 && cmd[..4] == *b"GNVD" {
+        let rt_h = u64::from_le_bytes(cmd[5..13].try_into().unwrap_or([0; 8]));
+        let w = u32::from_le_bytes(cmd[13..17].try_into().unwrap_or([0; 4]));
+        let h = u32::from_le_bytes(cmd[17..21].try_into().unwrap_or([0; 4]));
+        let pitch = u32::from_le_bytes(cmd[21..25].try_into().unwrap_or([0; 4]));
+        let frame_bytes = (pitch as u64)
+            .checked_mul(h as u64)
+            .ok_or(abi::EINVAL)?;
+        if w == 0 || h == 0 || pitch == 0 || frame_bytes == 0 {
+            return Err(abi::EINVAL);
+        }
+        let (rt_va, cap) = {
+            let buf = g
+                .buffers
+                .get(rt_h as usize)
+                .and_then(|b| b.as_ref())
+                .ok_or(abi::EINVAL)?;
+            (buf.device_va().ok_or(abi::EINVAL)?, buf.len() as u64)
+        };
+        if frame_bytes > cap {
+            return Err(abi::EINVAL);
+        }
+        drop(g);
+        #[cfg(feature = "lxdde")]
+        {
+            match super::scanout::effective_backend()? {
+                super::scanout::ScanoutBackend::Nvdisp => {}
+                super::scanout::ScanoutBackend::Gop => return Err(abi::ENOTSUP),
+            }
+            if !crate::lxdde::nvdisp_ready() {
+                return Err(abi::ENOTSUP);
+            }
+            crate::lxdde::nvdisp_present(rt_va, pitch, 0, 0, w, h, true)
+                .map_err(|_| abi::EIO)?;
+            return Ok(submit_bits(true));
+        }
+        #[cfg(not(feature = "lxdde"))]
+        {
+            let _ = (rt_va, w, h, pitch, frame_bytes);
+            return Err(abi::ENOSYS);
+        }
+    }
+    if cmd.len() >= 5 && &cmd[..5] == b"GUPRC" && cmd.len() >= 41 {
+        let tex_h = u64::from_le_bytes(cmd[5..13].try_into().unwrap_or([0; 8]));
+        let src_ptr = u64::from_le_bytes(cmd[13..21].try_into().unwrap_or([0; 8]));
+        let pitch = u32::from_le_bytes(cmd[21..25].try_into().unwrap_or([0; 4]));
+        let dx = u32::from_le_bytes(cmd[25..29].try_into().unwrap_or([0; 4]));
+        let dy = u32::from_le_bytes(cmd[29..33].try_into().unwrap_or([0; 4]));
+        let rw = u32::from_le_bytes(cmd[33..37].try_into().unwrap_or([0; 4]));
+        let rh = u32::from_le_bytes(cmd[37..41].try_into().unwrap_or([0; 4]));
+        if pitch == 0 || rw == 0 || rh == 0 {
+            return Err(abi::EINVAL);
+        }
+        let tex_va = g
+            .buffers
+            .get(tex_h as usize)
+            .and_then(|b| b.as_ref())
+            .and_then(|b| b.device_va())
+            .ok_or(abi::EINVAL)?;
+        drop(g);
+        #[cfg(feature = "lxdde")]
+        {
+            if !crate::lxdde::gfx3d_ready() {
+                return Err(abi::ENOTSUP);
+            }
+            upload_compositor_rect_from_user(tex_va, src_ptr, pitch, dx, dy, rw, rh)
+                .map_err(|_| abi::EIO)?;
+            return Ok(submit_bits(true));
+        }
+        #[cfg(not(feature = "lxdde"))]
+        let _ = (tex_va, src_ptr, pitch, dx, dy, rw, rh);
+        return Err(abi::ENOSYS);
+    }
+    if cmd.len() >= 5 && &cmd[..5] == b"GSCEN" && cmd.len() >= 53 {
+        const GSCEN_HDR: usize = 53;
+        const GSCEN_QUAD: usize = 36;
+        let rt_h = u64::from_le_bytes(cmd[5..13].try_into().unwrap_or([0; 8]));
+        let fb_w = u32::from_le_bytes(cmd[13..17].try_into().unwrap_or([0; 4]));
+        let fb_h = u32::from_le_bytes(cmd[17..21].try_into().unwrap_or([0; 4]));
+        let pitch = u32::from_le_bytes(cmd[21..25].try_into().unwrap_or([0; 4]));
+        let pres_x = u32::from_le_bytes(cmd[25..29].try_into().unwrap_or([0; 4]));
+        let pres_y = u32::from_le_bytes(cmd[29..33].try_into().unwrap_or([0; 4]));
+        let pres_w = u32::from_le_bytes(cmd[33..37].try_into().unwrap_or([0; 4]));
+        let pres_h = u32::from_le_bytes(cmd[37..41].try_into().unwrap_or([0; 4]));
+        let flags = u32::from_le_bytes(cmd[41..45].try_into().unwrap_or([0; 4]));
+        let rgba = u32::from_le_bytes(cmd[45..49].try_into().unwrap_or([0; 4]));
+        let n = u16::from_le_bytes(cmd[49..51].try_into().unwrap_or([0; 2])) as usize;
+        if n > 19 || fb_w == 0 || fb_h == 0 || pitch == 0 || pres_w == 0 || pres_h == 0 {
+            return Err(abi::EINVAL);
+        }
+        let need = GSCEN_HDR + n * GSCEN_QUAD;
+        if cmd.len() < need {
+            return Err(abi::EINVAL);
+        }
+        let frame_bytes = (pitch as u64)
+            .checked_mul(fb_h as u64)
+            .ok_or(abi::EINVAL)?;
+        let rt_va = g
+            .buffers
+            .get(rt_h as usize)
+            .and_then(|b| b.as_ref())
+            .and_then(|b| b.device_va())
+            .ok_or(abi::EINVAL)?;
+        let cap = g
+            .buffers
+            .get(rt_h as usize)
+            .and_then(|b| b.as_ref())
+            .map(|b| b.len() as u64)
+            .ok_or(abi::EINVAL)?;
+        if frame_bytes > cap {
+            return Err(abi::EINVAL);
+        }
+        let mut quads = alloc::vec![];
+        for i in 0..n {
+            let off = GSCEN_HDR + i * GSCEN_QUAD;
+            let tex_h = u64::from_le_bytes(cmd[off..off + 8].try_into().unwrap_or([0; 8]));
+            let dx = u32::from_le_bytes(cmd[off + 8..off + 12].try_into().unwrap_or([0; 4]));
+            let dy = u32::from_le_bytes(cmd[off + 12..off + 16].try_into().unwrap_or([0; 4]));
+            let w = u32::from_le_bytes(cmd[off + 16..off + 20].try_into().unwrap_or([0; 4]));
+            let h = u32::from_le_bytes(cmd[off + 20..off + 24].try_into().unwrap_or([0; 4]));
+            let tex_pitch = u32::from_le_bytes(cmd[off + 24..off + 28].try_into().unwrap_or([0; 4]));
+            let sx = u32::from_le_bytes(cmd[off + 28..off + 32].try_into().unwrap_or([0; 4]));
+            let sy = u32::from_le_bytes(cmd[off + 32..off + 36].try_into().unwrap_or([0; 4]));
+            let tex_va = g
+                .buffers
+                .get(tex_h as usize)
+                .and_then(|b| b.as_ref())
+                .and_then(|b| b.device_va())
+                .ok_or(abi::EINVAL)?;
+            if w == 0 || h == 0 || tex_pitch == 0 {
+                return Err(abi::EINVAL);
+            }
+            let src_off = (sy as u64)
+                .checked_mul(tex_pitch as u64)
+                .and_then(|p| p.checked_add((sx as u64).checked_mul(4)?))
+                .ok_or(abi::EINVAL)?;
+            let tex_src = tex_va.checked_add(src_off).ok_or(abi::EINVAL)?;
+            quads.push((tex_src, dx, dy, w, h, tex_pitch));
+        }
+        drop(g);
+        #[cfg(feature = "lxdde")]
+        {
+            if !crate::lxdde::gfx3d_ready() {
+                return Err(abi::ENOTSUP);
+            }
+            if flags & 1 != 0 {
+                crate::lxdde::submit_3d_clear(rt_va, fb_w, fb_h, pitch, rgba)
+                    .map_err(|_| abi::EIO)?;
+            }
+            for (tex_va, dx, dy, w, h, tex_pitch) in quads {
+                crate::lxdde::submit_3d_blit_tex(rt_va, pitch, dx, dy, tex_va, tex_pitch, w, h)
+                    .map_err(|_| abi::EIO)?;
+            }
+            let full_pres =
+                pres_x == 0 && pres_y == 0 && pres_w == fb_w && pres_h == fb_h;
+            return present_compositor_scanout(
+                rt_va,
+                pitch,
+                frame_bytes as usize,
+                pres_x,
+                pres_y,
+                pres_w,
+                pres_h,
+                full_pres,
+            );
+        }
+        #[cfg(not(feature = "lxdde"))]
+        let _ = (rt_va, frame_bytes, flags, rgba, n);
+        return Err(abi::ENOSYS);
+    }
+    if cmd.len() >= 5 && &cmd[..5] == b"GFRAM" && cmd.len() >= 53 {
+        let rt_h = u64::from_le_bytes(cmd[5..13].try_into().unwrap_or([0; 8]));
+        let tex_h = u64::from_le_bytes(cmd[13..21].try_into().unwrap_or([0; 8]));
+        let src_ptr = u64::from_le_bytes(cmd[21..29].try_into().unwrap_or([0; 8]));
+        let (fb_w, fb_h, pitch, dx, dy, rw, rh, rgba, legacy_src_len) =
+            if cmd.len() >= 61 {
+                let fb_w = u32::from_le_bytes(cmd[29..33].try_into().unwrap_or([0; 4]));
+                let fb_h = u32::from_le_bytes(cmd[33..37].try_into().unwrap_or([0; 4]));
+                let pitch = u32::from_le_bytes(cmd[37..41].try_into().unwrap_or([0; 4]));
+                let dx = u32::from_le_bytes(cmd[41..45].try_into().unwrap_or([0; 4]));
+                let dy = u32::from_le_bytes(cmd[45..49].try_into().unwrap_or([0; 4]));
+                let rw = u32::from_le_bytes(cmd[49..53].try_into().unwrap_or([0; 4]));
+                let rh = u32::from_le_bytes(cmd[53..57].try_into().unwrap_or([0; 4]));
+                let rgba = u32::from_le_bytes(cmd[57..61].try_into().unwrap_or([0; 4]));
+                (fb_w, fb_h, pitch, dx, dy, rw, rh, rgba, None)
+            } else {
+                let src_len = u64::from_le_bytes(cmd[29..37].try_into().unwrap_or([0; 8]));
+                let fb_w = u32::from_le_bytes(cmd[37..41].try_into().unwrap_or([0; 4]));
+                let fb_h = u32::from_le_bytes(cmd[41..45].try_into().unwrap_or([0; 4]));
+                let pitch = u32::from_le_bytes(cmd[45..49].try_into().unwrap_or([0; 4]));
+                let rgba = u32::from_le_bytes(cmd[49..53].try_into().unwrap_or([0; 4]));
+                if fb_w == 0 || fb_h == 0 || pitch == 0 || src_len == 0 {
+                    return Err(abi::EINVAL);
+                }
+                let frame_bytes = (pitch as u64)
+                    .checked_mul(fb_h as u64)
+                    .ok_or(abi::EINVAL)?;
+                if src_len > frame_bytes {
+                    return Err(abi::EINVAL);
+                }
+                (
+                    fb_w,
+                    fb_h,
+                    pitch,
+                    0,
+                    0,
+                    fb_w,
+                    fb_h,
+                    rgba,
+                    Some(src_len),
+                )
+            };
+        let frame_bytes = (pitch as u64)
+            .checked_mul(fb_h as u64)
+            .ok_or(abi::EINVAL)?;
+        if fb_w == 0 || fb_h == 0 || pitch == 0 || frame_bytes == 0 || rw == 0 || rh == 0 {
+            return Err(abi::EINVAL);
+        }
+        if dx >= fb_w || dy >= fb_h {
+            return Err(abi::EINVAL);
+        }
+        if dx.saturating_add(rw) > fb_w || dy.saturating_add(rh) > fb_h {
+            return Err(abi::EINVAL);
+        }
+        let (rt_va, tex_va, cap) = {
+            let rt_buf = g
+                .buffers
+                .get(rt_h as usize)
+                .and_then(|b| b.as_ref())
+                .ok_or(abi::EINVAL)?;
+            let tex_buf = g
+                .buffers
+                .get(tex_h as usize)
+                .and_then(|b| b.as_ref())
+                .ok_or(abi::EINVAL)?;
+            (
+                rt_buf.device_va().ok_or(abi::EINVAL)?,
+                tex_buf.device_va().ok_or(abi::EINVAL)?,
+                rt_buf.len() as u64,
+            )
+        };
+        if frame_bytes > cap {
+            return Err(abi::EINVAL);
+        }
+        drop(g);
+        #[cfg(not(feature = "lxdde"))]
+        let _ = (
+            rt_va,
+            tex_va,
+            src_ptr,
+            fb_w,
+            fb_h,
+            pitch,
+            dx,
+            dy,
+            rw,
+            rh,
+            rgba,
+            frame_bytes,
+            legacy_src_len,
+        );
+        #[cfg(feature = "lxdde")]
+        {
+            let full_damage = dx == 0 && dy == 0 && rw == fb_w && rh == fb_h;
+            if !crate::lxdde::gfx3d_ready() {
+                return Err(abi::ENOTSUP);
+            }
+            if let Some(src_len) = legacy_src_len {
+                upload_from_user(tex_h, src_ptr, src_len).map_err(|_| abi::EIO)?;
+            } else {
+                upload_compositor_rect_from_user(tex_va, src_ptr, pitch, dx, dy, rw, rh)
+                    .map_err(|_| abi::EIO)?;
+            }
+            if full_damage {
+                crate::lxdde::submit_3d_clear(rt_va, fb_w, fb_h, pitch, rgba)
+                    .map_err(|_| abi::EIO)?;
+            }
+            crate::lxdde::submit_3d_blit_tex(rt_va, pitch, dx, dy, tex_va, pitch, rw, rh)
+                .map_err(|_| abi::EIO)?;
+            return present_compositor_scanout(
+                rt_va,
+                pitch,
+                frame_bytes as usize,
+                dx,
+                dy,
+                rw,
+                rh,
+                full_damage,
+            );
+        }
+        return Err(abi::ENOSYS);
     }
     if cmd.len() >= 5 && &cmd[..5] == b"SAXPY" && cmd.len() >= 29 {
         let a = f32::from_le_bytes(cmd[5..9].try_into().unwrap_or([0; 4]));
@@ -1308,6 +1798,7 @@ fn submit_bits(on_gpu: bool) -> u64 {
 
 /// Vista `&[f32]` de un búfer, sin copia. Es lo que se usa para la matriz.
 fn f32_view(g: &GpuState, handle: u64, elems: usize) -> Result<&[f32], i64> {
+    require_buffer_owner(g, handle)?;
     g.buffers
         .get(handle as usize)
         .and_then(|b| b.as_ref())
@@ -1324,6 +1815,7 @@ fn read_f32_vec(g: &GpuState, handle: u64, elems: usize) -> Result<Vec<f32>, i64
 }
 
 fn write_f32_buffer(g: &mut GpuState, handle: u64, data: &[f32]) -> Result<(), i64> {
+    require_buffer_owner(g, handle)?;
     let slot = g
         .buffers
         .get_mut(handle as usize)

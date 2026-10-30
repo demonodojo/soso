@@ -1,0 +1,23 @@
+import "../../../user/sal/escritorio/files_path.sal"
+
+fn main() -> Int ! alloc
+    if path_is_root(d"/x") != 0
+        1
+    elsif path_is_root(d"/") == 0
+        2
+    elsif path_parent_matches(d"/a/b", d"/a") == 0
+        3
+    elsif path_parent_matches(d"/", d"/") == 0
+        4
+    elsif path_parent_matches(d"/solo", d"/") == 0
+        5
+    elsif path_join_matches(d"/", d"etc", d"/etc") == 0
+        6
+    elsif path_join_matches(d"/var", d"log", d"/var/log") == 0
+        7
+    elsif path_row_is_parent(d"..") == 0
+        8
+    elsif path_row_is_parent(d".") != 0
+        9
+    else
+        0

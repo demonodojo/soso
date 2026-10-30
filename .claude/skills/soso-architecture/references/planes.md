@@ -31,7 +31,7 @@ el alcance: consultar o editar documentación no inicia su implementación.
 | Actualizaciones de instalaciones y logs en sosofs | [PLAN-ACTUALIZACIONES.md](../../../../docs/PLAN-ACTUALIZACIONES.md), entregas U0–U8; transición legacy y recuperación conjunta kernel/rootfs |
 | Inferencia y modelos grandes | [PLAN-MODELOS-GRANDES.md](../../../../PLAN-MODELOS-GRANDES.md); distinguir etapas históricas de pendientes reales |
 | GPU nativa y VRAM | [L6-native-autonomy.md](../../../../docs/L6-native-autonomy.md), gates enlazados y [PLAN-VRAM-16G-ROG.md](../../../../docs/PLAN-VRAM-16G-ROG.md) |
-| Gráficos 3D y juegos nativos | [PLAN-GRAFICOS-JUEGOS.md](../../../../docs/PLAN-GRAFICOS-JUEGOS.md) (H1–F8; motor 3D NVIDIA + `soso-gfx`) |
+| Gráficos 3D y juegos nativos | [PLAN-GRAFICOS-JUEGOS.md](../../../../docs/PLAN-GRAFICOS-JUEGOS.md) (H1–F8; motor 3D NVIDIA + `soso-gfx`); scanout HDMI [PLAN-NVDISPLAY.md](../../../../docs/PLAN-NVDISPLAY.md) (N0–N8) |
 | Steam Deck / ath11k | [PLAN-STEAMDECK.md](../../../../docs/PLAN-STEAMDECK.md) |
 | WiFi operativo | [WIFI-OPERATIVA.md](../../../../docs/WIFI-OPERATIVA.md) y diagnóstico del equipo relevante |
 | Toolchain y compilación nativa | [SELF-HOSTING.md](../../../../docs/SELF-HOSTING.md); SI-6/SI-7 añaden agente e integración, no sustituyen los requisitos de toolchain |

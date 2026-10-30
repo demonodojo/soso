@@ -1,0 +1,67 @@
+import "mate.sal"
+
+fn comp_gfram_len() -> Int
+    61
+
+fn comp_st_size() -> Int
+    182
+
+fn comp_st_gpu_ok() -> Int
+    0
+
+fn comp_st_rt_h() -> Int
+    8
+
+fn comp_st_fb_w() -> Int
+    16
+
+fn comp_st_fb_h() -> Int
+    24
+
+fn comp_st_pitch() -> Int
+    32
+
+fn comp_st_rgba() -> Int
+    40
+
+fn comp_st_cmd_gfram() -> Int
+    48
+
+fn comp_st_cmd_guprc() -> Int
+    109
+
+fn comp_st_msg() -> Int
+    150
+
+fn comp_st_get(st: Int, off: Int) -> Int ! alloc
+    bytes_get_i64(bytes_view_mem(st, comp_st_size()), off)
+
+fn comp_st_set(st: Int, off: Int, v: Int) -> Int ! alloc
+    bytes_set_i64(bytes_view_mem(st, comp_st_size()), off, v)
+
+fn gpu_tag5(buf: Int, off: Int, s: String) -> Int ! alloc
+    b = bytes_view_mem(buf, off + 5)
+    i = 0
+    while i < 5
+        ch = 0
+        if i < str_len(s)
+            ch = str_char(s, i)
+        bytes_set_u8(b, off + i, ch)
+        i = i + 1
+    0
+
+fn comp_gpu_patch_gfram(st: Int, rt_h: Int, tex_h: Int, w: Int, h: Int, pitch: Int, rgba: Int) -> Int ! alloc
+    cmd = st + comp_st_cmd_gfram()
+    b = bytes_view_mem(cmd, comp_gfram_len())
+    _r = bytes_set_i64(b, 5, rt_h)
+    _x = bytes_set_i64(b, 13, tex_h)
+    _w = bytes_set_u32(b, 29, w)
+    _h = bytes_set_u32(b, 33, h)
+    _p = bytes_set_u32(b, 37, pitch)
+    _c = bytes_set_u32(b, 57, rgba)
+    _t = gpu_tag5(cmd, 0, d"GFRAM")
+    _fw = comp_st_set(st, comp_st_fb_w(), w)
+    _fh = comp_st_set(st, comp_st_fb_h(), h)
+    _fp = comp_st_set(st, comp_st_pitch(), pitch)
+    _fr = comp_st_set(st, comp_st_rgba(), rgba)
+    0

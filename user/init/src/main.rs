@@ -97,6 +97,18 @@ fn main(args: &[String]) -> u8 {
     if cmd == "shm-check" {
         return shm_check(op);
     }
+    if cmd == "shm-deny-check" {
+        return shm_deny_check(op);
+    }
+    if cmd == "nx-exec-test" {
+        return nx_exec_test();
+    }
+    if cmd == "mprotect-exec-ok" {
+        return mprotect_exec_ok();
+    }
+    if cmd == "text-ro-test" {
+        return text_ro_test();
+    }
     if cmd == "log" {
         libsoso::logln!("{}", args[1..].join(" "));
         return 0;
@@ -128,6 +140,7 @@ fn env_check() -> u8 {
 }
 
 fn shm_check(id_str: &str) -> u8 {
+    let _ = sys::sleep_ms(200);
     let id: u64 = id_str.bytes().fold(0u64, |acc, b| {
         acc.saturating_mul(10).saturating_add((b - b'0') as u64)
     });
@@ -141,6 +154,57 @@ fn shm_check(id_str: &str) -> u8 {
     }
     let _ = sys::munmap(va, 4096);
     0
+}
+
+fn shm_deny_check(id_str: &str) -> u8 {
+    let id: u64 = id_str.bytes().fold(0u64, |acc, b| {
+        acc.saturating_mul(10).saturating_add((b - b'0') as u64)
+    });
+    match sys::shm_map(id) {
+        Err(e) if e == -abi::EPERM => 0,
+        Ok(_) => 1,
+        Err(_) => 2,
+    }
+}
+
+fn nx_exec_test() -> u8 {
+    let base = sys::mmap(0, 4096, u64::MAX, 0);
+    if base < 0 {
+        return 1;
+    }
+    unsafe {
+        *(base as *mut u8) = 0xC3;
+    }
+    type RetFn = extern "C" fn();
+    let f: RetFn = unsafe { core::mem::transmute(base as usize) };
+    f();
+    3
+}
+
+fn mprotect_exec_ok() -> u8 {
+    let base = sys::mmap(0, 4096, u64::MAX, 0);
+    if base < 0 {
+        return 1;
+    }
+    unsafe {
+        *(base as *mut u8) = 0xC3;
+    }
+    if sys::mprotect(base as u64, 4096, abi::PROT_READ | abi::PROT_EXEC) != 0 {
+        return 2;
+    }
+    type RetFn = extern "C" fn();
+    let f: RetFn = unsafe { core::mem::transmute(base as usize) };
+    f();
+    0
+}
+
+fn text_ro_test() -> u8 {
+    extern "C" fn marcador_ro() {}
+    let p = marcador_ro as *const () as *mut u8;
+    unsafe {
+        core::ptr::write_volatile(p, 0);
+    }
+    4
 }
 
 fn modo_mprotect_test() -> u8 {
@@ -734,6 +798,55 @@ fn suite() -> u8 {
         check!(
             sys::wait() == Ok((pid as u64, 255)),
             "mprotect interior (fault+presente) RO mata al write"
+        );
+        let pid = sys::spawn_io_ex(
+            "/bin/init",
+            &["init", "nx-exec-test"],
+            &[],
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+        );
+        check!(pid > 0, "spawn nx-exec-test");
+        check!(
+            sys::wait() == Ok((pid as u64, 255)),
+            "ejecución en mmap NX mata al hijo"
+        );
+        let pid = sys::spawn_io_ex(
+            "/bin/init",
+            &["init", "text-ro-test"],
+            &[],
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+        );
+        check!(pid > 0, "spawn text-ro-test");
+        check!(
+            sys::wait() == Ok((pid as u64, 255)),
+            "escritura en .text mata al hijo"
+        );
+        let pid = sys::spawn_io_ex(
+            "/bin/init",
+            &["init", "mprotect-exec-ok"],
+            &[],
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+        );
+        check!(pid > 0, "spawn mprotect-exec-ok");
+        check!(
+            sys::wait() == Ok((pid as u64, 0)),
+            "mprotect R|X tras escribir ret funciona"
+        );
+        let wx_base = sys::mmap(0, 4096, u64::MAX, 0);
+        check!(wx_base > 0, "mmap para mprotect W|X");
+        check!(
+            sys::mprotect(
+                wx_base as u64,
+                4096,
+                abi::PROT_READ | abi::PROT_WRITE | abi::PROT_EXEC
+            ) < 0,
+            "mprotect W|X devuelve error"
         );
         let base = sys::mmap(0, 4096, u64::MAX, 0);
         check!(base > 0, "mmap anónimo para mremap");
@@ -1995,9 +2108,17 @@ fn suite() -> u8 {
         unsafe {
             core::ptr::write_volatile(va as *mut u64, 0x1122_3344_5566_7788);
         }
+        let deny_arg = alloc::format!("shm-deny-check {id}");
+        let deny_child = sys::spawn("/bin/init", &deny_arg);
+        check!(deny_child > 0, "spawn shm-deny-check");
+        check!(
+            sys::wait() == Ok((deny_child as u64, 0)),
+            "shm_map sin concesión devuelve EPERM"
+        );
         let arg = alloc::format!("shm-check {id}");
         let child = sys::spawn("/bin/init", &arg);
         check!(child > 0, "spawn shm-check");
+        check!(sys::shm_grant(id, child as u64).is_ok(), "shm_grant al hijo");
         check!(sys::wait() == Ok((child as u64, 0)), "shm-check ok");
         unsafe {
             check!(

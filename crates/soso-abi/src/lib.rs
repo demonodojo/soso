@@ -107,6 +107,10 @@ pub const SYS_SHM_CREATE: u64 = 99;
 pub const SYS_SHM_MAP: u64 = 100;
 /// Libera la referencia del creador sobre `id`.
 pub const SYS_SHM_FREE: u64 = 101;
+/// Concede a `pid` el derecho de mapear el segmento `id` (sólo el creador).
+pub const SYS_SHM_GRANT: u64 = 102;
+/// Devuelve el pid del otro extremo en un socket loopback conectado.
+pub const SYS_TCP_PEER_PID: u64 = 103;
 /// Espera a que termine un QMD encolado con `GPU_SUBMIT_ASYNC` (arg1 = fence).
 pub const SYS_GPU_WAIT: u64 = 66;
 /// Copia la versión del kernel a un buffer de usuario (`buf`, `len`). Devuelve bytes escritos.
@@ -448,6 +452,7 @@ pub const fn exit_by_signal(sig: u8) -> u8 {
 
 pub const PROT_READ: u64 = 1;
 pub const PROT_WRITE: u64 = 2;
+pub const PROT_EXEC: u64 = 4;
 pub const MAP_PRIVATE: u64 = 1;
 pub const MAP_SHARED: u64 = 2;
 pub const MAP_ANONYMOUS: u64 = 4;
@@ -482,6 +487,22 @@ pub const GPU_ALLOC_VRAM: u64 = 1;
 ///
 /// Negativo es siempre `-errno`.
 
+/// Índice en `GpuInfo::_pad` para `gpu_gfx3d_ready` / Sal `gpu_off_gfx3d()`.
+pub const GPU_PAD_GFX3D: usize = 0;
+/// 1 = backend NVDisplay listo (`GNVD`, auto con HDMI).
+pub const GPU_PAD_SCANOUT_NVDISP: usize = 1;
+/// 1 = backend GOP (`GPRES`, shadow + `fb_present`).
+pub const GPU_PAD_SCANOUT_GOP: usize = 2;
+/// Backend tras `SOSO_SCANOUT` + capacidades (`scanout::effective_backend`).
+pub const GPU_PAD_SCANOUT_EFFECTIVE: usize = 3;
+
+pub const GPU_SCANOUT_EFFECTIVE_NONE: u8 = 0;
+pub const GPU_SCANOUT_EFFECTIVE_NVDISP: u8 = 1;
+pub const GPU_SCANOUT_EFFECTIVE_GOP: u8 = 2;
+
+/// Longitud de `GPRES` / `GNVD` en `SYS_GPU_SUBMIT` (tag 5 B + rt u64 + w/h/pitch u32).
+pub const GPU_CMD_PRES_LEN: usize = 25;
+
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
 pub struct GpuInfo {
@@ -506,7 +527,12 @@ pub struct GpuInfo {
     ///
     /// Sale del hueco de `_pad`, así que el layout no cambia.
     pub vram_bufs: u8,
-    /// `_pad[0]`: 1 = motor 3D (`CLEAR_SURFACE`) listo en NVIDIA (H1).
+    /// Capacidades de scanout y 3D (layout fijo; ver [PLAN-NVDISPLAY.md] en el repo).
+    ///
+    /// - `_pad[0]` (`GPU_PAD_GFX3D`): motor 3D (`CLEAR_SURFACE`) listo (H1).
+    /// - `_pad[1]` (`GPU_PAD_SCANOUT_NVDISP`): head HDMI/DP operativo (F8).
+    /// - `_pad[2]` (`GPU_PAD_SCANOUT_GOP`): shadow GOP fijado (F1).
+    /// - `_pad[3]` (`GPU_PAD_SCANOUT_EFFECTIVE`): `GPU_SCANOUT_EFFECTIVE_*`.
     pub _pad: [u8; 4],
     pub vram_total: u64,
     pub vram_free: u64,
@@ -912,6 +938,28 @@ pub struct SpawnIo {
     /// gratis.
     pub cwd_ptr: u64,
     pub cwd_len: u64,
+}
+
+#[cfg(test)]
+mod gpu_info_pad_tests {
+    use super::*;
+    use core::mem::{offset_of, size_of};
+
+    #[test]
+    fn pad_field_offsets() {
+        assert_eq!(offset_of!(GpuInfo, present), 0);
+        assert_eq!(offset_of!(GpuInfo, vendor), 1);
+        assert_eq!(offset_of!(GpuInfo, compute), 2);
+        assert_eq!(offset_of!(GpuInfo, vram_bufs), 3);
+        assert_eq!(offset_of!(GpuInfo, _pad), 4);
+        assert_eq!(size_of::<GpuInfo>(), 104);
+        assert_eq!(GPU_PAD_GFX3D, 0);
+        assert_eq!(GPU_PAD_SCANOUT_NVDISP, 1);
+        assert_eq!(GPU_PAD_SCANOUT_GOP, 2);
+        assert_eq!(GPU_PAD_SCANOUT_EFFECTIVE, 3);
+        assert_eq!(GPU_SCANOUT_EFFECTIVE_NVDISP, 1);
+        assert_eq!(GPU_CMD_PRES_LEN, 25);
+    }
 }
 
 #[cfg(test)]

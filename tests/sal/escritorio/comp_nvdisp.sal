@@ -1,0 +1,32 @@
+import "../../../user/sal/escritorio/comp_nvdisp_layout.sal"
+import "../../../user/sal/escritorio/comp_gpres_layout.sal"
+
+fn main() -> Int ! alloc
+    if nvdisp_head_w() != 640
+        1
+    else
+        if nvdisp_head_h() != 480
+            2
+        else
+            if nvdisp_head_pitch() != 2560
+                3
+            else
+                if nvdisp_head_fb_vram() != 25165824
+                    4
+                else
+                    if nvdisp_clip_w(600, 100, 640) != 40
+                        5
+                    else
+                        if nvdisp_clip_h(400, 50, 480) != 50
+                            6
+                        else
+                            buf = bytes_ptr(bytes_new(comp_gpres_len()))
+                            _n = comp_gpres_patch_gnvd(buf, 3, nvdisp_head_w(), nvdisp_head_h(), nvdisp_head_pitch())
+                            b = bytes_view_mem(buf, comp_gpres_len())
+                            if bytes_get_u32(b, 13) != 640
+                                7
+                            else
+                                if bytes_get_u32(b, 21) != 2560
+                                    8
+                                else
+                                    0

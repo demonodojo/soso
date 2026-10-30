@@ -7,6 +7,15 @@ use crate::fs::MODELS;
 
 struct ActiveImport {
     session: ImportSession,
+    owner_as: u64,
+}
+
+fn require_import_owner(active: &ActiveImport) -> Result<(), i64> {
+    let want = crate::task::current_space_id().ok_or(-soso_abi::EINVAL)?;
+    if active.owner_as != want {
+        return Err(-soso_abi::EBUSY);
+    }
+    Ok(())
 }
 
 static IMPORT: Mutex<Option<ActiveImport>> = Mutex::new(None);
@@ -33,7 +42,8 @@ pub fn begin(name_ptr: u64, name_len: u64) -> Result<(), i64> {
         name,
     )
     .map_err(import_err)?;
-    *IMPORT.lock() = Some(ActiveImport { session });
+    let owner_as = crate::task::current_space_id().ok_or(-soso_abi::EINVAL)?;
+    *IMPORT.lock() = Some(ActiveImport { session, owner_as });
     Ok(())
 }
 
@@ -42,6 +52,7 @@ pub fn put(rel_ptr: u64, rel_len: u64, buf_ptr: u64, buf_len: u64) -> Result<(),
     let data = crate::task::syscall::user_slice(buf_ptr, buf_len)?;
     let mut imp = IMPORT.lock();
     let active = imp.as_mut().ok_or(-soso_abi::EINVAL)?;
+    require_import_owner(active)?;
     let mfs = MODELS.get().ok_or(-soso_abi::ENOSYS)?;
     let mut guard = mfs.lock();
     active
@@ -52,6 +63,7 @@ pub fn put(rel_ptr: u64, rel_len: u64, buf_ptr: u64, buf_len: u64) -> Result<(),
 
 pub fn commit() -> Result<(), i64> {
     let active = IMPORT.lock().take().ok_or(-soso_abi::EINVAL)?;
+    require_import_owner(&active)?;
     let mfs = MODELS.get().ok_or(-soso_abi::ENOSYS)?;
     let mut guard = mfs.lock();
     let (_sb, _cat) = active
@@ -64,6 +76,7 @@ pub fn commit() -> Result<(), i64> {
 
 pub fn abort() -> Result<(), i64> {
     if let Some(active) = IMPORT.lock().take() {
+        let _ = require_import_owner(&active);
         active.session.abort();
     }
     Ok(())
@@ -72,6 +85,7 @@ pub fn abort() -> Result<(), i64> {
 pub fn scratch_alloc(size: u64) -> Result<u64, i64> {
     let mut imp = IMPORT.lock();
     let active = imp.as_mut().ok_or(-soso_abi::EINVAL)?;
+    require_import_owner(active)?;
     let region = active.session.scratch_alloc(size).map_err(import_err)?;
     Ok(region.start_lba)
 }
@@ -80,6 +94,7 @@ pub fn scratch_write(start_lba: u64, offset: u64, buf_ptr: u64, buf_len: u64) ->
     let data = crate::task::syscall::user_slice(buf_ptr, buf_len)?;
     let mut imp = IMPORT.lock();
     let active = imp.as_mut().ok_or(-soso_abi::EINVAL)?;
+    require_import_owner(active)?;
     let region = active.session.scratch_region().ok_or(-soso_abi::EINVAL)?;
     if region.start_lba != start_lba {
         return Err(-soso_abi::EINVAL);
@@ -101,6 +116,7 @@ pub fn scratch_read(start_lba: u64, offset: u64, buf_ptr: u64, buf_len: u64) -> 
     }
     let mut imp = IMPORT.lock();
     let active = imp.as_mut().ok_or(-soso_abi::EINVAL)?;
+    require_import_owner(active)?;
     let region = active.session.scratch_region().ok_or(-soso_abi::EINVAL)?;
     if region.start_lba != start_lba {
         return Err(-soso_abi::EINVAL);
@@ -116,9 +132,7 @@ pub fn scratch_read(start_lba: u64, offset: u64, buf_ptr: u64, buf_len: u64) -> 
         &mut tmp,
     )
     .map_err(import_err)?;
-    let dst = crate::task::syscall::user_slice_mut(buf_ptr, buf_len)?;
-    dst.copy_from_slice(&tmp);
-    Ok(())
+    crate::task::uaccess::copy_to_user(buf_ptr, &tmp)
 }
 
 pub fn scratch_free() -> Result<(), i64> {

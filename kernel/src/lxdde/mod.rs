@@ -481,6 +481,23 @@ pub fn gfx3d_ready() -> bool {
     gpu::gfx3d_ready()
 }
 
+/// F8 NVDisplay: head + modo listos (N4+).
+pub fn nvdisp_ready() -> bool {
+    gpu::nvdisp_ready()
+}
+
+pub fn nvdisp_present(
+    rt_va: u64,
+    pitch: u32,
+    pres_x: u32,
+    pres_y: u32,
+    pres_w: u32,
+    pres_h: u32,
+    full_frame: bool,
+) -> Result<(), ()> {
+    gpu::nvdisp_present(rt_va, pitch, pres_x, pres_y, pres_w, pres_h, full_frame)
+}
+
 pub fn submit_3d_clear(
     rt_va: u64,
     width: u32,
@@ -489,4 +506,17 @@ pub fn submit_3d_clear(
     rgba: u32,
 ) -> Result<bool, ()> {
     gpu::submit_3d_clear(rt_va, width, height, pitch, rgba)
+}
+
+pub fn submit_3d_blit_tex(
+    rt_va: u64,
+    rt_pitch: u32,
+    dx: u32,
+    dy: u32,
+    tex_va: u64,
+    tex_pitch: u32,
+    width: u32,
+    height: u32,
+) -> Result<bool, ()> {
+    gpu::submit_3d_blit_tex(rt_va, rt_pitch, dx, dy, tex_va, tex_pitch, width, height)
 }

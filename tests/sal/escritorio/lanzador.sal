@@ -52,5 +52,9 @@ fn main() -> Int ! alloc
         5
     elsif lanz_menu_accion(lanz_menu_n() - 1) != lanz_salir()
         6
+    elsif lanz_menu_accion(2) != lanz_ficheros()
+        7
+    elsif str_eq(lanz_menu_texto(2), d"Archivos") == 0
+        8
     else
         0

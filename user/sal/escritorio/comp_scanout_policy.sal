@@ -1,0 +1,82 @@
+import "comp_nvdisp_layout.sal"
+
+fn comp_scanout_use_nvdisp(nvdisp: Int, gop: Int) -> Int
+    if nvdisp != 0
+        1
+    else
+        0
+
+fn comp_scanout_use_gop(nvdisp: Int, gop: Int) -> Int
+    if nvdisp != 0
+        0
+    else
+        if gop != 0
+            1
+        else
+            0
+
+fn comp_scanout_rt_nvdisp(effective: Int) -> Int
+    if effective == 1
+        1
+    else
+        0
+
+fn comp_scanout_effective(mode: Int, nvdisp: Int, gop: Int) -> Int
+    if mode == 2
+        if nvdisp != 0
+            1
+        else
+            0
+    else
+        if mode == 1
+            if gop != 0
+                2
+            else
+                0
+        else
+            if nvdisp != 0
+                1
+            else
+                if gop != 0
+                    2
+                else
+                    0
+
+fn comp_scanout_auto_nvdisp(nvdisp: Int, gop: Int) -> Int
+    if nvdisp != 0
+        1
+    else
+        0
+
+fn comp_scanout_auto_gop(nvdisp: Int, gop: Int) -> Int
+    if nvdisp != 0
+        0
+    else
+        if gop != 0
+            1
+        else
+            0
+
+fn comp_scanout_fb_w(fb_w: Int, nvdisp_active: Int) -> Int
+    if nvdisp_active != 0
+        if fb_w > nvdisp_head_w()
+            nvdisp_head_w()
+        else
+            fb_w
+    else
+        fb_w
+
+fn comp_scanout_fb_h(fb_h: Int, nvdisp_active: Int) -> Int
+    if nvdisp_active != 0
+        if fb_h > nvdisp_head_h()
+            nvdisp_head_h()
+        else
+            fb_h
+    else
+        fb_h
+
+fn comp_scanout_fb_pitch(fb_w: Int, fb_pitch: Int, nvdisp_active: Int) -> Int
+    if nvdisp_active != 0
+        comp_scanout_fb_w(fb_w, 1) * 4
+    else
+        fb_pitch

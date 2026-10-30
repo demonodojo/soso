@@ -2,6 +2,7 @@ fn main() {
     // Rotación de la consola fijada en el build (la Steam Deck la deduce sola;
     // esto es para corregir el sentido sin tocar código).
     println!("cargo:rerun-if-env-changed=SOSO_FB_ROT");
+    println!("cargo:rerun-if-env-changed=SOSO_SCANOUT");
     println!("cargo::rustc-check-cfg=cfg(soso_heap_debug)");
     println!("cargo:rerun-if-env-changed=SOSO_HEAP_DEBUG");
     if matches!(

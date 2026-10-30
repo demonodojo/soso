@@ -124,6 +124,7 @@ pub(crate) fn dispatch(vector: u8, desde_ring3: bool) {
     // `lx_kmalloc` no se entera: está detrás del bloque. `iret` restaura
     // RFLAGS, así que este `cld` no rompe el `memmove` interrumpido.
     unsafe { core::arch::asm!("cld") };
+    crate::arch::cpu_hardening::clac_en_entrada_isr();
     let prof = &PROF_IRQ[crate::arch::percpu::cpu_index()];
     prof.fetch_add(1, Ordering::Relaxed);
     if let Some(idx) = index(vector) {

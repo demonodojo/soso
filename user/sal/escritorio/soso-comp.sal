@@ -1,0 +1,105 @@
+import "soso.sal"
+import "comp_proto.sal"
+import "comp_gpu.sal"
+import "comp_escena.sal"
+import "comp_scanout_policy.sal"
+
+fn comp_puerto() -> Int
+    7432
+
+fn comp_servir_wm(wm_fd: Int, compos: Int, clen: Int, st: Int, tab: Int, gbuf: Int) -> Int ! io, alloc
+    msg = st + comp_st_msg()
+    seguir = 1
+    while seguir != 0
+        n = read_fd(wm_fd, msg, msg_len())
+        if n != msg_len()
+            seguir = 0
+        if seguir != 0
+            op = msg_get_op(msg)
+            if op == op_comp_frame()
+                x = msg_get_u32(msg, 4)
+                y = msg_get_u32(msg, 8)
+                w = msg_get_u32(msg, 12)
+                h = msg_get_u32(msg, 16)
+                if w > 0
+                    if h > 0
+                        if comp_st_get(st, comp_st_gpu_ok()) != 0
+                            _g = comp_gpu_present(st, compos, x, y, w, h)
+                        else
+                            _p = fb_present_rect(compos, clen, x, y, w, h)
+            else
+                if op == op_comp_bind()
+                    _b = comp_escena_bind(st, tab, msg_get_u32(msg, 4), msg_get_u32(msg, 8), msg_get_u32(msg, 12), msg_get_u32(msg, 16), msg_get_u32(msg, 20))
+                else
+                    if op == op_comp_geom()
+                        _g = comp_escena_geom(tab, msg_get_u32(msg, 4), msg_get_u32(msg, 8), msg_get_u32(msg, 12), msg_get_u32(msg, 16), msg_get_u32(msg, 20), msg_get_u32(msg, 24), msg_get_u32(msg, 28))
+                    else
+                        if op == op_comp_dmap()
+                            _d = comp_escena_dmap(tab, msg_get_u32(msg, 4), msg_get_u32(msg, 8), msg_get_u32(msg, 12), msg_get_u32(msg, 16), msg_get_u32(msg, 20))
+                        else
+                            if op == op_comp_commit()
+                                fl = msg_get_u32(msg, 20)
+                                clr = 0
+                                if fl == comp_commit_clear_rt()
+                                    clr = 1
+                                _c = comp_escena_commit(st, tab, gbuf, msg_get_u32(msg, 4), msg_get_u32(msg, 8), msg_get_u32(msg, 12), msg_get_u32(msg, 16), clr)
+                            else
+                                seguir = 0
+    0
+
+fn main() -> Int ! io, alloc
+    info = fb_info_nuevo()
+    if fb_info(info) < 0
+        1
+    else
+        if fb_info_leer(info) == 0
+            1
+        else
+            _m = fb_set_mode(fb_mode_graficos())
+            sw = fb_info_ancho(info)
+            sh = fb_info_alto(info)
+            stride = fb_info_stride(info)
+            bpp = fb_info_bpp(info)
+            fmt = fb_info_formato(info)
+            ginfo = bytes_ptr(bytes_new(gpu_info_size()))
+            nvdisp_on = 0
+            if gpu_info(ginfo) >= 0
+                nvdisp_on = comp_scanout_rt_nvdisp(gpu_scanout_effective(ginfo))
+            gw = comp_scanout_fb_w(sw, nvdisp_on)
+            gh = comp_scanout_fb_h(sh, nvdisp_on)
+            gpitch = comp_scanout_fb_pitch(sw, stride, nvdisp_on)
+            clen = gpitch * gh * bpp
+            if clen <= 0
+                1
+            else
+                sid = shm_create(clen)
+                if sid < 0
+                    1
+                else
+                    compos = shm_map(sid)
+                    if compos < 0
+                        1
+                    else
+                        st = bytes_ptr(bytes_new(comp_st_size()))
+                        tab = bytes_ptr(bytes_new(comp_surf_tab_bytes()))
+                        gbuf = bytes_ptr(bytes_new(comp_gscen_buf_len()))
+                        _z = comp_escena_init_tab(tab)
+                        _gi = comp_gpu_try_init(st, clen, gw, gh, gpitch)
+                        gpu_ok = comp_st_get(st, comp_st_gpu_ok())
+                        listener = tcp_listen(comp_puerto())
+                        if listener < 0
+                            1
+                        else
+                            escena = st + comp_st_msg()
+                            while 1 != 0
+                                wm = tcp_accept(listener, 60000)
+                                if wm >= 0
+                                    peer = tcp_peer_pid(wm)
+                                    if peer >= 0
+                                        _gr = shm_grant(sid, peer)
+                                    _e = msg_encode_comp_escena(escena, sid, sw, sh, stride, bpp, fmt, gpu_ok)
+                                    _w = write_fd(wm, escena, msg_len())
+                                    if _w == msg_len()
+                                        _s = comp_servir_wm(wm, compos, clen, st, tab, gbuf)
+                                    _c = close_fd(wm)
+                            0

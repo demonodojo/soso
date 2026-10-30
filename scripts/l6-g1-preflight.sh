@@ -17,6 +17,29 @@ echo "2) GPU NVIDIA"
 lspci -nn | rg 'NVIDIA|10de:' || echo "   FAIL: sin NVIDIA"
 
 echo ""
+echo "2b) Audio HDMI NVIDIA (VFIO / NVDisplay N8)"
+bdf="${SOSO_G1_BDF:-01:00.0}"
+slot="${bdf%.*}"
+audio="0000:${slot}.1"
+gpu="0000:${slot}.0"
+if [[ -e "/sys/bus/pci/devices/${audio}" ]]; then
+  aid=$(lspci -n -s "${slot}.1" 2>/dev/null | awk '{print $3}' || true)
+  echo "   Función audio: ${slot}.1 (${aid:-?})"
+  if [[ "$aid" == "10de:2f80" ]] || [[ "$aid" == 10de:* ]]; then
+    gg=$(readlink -f "/sys/bus/pci/devices/${gpu}/iommu_group" 2>/dev/null || true)
+    ga=$(readlink -f "/sys/bus/pci/devices/${audio}/iommu_group" 2>/dev/null || true)
+    if [[ -n "$gg" && "$gg" == "$ga" ]]; then
+      echo "   GO    audio HDMI en el mismo grupo IOMMU que la dGPU (bind VFIO en l6-g1-vfio-test)"
+    else
+      echo "   AVISO grupos IOMMU distintos GPU vs audio — revisar antes de VFIO"
+    fi
+  fi
+else
+  echo "   (sin función .1 en slot ${slot}; Ampere de sobremesa suele omitir audio HDMI)"
+fi
+echo "   Audio HDMI no usa NVDisplay en soso (F6 aparte); documentado en docs/L6-G1-gate.md"
+
+echo ""
 echo "3) VT-d / DMAR (ACPI)"
 if [[ -r /sys/firmware/acpi/tables/DMAR ]]; then
   echo "   GO    tabla DMAR presente (firmware expone VT-d)"

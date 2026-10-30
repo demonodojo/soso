@@ -1,10 +1,17 @@
 import "mate.sal"
+import "comp_gfram_layout.sal"
 
 fn sys_read() -> Int
     1
 
 fn sys_write() -> Int
     2
+
+fn sys_open() -> Int
+    3
+
+fn sys_getdents() -> Int
+    7
 
 fn sys_close() -> Int
     4
@@ -62,6 +69,60 @@ fn sys_shm_map() -> Int
 
 fn sys_shm_free() -> Int
     101
+
+fn sys_shm_grant() -> Int
+    102
+
+fn sys_tcp_peer_pid() -> Int
+    103
+
+fn sys_gpu_info() -> Int
+    17
+
+fn sys_gpu_alloc() -> Int
+    18
+
+fn sys_gpu_map() -> Int
+    19
+
+fn sys_gpu_submit() -> Int
+    20
+
+fn sys_gpu_free() -> Int
+    34
+
+fn gpu_alloc_vram_flag() -> Int
+    1
+
+fn gpu_info_size() -> Int
+    104
+
+fn gpu_off_present() -> Int
+    0
+
+fn gpu_off_gfx3d() -> Int
+    4
+
+fn gpu_off_scanout_nvdisp() -> Int
+    5
+
+fn gpu_off_scanout_gop() -> Int
+    6
+
+fn gpu_off_scanout_effective() -> Int
+    7
+
+fn gpu_scanout_gop_ready(info_ptr: Int) -> Int ! alloc
+    b = bytes_view_mem(info_ptr, gpu_info_size())
+    bytes_get_u8(b, gpu_off_scanout_gop())
+
+fn gpu_scanout_nvdisp_ready(info_ptr: Int) -> Int ! alloc
+    b = bytes_view_mem(info_ptr, gpu_info_size())
+    bytes_get_u8(b, gpu_off_scanout_nvdisp())
+
+fn gpu_scanout_effective(info_ptr: Int) -> Int ! alloc
+    b = bytes_view_mem(info_ptr, gpu_info_size())
+    bytes_get_u8(b, gpu_off_scanout_effective())
 
 fn fb_mode_consola() -> Int
     0
@@ -214,6 +275,44 @@ fn fb_present_rect(buf_ptr: Int, buf_len: Int, x: Int, y: Int, w: Int, h: Int) -
     wh = w + h * 65536
     syscall(sys_fb_present_rect(), buf_ptr, buf_len, xy, wh, 0, 0)
 
+fn gpu_info(out_ptr: Int) -> Int ! io, alloc
+    syscall(sys_gpu_info(), out_ptr, 0, 0, 0, 0, 0)
+
+fn gpu_gfx3d_ready(info_ptr: Int) -> Int ! alloc
+    b = bytes_view_mem(info_ptr, gpu_info_size())
+    bytes_get_u8(b, gpu_off_gfx3d())
+
+fn gpu_alloc_vram(bytes: Int) -> Int ! io
+    syscall(sys_gpu_alloc(), bytes, gpu_alloc_vram_flag(), 0, 0, 0, 0)
+
+fn gpu_map(handle: Int, src_ptr: Int, len: Int) -> Int ! io
+    syscall(sys_gpu_map(), handle, src_ptr, len, 0, 0, 0)
+
+fn gpu_submit(cmd_ptr: Int, cmd_len: Int) -> Int ! io
+    syscall(sys_gpu_submit(), cmd_ptr, cmd_len, 0, 0, 0, 0)
+
+fn gpu_free(handle: Int) -> Int ! io
+    syscall(sys_gpu_free(), handle, 0, 0, 0, 0, 0)
+
+fn gpu_gfram_len() -> Int
+    comp_gfram_len()
+
+fn gpu_gfram(cmd_ptr: Int, rt_h: Int, tex_h: Int, src_ptr: Int, fb_w: Int, fb_h: Int, pitch: Int, dx: Int, dy: Int, rw: Int, rh: Int, rgba: Int) -> Int ! io, alloc
+    b = bytes_view_mem(cmd_ptr, comp_gfram_len())
+    _r = bytes_set_i64(b, 5, rt_h)
+    _x = bytes_set_i64(b, 13, tex_h)
+    _s = bytes_set_i64(b, 21, src_ptr)
+    _w = bytes_set_u32(b, 29, fb_w)
+    _h = bytes_set_u32(b, 33, fb_h)
+    _p = bytes_set_u32(b, 37, pitch)
+    _dx = bytes_set_u32(b, 41, dx)
+    _dy = bytes_set_u32(b, 45, dy)
+    _rw = bytes_set_u32(b, 49, rw)
+    _rh = bytes_set_u32(b, 53, rh)
+    _c = bytes_set_u32(b, 57, rgba)
+    _t = gpu_tag5(cmd_ptr, 0, d"GFRAM")
+    gpu_submit(cmd_ptr, comp_gfram_len())
+
 fn input_poll(out_ptr: Int, out_len: Int, max_evt: Int) -> Int ! io
     syscall(sys_input_poll(), out_ptr, max_evt, 0, 0, 0, 0)
 
@@ -225,6 +324,36 @@ fn pty_fd_maestro(v: Int) -> Int
 
 fn pty_slot(v: Int) -> Int
     mod_pos(v, 256)
+
+fn o_RDONLY() -> Int
+    0
+
+fn ft_file() -> Int
+    1
+
+fn ft_dir() -> Int
+    2
+
+fn dirent_size() -> Int
+    272
+
+fn dirent_off_ino() -> Int
+    0
+
+fn dirent_off_file_type() -> Int
+    8
+
+fn dirent_off_name_len() -> Int
+    9
+
+fn dirent_off_name() -> Int
+    10
+
+fn open_path_ptr(path_ptr: Int, path_len: Int) -> Int ! io
+    syscall(sys_open(), path_ptr, path_len, o_RDONLY(), 0, 0, 0)
+
+fn getdents_fd(fd: Int, buf_ptr: Int, buf_len: Int) -> Int ! io
+    syscall(sys_getdents(), fd, buf_ptr, buf_len, 0, 0, 0)
 
 fn read_fd(fd: Int, buf_ptr: Int, len: Int) -> Int ! io
     syscall(sys_read(), fd, buf_ptr, len, 0, 0, 0)
@@ -279,6 +408,12 @@ fn shm_map(id: Int) -> Int ! io
 
 fn shm_free(id: Int) -> Int ! io
     syscall(sys_shm_free(), id, 0, 0, 0, 0, 0)
+
+fn shm_grant(id: Int, pid: Int) -> Int ! io
+    syscall(sys_shm_grant(), id, pid, 0, 0, 0, 0)
+
+fn tcp_peer_pid(fd: Int) -> Int ! io
+    syscall(sys_tcp_peer_pid(), fd, 0, 0, 0, 0, 0)
 
 fn kill_pid(pid: Int, sig: Int) -> Int ! io
     syscall(sys_kill(), pid, sig, 0, 0, 0, 0)

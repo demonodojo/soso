@@ -22,6 +22,8 @@ pub struct LoopPair {
     s2c_read: usize,
     closed_client: bool,
     closed_server: bool,
+    client_pid: u64,
+    server_pid: u64,
 }
 
 impl LoopPair {
@@ -33,7 +35,17 @@ impl LoopPair {
             s2c_read: 0,
             closed_client: false,
             closed_server: false,
+            client_pid: 0,
+            server_pid: 0,
         }
+    }
+
+    pub fn set_client_pid(pair: &mut LoopPair, pid: u64) {
+        pair.client_pid = pid;
+    }
+
+    pub fn set_server_pid(pair: &mut LoopPair, pid: u64) {
+        pair.server_pid = pid;
     }
 
     fn compact(side: LoopSide, pair: &mut LoopPair) {
@@ -92,6 +104,29 @@ pub fn take_pending(listener_slot: usize) -> Option<usize> {
     LOOP.lock().pending.get_mut(&listener_slot)?.pop()
 }
 
+pub fn bind_client_pid(pair_id: usize, pid: u64) {
+    if let Some(pair) = LOOP.lock().pairs.get_mut(pair_id).and_then(|p| p.as_mut()) {
+        LoopPair::set_client_pid(pair, pid);
+    }
+}
+
+pub fn bind_server_pid(pair_id: usize, pid: u64) {
+    if let Some(pair) = LOOP.lock().pairs.get_mut(pair_id).and_then(|p| p.as_mut()) {
+        LoopPair::set_server_pid(pair, pid);
+    }
+}
+
+pub fn peer_pid(pair_id: usize, side: LoopSide) -> u64 {
+    let st = LOOP.lock();
+    let Some(pair) = st.pairs.get(pair_id).and_then(|p| p.as_ref()) else {
+        return 0;
+    };
+    match side {
+        LoopSide::Client => pair.server_pid,
+        LoopSide::Server => pair.client_pid,
+    }
+}
+
 pub fn has_pending(listener_slot: usize) -> bool {
     LOOP.lock()
         .pending
@@ -113,10 +148,9 @@ pub fn try_read(pair_id: usize, side: LoopSide, buf: u64, len: u64) -> Result<u6
     }
     let avail = data.len() - *read_pos;
     let n = (len as usize).min(avail).min(4096);
-    for i in 0..n {
-        unsafe {
-            *((buf + i as u64) as *mut u8) = data[*read_pos + i];
-        }
+    let slice = &data[*read_pos..*read_pos + n];
+    if crate::task::uaccess::copy_to_user(buf, slice).is_err() {
+        return Err(-soso_abi::EFAULT);
     }
     *read_pos += n;
     LoopPair::compact(side, pair);
@@ -144,10 +178,11 @@ pub fn try_write(pair_id: usize, side: LoopSide, buf: u64, len: u64) -> Result<u
     }
     let room = LOOPBACK_BUF - dst.len();
     let n = (len as usize).min(room).min(4096);
-    for i in 0..n {
-        let b = unsafe { *((buf + i as u64) as *const u8) };
-        dst.push(b);
+    let mut tmp = [0u8; 4096];
+    if crate::task::uaccess::copy_from_user(buf, &mut tmp[..n]).is_err() {
+        return Err(-soso_abi::EFAULT);
     }
+    dst.extend_from_slice(&tmp[..n]);
     Ok(n as u64)
 }
 

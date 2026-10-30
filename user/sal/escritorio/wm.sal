@@ -6,9 +6,16 @@ import "tabla.sal"
 import "term.sal"
 import "fuente.sal"
 import "lanzador.sal"
+import "comp_proto.sal"
 
 fn st_size() -> Int
-    272
+    320
+
+fn st_psf_cap() -> Int
+    65536
+
+fn st_alloc_bytes() -> Int
+    st_size() + st_psf_cap() + wm_cursor_w() * wm_cursor_h() * 4
 
 fn st_cli_fd() -> Int
     0
@@ -112,6 +119,76 @@ fn st_grab_y() -> Int
 fn st_menu() -> Int
     264
 
+fn st_repintar() -> Int
+    272
+
+fn st_bak_ok() -> Int
+    280
+
+fn st_comp_fd() -> Int
+    288
+
+fn st_comp_gpu_ok() -> Int
+    296
+
+fn st_comp_need_clear() -> Int
+    304
+
+fn st_wsurf_tab() -> Int
+    312
+
+fn comp_puerto() -> Int
+    7432
+
+fn wm_surf_max() -> Int
+    19
+
+fn wm_surf_slot() -> Int
+    48
+
+fn wm_surf_tab_bytes() -> Int
+    wm_surf_max() * wm_surf_slot()
+
+fn wm_surf_id() -> Int
+    0
+
+fn wm_surf_sid() -> Int
+    8
+
+fn wm_surf_ptr() -> Int
+    16
+
+fn wm_surf_w() -> Int
+    24
+
+fn wm_surf_h() -> Int
+    32
+
+fn wm_surf_stride() -> Int
+    40
+
+fn wm_surf_bar() -> Int
+    0
+
+fn wm_surf_menu() -> Int
+    1
+
+fn wm_surf_cursor() -> Int
+    2
+
+fn wm_surf_win(i: Int) -> Int
+    3 + i
+
+fn wm_surf_off(slot: Int, field: Int) -> Int
+    slot * wm_surf_slot() + field
+
+fn wm_surf_get(tab: Int, slot: Int, field: Int) -> Int ! alloc
+    bytes_get_i64(bytes_view_mem(tab, wm_surf_tab_bytes()), wm_surf_off(slot, field))
+
+fn wm_surf_set(tab: Int, slot: Int, field: Int, v: Int) -> Int ! alloc
+    bytes_set_i64(bytes_view_mem(tab, wm_surf_tab_bytes()), wm_surf_off(slot, field), v)
+    0
+
 fn wm_cursor_w() -> Int
     12
 
@@ -137,6 +214,37 @@ fn wm_cursor_pixel(lx: Int, ly: Int) -> Int
                     if lx <= 1
                         ok = 1
     ok
+
+fn wm_pedir_repintar(st: Int) -> Int ! alloc
+    _r = st_set(st, st_repintar(), 1)
+    _b = st_set(st, st_bak_ok(), 0)
+    0
+
+fn wm_cursor_bak(st: Int) -> Int
+    st + st_size() + st_psf_cap()
+
+fn wm_cursor_bak_len() -> Int
+    wm_cursor_w() * wm_cursor_h() * 4
+
+fn wm_cursor_restaurar(st: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
+    if st_get(st, st_bak_ok()) != 0
+        ox = st_get(st, st_mx_prev())
+        oy = st_get(st, st_my_prev())
+        bak = wm_cursor_bak(st)
+        _c = copiar_rect(compos, clen, stride, bak, wm_cursor_bak_len(), wm_cursor_w(), bpp, fmt, ox, oy, 0, 0, wm_cursor_w(), wm_cursor_h())
+        _d = wm_cursor_marcar(st, ox, oy)
+        _k = st_set(st, st_bak_ok(), 0)
+    0
+
+fn wm_cursor_capturar(st: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
+    mx = st_get(st, st_mx())
+    my = st_get(st, st_my())
+    bak = wm_cursor_bak(st)
+    _c = copiar_rect(bak, wm_cursor_bak_len(), wm_cursor_w(), compos, clen, stride, bpp, fmt, 0, 0, mx, my, wm_cursor_w(), wm_cursor_h())
+    _a = st_set(st, st_mx_prev(), mx)
+    _b = st_set(st, st_my_prev(), my)
+    _k = st_set(st, st_bak_ok(), 1)
+    0
 
 fn wm_cursor_marcar(st: Int, mx: Int, my: Int) -> Int ! alloc
     w = wm_cursor_w()
@@ -171,16 +279,14 @@ fn wm_cursor_actualizar(st: Int, x: Int, y: Int, sw: Int, sh: Int) -> Int ! allo
     _d = st_set(st, st_my(), ny)
     0
 
-fn wm_pintar_cursor(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
-    mx = st_get(st, st_mx())
-    my = st_get(st, st_my())
+fn wm_pintar_cursor_buf(compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int, ox: Int, oy: Int) -> Int ! alloc
     ly = 0
     while ly < wm_cursor_h()
         lx = 0
         while lx < wm_cursor_w()
             if wm_cursor_pixel(lx, ly) != 0
-                px = mx + lx
-                py = my + ly
+                px = ox + lx
+                py = oy + ly
                 col = wm_color_cursor()
                 if lx == ly
                     col = wm_color_cursor_borde()
@@ -192,6 +298,12 @@ fn wm_pintar_cursor(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: I
                 _p = pixel_escribir(compos, clen, stride, bpp, fmt, px, py, col)
             lx = lx + 1
         ly = ly + 1
+    0
+
+fn wm_pintar_cursor(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
+    mx = st_get(st, st_mx())
+    my = st_get(st, st_my())
+    _b = wm_pintar_cursor_buf(compos, clen, stride, bpp, fmt, mx, my)
     _d = wm_cursor_marcar(st, mx, my)
     0
 
@@ -249,7 +361,7 @@ fn st_set(st: Int, off: Int, v: Int) -> Int ! alloc
     0
 
 fn st_nuevo(evt_buf: Int, msg_buf: Int) -> Int ! alloc
-    p = bytes_ptr(bytes_new(st_size()))
+    p = bytes_ptr(bytes_new(st_alloc_bytes()))
     tab = bytes_ptr(bytes_new(tab_cap() * tab_slot_bytes()))
     z = bytes_ptr(bytes_new(tab_zorder_size()))
     _z = st_set(p, st_cli_fd(), 0)
@@ -269,18 +381,25 @@ fn st_nuevo(evt_buf: Int, msg_buf: Int) -> Int ! alloc
     _gx = st_set(p, st_grab_x(), 0)
     _gy = st_set(p, st_grab_y(), 0)
     _mn = st_set(p, st_menu(), 0)
+    _rp = st_set(p, st_repintar(), 1)
+    _bk = st_set(p, st_bak_ok(), 0)
+    _cf = st_set(p, st_comp_fd(), -1)
+    _gk = st_set(p, st_comp_gpu_ok(), 0)
+    _nc = st_set(p, st_comp_need_clear(), 0)
+    wtab = bytes_ptr(bytes_new(wm_surf_tab_bytes()))
+    _wt = st_set(p, st_wsurf_tab(), wtab)
     p
 
 fn wm_cargar_psf(st: Int) -> Int ! io, alloc
-    psf = st_get(st, st_psf())
-    if psf == 0
+    if st_get(st, st_psf()) == 0
         s = read_file(d"/lib/fonts/spleen-8x16.psf2")
         n = str_len(s)
         if n >= 32
-            h = bytes_new(n)
-            str_bytes_copy(h, 0, s)
-            _p = st_set(st, st_psf(), bytes_ptr(h))
-            _l = st_set(st, st_psf_len(), n)
+            if n <= st_psf_cap()
+                blk = bytes_view_mem(st, st_alloc_bytes())
+                str_bytes_copy(blk, st_size(), s)
+                _p = st_set(st, st_psf(), st + st_size())
+                _l = st_set(st, st_psf_len(), n)
     0
 
 fn pty_max() -> Int
@@ -302,6 +421,9 @@ fn wm_term_rows(wh: Int) -> Int
 
 fn wm_lanzar_web() -> Int ! io, alloc
     spawn_io_4(d"/var/paquetes/soso-web/bin/soso-web", d"--grafico", d"--local", d"/var/paquetes/soso-web/share/ejemplo/web-prueba.html", 0, 0, 0, fd_kernel_log())
+
+fn wm_lanzar_ficheros() -> Int ! io, alloc
+    spawn_io_full(d"/bin/soso-files", 0, 0, 0, fd_kernel_log())
 
 fn prueba_web_pixel_ok(tab: Int, i: Int) -> Int ! alloc
     if tab_get(tab, i, tab_fase()) != 2
@@ -375,7 +497,12 @@ fn wm_pintar_barra(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: In
             if st_get(st, st_menu()) != 0
                 bg = wm_color_boton_activo()
         _b = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, x0, 2, x0 + lanz_boton_ancho(i), barra_alto() - 2, bg)
-        _t = wm_texto(st, compos, clen, stride, bpp, fmt, lanz_boton_texto(i), x0 + lanz_margen(), 4, wm_color_texto_barra(), bg)
+        if i == 0
+            _t = wm_texto(st, compos, clen, stride, bpp, fmt, d"Aplicaciones", x0 + lanz_margen(), 4, wm_color_texto_barra(), bg)
+        elsif i == 1
+            _t = wm_texto(st, compos, clen, stride, bpp, fmt, d"Terminal", x0 + lanz_margen(), 4, wm_color_texto_barra(), bg)
+        else
+            _t = wm_texto(st, compos, clen, stride, bpp, fmt, d"Web", x0 + lanz_margen(), 4, wm_color_texto_barra(), bg)
         i = i + 1
     _d = wm_marcar_dirty(st, 0, 0, sw, barra_alto())
     0
@@ -400,8 +527,30 @@ fn wm_pintar_menu(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int
         _d = wm_marcar_dirty(st, x0, y0, x1, y0 + lanz_menu_alto())
     0
 
+fn wm_pintar_menu_local(st: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
+    if st_get(st, st_menu()) != 0
+        mw = lanz_menu_ancho()
+        mh = lanz_menu_alto()
+        alto = lanz_menu_item_alto()
+        _f = rellenar_rect(compos, clen, mw, mh, stride, bpp, fmt, 0, 0, mw, mh, wm_color_boton())
+        sel = lanz_menu_item(st_get(st, st_mx()), st_get(st, st_my()))
+        k = 0
+        while k < lanz_menu_n()
+            iy = k * alto
+            bg = wm_color_menu()
+            if k == sel
+                bg = wm_color_menu_sel()
+            _r = rellenar_rect(compos, clen, mw, mh, stride, bpp, fmt, 1, iy + 1, mw - 1, iy + alto - 1, bg)
+            _t = wm_texto(st, compos, clen, stride, bpp, fmt, lanz_menu_texto(k), lanz_margen(), iy + 3, wm_color_texto_barra(), bg)
+            k = k + 1
+        x0 = lanz_menu_x0()
+        y0 = lanz_menu_y0()
+        _d = wm_marcar_dirty(st, x0, y0, x0 + mw, y0 + mh)
+    0
+
 fn wm_menu_poner(st: Int, abierto: Int) -> Int ! alloc
     _s = st_set(st, st_menu(), abierto)
+    _rp = wm_pedir_repintar(st)
     x0 = lanz_menu_x0()
     y0 = lanz_menu_y0()
     _d = wm_marcar_dirty(st, x0, y0, x0 + lanz_menu_ancho(), y0 + lanz_menu_alto())
@@ -416,6 +565,8 @@ fn wm_ejecutar(st: Int, accion: Int, sw: Int, sh: Int) -> Int ! io, alloc
             _t = wm_abrir_terminal(st, sw, sh)
         if accion == lanz_web()
             _w = wm_lanzar_web()
+        if accion == lanz_ficheros()
+            _f = wm_lanzar_ficheros()
         if accion == lanz_salir()
             _s = st_set(st, st_salir(), 1)
     0
@@ -446,6 +597,7 @@ fn wm_foco_a(st: Int, i: Int) -> Int ! alloc
     if tab_slot_activo(tab, i) != 0
         _f = st_set(st, st_focus(), i)
         _u = z_subir(z, nz, i)
+        _rp = wm_pedir_repintar(st)
     0
 
 fn wm_cerrar_indice(st: Int, i: Int) -> Int ! io, alloc
@@ -462,6 +614,7 @@ fn wm_cerrar_indice(st: Int, i: Int) -> Int ! io, alloc
             if nn > 0
                 nfi = z_get(z, nn - 1)
         _fo = st_set(st, st_focus(), nfi)
+        _rp = wm_pedir_repintar(st)
     0
 
 fn wm_aplicar_mosaic(st: Int, sw: Int, sh: Int) -> Int ! alloc
@@ -493,50 +646,138 @@ fn wm_aplicar_mosaic(st: Int, sw: Int, sh: Int) -> Int ! alloc
                 _tr2 = wm_term_redimensionar_si(st, tab, i)
         k = k + 1
     _d = wm_marcar_dirty(st, 0, barra_alto(), sw, sh)
+    _rp = wm_pedir_repintar(st)
     0
 
-fn wm_repintar_slot(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
+fn wm_repintar_slot(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, completo: Int, zix: Int) -> Int ! io, alloc
     if tab_slot_activo(tab, i) != 0
         wx = tab_get(tab, i, tab_wx())
         wy = tab_get(tab, i, tab_wy())
         ww = tab_get(tab, i, tab_ww())
         wh = tab_get(tab, i, tab_wh())
-        _m = wm_pintar_marco(compos, clen, sw, sh, stride, bpp, fmt, wx, wy, ww, wh, st, tab, i)
+        c = compos
+        cl = clen
+        px = wx
+        py = wy
+        fd = st_get(st, st_comp_fd())
+        gmode = wm_comp_gpu_mode(st)
+        if gmode != 0
+            _we = wm_comp_win_ensure(st, fd, tab, i, stride)
+            _wg = wm_comp_sync_win_geom(st, fd, tab, i, zix)
+            c = wm_comp_tgt(st, compos, wm_surf_win(i))
+            cl = ww * wh * 4
+            px = 0
+            py = 0
+        if completo != 0
+            _m = wm_pintar_marco(c, cl, sw, sh, stride, bpp, fmt, px, py, ww, wh, st, tab, i)
         if tab_get(tab, i, tab_tipo()) == tab_tipo_term()
             psf = st_get(st, st_psf())
             plen = st_get(st, st_psf_len())
             if psf > 0
                 grid = tab_get(tab, i, tab_shm_ptr())
                 tst = tab_get(tab, i, tab_term_st())
+                if completo != 0
+                    _df = term_st_set(tst, st_dirty(), -1)
+                dr = term_st_get(tst, st_dirty())
                 cols = wm_term_cols(ww)
                 rows = wm_term_rows(wh)
-                _t = term_pintar(tst, grid, cols * rows * celda_bytes(), cols, rows, psf, plen, compos, clen, sw, sh, stride, bpp, fmt, wx + 4, wy + barra_alto() + 4)
+                _t = term_pintar(tst, grid, cols * rows * celda_bytes(), cols, rows, psf, plen, c, cl, sw, sh, stride, bpp, fmt, px + 4, py + barra_alto() + 4)
+                if dr == -1
+                    _d = wm_marcar_dirty(st, wx, wy, wx + ww, wy + wh)
+                    if gmode != 0
+                        _dm = wm_comp_dmap_surf(st, fd, wm_surf_win(i), 0, 0, ww, wh, wx, wy)
+                if dr >= 0
+                    ry = wy + barra_alto() + 4 + dr * 16
+                    _d2 = wm_marcar_dirty(st, wx, ry, wx + ww, ry + 16)
+                    if gmode != 0
+                        lry = barra_alto() + 4 + dr * 16
+                        _dm2 = wm_comp_dmap_surf(st, fd, wm_surf_win(i), 0, lry, ww, lry + 16, wx, wy)
         if tab_get(tab, i, tab_tipo()) == tab_tipo_cli()
-            if tab_get(tab, i, tab_fase()) == 2
-                cw = tab_get(tab, i, tab_cw())
-                ch = tab_get(tab, i, tab_ch())
-                shm = tab_get(tab, i, tab_shm_ptr())
-                slen = cw * ch * 4
-                _b = wm_blit_cliente(compos, clen, stride, bpp, fmt, wx, wy, cw, ch, shm, slen, 0, 0, cw, ch)
-        _d = wm_marcar_dirty(st, wx, wy, wx + ww, wy + wh)
+            if completo != 0
+                if tab_get(tab, i, tab_fase()) == 2
+                    cw = tab_get(tab, i, tab_cw())
+                    ch = tab_get(tab, i, tab_ch())
+                    shm = tab_get(tab, i, tab_shm_ptr())
+                    slen = cw * ch * 4
+                    _b = wm_blit_cliente(c, cl, stride, bpp, fmt, px, py, cw, ch, shm, slen, 0, 0, cw, ch)
+                    _d3 = wm_marcar_dirty(st, wx, wy, wx + ww, wy + wh)
+                    if gmode != 0
+                        _dm3 = wm_comp_dmap_surf(st, fd, wm_surf_win(i), 0, 0, ww, wh, wx, wy)
+        if completo != 0
+            if tab_get(tab, i, tab_tipo()) != tab_tipo_term()
+                if tab_get(tab, i, tab_tipo()) != tab_tipo_cli()
+                    _d4 = wm_marcar_dirty(st, wx, wy, wx + ww, wy + wh)
     0
 
-fn wm_compose(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
+fn wm_compose(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     tab = st_get(st, st_tab())
     z = st_get(st, st_z())
     nz = st_get(st, st_nz())
-    _bg = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, barra_alto(), sw, sh, wm_color_fondo())
+    fd = st_get(st, st_comp_fd())
+    gmode = wm_comp_gpu_mode(st)
+    completo = 0
     if st_get(st, st_fondo()) == 0
-        _db = wm_marcar_dirty(st, 0, 0, sw, sh)
+        completo = 1
+    if st_get(st, st_repintar()) != 0
+        completo = 1
+    if completo != 0
+        if gmode != 0
+            _nc = st_set(st, st_comp_need_clear(), 1)
+            _db = wm_marcar_dirty(st, 0, 0, sw, sh)
+        else
+            _bg = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, barra_alto(), sw, sh, wm_color_fondo())
+            _db = wm_marcar_dirty(st, 0, 0, sw, sh)
+        bar_tgt = wm_comp_tgt(st, compos, wm_surf_bar())
+        bar_cl = clen
+        if gmode != 0
+            bar_cl = sw * barra_alto() * 4
+        _bar = wm_pintar_barra(st, bar_tgt, bar_cl, sw, sh, stride, bpp, fmt)
+        if gmode != 0
+            _bd = wm_comp_dmap_surf(st, fd, wm_surf_bar(), 0, 0, sw, barra_alto(), 0, 0)
         _sf = st_set(st, st_fondo(), 1)
-    _bar = wm_pintar_barra(st, compos, clen, sw, sh, stride, bpp, fmt)
+        _rp = st_set(st, st_repintar(), 0)
+    if completo == 0
+        if gmode == 0
+            _re = wm_cursor_restaurar(st, compos, clen, stride, bpp, fmt)
     k = 0
     while k < nz
         i = z_get(z, k)
-        _r = wm_repintar_slot(st, tab, i, compos, clen, sw, sh, stride, bpp, fmt)
+        _r = wm_repintar_slot(st, tab, i, compos, clen, sw, sh, stride, bpp, fmt, completo, k)
         k = k + 1
-    _men = wm_pintar_menu(st, compos, clen, sw, sh, stride, bpp, fmt)
-    _cur = wm_pintar_cursor(st, compos, clen, sw, sh, stride, bpp, fmt)
+    if completo != 0
+        if gmode == 0
+            _men = wm_pintar_menu(st, compos, clen, sw, sh, stride, bpp, fmt)
+        else
+            if st_get(st, st_menu()) != 0
+                mcl = lanz_menu_ancho() * lanz_menu_alto() * 4
+                mt = wm_comp_tgt(st, compos, wm_surf_menu())
+                _ml = wm_pintar_menu_local(st, mt, mcl, stride, bpp, fmt)
+                _mg = wm_comp_send_geom(st, fd, wm_surf_menu(), lanz_menu_x0(), lanz_menu_y0(), lanz_menu_ancho(), lanz_menu_alto(), comp_geom_opaque(), 50)
+                _md = wm_comp_dmap_surf(st, fd, wm_surf_menu(), 0, 0, lanz_menu_ancho(), lanz_menu_alto(), lanz_menu_x0(), lanz_menu_y0())
+            else
+                _mh = wm_comp_send_geom(st, fd, wm_surf_menu(), 0, 0, 0, 0, comp_geom_hidden(), 50)
+    if completo == 0
+        if st_get(st, st_menu()) != 0
+            if gmode == 0
+                _men2 = wm_pintar_menu(st, compos, clen, sw, sh, stride, bpp, fmt)
+            else
+                mcl = lanz_menu_ancho() * lanz_menu_alto() * 4
+                mt = wm_comp_tgt(st, compos, wm_surf_menu())
+                _ml2 = wm_pintar_menu_local(st, mt, mcl, stride, bpp, fmt)
+                _mg2 = wm_comp_send_geom(st, fd, wm_surf_menu(), lanz_menu_x0(), lanz_menu_y0(), lanz_menu_ancho(), lanz_menu_alto(), comp_geom_opaque(), 50)
+                _md2 = wm_comp_dmap_surf(st, fd, wm_surf_menu(), 0, 0, lanz_menu_ancho(), lanz_menu_alto(), lanz_menu_x0(), lanz_menu_y0())
+    if gmode == 0
+        _cap = wm_cursor_capturar(st, compos, clen, stride, bpp, fmt)
+        _cur = wm_pintar_cursor(st, compos, clen, sw, sh, stride, bpp, fmt)
+    else
+        cur_tgt = wm_comp_tgt(st, compos, wm_surf_cursor())
+        cur_cl = wm_cursor_w() * wm_cursor_h() * 4
+        mx = st_get(st, st_mx())
+        my = st_get(st, st_my())
+        _cg = wm_comp_send_geom(st, fd, wm_surf_cursor(), mx, my, wm_cursor_w(), wm_cursor_h(), 0, 60)
+        _cur = wm_pintar_cursor_buf(cur_tgt, cur_cl, wm_cursor_w() * 4, bpp, fmt, 0, 0)
+        _cd = wm_comp_dmap_surf(st, fd, wm_surf_cursor(), 0, 0, wm_cursor_w(), wm_cursor_h(), mx, my)
+    _cm = wm_cursor_marcar(st, st_get(st, st_mx()), st_get(st, st_my()))
     0
 
 fn wm_marcar_dirty(st: Int, x0: Int, y0: Int, x1: Int, y1: Int) -> Int ! alloc
@@ -639,19 +880,225 @@ fn wm_pintar_marco(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: I
 fn wm_blit_cliente(compos: Int, clen: Int, cstride: Int, bpp: Int, fmt: Int, wx: Int, wy: Int, cw: Int, ch: Int, shm: Int, slen: Int, sx: Int, sy: Int, w: Int, h: Int) -> Int ! alloc
     copiar_rect(compos, clen, cstride, shm, slen, cw, bpp, fmt, wx + sx, wy + barra_alto() + sy, sx, sy, w, h)
 
-fn wm_flush_dirty(st: Int, compos: Int, clen: Int) -> Int ! io, alloc
-    x0 = st_get(st, st_dx0())
-    y0 = st_get(st, st_dy0())
-    x1 = st_get(st, st_dx1())
-    y1 = st_get(st, st_dy1())
+fn wm_comp_gpu_mode(st: Int) -> Int ! alloc
+    if st_get(st, st_comp_fd()) < 0
+        0
+    else
+        if st_get(st, st_comp_gpu_ok()) == 0
+            0
+        else
+            1
+
+fn wm_comp_tgt(st: Int, compos: Int, surf_id: Int) -> Int ! alloc
+    if wm_comp_gpu_mode(st) == 0
+        compos
+    else
+        tab = st_get(st, st_wsurf_tab())
+        ptr = wm_surf_get(tab, surf_id, wm_surf_ptr())
+        if ptr > 0
+            ptr
+        else
+            compos
+
+fn wm_comp_send_bind(st: Int, fd: Int, id: Int, sid: Int, w: Int, h: Int, stride: Int) -> Int ! io, alloc
+    m = st_get(st, st_msg_buf())
+    _e = msg_encode_comp_bind(m, id, sid, w, h, stride)
+    _w = write_fd(fd, m, msg_len())
+    0
+
+fn wm_comp_send_geom(st: Int, fd: Int, id: Int, x: Int, y: Int, w: Int, h: Int, flags: Int, z: Int) -> Int ! io, alloc
+    m = st_get(st, st_msg_buf())
+    _e = msg_encode_comp_geom(m, id, x, y, w, h, flags, z)
+    _w = write_fd(fd, m, msg_len())
+    0
+
+fn wm_comp_send_dmap(st: Int, fd: Int, id: Int, x: Int, y: Int, w: Int, h: Int) -> Int ! io, alloc
+    m = st_get(st, st_msg_buf())
+    _e = msg_encode_comp_dmap(m, id, x, y, w, h)
+    _w = write_fd(fd, m, msg_len())
+    0
+
+fn wm_comp_send_commit(st: Int, fd: Int, x: Int, y: Int, w: Int, h: Int, flags: Int) -> Int ! io, alloc
+    m = st_get(st, st_msg_buf())
+    _e = msg_encode_comp_commit(m, x, y, w, h, flags)
+    _w = write_fd(fd, m, msg_len())
+    0
+
+fn wm_surf_ensure(st: Int, fd: Int, surf_id: Int, w: Int, h: Int, stride: Int) -> Int ! io, alloc
+    tab = st_get(st, st_wsurf_tab())
+    sid = wm_surf_get(tab, surf_id, wm_surf_sid())
+    if sid > 0
+        wm_surf_get(tab, surf_id, wm_surf_ptr())
+    else
+        clen = stride * h
+        nsid = shm_create(clen)
+        if nsid < 0
+            0
+        else
+            ptr = shm_map(nsid)
+            if ptr < 0
+                0
+            else
+                _s = wm_surf_set(tab, surf_id, wm_surf_sid(), nsid)
+                _p = wm_surf_set(tab, surf_id, wm_surf_ptr(), ptr)
+                _w = wm_surf_set(tab, surf_id, wm_surf_w(), w)
+                _h = wm_surf_set(tab, surf_id, wm_surf_h(), h)
+                _t = wm_surf_set(tab, surf_id, wm_surf_stride(), stride)
+                _b = wm_comp_send_bind(st, fd, surf_id, nsid, w, h, stride)
+                ptr
+
+fn wm_comp_gpu_init(st: Int, fd: Int, sw: Int, sh: Int, stride: Int) -> Int ! io, alloc
+    if wm_comp_gpu_mode(st) == 0
+        0
+    else
+        bh = barra_alto()
+        _bar = wm_surf_ensure(st, fd, wm_surf_bar(), sw, bh, stride)
+        mw = lanz_menu_ancho()
+        mh = lanz_menu_alto()
+        _men = wm_surf_ensure(st, fd, wm_surf_menu(), mw, mh, stride)
+        cw = wm_cursor_w()
+        ch = wm_cursor_h()
+        cstride = cw * 4
+        _cur = wm_surf_ensure(st, fd, wm_surf_cursor(), cw, ch, cstride)
+        _g0 = wm_comp_send_geom(st, fd, wm_surf_bar(), 0, 0, sw, bh, comp_geom_opaque(), 0)
+        _g1 = wm_comp_send_geom(st, fd, wm_surf_menu(), 0, 0, 0, 0, comp_geom_hidden(), 50)
+        _g2 = wm_comp_send_geom(st, fd, wm_surf_cursor(), 0, 0, cw, ch, 0, 60)
+        _c = st_set(st, st_comp_need_clear(), 1)
+        1
+
+fn wm_comp_dmap_surf(st: Int, fd: Int, surf_id: Int, x0: Int, y0: Int, x1: Int, y1: Int, gx: Int, gy: Int) -> Int ! io, alloc
     if x1 > x0
         if y1 > y0
-            _p = fb_present_rect(compos, clen, x0, y0, x1 - x0, y1 - y0)
-            _r = st_set(st, st_dx0(), 0)
-            _s = st_set(st, st_dy0(), 0)
-            _t = st_set(st, st_dx1(), 0)
-            _u = st_set(st, st_dy1(), 0)
+            _d = wm_comp_send_dmap(st, fd, surf_id, x0, y0, x1 - x0, y1 - y0)
+            _m = wm_marcar_dirty(st, gx + x0, gy + y0, gx + x1, gy + y1)
     0
+
+fn wm_comp_win_ensure(st: Int, fd: Int, tab: Int, i: Int, stride: Int) -> Int ! io, alloc
+    ww = tab_get(tab, i, tab_ww())
+    wh = tab_get(tab, i, tab_wh())
+    sid = wm_surf_win(i)
+    wm_surf_ensure(st, fd, sid, ww, wh, stride)
+
+fn wm_comp_sync_win_geom(st: Int, fd: Int, tab: Int, i: Int, z: Int) -> Int ! io, alloc
+    wx = tab_get(tab, i, tab_wx())
+    wy = tab_get(tab, i, tab_wy())
+    ww = tab_get(tab, i, tab_ww())
+    wh = tab_get(tab, i, tab_wh())
+    sid = wm_surf_win(i)
+    _g = wm_comp_send_geom(st, fd, sid, wx, wy, ww, wh, comp_geom_opaque(), 10 + z)
+    0
+
+fn wm_comp_flush_scene(st: Int) -> Int ! io, alloc
+    fd = st_get(st, st_comp_fd())
+    if wm_comp_gpu_mode(st) == 0
+        0
+    else
+        x0 = st_get(st, st_dx0())
+        y0 = st_get(st, st_dy0())
+        x1 = st_get(st, st_dx1())
+        y1 = st_get(st, st_dy1())
+        if x1 > x0
+            if y1 > y0
+                fl = 0
+                if st_get(st, st_comp_need_clear()) != 0
+                    fl = comp_commit_clear_rt()
+                    _nc = st_set(st, st_comp_need_clear(), 0)
+                _c = wm_comp_send_commit(st, fd, x0, y0, x1 - x0, y1 - y0, fl)
+                _r = st_set(st, st_dx0(), 0)
+                _s = st_set(st, st_dy0(), 0)
+                _t = st_set(st, st_dx1(), 0)
+                _u = st_set(st, st_dy1(), 0)
+                0
+        0
+    0
+
+fn wm_comp_attach(st: Int, plen: Int) -> Int ! io, alloc
+    fd = tcp_connect(comp_puerto(), 200)
+    if fd < 0
+        -1
+    else
+        buf = bytes_ptr(bytes_new(msg_len()))
+        n = read_fd(fd, buf, msg_len())
+        if n != msg_len()
+            close_fd(fd)
+            -1
+        else
+            if msg_get_op(buf) != op_comp_escena()
+                close_fd(fd)
+                -1
+            else
+                sid = msg_get_u32(buf, 4)
+                gok = msg_get_u32(buf, comp_escena_gpu_ok_off())
+                ptr = shm_map(sid)
+                if ptr < 0
+                    close_fd(fd)
+                    -1
+                else
+                    _f = st_set(st, st_comp_fd(), fd)
+                    _g = st_set(st, st_comp_gpu_ok(), gok)
+                    ptr
+
+fn wm_comp_ensure(st: Int, sw: Int, sh: Int, stride: Int, sin_comp: Int) -> Int ! io, alloc
+    if sin_comp != 0
+        -1
+    else
+        ptr = wm_comp_attach(st, sw * sh * 4)
+        if ptr >= 0
+            fd = st_get(st, st_comp_fd())
+            _i = wm_comp_gpu_init(st, fd, sw, sh, stride)
+            ptr
+        else
+            _sp = spawn_io_full(d"/bin/soso-comp", 0, 0, 0, fd_kernel_log())
+            t0 = uptime_ms()
+            res = -1
+            done = 0
+            while done == 0
+                if uptime_ms() - t0 > 5000
+                    done = 1
+                if done == 0
+                    ptr = wm_comp_attach(st, sw * sh * 4)
+                    if ptr >= 0
+                        fd = st_get(st, st_comp_fd())
+                        _i = wm_comp_gpu_init(st, fd, sw, sh, stride)
+                        res = ptr
+                        done = 1
+            res
+
+fn wm_comp_flush(st: Int, compos: Int, clen: Int) -> Int ! io, alloc
+    if wm_comp_gpu_mode(st) != 0
+        wm_comp_flush_scene(st)
+    fd = st_get(st, st_comp_fd())
+    if fd < 0
+        x0 = st_get(st, st_dx0())
+        y0 = st_get(st, st_dy0())
+        x1 = st_get(st, st_dx1())
+        y1 = st_get(st, st_dy1())
+        if x1 > x0
+            if y1 > y0
+                _p = fb_present_rect(compos, clen, x0, y0, x1 - x0, y1 - y0)
+                _r = st_set(st, st_dx0(), 0)
+                _s = st_set(st, st_dy0(), 0)
+                _t = st_set(st, st_dx1(), 0)
+                _u = st_set(st, st_dy1(), 0)
+    else
+        if wm_comp_gpu_mode(st) == 0
+            x0 = st_get(st, st_dx0())
+            y0 = st_get(st, st_dy0())
+            x1 = st_get(st, st_dx1())
+            y1 = st_get(st, st_dy1())
+            if x1 > x0
+                if y1 > y0
+                    m = st_get(st, st_msg_buf())
+                    _e = msg_encode_comp_frame(m, x0, y0, x1 - x0, y1 - y0)
+                    _w = write_fd(fd, m, msg_len())
+                    _r = st_set(st, st_dx0(), 0)
+                    _s = st_set(st, st_dy0(), 0)
+                    _t = st_set(st, st_dx1(), 0)
+                    _u = st_set(st, st_dy1(), 0)
+    0
+
+fn wm_flush_dirty(st: Int, compos: Int, clen: Int) -> Int ! io, alloc
+    wm_comp_flush(st, compos, clen)
 
 fn wm_cerrar_cliente(st: Int) -> Int ! io, alloc
     fd = st_get(st, st_cli_fd())
@@ -704,10 +1151,13 @@ fn wm_redim_slot(st: Int, tab: Int, i: Int, fmt: Int, compos: Int, clen: Int, sw
             sid = shm_create(slen)
             ok = 0
             if sid >= 0
+                fd = tab_get(tab, i, tab_fd())
+                peer = tcp_peer_pid(fd)
+                if peer >= 0
+                    _g = shm_grant(sid, peer)
                 sptr = shm_map(sid)
                 if sptr >= 0
                     old = tab_get(tab, i, tab_shm_id())
-                    fd = tab_get(tab, i, tab_fd())
                     msg = st_get(st, st_msg_buf())
                     _e = msg_encode_redim(msg, cw, ch, sid)
                     _w = write_fd(fd, msg, msg_len())
@@ -732,6 +1182,9 @@ fn wm_on_crear(st: Int, fd: Int, msg: Int, fmt: Int, sw: Int, sh: Int) -> Int ! 
             slen = cw * ch * 4
             sid = shm_create(slen)
             if sid >= 0
+                peer = tcp_peer_pid(fd)
+                if peer >= 0
+                    _g = shm_grant(sid, peer)
                 sptr = shm_map(sid)
                 if sptr >= 0
                     wx = max(0, (sw - cw) / 2)
@@ -871,6 +1324,7 @@ fn wm_raton_mover(st: Int, x: Int, y: Int, botones: Int, sw: Int, sh: Int) -> In
                 _w = tab_set(tab, dix, tab_ww(), nw)
                 _h = tab_set(tab, dix, tab_wh(), nh)
             _d = wm_marcar_dirty(st, 0, barra_alto(), sw, sh)
+            _rp = wm_pedir_repintar(st)
     if dix < 0
         fi = st_get(st, st_focus())
         if fi >= 0
@@ -979,6 +1433,7 @@ fn wm_foco_siguiente(st: Int) -> Int ! alloc
             k = k + 1
         _f = st_set(st, st_focus(), nfi)
         _u = z_subir(z, nz, nfi)
+        _rp = wm_pedir_repintar(st)
     nfi
 
 fn wm_abrir_terminal(st: Int, sw: Int, sh: Int) -> Int ! io, alloc
@@ -1005,6 +1460,7 @@ fn wm_abrir_terminal(st: Int, sw: Int, sh: Int) -> Int ! io, alloc
             nn = z_anadir(z, nz, si)
             _n = st_set(st, st_nz(), nn)
             _fo = st_set(st, st_focus(), si)
+            _rp = wm_pedir_repintar(st)
             cols = wm_term_cols(640)
             rows = wm_term_rows(400 + barra_alto())
             grid = term_capa(cols, rows)

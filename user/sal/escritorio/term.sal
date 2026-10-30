@@ -108,8 +108,18 @@ fn term_st_set_csi_param(st: Int, i: Int, v: Int) -> Int ! alloc
     0
 
 fn term_marcar_fila(st: Int, row: Int) -> Int ! alloc
-    _d = term_st_set(st, st_dirty(), row)
-    0
+    d = term_st_get(st, st_dirty())
+    if d == -1
+        0
+    elsif d >= 0
+        if d != row
+            _a = term_st_set(st, st_dirty(), -1)
+            0
+        else
+            0
+    else
+        _b = term_st_set(st, st_dirty(), row)
+        0
 
 fn term_capa(w: Int, h: Int) -> Int ! alloc
     bytes_ptr(bytes_new(w * h * celda_bytes()))
@@ -497,7 +507,7 @@ fn term_pintar(st: Int, grid: Int, glen: Int, cols: Int, rows: Int, psf: Int, ps
     row = 0
     while row < rows
         pinta = 0
-        if dr < 0
+        if dr == -1
             pinta = 1
         if dr == row
             pinta = 1
@@ -514,7 +524,9 @@ fn term_pintar(st: Int, grid: Int, glen: Int, cols: Int, rows: Int, psf: Int, ps
                 col = col + 1
         row = row + 1
     if dr >= 0
-        _d = term_st_set(st, st_dirty(), -1)
+        _d = term_st_set(st, st_dirty(), -2)
+    if dr == -1
+        _e = term_st_set(st, st_dirty(), -2)
     pos = term_st_get(st, st_cursor())
     cc = term_cursor_col(pos)
     cr = term_cursor_row(pos)

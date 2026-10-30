@@ -261,6 +261,145 @@ int gsp_ce_wait(struct gsp_ce *ce, unsigned ms)
     return -1;
 }
 
+int gsp_ce_encode_blit(struct gsp_ce *ce, uint64_t dst_va, uint32_t dst_pitch,
+                       uint64_t src_va, uint32_t src_pitch, uint32_t line_bytes,
+                       uint32_t lines, unsigned *pb_off, unsigned *pb_len)
+{
+    struct gsp_chan *c;
+    unsigned pos;
+    unsigned start;
+    unsigned end;
+    uint32_t launch;
+    uint64_t sem_va;
+    int off;
+
+    if (!ce || !ce->ready || !ce->chan || !line_bytes || !lines || !dst_pitch ||
+        !src_pitch || ce->stuck) {
+        return -1;
+    }
+    if (line_bytes > dst_pitch || line_bytes > src_pitch) {
+        return -1;
+    }
+    c = ce->chan;
+
+    off = gsp_chan_pb_reserve(c, 192);
+    if (off < 0) {
+        if (gsp_chan_pb_rewind(c) != 0 ||
+            (off = gsp_chan_pb_reserve(c, 192)) < 0) {
+            ce_mark_stuck(ce, "pushbuffer lleno y sin rebobinar (blit)");
+            return -1;
+        }
+    }
+    start = (unsigned)off;
+    pos = start;
+
+    pb_set_object(c, &pos, GSP_CE_SUBCHANNEL, ce->cls);
+
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_OFFSET_IN_UPPER, 1);
+    pb_write(c, &pos, (uint32_t)(src_va >> 32));
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_OFFSET_IN_LOWER, 1);
+    pb_write(c, &pos, (uint32_t)src_va);
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_PITCH_IN, 1);
+    pb_write(c, &pos, src_pitch);
+
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_OFFSET_OUT_UPPER, 1);
+    pb_write(c, &pos, (uint32_t)(dst_va >> 32));
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_OFFSET_OUT_LOWER, 1);
+    pb_write(c, &pos, (uint32_t)dst_va);
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_PITCH_OUT, 1);
+    pb_write(c, &pos, dst_pitch);
+
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_LINE_LENGTH_IN, 1);
+    pb_write(c, &pos, line_bytes);
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_LINE_COUNT, 1);
+    pb_write(c, &pos, lines);
+
+    sem_va = c->notifier_va;
+    ce->pending = ++ce->seq;
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_SET_SEMAPHORE_A, 1);
+    pb_write(c, &pos, (uint32_t)(sem_va >> 32));
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_SET_SEMAPHORE_B, 1);
+    pb_write(c, &pos, (uint32_t)sem_va);
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_SET_SEMAPHORE_PAYLOAD, 1);
+    pb_write(c, &pos, ce->pending);
+
+    launch = NVC6B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED |
+             NVC6B5_LAUNCH_DMA_FLUSH_ENABLE_TRUE |
+             NVC6B5_LAUNCH_DMA_SRC_TYPE_VIRTUAL |
+             NVC6B5_LAUNCH_DMA_DST_TYPE_VIRTUAL |
+             NVC6B5_LAUNCH_DMA_SRC_MEMORY_LAYOUT_PITCH |
+             NVC6B5_LAUNCH_DMA_DST_MEMORY_LAYOUT_PITCH |
+             NVC6B5_LAUNCH_DMA_SEMAPHORE_TYPE_RELEASE_ONE_WORD;
+    if (lines > 1u) {
+        launch |= NVC6B5_LAUNCH_DMA_MULTI_LINE_ENABLE_TRUE;
+    }
+
+    pb_method(c, &pos, GSP_CE_SUBCHANNEL, NVC6B5_LAUNCH_DMA, 1);
+    pb_write(c, &pos, launch);
+
+    end = pos;
+    if (pb_off) {
+        *pb_off = start;
+    }
+    if (pb_len) {
+        *pb_len = end - start;
+    }
+    return 0;
+}
+
+int gsp_ce_blit_sync(struct gsp_ce *ce, uint64_t dst_va, uint32_t dst_pitch,
+                     uint64_t src_va, uint32_t src_pitch, uint32_t line_bytes,
+                     uint32_t lines, unsigned ms)
+{
+    unsigned pb_off = 0, pb_len = 0;
+
+    if (!ce || ce->stuck) {
+        return -1;
+    }
+    if (gsp_ce_encode_blit(ce, dst_va, dst_pitch, src_va, src_pitch, line_bytes,
+                           lines, &pb_off, &pb_len) != 0 ||
+        gsp_chan_submit(ce->chan, pb_off, pb_len) != 0) {
+        return -1;
+    }
+    return gsp_ce_wait(ce, ms);
+}
+
+int gsp_ce_selftest_encode_blit(struct gsp_chan *c, uint32_t ce_cls,
+                                uint64_t dst_va, uint32_t dst_pitch,
+                                uint64_t src_va, uint32_t src_pitch,
+                                uint32_t line_bytes, uint32_t lines)
+{
+    struct gsp_ce ce;
+    unsigned pb_off = 0, pb_len = 0;
+    const uint32_t *words;
+    uint32_t hdr;
+
+    if (!c || !c->ready) {
+        return -1;
+    }
+    memset(&ce, 0, sizeof(ce));
+    ce.ready = 1;
+    ce.cls = ce_cls;
+    ce.chan = c;
+
+    if (gsp_ce_encode_blit(&ce, dst_va, dst_pitch, src_va, src_pitch, line_bytes,
+                           lines, &pb_off, &pb_len) != 0) {
+        return -1;
+    }
+    if (pb_len < 12) {
+        return -1;
+    }
+    words = (const uint32_t *)((const unsigned char *)c->pushbuf.va + pb_off);
+    hdr = words[0];
+    if (((hdr >> 29) & 7u) != NVC56F_DMA_INCR_OPCODE_VALUE) {
+        return -1;
+    }
+    if (((hdr >> 13) & 7u) != GSP_CE_SUBCHANNEL) {
+        return -1;
+    }
+    return 0;
+}
+
 int gsp_ce_copy_sync(struct gsp_ce *ce, uint64_t dst_va, uint64_t src_va,
                      uint32_t size, unsigned ms)
 {

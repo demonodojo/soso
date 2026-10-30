@@ -5,8 +5,9 @@ description: >-
   userspace ABI, networking, SSH stack and coding constraints. Use when
   modifying kernel/, crates/, user/, xtask/, adding features, syscalls,
   drivers, understanding how components interact, or identifying and resuming
-  soso plans that are not automejora. GPU NVIDIA: skill soso-gpu. WiFi iwlwifi:
-  soso-wifi. Live USB e instalación: soso-live. Actualizaciones: soso-update.
+  soso plans that are not automejora. Escritorio Sal: skills soso-wm, soso-comp.
+  GPU NVIDIA: skill soso-gpu. WiFi iwlwifi: soso-wifi. Live USB e instalación:
+  soso-live. Actualizaciones: soso-update.
   Automejora, OpenCode, Txx, SI-*: skill soso-self-improvement.
   Page fault recurrente en soso-update / GitHub en placa: skill soso-pf-red.
 ---
@@ -62,7 +63,8 @@ soso/
 └── rootfs/           # source tree embedded into disk by mkfs-soso
 ```
 
-Skills de dominio: **`soso-dev`** (build/test), **`soso-gpu`**, **`soso-wifi`**,
+Skills de dominio: **`soso-dev`** (build/test), **`soso-wm`** (gestor Sal `:7430`),
+**`soso-comp`** (compositor GPU `:7432`, GSCEN), **`soso-gpu`**, **`soso-wifi`**,
 **`soso-live`** (USB/instalación), **`soso-update`** (OTA y vuelta atrás),
 **`soso-self-improvement`** (OpenCode / Txx / SI-*), **`soso-user-manual`**,
 **`soso-release`** (publicar versión: `/publicar-release`).
@@ -554,6 +556,38 @@ suite a los pocos minutos, con la máquina respondiendo al ping pero no al disco
 Quedan seis llamantes de `enumerate()` post-arranque (usb_storage, nvme, gpu,
 nvidia_probe, e1000e, lxdde/pci): corren en secuencia durante el boot y sin
 tráfico, pero son la misma clase de bug.
+
+## Protección de memoria
+
+Separación estricta código/datos/procesos (W^X, aislamiento de recursos compartidos, SMEP/SMAP).
+
+### W^X en espacios de usuario
+
+- `UserProt` en `kernel/src/task/addrspace.rs`: hojas `R`/`Rw` llevan `NO_EXECUTE`; `Rx` no es escribible. Tablas intermedias usan `PARENT_FLAGS` **sin** NX (el NX de un nivel superior afecta a todo el subárbol).
+- `elf::load` / `load_lazy` aplican permisos por `PT_LOAD`; rechazan W+X en un mismo segmento; páginas compartidas W+X entre segmentos → `Rwx` transitorio + `klogln!` (rootfs antiguo en OTA).
+- Fallo por ejecución en página NX: `handle_mmap_fault` / `#PF` con fetch → `kill_current("ejecución en página no ejecutable")`.
+- `user/link.ld`, `wild-soso`, Sal y `rust-soso`: segmentos alineados a página. `cargo xtask check` → `xtask/src/elf_wx.rs` rechaza ELF del rootfs con W+X o solape W/X en la misma página.
+
+### `PROT_EXEC` y cargador dinámico
+
+- `soso-abi`: `PROT_EXEC = 4`. `sys_mprotect`: acepta `R|X`; `W|X` → `EINVAL`; `EXEC` sólo en regiones anónimas privadas (no SHM ni fichero).
+- `config/rust-soso/.../dl.rs`: tras reubicar cada `.so`, `mprotect` por `PT_LOAD` antes de ejecutar init.
+
+### Aislamiento entre procesos
+
+- `AddrSpaceInner.id`: contador monotónico; identifica el «proceso» (hilos comparten espacio).
+- **SHM**: `creador_as`, `concedidos`; `SYS_SHM_GRANT`, `SYS_TCP_PEER_PID`; `shm::map` → `EPERM` sin concesión. WM/comp: `tcp_peer_pid` + `shm_grant` al conectar (p. ej. `wm.sal`, `soso-comp.sal`).
+- **GPU**: `owners` por handle; `free`/`map`/`upload`/`submit` comprueban `current_space_id()`.
+- **Import SOM**: `owner_as` en sesión activa y scratch; otro espacio → `EBUSY`.
+
+### SMEP / SMAP
+
+- CPUID leaf 7 → SMEP/SMAP en BSP (`arch/mod.rs`) y AP (`smp::ap_entry`); log `cpu: SMEP=… SMAP=…`.
+- **SMAP**: el kernel no desreferencia VA de ring 3; copias vía `task/uaccess.rs` y `AddrSpace::read`/`write` (física mapeada). `user_slice`/`user_str` devuelven copias; buffers grandes por trozos.
+- `SFMask` incluye `ALIGNMENT_CHECK` en syscalls (el usuario no puede desactivar SMAP con `popf` durante syscall).
+- `clac` al entrar en timer, IRQ (`irq::dispatch`), excepciones y `#PF` de usuario si SMAP está activo.
+
+Regla: cualquier acceso nuevo a buffers de usuario debe pasar por `uaccess` o `AddrSpace::read`/`write`, nunca puntero crudo en ring 0.
 
 ## Coding constraints
 

@@ -4,7 +4,8 @@ description: >-
   soso GPU nativa (NVIDIA nouveau/GSP, fase L6) — roadmap G1→G5, capa lxdde y
   port nvkm, firmware GSP, VFIO/IOMMU, shims de cabecera lx_emul y workflow de
   integración incremental. Úsala al tocar lxdde/ports/nouveau, kernel/src/lxdde,
-  drivers GPU, scripts l6-*, firmware NVIDIA, o al avanzar los gates G1–G5.
+  drivers GPU, scanout NVDisplay (F8), scripts l6-*, firmware NVIDIA, o al avanzar
+  los gates G1–G5 y el plan [PLAN-NVDISPLAY.md](../../docs/PLAN-NVDISPLAY.md).
 ---
 
 # soso — GPU nativa NVIDIA (fase L6)
@@ -31,7 +32,8 @@ Inferencia acelerada vía lxdde + nvkm + kernels SASS. Motor CPU (L1–L4) = fal
 - Familia detectada por `NV_PMC_BOOT_0` (arch `>>20`) con fallback por device-id.
 
 Docs fuente: `docs/L6-native-autonomy.md` (maestro), `docs/L6-G1-gate.md`,
-`docs/L6-G3-nvkm-scope.md`, `docs/L6-H-cuda-hybrid.md`, y `PLAN-MODELOS-GRANDES.md`.
+`docs/L6-G3-nvkm-scope.md`, `docs/L6-H-cuda-hybrid.md`, `PLAN-MODELOS-GRANDES.md`,
+`docs/PLAN-GRAFICOS-JUEGOS.md` (F8), `docs/PLAN-NVDISPLAY.md` (N0–N8).
 
 ## Gates G1→G5
 
@@ -57,9 +59,30 @@ Docs fuente: `docs/L6-native-autonomy.md` (maestro), `docs/L6-G1-gate.md`,
 subcanal 0 del canal GR0; userspace usa `SYS_GPU_SUBMIT` **`GCLR3`** (RT en VRAM) y
 `GpuInfo._pad[0]` (`gfx3d`). Plan: [docs/PLAN-GRAFICOS-JUEGOS.md](../../docs/PLAN-GRAFICOS-JUEGOS.md).
 
-**F1 (presentación):** `gsp_buf_download_dma` + comando **`GPRES`** (CE VRAM→shadow del
+**F1 (presentación GOP):** `gsp_buf_download_dma` + comando **`GPRES`** (CE VRAM→shadow del
 GOP; una copia WC). `soso-gfx-demo` encadena `GCLR3`+`GPRES`. Hostcheck codifica el PB;
 GO silicio = demo visible en VFIO GB205.
+
+**F8 (NVDisplay / scanout unificado):** N0–N8 **implementados en host** (2026-10).
+Router `kernel/src/drivers/scanout.rs`; port `nvdisp_{probe,head,scanout}.c` + `engine/disp`
+en `liblxdde.a`. Comandos **`GNVD`** (25 B, tag `GNVD\\0`) y present de **`GSCEN`/`GFRAM`**
+sin copia CE→shadow cuando el backend efectivo es NVDisplay. Tile daño: `gsp_vram_blit_pitch`
+(CE) con fallback PRAMIN. Blackwell (GB205): mismo bringup que Ampere salvo omitir
+`gsp_mmio_gfw_wait`; log `NVDisplay: N8 familia=Blackwell …`.
+
+| Build / runtime | Efecto |
+|-----------------|--------|
+| `SOSO_SCANOUT=auto` (default) | NVDisplay si `nvdisp_ready()`; si no, GOP |
+| `SOSO_SCANOUT=gop` | Fuerza F1; `GNVD` → ENOTSUP |
+| `SOSO_SCANOUT=nvdisp` | Fuerza HDMI; falla si no hay head |
+
+`GpuInfo._pad`: `[0]` gfx3d, `[1]` scanout_nvdisp, `[2]` scanout_gop, `[3]` backend efectivo
+(`GPU_SCANOUT_EFFECTIVE_*` en `soso-abi`). Arranque: línea `scanout: policy=…`.
+
+Scripts F8: `l6-scanout-regression.sh`, `l6-nvdisp-smoke.sh`, `l6-nvdisp-blackwell.sh`.
+VFIO: `l6-g1-vfio-test.sh` imprime `scanout:` / `NVDisplay:` al GO; preflight §2b audio
+HDMI `10de:2f80` (mismo IOMMU; reproducción = F6). **GO silicio F8** = monitor HDMI +
+evidencia `hw-matrix`; canal disp/SOR entrenado sigue siendo el riesgo principal en GB205.
 
 **Pendiente post-G6:** medir tok/s nativo vs CPU en silicio (`bench`, timeout amplio);
 Ampere GA10x/GA107: cadena FWSEC-FRTS + booter escrita — validar `pool VRAM=sí`

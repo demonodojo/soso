@@ -1,0 +1,25 @@
+# N3 — ficheros nvkm engine/disp a integrar en source.list (orden sugerido, Ampere).
+# No añadir todos a la vez: cada ola debe dejar liblxdde.a enlazando (cargo xtask lx-build nouveau).
+#
+# Ola 1 — núcleo (priv, conn, head, ior, outp mínimos):
+# drivers/gpu/drm/nouveau/nvkm/engine/disp/base.c
+# drivers/gpu/drm/nouveau/nvkm/engine/disp/conn.c
+# drivers/gpu/drm/nouveau/nvkm/engine/disp/head.c
+# drivers/gpu/drm/nouveau/nvkm/engine/disp/ior.c
+# drivers/gpu/drm/nouveau/nvkm/engine/disp/outp.c
+# drivers/gpu/drm/nouveau/nvkm/engine/disp/nv04.c   # stubs históricos enlazados desde base
+#
+# Ola 2 — chip Ampere/GA10x + DP aux:
+# drivers/gpu/drm/nouveau/nvkm/engine/disp/ga102.c
+# drivers/gpu/drm/nouveau/nvkm/engine/disp/gm107.c
+# drivers/gpu/drm/nouveau/nvkm/engine/disp/g94.c
+# drivers/gpu/drm/nouveau/nvkm/engine/disp/dp.c
+# drivers/gpu/drm/nouveau/nvkm/subdev/i2c/base.c
+#
+# N8 — GB205 Blackwell reutiliza ga102.c + gf119/hdmi en 6.6 (head soso en nvdisp_head.c).
+# Ola 3 — HDMI/SOR compartido + GPIO + i2c gf119 (GB205 → ga102_disp en 6.6):
+# drivers/gpu/drm/nouveau/nvkm/engine/disp/gf119.c  # ya en ola 1
+# drivers/gpu/drm/nouveau/nvkm/engine/disp/hdmi.c
+# drivers/gpu/drm/nouveau/nvkm/engine/disp/chan.c
+# drivers/gpu/drm/nouveau/nvkm/subdev/gpio/{base,nv50,g94,gf119,gk104,ga102}.c
+# drivers/gpu/drm/nouveau/nvkm/subdev/i2c/{gf119,padgf119,auxgf119}.c

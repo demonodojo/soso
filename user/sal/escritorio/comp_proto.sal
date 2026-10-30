@@ -1,0 +1,88 @@
+import "proto.sal"
+
+fn op_comp_escena() -> Int
+    30
+
+fn op_comp_frame() -> Int
+    31
+
+fn op_comp_bind() -> Int
+    33
+
+fn op_comp_geom() -> Int
+    34
+
+fn op_comp_dmap() -> Int
+    35
+
+fn op_comp_commit() -> Int
+    36
+
+fn comp_geom_hidden() -> Int
+    1
+
+fn comp_geom_opaque() -> Int
+    2
+
+fn comp_commit_clear_rt() -> Int
+    1
+
+fn comp_escena_gpu_ok_off() -> Int
+    28
+
+fn msg_encode_comp_escena(ptr: Int, shm_id: Int, w: Int, h: Int, stride: Int, bpp: Int, fmt: Int, gpu_ok: Int) -> Int ! alloc
+    _o = msg_set_op(ptr, op_comp_escena())
+    _s = msg_set_u32(ptr, 4, shm_id)
+    _w = msg_set_u32(ptr, 8, w)
+    _h = msg_set_u32(ptr, 12, h)
+    _p = msg_set_u32(ptr, 16, stride)
+    _b = msg_set_u32(ptr, 20, bpp)
+    _f = msg_set_u32(ptr, 24, fmt)
+    _g = msg_set_u32(ptr, 28, gpu_ok)
+    0
+
+fn msg_encode_comp_bind(ptr: Int, id: Int, shm_id: Int, w: Int, h: Int, stride: Int) -> Int ! alloc
+    _o = msg_set_op(ptr, op_comp_bind())
+    _i = msg_set_u32(ptr, 4, id)
+    _s = msg_set_u32(ptr, 8, shm_id)
+    _w = msg_set_u32(ptr, 12, w)
+    _h = msg_set_u32(ptr, 16, h)
+    _p = msg_set_u32(ptr, 20, stride)
+    0
+
+fn msg_encode_comp_geom(ptr: Int, id: Int, x: Int, y: Int, w: Int, h: Int, flags: Int, z: Int) -> Int ! alloc
+    _o = msg_set_op(ptr, op_comp_geom())
+    _i = msg_set_u32(ptr, 4, id)
+    _x = msg_set_u32(ptr, 8, x)
+    _y = msg_set_u32(ptr, 12, y)
+    _w = msg_set_u32(ptr, 16, w)
+    _h = msg_set_u32(ptr, 20, h)
+    _f = msg_set_u32(ptr, 24, flags)
+    _z = msg_set_u32(ptr, 28, z)
+    0
+
+fn msg_encode_comp_dmap(ptr: Int, id: Int, x: Int, y: Int, w: Int, h: Int) -> Int ! alloc
+    _o = msg_set_op(ptr, op_comp_dmap())
+    _i = msg_set_u32(ptr, 4, id)
+    _x = msg_set_u32(ptr, 8, x)
+    _y = msg_set_u32(ptr, 12, y)
+    _w = msg_set_u32(ptr, 16, w)
+    _h = msg_set_u32(ptr, 20, h)
+    0
+
+fn msg_encode_comp_commit(ptr: Int, x: Int, y: Int, w: Int, h: Int, flags: Int) -> Int ! alloc
+    _o = msg_set_op(ptr, op_comp_commit())
+    _x = msg_set_u32(ptr, 4, x)
+    _y = msg_set_u32(ptr, 8, y)
+    _w = msg_set_u32(ptr, 12, w)
+    _h = msg_set_u32(ptr, 16, h)
+    _f = msg_set_u32(ptr, 20, flags)
+    0
+
+fn msg_encode_comp_frame(ptr: Int, x: Int, y: Int, w: Int, h: Int) -> Int ! alloc
+    _o = msg_set_op(ptr, op_comp_frame())
+    _a = msg_set_u32(ptr, 4, x)
+    _b = msg_set_u32(ptr, 8, y)
+    _c = msg_set_u32(ptr, 12, w)
+    _d = msg_set_u32(ptr, 16, h)
+    0

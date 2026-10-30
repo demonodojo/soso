@@ -186,12 +186,41 @@ pub fn gfx3d_ready() -> bool {
     false
 }
 
+pub fn nvdisp_ready() -> bool {
+    false
+}
+
+pub fn nvdisp_present(
+    _rt_va: u64,
+    _pitch: u32,
+    _pres_x: u32,
+    _pres_y: u32,
+    _pres_w: u32,
+    _pres_h: u32,
+    _full_frame: bool,
+) -> Result<(), ()> {
+    Err(())
+}
+
 pub fn submit_3d_clear(
     _rt_va: u64,
     _width: u32,
     _height: u32,
     _pitch: u32,
     _rgba: u32,
+) -> Result<bool, ()> {
+    Err(())
+}
+
+pub fn submit_3d_blit_tex(
+    _rt_va: u64,
+    _rt_pitch: u32,
+    _dx: u32,
+    _dy: u32,
+    _tex_va: u64,
+    _tex_pitch: u32,
+    _width: u32,
+    _height: u32,
 ) -> Result<bool, ()> {
     Err(())
 }

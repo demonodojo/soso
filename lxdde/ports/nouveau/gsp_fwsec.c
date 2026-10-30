@@ -6,13 +6,11 @@
 #include "gsp_dma.h"
 #include "gsp_mmio.h"
 #include "gsp_top.h"
+#include "gsp_rom.h"
 #include "lx_emul.h"
 
 void *memcpy(void *dst, const void *src, unsigned long n);
 void *memset(void *dst, int c, unsigned long n);
-
-#define NV_PROM_BASE            0x00300000u
-#define NV_PROM_MAX             0x00100000u
 
 #define NV_PFB_PRI_MMU_WPR2_ADDR_LO 0x001fa824u
 #define NV_PFB_PRI_MMU_WPR2_ADDR_HI 0x001fa828u
@@ -142,60 +140,8 @@ struct fwsec_ucode_info {
     unsigned sig_rom_off;
 };
 
-static unsigned rom_data_len;
 static int fwsec_last_patch_appif;
 static unsigned fwsec_probe_boot_addr;
-
-static uint8_t rom_rd8(unsigned off)
-{
-    unsigned word = off & ~3u;
-    uint32_t v;
-
-    if (off >= rom_data_len) {
-        return 0;
-    }
-    v = gsp_mmio_rd32(NV_PROM_BASE + word);
-    return (uint8_t)(v >> ((off & 3u) * 8u));
-}
-
-static uint16_t rom_rd16(unsigned off)
-{
-    return (uint16_t)rom_rd8(off) | ((uint16_t)rom_rd8(off + 1) << 8);
-}
-
-static uint32_t rom_rd32(unsigned off)
-{
-    return (uint32_t)rom_rd8(off) |
-           ((uint32_t)rom_rd8(off + 1) << 8) |
-           ((uint32_t)rom_rd8(off + 2) << 16) |
-           ((uint32_t)rom_rd8(off + 3) << 24);
-}
-
-static int rom_match(unsigned off, const char *sig, unsigned n)
-{
-    unsigned i;
-
-    for (i = 0; i < n; i++) {
-        if (rom_rd8(off + i) != (uint8_t)sig[i]) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
-static int rom_copy(unsigned off, void *dst, unsigned len)
-{
-    unsigned char *d = dst;
-    unsigned i;
-
-    if (off + len > rom_data_len) {
-        return -1;
-    }
-    for (i = 0; i < len; i++) {
-        d[i] = rom_rd8(off + i);
-    }
-    return 0;
-}
 
 static unsigned align_up512(unsigned v)
 {
@@ -236,7 +182,7 @@ static unsigned fuse_reg_version(uint16_t data)
 
 static int prom_ifr_offset(unsigned *start_out)
 {
-    uint32_t sig = rom_rd32(0);
+    uint32_t sig = gsp_rom_rd32(0);
 
     if (sig != 0x4947564eu) { /* "NVGI" */
         *start_out = 0;
@@ -244,7 +190,7 @@ static int prom_ifr_offset(unsigned *start_out)
     }
 
     {
-        uint32_t fixed1 = rom_rd32(4);
+        uint32_t fixed1 = gsp_rom_rd32(4);
         unsigned ver = (unsigned)((fixed1 >> 8) & 0xffu);
         unsigned fixed_data_size = (unsigned)((fixed1 >> 16) & 0x7fffu);
 
@@ -253,23 +199,23 @@ static int prom_ifr_offset(unsigned *start_out)
             return 0;
         }
         if (ver == 3u) {
-            uint32_t total = rom_rd32(8) & 0xfffffu;
+            uint32_t total = gsp_rom_rd32(8) & 0xfffffu;
             uint32_t flash_status;
             unsigned dir_off;
 
-            if (total + 4u > rom_data_len) {
+            if (total + 4u > gsp_rom_limit()) {
                 return -1;
             }
-            flash_status = rom_rd32(total);
+            flash_status = gsp_rom_rd32(total);
             dir_off = (unsigned)flash_status + 4096u;
-            if (dir_off + 12u > rom_data_len) {
+            if (dir_off + 12u > gsp_rom_limit()) {
                 return -1;
             }
-            if (rom_rd32(dir_off) != 0x44465252u) { /* "RFRD" */
+            if (gsp_rom_rd32(dir_off) != 0x44465252u) { /* "RFRD" */
                 lx_printk("nouveau-lx: VBIOS IFR v3 sin directorio RFRD\n");
                 return -1;
             }
-            *start_out = rom_rd32(dir_off + 8u);
+            *start_out = gsp_rom_rd32(dir_off + 8u);
             return 0;
         }
         lx_printk("nouveau-lx: VBIOS IFR versión %u no soportada\n", ver);
@@ -279,20 +225,20 @@ static int prom_ifr_offset(unsigned *start_out)
 
 static unsigned image_size_bytes(unsigned img_off)
 {
-    unsigned pcir_off = img_off + rom_rd16(img_off + 0x18u);
+    unsigned pcir_off = img_off + gsp_rom_rd16(img_off + 0x18u);
     uint16_t image_len;
     unsigned npde_off;
 
-    if (pcir_off + 22u > rom_data_len) {
+    if (pcir_off + 22u > gsp_rom_limit()) {
         return 0;
     }
-    image_len = (uint16_t)rom_rd8(pcir_off + 16u) |
-                ((uint16_t)rom_rd8(pcir_off + 17u) << 8);
+    image_len = (uint16_t)gsp_rom_rd8(pcir_off + 16u) |
+                ((uint16_t)gsp_rom_rd8(pcir_off + 17u) << 8);
 
-    npde_off = (pcir_off + rom_rd16(pcir_off + 10u) + 0x0fu) & ~0x0fu;
-    if (npde_off + 12u <= rom_data_len && rom_match(npde_off, "NPDE", 4)) {
-        uint16_t sub = (uint16_t)rom_rd8(npde_off + 8u) |
-                       ((uint16_t)rom_rd8(npde_off + 9u) << 8);
+    npde_off = (pcir_off + gsp_rom_rd16(pcir_off + 10u) + 0x0fu) & ~0x0fu;
+    if (npde_off + 12u <= gsp_rom_limit() && gsp_rom_match(npde_off, "NPDE", 4)) {
+        uint16_t sub = (uint16_t)gsp_rom_rd8(npde_off + 8u) |
+                       ((uint16_t)gsp_rom_rd8(npde_off + 9u) << 8);
         if (sub) {
             return (unsigned)sub * 512u;
         }
@@ -305,33 +251,33 @@ static unsigned image_size_bytes(unsigned img_off)
 
 static int image_is_last(unsigned img_off)
 {
-    unsigned pcir_off = img_off + rom_rd16(img_off + 0x18u);
+    unsigned pcir_off = img_off + gsp_rom_rd16(img_off + 0x18u);
     unsigned npde_off;
     uint8_t code_type;
 
-    if (pcir_off + 22u > rom_data_len) {
+    if (pcir_off + 22u > gsp_rom_limit()) {
         return 1;
     }
-    code_type = rom_rd8(pcir_off + 20u);
+    code_type = gsp_rom_rd8(pcir_off + 20u);
     if (code_type == 0x70u) {
         return 1;
     }
 
-    npde_off = (pcir_off + rom_rd16(pcir_off + 10u) + 0x0fu) & ~0x0fu;
-    if (npde_off + 12u <= rom_data_len && rom_match(npde_off, "NPDE", 4)) {
-        return (rom_rd8(npde_off + 0xau) & 0x80u) != 0;
+    npde_off = (pcir_off + gsp_rom_rd16(pcir_off + 10u) + 0x0fu) & ~0x0fu;
+    if (npde_off + 12u <= gsp_rom_limit() && gsp_rom_match(npde_off, "NPDE", 4)) {
+        return (gsp_rom_rd8(npde_off + 0xau) & 0x80u) != 0;
     }
-    return (rom_rd8(pcir_off + 21u) & 0x80u) != 0;
+    return (gsp_rom_rd8(pcir_off + 21u) & 0x80u) != 0;
 }
 
 static uint8_t image_code_type(unsigned img_off)
 {
-    unsigned pcir_off = img_off + rom_rd16(img_off + 0x18u);
+    unsigned pcir_off = img_off + gsp_rom_rd16(img_off + 0x18u);
 
-    if (pcir_off + 21u > rom_data_len) {
+    if (pcir_off + 21u > gsp_rom_limit()) {
         return 0xffu;
     }
-    return rom_rd8(pcir_off + 20u);
+    return gsp_rom_rd8(pcir_off + 20u);
 }
 
 static void log_image_chain(unsigned start)
@@ -340,14 +286,14 @@ static void log_image_chain(unsigned start)
     unsigned n = 0;
 
     lx_printk("nouveau-lx: VBIOS cadena imágenes @0x%x:\n", start);
-    while (off < rom_data_len && n < 16u) {
+    while (off < gsp_rom_limit() && n < 16u) {
         unsigned sz;
         uint16_t sig;
 
-        if (off + 2u > rom_data_len) {
+        if (off + 2u > gsp_rom_limit()) {
             break;
         }
-        sig = (uint16_t)rom_rd8(off) | ((uint16_t)rom_rd8(off + 1) << 8);
+        sig = (uint16_t)gsp_rom_rd8(off) | ((uint16_t)gsp_rom_rd8(off + 1) << 8);
         if (sig != 0xaa55u && sig != 0x4e56u) {
             lx_printk("nouveau-lx:   [%u] @0x%x sig=0x%04x (fin)\n", n, off, sig);
             break;
@@ -374,17 +320,17 @@ static int find_bit_falcon_ptr(unsigned pciat_off, unsigned pciat_len, unsigned 
     unsigned end = pciat_off + pciat_len;
 
     for (i = pciat_off; i + 6u < end; i++) {
-        if (rom_rd8(i) != 0xffu || rom_rd8(i + 1) != 0xb8u) {
+        if (gsp_rom_rd8(i) != 0xffu || gsp_rom_rd8(i + 1) != 0xb8u) {
             continue;
         }
-        if (!rom_match(i + 2, "BIT", 3) || rom_rd8(i + 5) != 0u) {
+        if (!gsp_rom_match(i + 2, "BIT", 3) || gsp_rom_rd8(i + 5) != 0u) {
             continue;
         }
         {
             unsigned hdr = i;
-            unsigned hdr_size = rom_rd8(hdr + 8);
-            unsigned token_size = rom_rd8(hdr + 9);
-            unsigned token_count = rom_rd8(hdr + 10);
+            unsigned hdr_size = gsp_rom_rd8(hdr + 8);
+            unsigned token_size = gsp_rom_rd8(hdr + 9);
+            unsigned token_count = gsp_rom_rd8(hdr + 10);
             unsigned tok_base = hdr + hdr_size;
             unsigned j;
 
@@ -396,18 +342,18 @@ static int find_bit_falcon_ptr(unsigned pciat_off, unsigned pciat_len, unsigned 
                 if (eoff + 6u > end) {
                     break;
                 }
-                id = rom_rd8(eoff);
+                id = gsp_rom_rd8(eoff);
                 if (id != BIT_TOKEN_FALCON_DATA) {
                     continue;
                 }
-                data_off = (uint16_t)rom_rd8(eoff + 4) |
-                           ((uint16_t)rom_rd8(eoff + 5) << 8);
+                data_off = (uint16_t)gsp_rom_rd8(eoff + 4) |
+                           ((uint16_t)gsp_rom_rd8(eoff + 5) << 8);
                 if ((unsigned)data_off + 4u > pciat_len) {
                     lx_printk("nouveau-lx: BIT 0x70 data_offset 0x%x fuera de PCI-AT\n",
                               data_off);
                     return -1;
                 }
-                *ptr_out = rom_rd32(pciat_off + data_off);
+                *ptr_out = gsp_rom_rd32(pciat_off + data_off);
                 lx_printk("nouveau-lx: BIT 0x70 ptr=0x%x (pciat_len=0x%x)\n",
                           *ptr_out, pciat_len);
                 return 0;
@@ -432,12 +378,12 @@ static int pmu_lookup_fwsec(unsigned fwsec_off, unsigned fwsec_len,
     if (falcon_data_off + 4u > fwsec_len) {
         return -1;
     }
-    hdr_len = rom_rd8(base + 1);
-    entry_len = rom_rd8(base + 2);
-    entry_count = rom_rd8(base + 3);
+    hdr_len = gsp_rom_rd8(base + 1);
+    entry_len = gsp_rom_rd8(base + 2);
+    entry_count = gsp_rom_rd8(base + 3);
 
     lx_printk("nouveau-lx: PmuLookupTable @0x%x ver=%u hdr=%u entry=%u count=%u\n",
-              falcon_data_off, rom_rd8(base), hdr_len, entry_len, entry_count);
+              falcon_data_off, gsp_rom_rd8(base), hdr_len, entry_len, entry_count);
 
     for (i = 0; i < entry_count; i++) {
         unsigned eoff = falcon_data_off + hdr_len + i * entry_len;
@@ -447,8 +393,8 @@ static int pmu_lookup_fwsec(unsigned fwsec_off, unsigned fwsec_len,
         if (eoff + entry_len > fwsec_len || entry_len < 6u) {
             break;
         }
-        app_id = rom_rd8(fwsec_off + eoff);
-        data = rom_rd32(fwsec_off + eoff + 2);
+        app_id = gsp_rom_rd8(fwsec_off + eoff);
+        data = gsp_rom_rd32(fwsec_off + eoff + 2);
         if (app_id == PMU_APPID_FWSEC_PROD) {
             if (data < pciat_len) {
                 lx_printk("nouveau-lx: PMU 0x85 data=0x%x < pciat_len\n", data);
@@ -473,7 +419,7 @@ static int parse_fwsec_desc(unsigned fwsec_off, unsigned fwsec_len,
     if (abs + 8u > fwsec_off + fwsec_len) {
         return -1;
     }
-    hdr = rom_rd32(abs);
+    hdr = gsp_rom_rd32(abs);
     ver = (uint8_t)desc_version(hdr);
     info->version = ver;
     info->desc_size = desc_hdr_size(hdr);
@@ -482,7 +428,7 @@ static int parse_fwsec_desc(unsigned fwsec_off, unsigned fwsec_len,
         struct falcon_ucode_desc_v3 d;
 
         if (info->desc_size < sizeof(d) ||
-            rom_copy(abs, &d, sizeof(d)) != 0) {
+            gsp_rom_copy(abs, &d, sizeof(d)) != 0) {
             return -1;
         }
         info->interface_offset = d.interface_offset;
@@ -502,7 +448,7 @@ static int parse_fwsec_desc(unsigned fwsec_off, unsigned fwsec_len,
         struct falcon_ucode_desc_v2 d;
 
         if (info->desc_size < sizeof(d) ||
-            rom_copy(abs, &d, sizeof(d)) != 0) {
+            gsp_rom_copy(abs, &d, sizeof(d)) != 0) {
             return -1;
         }
         info->interface_offset = d.interface_offset;
@@ -562,22 +508,22 @@ static int vbios_locate_fwsec(struct fwsec_ucode_info *info)
     int have_pciat = 0;
     int have_fwsec = 0;
 
-    rom_data_len = NV_PROM_MAX;
+    gsp_rom_init();
     if (prom_ifr_offset(&start) != 0) {
         log_image_chain(0);
         return -1;
     }
 
     off = start;
-    while (off < rom_data_len) {
+    while (off < gsp_rom_limit()) {
         unsigned sz;
         uint16_t sig;
         uint8_t ctype;
 
-        if (off + 2u > rom_data_len) {
+        if (off + 2u > gsp_rom_limit()) {
             break;
         }
-        sig = (uint16_t)rom_rd8(off) | ((uint16_t)rom_rd8(off + 1) << 8);
+        sig = (uint16_t)gsp_rom_rd8(off) | ((uint16_t)gsp_rom_rd8(off + 1) << 8);
         if (sig != 0xaa55u && sig != 0x4e56u) {
             break;
         }
@@ -593,7 +539,7 @@ static int vbios_locate_fwsec(struct fwsec_ucode_info *info)
             have_pciat = 1;
         } else if (ctype == 0xe0u && !have_fwsec) {
             fwsec_off = off;
-            fwsec_len = rom_data_len - off;
+            fwsec_len = gsp_rom_limit() - off;
             have_fwsec = 1;
         }
 
@@ -733,7 +679,7 @@ static int patch_fwsec_signature(unsigned char *ucode, unsigned ulen,
         return -1;
     }
 
-    if (rom_copy(sig_off, ucode + patch_off, BCRT30_RSA3K_SIG_SIZE) != 0) {
+    if (gsp_rom_copy(sig_off, ucode + patch_off, BCRT30_RSA3K_SIG_SIZE) != 0) {
         return -1;
     }
 
@@ -921,7 +867,7 @@ int gsp_fwsec_probe(uint64_t frts_addr, uint64_t frts_size)
     if (!ucode) {
         return -1;
     }
-    if (rom_copy(info.ucode_rom_off, ucode, info.ucode_len) != 0) {
+    if (gsp_rom_copy(info.ucode_rom_off, ucode, info.ucode_len) != 0) {
         lx_kfree(ucode);
         return -1;
     }
@@ -978,7 +924,7 @@ int gsp_fwsec_run_frts(uint64_t frts_addr, uint64_t frts_size)
     if (!ucode) {
         return -1;
     }
-    if (rom_copy(info.ucode_rom_off, ucode, info.ucode_len) != 0) {
+    if (gsp_rom_copy(info.ucode_rom_off, ucode, info.ucode_len) != 0) {
         lx_kfree(ucode);
         return -1;
     }

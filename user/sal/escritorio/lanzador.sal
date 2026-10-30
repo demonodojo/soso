@@ -12,6 +12,9 @@ fn lanz_terminal() -> Int
 fn lanz_web() -> Int
     3
 
+fn lanz_ficheros() -> Int
+    5
+
 fn lanz_salir() -> Int
     4
 
@@ -65,13 +68,15 @@ fn lanz_hit_barra(x: Int, y: Int) -> Int ! alloc
     acc
 
 fn lanz_menu_n() -> Int
-    3
+    4
 
 fn lanz_menu_texto(k: Int) -> String ! alloc
     if k == 0
         d"Terminal"
     elsif k == 1
         d"Navegador web"
+    elsif k == 2
+        d"Archivos"
     else
         d"Salir del escritorio"
 
@@ -80,6 +85,8 @@ fn lanz_menu_accion(k: Int) -> Int
         lanz_terminal()
     elsif k == 1
         lanz_web()
+    elsif k == 2
+        lanz_ficheros()
     else
         lanz_salir()
 

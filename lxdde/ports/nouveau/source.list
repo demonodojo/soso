@@ -3,7 +3,11 @@ lxdde/ports/nouveau/gsp_dma.c
 lxdde/ports/nouveau/gsp_fw.c
 lxdde/ports/nouveau/gsp_rm.c
 lxdde/ports/nouveau/gsp_wpr.c
+lxdde/ports/nouveau/gsp_rom.c
 lxdde/ports/nouveau/gsp_fwsec.c
+lxdde/ports/nouveau/nvdisp_probe.c
+lxdde/ports/nouveau/nvdisp_head.c
+lxdde/ports/nouveau/nvdisp_scanout.c
 lxdde/ports/nouveau/gsp_libos.c
 lxdde/ports/nouveau/gsp_rpc.c
 lxdde/ports/nouveau/gsp_cpu_seq.c
@@ -97,6 +101,59 @@ drivers/gpu/drm/nouveau/nvkm/subdev/mmu/mem.c
 drivers/gpu/drm/nouveau/nvkm/subdev/fb/ram.c
 drivers/gpu/drm/nouveau/nvkm/subdev/bios/base.c
 drivers/gpu/drm/nouveau/nvkm/subdev/bios/M0203.c
+
+# --- N3 ola 0: VBIOS nvkm (sustituye dummies nvbios_*/bit_entry) ---
+drivers/gpu/drm/nouveau/nvkm/subdev/bios/pcir.c
+drivers/gpu/drm/nouveau/nvkm/subdev/bios/npde.c
+drivers/gpu/drm/nouveau/nvkm/subdev/bios/image.c
+drivers/gpu/drm/nouveau/nvkm/subdev/bios/shadowrom.c
+drivers/gpu/drm/nouveau/nvkm/subdev/bios/shadow.c
+drivers/gpu/drm/nouveau/nvkm/subdev/bios/bit.c
+drivers/gpu/drm/nouveau/nvkm/subdev/bios/dcb.c
+drivers/gpu/drm/nouveau/nvkm/subdev/bios/conn.c
+
+# --- N3 ola 1: engine/disp (núcleo + histórico nv04) ---
+drivers/gpu/drm/nouveau/nvkm/engine/disp/conn.c
+drivers/gpu/drm/nouveau/nvkm/engine/disp/outp.c
+drivers/gpu/drm/nouveau/nvkm/engine/disp/ior.c
+drivers/gpu/drm/nouveau/nvkm/engine/disp/head.c
+drivers/gpu/drm/nouveau/nvkm/engine/disp/nv04.c
+drivers/gpu/drm/nouveau/nvkm/engine/disp/ga102.c
+drivers/gpu/drm/nouveau/nvkm/engine/disp/g94.c
+drivers/gpu/drm/nouveau/nvkm/engine/disp/gm107.c
+drivers/gpu/drm/nouveau/nvkm/engine/disp/gm200.c
+drivers/gpu/drm/nouveau/nvkm/engine/disp/gv100.c
+drivers/gpu/drm/nouveau/nvkm/engine/disp/nv50.c
+drivers/gpu/drm/nouveau/nvkm/engine/disp/gf119.c
+drivers/gpu/drm/nouveau/nvkm/engine/disp/tu102.c
+drivers/gpu/drm/nouveau/nvkm/engine/disp/base.c
+
+# --- N3 ola 2: DisplayPort + subdev i2c (aux DPCD) ---
+drivers/gpu/drm/nouveau/nvkm/engine/disp/dp.c
+drivers/gpu/drm/nouveau/nvkm/subdev/i2c/base.c
+drivers/gpu/drm/nouveau/nvkm/subdev/i2c/pad.c
+drivers/gpu/drm/nouveau/nvkm/subdev/i2c/bus.c
+drivers/gpu/drm/nouveau/nvkm/subdev/i2c/aux.c
+drivers/gpu/drm/nouveau/nvkm/subdev/i2c/bit.c
+drivers/gpu/drm/nouveau/nvkm/subdev/i2c/gm200.c
+drivers/gpu/drm/nouveau/nvkm/subdev/i2c/padgm200.c
+drivers/gpu/drm/nouveau/nvkm/subdev/i2c/auxgm200.c
+drivers/gpu/drm/nouveau/nvkm/subdev/i2c/busgf119.c
+
+# --- N3 ola 3: HDMI + disp chan + GPIO + i2c gf119 (SOR/pad; GB205 reutiliza ga102 disp en 6.6) ---
+drivers/gpu/drm/nouveau/nvkm/engine/disp/hdmi.c
+drivers/gpu/drm/nouveau/nvkm/engine/disp/chan.c
+drivers/gpu/drm/nouveau/nvkm/subdev/gpio/base.c
+drivers/gpu/drm/nouveau/nvkm/subdev/gpio/nv50.c
+drivers/gpu/drm/nouveau/nvkm/subdev/gpio/g94.c
+drivers/gpu/drm/nouveau/nvkm/subdev/gpio/gf119.c
+drivers/gpu/drm/nouveau/nvkm/subdev/gpio/gk104.c
+drivers/gpu/drm/nouveau/nvkm/subdev/gpio/ga102.c
+drivers/gpu/drm/nouveau/nvkm/subdev/i2c/gf119.c
+drivers/gpu/drm/nouveau/nvkm/subdev/i2c/padgf119.c
+drivers/gpu/drm/nouveau/nvkm/subdev/i2c/auxgf119.c
+
+lxdde/ports/nouveau/nvdisp_engine.c
 
 # --- Ola 4 (G4): infraestructura base del motor de cómputo + fifo/canales ---
 drivers/gpu/drm/nouveau/nvkm/core/event.c

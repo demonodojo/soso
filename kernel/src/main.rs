@@ -81,6 +81,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             None => {}
         }
     }
+    drivers::scanout::boot_log();
 
     // En placa sin COM1 la consola es sólo el framebuffer y el teclado PS/2.
     if drivers::serial::present() {

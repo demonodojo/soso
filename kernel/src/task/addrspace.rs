@@ -11,8 +11,11 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 use crate::mm;
 use spin::Mutex;
+
+static NEXT_ADDR_SPACE_ID: AtomicU64 = AtomicU64::new(1);
 use super::mmap::{self, MmapRegion};
 use x86_64::registers::control::{Cr3, Cr3Flags};
 use x86_64::structures::paging::{
@@ -36,11 +39,59 @@ pub const STACK_MAX: u64 = 8 * 1024 * 1024;
 /// entrada L4[0] (la ventana mmap de modelos llega hasta MMAP_LIMIT).
 pub const USER_MAX: u64 = 0x80_0000_0000;
 
-const USER_FLAGS: PageTableFlags = PageTableFlags::PRESENT
-    .union(PageTableFlags::WRITABLE)
-    .union(PageTableFlags::USER_ACCESSIBLE);
+/// Permisos de una hoja de usuario (W^X: datos con NX, código sin WRITABLE).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UserProt {
+    R,
+    Rw,
+    Rx,
+    /// Transición: binarios antiguos con texto y datos en la misma página.
+    Rwx,
+}
 
-const USER_RDONLY: PageTableFlags = PageTableFlags::PRESENT
+impl UserProt {
+    pub fn leaf_flags(self) -> PageTableFlags {
+        match self {
+            UserProt::R => PageTableFlags::PRESENT
+                .union(PageTableFlags::USER_ACCESSIBLE)
+                .union(PageTableFlags::NO_EXECUTE),
+            UserProt::Rw => PageTableFlags::PRESENT
+                .union(PageTableFlags::WRITABLE)
+                .union(PageTableFlags::USER_ACCESSIBLE)
+                .union(PageTableFlags::NO_EXECUTE),
+            UserProt::Rx => PageTableFlags::PRESENT.union(PageTableFlags::USER_ACCESSIBLE),
+            UserProt::Rwx => PageTableFlags::PRESENT
+                .union(PageTableFlags::WRITABLE)
+                .union(PageTableFlags::USER_ACCESSIBLE),
+        }
+    }
+
+    pub fn writable(self) -> bool {
+        matches!(self, UserProt::Rw | UserProt::Rwx)
+    }
+
+    pub fn exec(self) -> bool {
+        matches!(self, UserProt::Rx | UserProt::Rwx)
+    }
+
+    pub fn merge(self, other: Self) -> Self {
+        if self == other {
+            return self;
+        }
+        let w = self.writable() || other.writable();
+        let x = self.exec() || other.exec();
+        match (w, x) {
+            (false, false) => UserProt::R,
+            (true, false) => UserProt::Rw,
+            (false, true) => UserProt::Rx,
+            (true, true) => UserProt::Rwx,
+        }
+    }
+}
+
+/// Tablas intermedias: sin NX (un NX en un nivel superior bloquearía todo el subárbol).
+const PARENT_FLAGS: PageTableFlags = PageTableFlags::PRESENT
+    .union(PageTableFlags::WRITABLE)
     .union(PageTableFlags::USER_ACCESSIBLE);
 
 /// Regiones mmap compartidas entre hilos del mismo AddrSpace.
@@ -50,6 +101,7 @@ pub struct MmapBook {
 }
 
 struct AddrSpaceInner {
+    id: u64,
     pml4: PhysFrame,
     mmap: Mutex<MmapBook>,
 }
@@ -170,6 +222,7 @@ impl AddrSpace {
         }
         Some(Self {
             inner: Arc::new(AddrSpaceInner {
+                id: NEXT_ADDR_SPACE_ID.fetch_add(1, Ordering::Relaxed),
                 pml4: frame,
                 mmap: Mutex::new(MmapBook {
                     regions: Vec::new(),
@@ -201,6 +254,10 @@ impl AddrSpace {
         self.inner.pml4.start_address().as_u64()
     }
 
+    pub fn id(&self) -> u64 {
+        self.inner.id
+    }
+
     pub fn mapper(&self) -> OffsetPageTable<'static> {
         let phys_offset = mm::phys_to_virt(0);
         unsafe { OffsetPageTable::new(table_mut(self.pml4()), phys_offset) }
@@ -209,6 +266,10 @@ impl AddrSpace {
     /// Mapea (si no lo está ya) la página de `va` con un frame nuevo a
     /// cero. Devuelve el frame que la respalda.
     pub fn ensure_mapped(&self, va: u64) -> Option<PhysFrame> {
+        self.ensure_mapped_prot(va, UserProt::Rw)
+    }
+
+    pub fn ensure_mapped_prot(&self, va: u64, prot: UserProt) -> Option<PhysFrame> {
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
         let mut mapper = self.mapper();
         if let Some(frame) = mapper.translate_page(page).ok() {
@@ -221,7 +282,13 @@ impl AddrSpace {
                 .as_mut_ptr::<[u8; 4096]>()
                 .write([0; 4096]);
             mapper
-                .map_to_with_table_flags(page, frame, USER_FLAGS, USER_FLAGS, &mut *fa)
+                .map_to_with_table_flags(
+                    page,
+                    frame,
+                    prot.leaf_flags(),
+                    PARENT_FLAGS,
+                    &mut *fa,
+                )
                 .ok()?
                 .ignore();
         }
@@ -296,20 +363,20 @@ impl AddrSpace {
     }
 
     /// Mapea una página de usuario con el frame dado.
-    pub fn map_page(&self, va: u64, frame: PhysFrame, writable: bool) -> Option<()> {
+    pub fn map_page(&self, va: u64, frame: PhysFrame, prot: UserProt) -> Option<()> {
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va));
         let mut mapper = self.mapper();
-        let flags = if writable { USER_FLAGS } else { USER_RDONLY };
+        let flags = prot.leaf_flags();
         let mut fa = mm::FRAME_ALLOC.get()?.lock();
         unsafe {
-            if mapper.translate_page(page).is_ok() {
-                if let Ok((frame, flush)) = mapper.unmap(page) {
-                    flush.flush();
-                    fa.deallocate_frame(frame);
+            if let Ok((old, flush)) = mapper.unmap(page) {
+                flush.flush();
+                if old != frame {
+                    fa.deallocate_frame(old);
                 }
             }
             mapper
-                .map_to_with_table_flags(page, frame, flags, USER_FLAGS, &mut *fa)
+                .map_to_with_table_flags(page, frame, flags, PARENT_FLAGS, &mut *fa)
                 .ok()?
                 .ignore();
         }
@@ -317,18 +384,30 @@ impl AddrSpace {
     }
 
     /// Mapea una página de usuario de 2 MiB con el bloque físico dado.
-    pub fn map_page_2m(&self, va: u64, frame: PhysFrame, writable: bool) -> Option<()> {
+    pub fn map_page_2m(&self, va: u64, frame: PhysFrame, prot: UserProt) -> Option<()> {
         let page = Page::<Size2MiB>::containing_address(VirtAddr::new(va));
         let frame2m = PhysFrame::<Size2MiB>::containing_address(frame.start_address());
         let mut mapper = self.mapper();
-        let flags = if writable { USER_FLAGS } else { USER_RDONLY };
+        let flags = prot.leaf_flags();
         let mut fa = mm::FRAME_ALLOC.get()?.lock();
         unsafe {
             mapper
-                .map_to_with_table_flags(page, frame2m, flags, USER_FLAGS, &mut *fa)
+                .map_to_with_table_flags(page, frame2m, flags, PARENT_FLAGS, &mut *fa)
                 .ok()?
                 .ignore();
         }
+        Some(())
+    }
+
+    pub fn set_page_prot(&self, va: u64, prot: UserProt) -> Option<()> {
+        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va & !0xfff));
+        if !self.is_mapped(va) {
+            return None;
+        }
+        let mut mapper = self.mapper();
+        let flush = unsafe { mapper.update_flags(page, prot.leaf_flags()).ok()? };
+        flush.flush();
+        crate::arch::apic::tlb_shootdown_all();
         Some(())
     }
 
@@ -450,14 +529,18 @@ impl AddrSpace {
     /// lo que N-002 persigue —una guarda al pie de una pila, que nadie ha
     /// tocado— da igual; para usar `PROT_NONE` como candado temporal sobre
     /// datos, no.
-    pub fn set_prot(&self, addr: u64, len: u64, writable: bool, sin_acceso: bool) -> Option<()> {
+    pub fn set_prot(&self, addr: u64, len: u64, prot: UserProt, sin_acceso: bool) -> Option<()> {
         if len == 0 {
             return Some(());
         }
         if addr == 0 || addr.checked_add(len).is_none_or(|e| e > USER_MAX) {
             return None;
         }
-        let flags = if writable { USER_FLAGS } else { USER_RDONLY };
+        let flags = if sin_acceso {
+            PageTableFlags::empty()
+        } else {
+            prot.leaf_flags()
+        };
         let end = addr.saturating_add(len);
         let mut va = addr & !0xfff;
         let mut mapper = self.mapper();

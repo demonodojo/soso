@@ -18,6 +18,8 @@ Comprobarlo con `file .cursor/skills` antes de tocar nada.
 |-------|---------|
 | `soso-dev` | Build, run, `check`, test, debug, `sosolog`, hw-matrix |
 | `soso-architecture` | Kernel, sosofs, userspace, syscalls and coding constraints |
+| `soso-wm` | Window manager Sal (`soso-wm`, TCP :7430, PTY/SHM, pruebas escritorio) |
+| `soso-comp` | Compositor GPU (`soso-comp`, :7432, GSCEN, clip, scanout con WM) |
 | `soso-gpu` | NVIDIA nouveau/GSP (L6, gates G1–G5, VFIO) |
 | `soso-wifi` | Intel iwlwifi (AX211/AX200), WPA2, firmware, VFIO |
 | `soso-live` | Live USB, ESP slots, boot-shim, install (`soso-install`) |

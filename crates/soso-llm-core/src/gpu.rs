@@ -47,6 +47,21 @@ pub struct GdnCapa<'a> {
     pub eps: f32,
 }
 
+/// Capa de atención con puerta (Qwen3.5/3.6 Gated) para un despacho que la haga entera en el dispositivo (q/k/v, qk-norm, rope, escritura del KV,
+/// atención, puerta sigmoide y proyección de salida).
+pub struct AtencionCapa<'a> {
+    pub claves: [&'a str; 4], // attn_q, attn_k, attn_v, attn_output
+    pub vistas: [&'a TensorView<'a>; 4],
+    pub qnorm: &'a [f32],
+    pub knorm: &'a [f32],
+    pub heads: usize,
+    pub kv_heads: usize,
+    pub hd: usize,
+    pub rope_n: usize,
+    pub theta: f32,
+    pub eps: f32,
+}
+
 /// Vista cruda de un tensor: puntero al mapa de la fuente (vive mientras viva el modelo), sin tomar prestada la fuente.
 #[derive(Clone, Copy, Debug)]
 pub struct VistaCruda {
@@ -490,6 +505,30 @@ pub trait GpuDispatch {
         filas_validas: &mut usize,
     ) -> Result<bool, ()> {
         let _ = (capa, q, out, n, seq_antes, heads, kv_heads, hd, k, v, filas_validas);
+        Ok(false)
+    }
+
+    /// Capa de atención con puerta entera de un bloque de `n` tokens (`xs`: `n` vectores de `h` ya normalizados) que empieza en la fila
+    /// `seq_antes` del KV (= posición absoluta). `salida` (`n × h`) es la proyección de salida (sin el residual). `k_host`/`v_host`: el KV del host
+    /// (`seq_antes` filas); `filas_validas`: filas del principio que el dispositivo ya espeja (se actualiza). Devuelve en `k_nuevo`/`v_nuevo`
+    /// (`n × kv_dim`, f16) las filas que el host debe añadir a su KV. `Ok(false)` = hacerlo en CPU.
+    #[allow(clippy::too_many_arguments)]
+    fn atencion_capa(
+        &mut self,
+        layer: u32,
+        capa: &AtencionCapa<'_>,
+        xs: &[f32],
+        n: usize,
+        h: usize,
+        seq_antes: usize,
+        filas_validas: &mut usize,
+        k_host: &[u16],
+        v_host: &[u16],
+        k_nuevo: &mut [u16],
+        v_nuevo: &mut [u16],
+        salida: &mut [f32],
+    ) -> Result<bool, ()> {
+        let _ = (layer, capa, xs, n, h, seq_antes, filas_validas, k_host, v_host, k_nuevo, v_nuevo, salida);
         Ok(false)
     }
 

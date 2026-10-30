@@ -159,8 +159,8 @@ pub fn read_into_user(id: PipeId, buf: u64, len: u64) -> u64 {
         if n == 0 {
             break;
         }
-        unsafe {
-            core::ptr::copy_nonoverlapping(tmp.as_ptr(), (buf + total) as *mut u8, n);
+        if super::uaccess::copy_to_user(buf + total, &tmp[..n]).is_err() {
+            break;
         }
         total += n as u64;
     }
@@ -189,8 +189,8 @@ pub fn write_from_user(id: PipeId, buf: u64, len: u64) -> Result<u64, i64> {
             break;
         }
         let want = ((len - total) as usize).min(CHUNK).min(hueco);
-        unsafe {
-            core::ptr::copy_nonoverlapping((buf + total) as *const u8, src.as_mut_ptr(), want);
+        if super::uaccess::copy_from_user(buf + total, &mut src[..want]).is_err() {
+            return Err(-abi::EFAULT);
         }
         let n = p.write_from(&src[..want]);
         total += n as u64;

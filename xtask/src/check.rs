@@ -37,6 +37,10 @@ pub fn run() {
 
     println!("check: builds bare-metal…");
     crate::build_user();
+    if let Err(e) = crate::elf_wx::verificar_rootfs(&root) {
+        eprintln!("check: ELF W^X — {e}");
+        *fallos.lock().unwrap() += 1;
+    }
     let img = crate::build_image();
     if !img.exists() {
         eprintln!("check: kernel/imagen no generada");
@@ -239,6 +243,11 @@ pub(crate) fn host_test_batches() -> &'static [HostTestBatch] {
             label: "soso-llm-api",
             pkgs: &["soso-llm-api"],
             std: true,
+        },
+        HostTestBatch {
+            label: "soso-wm-proto+soso-abi (scanout/GSCEN)",
+            pkgs: &["soso-wm-proto", "soso-abi"],
+            std: false,
         },
         HostTestBatch {
             label: "soso-improve-core+soso-improve",

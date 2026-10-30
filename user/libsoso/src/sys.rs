@@ -793,6 +793,16 @@ pub fn shm_map(id: u64) -> Result<u64, i64> {
     if r < 0 { Err(r) } else { Ok(r as u64) }
 }
 
+pub fn shm_grant(id: u64, pid: u64) -> Result<(), i64> {
+    let r = syscall4(abi::SYS_SHM_GRANT, id, pid, 0, 0);
+    if r < 0 { Err(r) } else { Ok(()) }
+}
+
+pub fn tcp_peer_pid(fd: u64) -> Result<u64, i64> {
+    let r = syscall1(abi::SYS_TCP_PEER_PID, fd);
+    if r < 0 { Err(r) } else { Ok(r as u64) }
+}
+
 pub fn shm_free(id: u64) -> Result<(), i64> {
     let r = syscall1(abi::SYS_SHM_FREE, id);
     if r < 0 { Err(r) } else { Ok(()) }

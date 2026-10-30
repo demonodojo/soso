@@ -1,0 +1,26 @@
+fn gpu_info_size() -> Int
+    104
+
+fn gpu_off_gfx3d() -> Int
+    4
+
+fn gpu_off_scanout_nvdisp() -> Int
+    5
+
+fn gpu_off_scanout_gop() -> Int
+    6
+
+fn main() -> Int
+    if gpu_off_gfx3d() != 4
+        1
+    else
+        if gpu_off_scanout_nvdisp() != 5
+            2
+        else
+            if gpu_off_scanout_gop() != 6
+                3
+            else
+                if gpu_info_size() != 104
+                    4
+                else
+                    0

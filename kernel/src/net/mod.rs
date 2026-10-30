@@ -1014,12 +1014,46 @@ fn tcp_connect_loopback(port: u16) -> Result<usize, i64> {
             .map_err(|_| -soso_abi::EMFILE)?
     };
     loopback::register_pending(listener_slot, server_slot);
+    loopback::bind_client_pid(pair_id, crate::task::current_pid());
     Ok(client_slot)
 }
 
 /// Acepta una conexión loopback pendiente. Devuelve el slot del lado servidor.
 pub fn tcp_accept_loopback(listener_slot: usize) -> Result<usize, i64> {
-    loopback::take_pending(listener_slot).ok_or(-soso_abi::EAGAIN)
+    let slot = loopback::take_pending(listener_slot).ok_or(-soso_abi::EAGAIN)?;
+    let pair = {
+        let net = NET.get().ok_or(-soso_abi::EIO)?;
+        let n = net.lock();
+        n.user_tcp
+            .entries
+            .get(slot)
+            .and_then(|e| e.as_ref())
+            .and_then(|e| e.loop_pair)
+    };
+    if let Some(pair_id) = pair {
+        loopback::bind_server_pid(pair_id, crate::task::current_pid());
+    }
+    Ok(slot)
+}
+
+pub fn tcp_peer_pid(slot: usize) -> Result<u64, i64> {
+    let net = NET.get().ok_or(-soso_abi::EIO)?;
+    let n = net.lock();
+    let entry = n
+        .user_tcp
+        .entries
+        .get(slot)
+        .and_then(|e| e.as_ref())
+        .ok_or(-soso_abi::EBADF)?;
+    if !entry.loopback {
+        return Err(-soso_abi::ENOTCONN);
+    }
+    let pair = entry.loop_pair.ok_or(-soso_abi::ENOTCONN)?;
+    let peer = loopback::peer_pid(pair, entry.loop_side);
+    if peer == 0 {
+        return Err(-soso_abi::EAGAIN);
+    }
+    Ok(peer)
 }
 
 /// Un listener de userspace atiende **las dos** procedencias: el loopback del

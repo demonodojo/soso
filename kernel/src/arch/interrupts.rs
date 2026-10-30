@@ -195,6 +195,7 @@ extern "sysv64" fn watch_panic_shim(_: u64, _b: u64) -> u64 {
 }
 
 fn excepcion_generica(stack_frame: &InterruptStackFrame, vector: u8, error_code: u64) {
+    crate::arch::cpu_hardening::clac_en_entrada_isr();
     if desde_usuario(stack_frame) {
         EXC_VECTOR.store(vector as u64, Ordering::Relaxed);
         con_rsp_alineado(kill_vector_shim, vector as u64, 0);
@@ -441,6 +442,7 @@ extern "x86-interrupt" fn page_fault_handler(
     // Igual que `irq::dispatch`: LLVM no emite `cld` en este prólogo, y
     // rellenar una página (`handle_mmap_fault`) copia con `rep movs`.
     unsafe { core::arch::asm!("cld") };
+    crate::arch::cpu_hardening::clac_en_entrada_isr();
     let addr = x86_64::registers::control::Cr2::read_raw();
     if desde_usuario(&stack_frame) {
         let is_write = error_code.contains(PageFaultErrorCode::CAUSED_BY_WRITE);

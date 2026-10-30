@@ -1079,3 +1079,29 @@ where
     flush_all(st);
     Ok(out)
 }
+
+/// Rellena un subrectángulo del shadow y vuelca sólo esa región al GOP.
+#[cfg_attr(not(feature = "lxdde"), allow(dead_code))]
+pub fn present_shadow_rect_after<F, R>(
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    fill: F,
+) -> Result<R, ()>
+where
+    F: FnOnce(*mut u8, u64) -> Result<R, ()>,
+{
+    if w == 0 || h == 0 {
+        return Err(());
+    }
+    let mut guard = FB.lock();
+    let Some(st) = guard.as_mut() else {
+        return Err(());
+    };
+    let ptr = st.shadow.as_mut_ptr();
+    let virt = ptr as u64;
+    let out = fill(ptr, virt)?;
+    flush_rect(st, x as usize, y as usize, w as usize, h as usize);
+    Ok(out)
+}

@@ -271,6 +271,14 @@ impl LayerKv {
         }
     }
 
+    /// Añade `n` filas ya en f16 (KV f16 sin MLA): lo que devuelve un despacho que calculó el bloque en el dispositivo.
+    pub fn append_filas_f16(&mut self, k: &[u16], v: &[u16], n: usize) {
+        debug_assert!(self.dtype == KvDtype::F16 && !self.mla_latent);
+        self.k_f16.extend_from_slice(k);
+        self.v_f16.extend_from_slice(v);
+        self.mass.resize(self.mass.len() + n, 0.0);
+    }
+
     /// Compat: append desde f32 (antes `append_f16`).
     pub fn append_f16(&mut self, k: &[f32], v: &[f32]) {
         self.append(k, v);

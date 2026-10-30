@@ -150,6 +150,8 @@ extern "C" fn ap_entry() -> ! {
     // sin esto, un proceso ejecutando `syscall` en este core saltaría a la
     // pila de la BSP (o a lo que hubiera en LSTAR, sin inicializar = #GP).
     crate::task::syscall::init_msrs_ap();
+    crate::arch::cpu_hardening::enable_smep();
+    crate::arch::cpu_hardening::enable_smap();
     let id = apic::id();
     set_apic_id(cpu, id);
     crate::println!("smp: cpu apic {id} en línea");

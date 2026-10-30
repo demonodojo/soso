@@ -76,7 +76,9 @@ pub fn build(args: &[String]) {
     for (source_file, name) in [
         ("user/sal/sal-contar.sal", "sal-contar"),
         ("user/sal/escritorio/soso-wm.sal", "soso-wm"),
+        ("user/sal/escritorio/soso-comp.sal", "soso-comp"),
         ("user/sal/escritorio/demo-cliente.sal", "demo-cliente"),
+        ("user/sal/escritorio/soso-files.sal", "soso-files"),
         ("tests/sal/hello.sal", "hello"),
         ("tests/sal/runtime.sal", "runtime"),
     ] {
@@ -89,6 +91,8 @@ pub fn build(args: &[String]) {
                 .arg(root.join("target/sal").join(name)),
         );
     }
+    // Empaqueta el escritorio en rootfs aunque falte el bootstrap nativo (sal-native.sh).
+    instalar_guest(&root);
     if !cross {
         ejecutar(
             Command::new("bash")
@@ -100,32 +104,48 @@ pub fn build(args: &[String]) {
             root.join("target/sal/native/source.lock"),
         )
         .expect("procedencia compilador Sal");
+        let mut elf = Command::new("python3");
+        elf.current_dir(&root).args([
+            "scripts/sal-elf.py",
+            "target/sal/native/sal",
+            "target/sal/native/sal-llc",
+        ]);
+        ejecutar(&mut elf);
+        fs::copy(
+            root.join("config/sal-source.lock"),
+            root.join("target/sal/source.lock"),
+        )
+        .expect("procedencia Sal");
+        install(&root);
     }
-    // Rechazar fuentes que hayan cambiado durante el build.
+}
+
+fn instalar_guest(root: &Path) {
     ejecutar(
         Command::new("python3")
-            .current_dir(&root)
+            .current_dir(root)
             .arg("scripts/sal-source.py"),
     );
-    let mut elf = Command::new("python3");
-    elf.current_dir(&root).args([
-        "scripts/sal-elf.py",
-        "target/sal/sal-contar",
-        "target/sal/soso-wm",
-        "target/sal/demo-cliente",
-        "target/sal/hello",
-        "target/sal/runtime",
-    ]);
-    if !cross {
-        elf.args(["target/sal/native/sal", "target/sal/native/sal-llc"]);
-    }
-    ejecutar(&mut elf);
+    ejecutar(
+        Command::new("python3")
+            .current_dir(root)
+            .args([
+                "scripts/sal-elf.py",
+                "target/sal/sal-contar",
+                "target/sal/soso-wm",
+                "target/sal/soso-comp",
+                "target/sal/demo-cliente",
+                "target/sal/soso-files",
+                "target/sal/hello",
+                "target/sal/runtime",
+            ]),
+    );
     fs::copy(
         root.join("config/sal-source.lock"),
         root.join("target/sal/source.lock"),
     )
     .expect("procedencia Sal");
-    install(&root);
+    install(root);
 }
 
 fn copiar(src: &Path, dst: &Path) -> bool {
@@ -166,8 +186,16 @@ pub fn install(root: &Path) -> bool {
         &root.join("rootfs/bin/soso-wm"),
     );
     changed |= copiar(
+        &prepared.join("soso-comp"),
+        &root.join("rootfs/bin/soso-comp"),
+    );
+    changed |= copiar(
         &prepared.join("demo-cliente"),
         &root.join("rootfs/bin/demo-cliente"),
+    );
+    changed |= copiar(
+        &prepared.join("soso-files"),
+        &root.join("rootfs/bin/soso-files"),
     );
     for file in [
         "runtime.o",

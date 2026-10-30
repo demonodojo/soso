@@ -1,0 +1,285 @@
+import "soso.sal"
+import "comp_gfram_layout.sal"
+import "comp_gscen_layout.sal"
+import "comp_clip.sal"
+
+fn comp_surf_max() -> Int
+    19
+
+fn comp_surf_slot() -> Int
+    128
+
+fn comp_surf_tab_bytes() -> Int
+    comp_surf_max() * comp_surf_slot()
+
+fn comp_surf_id() -> Int
+    0
+
+fn comp_surf_tex() -> Int
+    8
+
+fn comp_surf_ptr() -> Int
+    16
+
+fn comp_surf_w() -> Int
+    24
+
+fn comp_surf_h() -> Int
+    32
+
+fn comp_surf_stride() -> Int
+    40
+
+fn comp_surf_gx() -> Int
+    48
+
+fn comp_surf_gy() -> Int
+    56
+
+fn comp_surf_gw() -> Int
+    64
+
+fn comp_surf_gh() -> Int
+    72
+
+fn comp_surf_flags() -> Int
+    80
+
+fn comp_surf_z() -> Int
+    88
+
+fn comp_surf_dx0() -> Int
+    96
+
+fn comp_surf_dy0() -> Int
+    104
+
+fn comp_surf_dx1() -> Int
+    112
+
+fn comp_surf_dy1() -> Int
+    120
+
+fn comp_surf_off(slot: Int, field: Int) -> Int
+    slot * comp_surf_slot() + field
+
+fn comp_surf_get(tab: Int, slot: Int, field: Int) -> Int ! alloc
+    bytes_get_i64(bytes_view_mem(tab, comp_surf_tab_bytes()), comp_surf_off(slot, field))
+
+fn comp_surf_set(tab: Int, slot: Int, field: Int, v: Int) -> Int ! alloc
+    bytes_set_i64(bytes_view_mem(tab, comp_surf_tab_bytes()), comp_surf_off(slot, field), v)
+    0
+
+fn comp_surf_occluded(tab: Int, slot: Int, ix: Int, iy: Int, iw: Int, ih: Int, z_me: Int) -> Int ! alloc
+    t = 0
+    hit = 0
+    while t < comp_surf_max()
+        if hit == 0
+            if t != slot
+                if comp_surf_get(tab, t, comp_surf_id()) >= 0
+                    tz = comp_surf_get(tab, t, comp_surf_z())
+                    if tz > z_me
+                        tf = comp_surf_get(tab, t, comp_surf_flags())
+                        if comp_surf_visible(tf) != 0
+                            if comp_surf_opaque(tf) != 0
+                                ogx = comp_surf_get(tab, t, comp_surf_gx())
+                                ogy = comp_surf_get(tab, t, comp_surf_gy())
+                                ogw = comp_surf_get(tab, t, comp_surf_gw())
+                                ogh = comp_surf_get(tab, t, comp_surf_gh())
+                                if comp_rect_contains(ogx, ogy, ogw, ogh, ix, iy, iw, ih) != 0
+                                    hit = 1
+        t = t + 1
+    hit
+
+fn comp_surf_find(tab: Int, id: Int) -> Int ! alloc
+    s = 0
+    found = -1
+    while s < comp_surf_max()
+        if found < 0
+            if comp_surf_get(tab, s, comp_surf_id()) == id
+                found = s
+        s = s + 1
+    found
+
+fn comp_surf_alloc(tab: Int, id: Int) -> Int ! alloc
+    slot = comp_surf_find(tab, id)
+    if slot >= 0
+        slot
+    else
+        s = 0
+        free = -1
+        while s < comp_surf_max()
+            if free < 0
+                if comp_surf_get(tab, s, comp_surf_id()) < 0
+                    free = s
+            s = s + 1
+        if free < 0
+            -1
+        else
+            _i = comp_surf_set(tab, free, comp_surf_id(), id)
+            free
+
+fn comp_surf_dmap_merge(tab: Int, slot: Int, x0: Int, y0: Int, x1: Int, y1: Int) -> Int ! alloc
+    if comp_surf_get(tab, slot, comp_surf_dx1()) <= comp_surf_get(tab, slot, comp_surf_dx0())
+        _a = comp_surf_set(tab, slot, comp_surf_dx0(), x0)
+        _b = comp_surf_set(tab, slot, comp_surf_dy0(), y0)
+        _c = comp_surf_set(tab, slot, comp_surf_dx1(), x1)
+        _d = comp_surf_set(tab, slot, comp_surf_dy1(), y1)
+    else
+        ox0 = comp_surf_get(tab, slot, comp_surf_dx0())
+        oy0 = comp_surf_get(tab, slot, comp_surf_dy0())
+        ox1 = comp_surf_get(tab, slot, comp_surf_dx1())
+        oy1 = comp_surf_get(tab, slot, comp_surf_dy1())
+        nx0 = x0
+        if ox0 < x0
+            nx0 = ox0
+        ny0 = y0
+        if oy0 < y0
+            ny0 = oy0
+        nx1 = x1
+        if ox1 > x1
+            nx1 = ox1
+        ny1 = y1
+        if oy1 > y1
+            ny1 = oy1
+        _a = comp_surf_set(tab, slot, comp_surf_dx0(), nx0)
+        _b = comp_surf_set(tab, slot, comp_surf_dy0(), ny0)
+        _c = comp_surf_set(tab, slot, comp_surf_dx1(), nx1)
+        _d = comp_surf_set(tab, slot, comp_surf_dy1(), ny1)
+    0
+
+fn comp_escena_init_tab(tab: Int) -> Int ! alloc
+    s = 0
+    while s < comp_surf_max()
+        _i = comp_surf_set(tab, s, comp_surf_id(), -1)
+        s = s + 1
+    0
+
+fn comp_escena_bind(st: Int, tab: Int, id: Int, sid: Int, w: Int, h: Int, stride: Int) -> Int ! io, alloc
+    slot = comp_surf_alloc(tab, id)
+    if slot < 0
+        0
+    else
+        clen = stride * h
+        tex = gpu_alloc_vram(clen)
+        if tex < 0
+            0
+        else
+            ptr = shm_map(sid)
+            if ptr < 0
+                _f = gpu_free(tex)
+                0
+            else
+                _t = comp_surf_set(tab, slot, comp_surf_tex(), tex)
+                _p = comp_surf_set(tab, slot, comp_surf_ptr(), ptr)
+                _w = comp_surf_set(tab, slot, comp_surf_w(), w)
+                _h = comp_surf_set(tab, slot, comp_surf_h(), h)
+                _s = comp_surf_set(tab, slot, comp_surf_stride(), stride)
+                1
+
+fn comp_escena_geom(tab: Int, id: Int, x: Int, y: Int, w: Int, h: Int, flags: Int, z: Int) -> Int ! alloc
+    slot = comp_surf_find(tab, id)
+    if slot < 0
+        0
+    else
+        _x = comp_surf_set(tab, slot, comp_surf_gx(), x)
+        _y = comp_surf_set(tab, slot, comp_surf_gy(), y)
+        _w = comp_surf_set(tab, slot, comp_surf_gw(), w)
+        _h = comp_surf_set(tab, slot, comp_surf_gh(), h)
+        _f = comp_surf_set(tab, slot, comp_surf_flags(), flags)
+        _z = comp_surf_set(tab, slot, comp_surf_z(), z)
+        1
+
+fn comp_escena_dmap(tab: Int, id: Int, x: Int, y: Int, w: Int, h: Int) -> Int ! alloc
+    slot = comp_surf_find(tab, id)
+    if slot < 0
+        0
+    else
+        comp_surf_dmap_merge(tab, slot, x, y, x + w, y + h)
+
+fn comp_escena_upload_dirty(st: Int, tab: Int) -> Int ! io, alloc
+    gup = st + comp_st_cmd_guprc()
+    s = 0
+    ok = 1
+    while s < comp_surf_max()
+        if comp_surf_get(tab, s, comp_surf_id()) >= 0
+            x0 = comp_surf_get(tab, s, comp_surf_dx0())
+            y0 = comp_surf_get(tab, s, comp_surf_dy0())
+            x1 = comp_surf_get(tab, s, comp_surf_dx1())
+            y1 = comp_surf_get(tab, s, comp_surf_dy1())
+            if x1 > x0
+                if y1 > y0
+                    tex = comp_surf_get(tab, s, comp_surf_tex())
+                    ptr = comp_surf_get(tab, s, comp_surf_ptr())
+                    stride = comp_surf_get(tab, s, comp_surf_stride())
+                    _p = comp_guprc_patch(gup, tex, ptr, stride, x0, y0, x1 - x0, y1 - y0)
+                    if gpu_submit(gup, comp_guprc_len()) < 0
+                        ok = 0
+                    _c = comp_surf_set(tab, s, comp_surf_dx0(), 0)
+                    _d = comp_surf_set(tab, s, comp_surf_dy0(), 0)
+                    _e = comp_surf_set(tab, s, comp_surf_dx1(), 0)
+                    _f = comp_surf_set(tab, s, comp_surf_dy1(), 0)
+        s = s + 1
+    ok
+
+fn comp_escena_emit_quad(gbuf: Int, n: Int, tab: Int, s: Int, dx: Int, dy: Int, w: Int, h: Int, sx: Int, sy: Int) -> Int ! alloc
+    tex = comp_surf_get(tab, s, comp_surf_tex())
+    tsp = comp_surf_get(tab, s, comp_surf_stride())
+    comp_gscen_patch_quad(gbuf, n, tex, dx, dy, w, h, tsp, sx, sy)
+
+fn comp_escena_commit(st: Int, tab: Int, gbuf: Int, px: Int, py: Int, pw: Int, ph: Int, clear_rt: Int) -> Int ! io, alloc
+    if comp_st_get(st, comp_st_gpu_ok()) == 0
+        0
+    else
+        _u = comp_escena_upload_dirty(st, tab)
+        rt = comp_st_get(st, comp_st_rt_h())
+        fb_w = comp_st_get(st, comp_st_fb_w())
+        fb_h = comp_st_get(st, comp_st_fb_h())
+        pitch = comp_st_get(st, comp_st_pitch())
+        rgba = comp_st_get(st, comp_st_rgba())
+        flags = 0
+        if clear_rt != 0
+            flags = comp_gscen_flag_clear()
+        cx1 = px + pw
+        cy1 = py + ph
+        n = 0
+        z = 0
+        while z < 64
+            if n < comp_gscen_max_quads()
+                s = 0
+                while s < comp_surf_max()
+                    if n < comp_gscen_max_quads()
+                        if comp_surf_get(tab, s, comp_surf_id()) >= 0
+                            if comp_surf_get(tab, s, comp_surf_z()) == z
+                                fl = comp_surf_get(tab, s, comp_surf_flags())
+                                if comp_surf_visible(fl) != 0
+                                    gw = comp_surf_get(tab, s, comp_surf_gw())
+                                    gh = comp_surf_get(tab, s, comp_surf_gh())
+                                    if gw > 0
+                                        if gh > 0
+                                            gx = comp_surf_get(tab, s, comp_surf_gx())
+                                            gy = comp_surf_get(tab, s, comp_surf_gy())
+                                            if clear_rt != 0
+                                                _q = comp_escena_emit_quad(gbuf, n, tab, s, gx, gy, gw, gh, 0, 0)
+                                                n = n + 1
+                                            else
+                                                iw = comp_intersect_len(gx, gx + gw, px, cx1)
+                                                if iw > 0
+                                                    ih = comp_intersect_len(gy, gy + gh, py, cy1)
+                                                    if ih > 0
+                                                        ix = comp_intersect_x0(gx, px)
+                                                        iy = comp_intersect_x0(gy, py)
+                                                        sx = ix - gx
+                                                        sy = iy - gy
+                                                        occ = comp_surf_occluded(tab, s, ix, iy, iw, ih, z)
+                                                        if occ == 0
+                                                            _q = comp_escena_emit_quad(gbuf, n, tab, s, ix, iy, iw, ih, sx, sy)
+                                                            n = n + 1
+                    s = s + 1
+            z = z + 1
+        _h = comp_gscen_patch_hdr(gbuf, rt, fb_w, fb_h, pitch, px, py, pw, ph, flags, rgba, n)
+        cmd_len = comp_gscen_hdr_len() + n * comp_gscen_quad_len()
+        if gpu_submit(gbuf, cmd_len) < 0
+            0
+        else
+            1
