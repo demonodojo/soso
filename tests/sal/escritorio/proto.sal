@@ -10,16 +10,36 @@ fn main() -> Int ! alloc
         if msg_get_u32(m, 4) != 640
             2
         else
-            _v = msg_encode_ventana(m, 3, 9, 640, 480, 0)
+            _v = msg_encode_ventana(m, 3, 9, 640, 480, 0, 1, 2)
             if msg_get_u32(m, 8) != 9
                 3
             else
-                _t = msg_encode_tecla(m, 97, 2)
-                if msg_get_u32(m, 4) != 97
-                    4
+                if msg_get_u32(m, 24) != 1
+                    12
                 else
-                    _d = msg_encode_danio(m, 10, 20, 100, 50)
-                    if msg_get_u32(m, 16) != 50
-                        5
+                    if msg_get_u32(m, 28) != 2
+                        13
                     else
-                        0
+                        _tm = msg_encode_tema(m, 0)
+                        if msg_get_op(m) != op_tema()
+                            14
+                        else
+                            if msg_get_u32(m, 4) != 0
+                                15
+                            else
+                                _es = msg_encode_escala(m, 2, 12, 24)
+                                if msg_get_op(m) != op_escala()
+                                    16
+                                else
+                                    if msg_get_u32(m, 8) != 12
+                                        17
+                                    else
+                                        _t = msg_encode_tecla(m, 97, 2)
+                                        if msg_get_u32(m, 4) != 97
+                                            4
+                                        else
+                                            _d = msg_encode_danio(m, 10, 20, 100, 50)
+                                            if msg_get_u32(m, 16) != 50
+                                                5
+                                            else
+                                                0

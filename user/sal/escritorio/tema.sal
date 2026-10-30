@@ -1,0 +1,171 @@
+import "superficie.sal"
+
+fn tema_oscuro() -> Int
+    0
+
+fn tema_claro() -> Int
+    1
+
+fn tema_fondo_arriba(t: Int) -> Int
+    if t == tema_claro()
+        color_rgb(220, 230, 245)
+    else
+        color_rgb(27, 31, 46)
+
+fn tema_fondo_abajo(t: Int) -> Int
+    if t == tema_claro()
+        color_rgb(243, 232, 247)
+    else
+        color_rgb(42, 31, 61)
+
+fn tema_barra(t: Int) -> Int
+    if t == tema_claro()
+        color_rgb(255, 255, 255)
+    else
+        color_rgb(18, 20, 28)
+
+fn tema_barra_alfa(t: Int) -> Int
+    if t == tema_claro()
+        178
+    else
+        184
+
+fn tema_texto(t: Int) -> Int
+    if t == tema_claro()
+        color_rgb(31, 36, 48)
+    else
+        color_rgb(230, 233, 242)
+
+fn tema_texto_tenue(t: Int) -> Int
+    if t == tema_claro()
+        color_rgb(96, 104, 120)
+    else
+        color_rgb(160, 168, 184)
+
+fn tema_acento(t: Int) -> Int
+    if t == tema_claro()
+        color_rgb(61, 111, 224)
+    else
+        color_rgb(122, 162, 247)
+
+fn tema_marco(t: Int, foco: Int) -> Int
+    if foco != 0
+        if t == tema_claro()
+            color_rgb(255, 255, 255)
+        else
+            color_rgb(43, 48, 69)
+    else
+        if t == tema_claro()
+            color_rgb(236, 238, 243)
+        else
+            color_rgb(35, 38, 52)
+
+fn tema_cliente_bg(t: Int) -> Int
+    if t == tema_claro()
+        color_rgb(252, 252, 254)
+    else
+        color_rgb(20, 20, 28)
+
+fn tema_menu(t: Int) -> Int
+    if t == tema_claro()
+        color_rgb(255, 255, 255)
+    else
+        color_rgb(32, 34, 48)
+
+fn tema_menu_alfa(t: Int) -> Int
+    if t == tema_claro()
+        200
+    else
+        210
+
+fn tema_menu_sel(t: Int) -> Int
+    if t == tema_claro()
+        color_rgb(228, 236, 252)
+    else
+        color_rgb(56, 72, 104)
+
+fn tema_sombra_alfa(t: Int) -> Int
+    if t == tema_claro()
+        48
+    else
+        72
+
+fn tema_boton_cerrar(t: Int) -> Int
+    color_rgb(220, 80, 90)
+
+fn tema_term_cursor(t: Int) -> Int
+    if t == tema_claro()
+        color_rgb(31, 36, 48)
+    else
+        color_rgb(255, 255, 255)
+
+fn tema_term_rgb(t: Int, i: Int) -> Int
+    if t == tema_claro()
+        if i == 0
+            color_rgb(255, 255, 255)
+        elsif i == 1
+            color_rgb(228, 0, 92)
+        elsif i == 2
+            color_rgb(80, 161, 79)
+        elsif i == 3
+            color_rgb(193, 156, 0)
+        elsif i == 4
+            color_rgb(0, 110, 217)
+        elsif i == 5
+            color_rgb(163, 48, 201)
+        elsif i == 6
+            color_rgb(0, 164, 164)
+        elsif i == 7
+            color_rgb(131, 145, 161)
+        elsif i == 8
+            color_rgb(131, 145, 161)
+        elsif i == 9
+            color_rgb(255, 0, 92)
+        elsif i == 10
+            color_rgb(80, 250, 123)
+        elsif i == 11
+            color_rgb(255, 184, 108)
+        elsif i == 12
+            color_rgb(0, 145, 255)
+        elsif i == 13
+            color_rgb(255, 121, 198)
+        elsif i == 14
+            color_rgb(0, 255, 255)
+        else
+            color_rgb(31, 36, 48)
+    else
+        if i == 0
+            color_rgb(26, 27, 38)
+        elsif i == 1
+            color_rgb(247, 118, 142)
+        elsif i == 2
+            color_rgb(158, 206, 106)
+        elsif i == 3
+            color_rgb(224, 175, 104)
+        elsif i == 4
+            color_rgb(122, 162, 247)
+        elsif i == 5
+            color_rgb(187, 154, 247)
+        elsif i == 6
+            color_rgb(125, 207, 255)
+        elsif i == 7
+            color_rgb(169, 177, 214)
+        elsif i == 8
+            color_rgb(86, 95, 137)
+        elsif i == 9
+            color_rgb(255, 158, 100)
+        elsif i == 10
+            color_rgb(166, 227, 161)
+        elsif i == 11
+            color_rgb(255, 203, 107)
+        elsif i == 12
+            color_rgb(125, 207, 255)
+        elsif i == 13
+            color_rgb(203, 166, 247)
+        elsif i == 14
+            color_rgb(148, 226, 213)
+        else
+            color_rgb(192, 202, 245)
+
+fn tema_luma(rgb: Int) -> Int
+    u8(u32_b2(rgb)) * 299 + u8(u32_b1(rgb)) * 587 + u8(u32_b0(rgb)) * 114

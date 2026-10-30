@@ -1,0 +1,90 @@
+import "mate.sal"
+import "fuentes.sal"
+
+fn zoom_dest_app() -> Int
+    0
+
+fn zoom_dest_wm() -> Int
+    1
+
+fn zoom_sentido_nada() -> Int
+    0
+
+fn zoom_sentido_mas() -> Int
+    1
+
+fn zoom_sentido_menos() -> Int
+    2
+
+fn zoom_tecla_es_mas(key: Int, shift: Int) -> Int
+    if shift != 0
+        if key == 42
+            1
+        elsif key == 43
+            1
+        else
+            0
+    else
+        if key == 43
+            1
+        elsif key == 61
+            1
+        else
+            0
+
+fn zoom_tecla_es_menos(key: Int, shift: Int) -> Int
+    if shift != 0
+        if key == 95
+            1
+        elsif key == 45
+            1
+        else
+            0
+    else
+        if key == 45
+            1
+        else
+            0
+
+fn zoom_tecla(key: Int, mods: Int) -> Int
+    if (mods & 2) == 0
+        zoom_sentido_nada()
+    else
+        if (mods & 4) != 0
+            zoom_sentido_nada()
+        else
+            shift = mods & 1
+            mas = zoom_tecla_es_mas(key, shift)
+            menos = zoom_tecla_es_menos(key, shift)
+            if mas == 0
+                if menos == 0
+                    zoom_sentido_nada()
+                else
+                    if shift != 0
+                        zoom_dest_wm() * 10 + zoom_sentido_menos()
+                    else
+                        zoom_dest_app() * 10 + zoom_sentido_menos()
+            else
+                if shift != 0
+                    zoom_dest_wm() * 10 + zoom_sentido_mas()
+                else
+                    zoom_dest_app() * 10 + zoom_sentido_mas()
+
+fn zoom_parse(v: Int) -> Int
+    v
+
+fn zoom_dest(v: Int) -> Int
+    v / 10
+
+fn zoom_sentido(v: Int) -> Int
+    mod_pos(v, 10)
+
+fn zoom_clamp(nivel: Int, delta: Int) -> Int
+    n = nivel + delta
+    if n < 0
+        0
+    else
+        if n >= fuente_niveles()
+            fuente_niveles() - 1
+        else
+            n

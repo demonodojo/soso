@@ -1,4 +1,5 @@
 import "ventanas.sal"
+import "fuentes.sal"
 
 fn lanz_nada() -> Int
     0
@@ -15,11 +16,14 @@ fn lanz_web() -> Int
 fn lanz_ficheros() -> Int
     5
 
+fn lanz_tema() -> Int
+    6
+
 fn lanz_salir() -> Int
     4
 
-fn lanz_margen() -> Int
-    8
+fn lanz_margen(gw: Int) -> Int
+    metrica_margen(gw)
 
 fn lanz_separacion() -> Int
     4
@@ -43,40 +47,46 @@ fn lanz_boton_accion(i: Int) -> Int
     else
         lanz_web()
 
-fn lanz_boton_ancho(i: Int) -> Int ! alloc
-    str_len(lanz_boton_texto(i)) * 8 + 2 * lanz_margen()
+fn lanz_boton_ancho(i: Int, gw: Int) -> Int ! alloc
+    str_len(lanz_boton_texto(i)) * gw + 2 * lanz_margen(gw)
 
-fn lanz_boton_x0(i: Int) -> Int ! alloc
+fn lanz_boton_x0(i: Int, gw: Int) -> Int ! alloc
     x = 0
     k = 0
     while k < i
-        x = x + lanz_boton_ancho(k) + lanz_separacion()
+        x = x + lanz_boton_ancho(k, gw) + lanz_separacion()
         k = k + 1
     x
 
-fn lanz_hit_barra(x: Int, y: Int) -> Int ! alloc
+fn lanz_hit_barra(x: Int, y: Int, gw: Int, gh: Int) -> Int ! alloc
     acc = lanz_nada()
+    bh = barra_alto(gh)
     if y >= 0
-        if y < barra_alto()
+        if y < bh
             i = 0
             while i < lanz_n_botones()
-                x0 = lanz_boton_x0(i)
+                x0 = lanz_boton_x0(i, gw)
                 if x >= x0
-                    if x < x0 + lanz_boton_ancho(i)
+                    if x < x0 + lanz_boton_ancho(i, gw)
                         acc = lanz_boton_accion(i)
                 i = i + 1
     acc
 
 fn lanz_menu_n() -> Int
-    4
+    5
 
-fn lanz_menu_texto(k: Int) -> String ! alloc
+fn lanz_menu_texto(k: Int, tema: Int) -> String ! alloc
     if k == 0
         d"Terminal"
     elsif k == 1
         d"Navegador web"
     elsif k == 2
         d"Archivos"
+    elsif k == 3
+        if tema == 1
+            d"Modo oscuro"
+        else
+            d"Modo claro"
     else
         d"Salir del escritorio"
 
@@ -87,37 +97,39 @@ fn lanz_menu_accion(k: Int) -> Int
         lanz_web()
     elsif k == 2
         lanz_ficheros()
+    elsif k == 3
+        lanz_tema()
     else
         lanz_salir()
 
-fn lanz_menu_item_alto() -> Int
-    22
+fn lanz_menu_item_alto(gh: Int) -> Int
+    metrica_menu_item_alto(gh)
 
-fn lanz_menu_x0() -> Int ! alloc
-    lanz_boton_x0(0)
+fn lanz_menu_x0(gw: Int) -> Int ! alloc
+    lanz_boton_x0(0, gw)
 
-fn lanz_menu_y0() -> Int
-    barra_alto()
+fn lanz_menu_y0(gh: Int) -> Int
+    barra_alto(gh)
 
-fn lanz_menu_ancho() -> Int ! alloc
+fn lanz_menu_ancho(gw: Int, gh: Int, tema: Int) -> Int ! alloc
     w = 0
     k = 0
     while k < lanz_menu_n()
-        w = max(w, str_len(lanz_menu_texto(k)) * 8)
+        w = max(w, str_len(lanz_menu_texto(k, tema)) * gw)
         k = k + 1
-    w + 2 * lanz_margen()
+    w + 2 * lanz_margen(gw)
 
-fn lanz_menu_alto() -> Int
-    lanz_menu_n() * lanz_menu_item_alto()
+fn lanz_menu_alto(gh: Int) -> Int
+    lanz_menu_n() * lanz_menu_item_alto(gh)
 
-fn lanz_menu_item(x: Int, y: Int) -> Int ! alloc
-    if ventana_contiene(x, y, lanz_menu_x0(), lanz_menu_y0(), lanz_menu_ancho(), lanz_menu_alto()) == 0
+fn lanz_menu_item(x: Int, y: Int, gw: Int, gh: Int, tema: Int) -> Int ! alloc
+    if ventana_contiene(x, y, lanz_menu_x0(gw), lanz_menu_y0(gh), lanz_menu_ancho(gw, gh, tema), lanz_menu_alto(gh)) == 0
         -1
     else
-        (y - lanz_menu_y0()) / lanz_menu_item_alto()
+        (y - lanz_menu_y0(gh)) / lanz_menu_item_alto(gh)
 
-fn lanz_hit_menu(x: Int, y: Int) -> Int ! alloc
-    k = lanz_menu_item(x, y)
+fn lanz_hit_menu(x: Int, y: Int, gw: Int, gh: Int, tema: Int) -> Int ! alloc
+    k = lanz_menu_item(x, y, gw, gh, tema)
     if k < 0
         lanz_nada()
     else

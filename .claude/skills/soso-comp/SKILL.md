@@ -12,6 +12,9 @@ description: >-
 Daemon **`soso-comp`** escucha en **`127.0.0.1:7432`**. El WM (`soso-wm`) le envía la
 escena; el compositor compone en RT (VRAM si `gfx3d`, si no SHM + `fb_present_rect`).
 
+En modo GPU el WM usa superficie **`wm_surf_fondo()` id 18** (degradado pantalla completa,
+z=0), barra z=5; menú/barra se pre-mezclan contra el fondo (sin alpha en GSCEN).
+
 Protocolo detallado: [`references/gscen-protocol.md`](references/gscen-protocol.md).
 
 Planes: compositor en [`docs/PLAN-NVDISPLAY.md`](../../docs/PLAN-NVDISPLAY.md) (F8),

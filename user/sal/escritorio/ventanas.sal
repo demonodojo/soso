@@ -1,4 +1,5 @@
 import "mate.sal"
+import "fuentes.sal"
 
 fn tipo_terminal() -> Int
     1
@@ -6,14 +7,14 @@ fn tipo_terminal() -> Int
 fn tipo_cliente() -> Int
     2
 
-fn barra_alto() -> Int
-    24
+fn barra_alto(gh: Int) -> Int
+    metrica_barra_alto(gh)
 
 fn ventana_min_ancho() -> Int
     120
 
-fn ventana_min_alto() -> Int
-    80
+fn ventana_min_alto(gh: Int) -> Int
+    metrica_barra_alto(gh) + 56
 
 fn ventana_contiene(x: Int, y: Int, wx: Int, wy: Int, ww: Int, wh: Int) -> Int
     if x < wx
@@ -27,21 +28,24 @@ fn ventana_contiene(x: Int, y: Int, wx: Int, wy: Int, ww: Int, wh: Int) -> Int
     else
         1
 
-fn ventana_hit_titulo(x: Int, y: Int, wx: Int, wy: Int, ww: Int) -> Int
-    if ventana_contiene(x, y, wx, wy, ww, barra_alto()) == 0
+fn ventana_hit_titulo(x: Int, y: Int, wx: Int, wy: Int, ww: Int, gh: Int) -> Int
+    bh = barra_alto(gh)
+    if ventana_contiene(x, y, wx, wy, ww, bh) == 0
         0
     else
         1
 
-fn ventana_hit_cerrar(x: Int, y: Int, wx: Int, wy: Int, ww: Int) -> Int
-    cx = wx + ww - 20
+fn ventana_hit_cerrar(x: Int, y: Int, wx: Int, wy: Int, ww: Int, gh: Int) -> Int
+    bh = barra_alto(gh)
+    btn = gh + 4
+    cx = wx + ww - btn - 4
     if x < cx
         0
-    elsif x >= cx + 16
+    elsif x >= cx + btn
         0
     elsif y < wy
         0
-    elsif y >= wy + barra_alto()
+    elsif y >= wy + bh
         0
     else
         1
@@ -79,13 +83,13 @@ fn ventana_mosaico_wx(i: Int, total: Int, pantalla_w: Int, pantalla_h: Int) -> I
     base_w = pantalla_w / cols
     col * base_w
 
-fn ventana_mosaico_wy(i: Int, total: Int, pantalla_w: Int, pantalla_h: Int) -> Int
+fn ventana_mosaico_wy(i: Int, total: Int, pantalla_w: Int, pantalla_h: Int, bar_h: Int) -> Int
     cols = ventana_mosaico_cols(total)
     filas = ventana_mosaico_filas(total, cols)
     row = i / cols
-    area_h = pantalla_h - barra_alto()
+    area_h = pantalla_h - bar_h
     base_h = area_h / filas
-    barra_alto() + row * base_h
+    bar_h + row * base_h
 
 fn ventana_mosaico_ww(i: Int, total: Int, pantalla_w: Int, pantalla_h: Int) -> Int
     cols = ventana_mosaico_cols(total)
@@ -97,15 +101,15 @@ fn ventana_mosaico_ww(i: Int, total: Int, pantalla_w: Int, pantalla_h: Int) -> I
     else
         base_w
 
-fn ventana_mosaico_wh(i: Int, total: Int, pantalla_w: Int, pantalla_h: Int) -> Int
+fn ventana_mosaico_wh(i: Int, total: Int, pantalla_w: Int, pantalla_h: Int, bar_h: Int) -> Int
     cols = ventana_mosaico_cols(total)
     filas = ventana_mosaico_filas(total, cols)
     row = i / cols
-    wy = ventana_mosaico_wy(i, total, pantalla_w, pantalla_h)
+    wy = ventana_mosaico_wy(i, total, pantalla_w, pantalla_h, bar_h)
     if row == filas - 1
         pantalla_h - wy
     else
-        area_h = pantalla_h - barra_alto()
+        area_h = pantalla_h - bar_h
         area_h / filas
 
 fn ventana_recortar_nx(wx: Int) -> Int
@@ -114,9 +118,9 @@ fn ventana_recortar_nx(wx: Int) -> Int
     else
         wx
 
-fn ventana_recortar_ny(wy: Int) -> Int
-    if wy < barra_alto()
-        barra_alto()
+fn ventana_recortar_ny(wy: Int, bar_h: Int) -> Int
+    if wy < bar_h
+        bar_h
     else
         wy
 
@@ -126,8 +130,9 @@ fn ventana_recortar_nw(wx: Int, ww: Int, sw: Int, nx: Int) -> Int
         nw = max(ventana_min_ancho(), sw - nx)
     nw
 
-fn ventana_recortar_nh(wh: Int, sh: Int, ny: Int) -> Int
+fn ventana_recortar_nh(wh: Int, sh: Int, ny: Int, gh: Int) -> Int
+    bh = barra_alto(gh)
     nh = wh
     if ny + nh > sh
-        nh = max(ventana_min_alto() + barra_alto(), sh - ny)
+        nh = max(ventana_min_alto(gh), sh - ny)
     nh

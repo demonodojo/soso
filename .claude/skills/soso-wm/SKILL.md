@@ -26,6 +26,7 @@ skill **`soso-comp`**.
 | Entrada WM | `user/sal/escritorio/soso-wm.sal` |
 | Bucle eventos | `wm.sal`, `ventanas.sal`, `tabla.sal` |
 | Terminal | `term.sal`, `superficie.sal`, `fuente.sal` |
+| Tema / escala | `tema.sal`, `fuentes.sal`, `zoom.sal` |
 | Protocolo 32 B | `proto.sal` ↔ `crates/soso-wm-proto` |
 | Cliente demo | `demo-cliente.sal` |
 | Explorador ficheros | `soso-files.sal`, `files_path.sal` → `/bin/soso-files` |
@@ -38,7 +39,8 @@ skill **`soso-comp`**.
 
 - Mensajes **32 bytes** little-endian (`MSG_LEN` en `soso-wm-proto`).
 - Ops principales: `HOLA`, `CREAR`, `DANIO`, `TITULO`, `CERRAR_CLI`; WM→cliente:
-  `VENTANA`, `TECLA`, `RATON`, `FOCO`, `REDIM`, `CERRAR_WM`, `FOTOGRAMA`.
+  `VENTANA`, `TECLA`, `RATON`, `FOCO`, `REDIM`, `CERRAR_WM`, `FOTOGRAMA`, `TEMA` (23),
+  `ESCALA` (24). `VENTANA`: tema u32 @24, escala inicial @28.
 - Tras `CREAR`, el WM asigna SHM; el cliente pinta y notifica daño con `DANIO(x,y,w,h)`.
 - **Versión** en `HOLA` (offset 4): mantener alineado Sal/Rust tests.
 
@@ -59,6 +61,9 @@ Tests layout Rust: `cargo test -p soso-wm-proto`.
 | Alt+Q | Cerrar ventana |
 | Alt+T | Flotante / mosaico |
 | Alt+W | `soso-web --grafico` (página de prueba empaquetada) |
+| Alt+D / menú «Modo claro/oscuro» | Alterna `tema.sal` (repinta + `op TEMA` a clientes) |
+| Ctrl+/- | Escala fuente **solo ventana con foco** (`tab_escala`, `op ESCALA`) |
+| Ctrl+Mayús+/- | Escala **solo WM** (barra/títulos; `REDIM` a clientes si cambia barra) |
 | Menú Aplicaciones → Archivos | `spawn` de `/bin/soso-files` (listado `open`/`getdents`, clic o j/k+Intro) |
 | Alt+Mayús+E | Salir a consola |
 

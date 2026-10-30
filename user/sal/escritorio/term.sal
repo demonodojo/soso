@@ -1,6 +1,8 @@
 import "mate.sal"
 import "utf8.sal"
 import "fuente.sal"
+import "superficie.sal"
+import "tema.sal"
 
 fn celda_bytes() -> Int
     8
@@ -189,6 +191,10 @@ fn term_leer_cp(ptr: Int, len: Int, w: Int, col: Int, row: Int) -> Int ! alloc
 fn term_leer_fg(ptr: Int, len: Int, w: Int, col: Int, row: Int) -> Int ! alloc
     b = bytes_view_mem(ptr, len)
     bytes_get_u8(b, term_idx(w, col, row) + 4)
+
+fn term_leer_bg(ptr: Int, len: Int, w: Int, col: Int, row: Int) -> Int ! alloc
+    b = bytes_view_mem(ptr, len)
+    bytes_get_u8(b, term_idx(w, col, row) + 5)
 
 fn term_limpiar_pantalla(st: Int, ptr: Int, len: Int, w: Int, h: Int) -> Int ! alloc
     row = 0
@@ -502,7 +508,7 @@ fn term_feed_byte(st: Int, ptr: Int, len: Int, w: Int, h: Int, byte: Int) -> Int
         _e = term_csi_byte(st, ptr, len, w, h, byte)
     0
 
-fn term_pintar(st: Int, grid: Int, glen: Int, cols: Int, rows: Int, psf: Int, psflen: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, ox: Int, oy: Int) -> Int ! alloc
+fn term_pintar(st: Int, grid: Int, glen: Int, cols: Int, rows: Int, psf: Int, psflen: Int, gw: Int, gh: Int, tema: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, ox: Int, oy: Int) -> Int ! alloc
     dr = term_st_get(st, st_dirty())
     row = 0
     while row < rows
@@ -516,10 +522,11 @@ fn term_pintar(st: Int, grid: Int, glen: Int, cols: Int, rows: Int, psf: Int, ps
             while col < cols
                 cp = term_leer_cp(grid, glen, cols, col, row)
                 fg = term_leer_fg(grid, glen, cols, col, row)
-                rgb_fg = term_paleta_rgb(fg)
-                rgb_bg = term_paleta_rgb(col_default_bg())
-                px = ox + col * 8
-                py = oy + row * 16
+                bg_i = term_leer_bg(grid, glen, cols, col, row)
+                rgb_fg = tema_term_rgb(tema, fg)
+                rgb_bg = tema_term_rgb(tema, bg_i)
+                px = ox + col * gw
+                py = oy + row * gh
                 _f = fuente_dibujar(psf, psflen, compos, clen, stride, bpp, fmt, cp, rgb_fg, rgb_bg, px, py)
                 col = col + 1
         row = row + 1
@@ -530,9 +537,9 @@ fn term_pintar(st: Int, grid: Int, glen: Int, cols: Int, rows: Int, psf: Int, ps
     pos = term_st_get(st, st_cursor())
     cc = term_cursor_col(pos)
     cr = term_cursor_row(pos)
-    cx = ox + cc * 8
-    cy = oy + cr * 16
-    _c = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, cx, cy, cx + 2, cy + 16, color_rgb(255, 255, 255))
+    cx = ox + cc * gw
+    cy = oy + cr * gh
+    _c = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, cx, cy, cx + 2, cy + gh, tema_term_cursor(tema))
     0
 
 fn term_limpiar(ptr: Int, len: Int, w: Int, h: Int) -> Int ! alloc

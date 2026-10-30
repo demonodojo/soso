@@ -3,6 +3,8 @@ import "proto.sal"
 import "superficie.sal"
 import "fuente.sal"
 import "files_path.sal"
+import "tema.sal"
+import "fuentes.sal"
 
 fn st_size() -> Int
     4096
@@ -15,6 +17,18 @@ fn st_off_sel() -> Int
 
 fn st_off_esc() -> Int
     16
+
+fn st_off_tema() -> Int
+    20
+
+fn st_off_nivel() -> Int
+    24
+
+fn st_off_gw() -> Int
+    28
+
+fn st_off_gh() -> Int
+    32
 
 fn st_off_path() -> Int
     64
@@ -79,6 +93,38 @@ fn st_esc(st: Int) -> Int ! alloc
 fn st_set_esc(st: Int, v: Int) -> Int ! alloc
     b = bytes_view_mem(st, st_size())
     bytes_set_u32(b, st_off_esc(), v)
+
+fn st_tema(st: Int) -> Int ! alloc
+    b = bytes_view_mem(st, st_size())
+    bytes_get_u32(b, st_off_tema())
+
+fn st_set_tema(st: Int, v: Int) -> Int ! alloc
+    b = bytes_view_mem(st, st_size())
+    bytes_set_u32(b, st_off_tema(), v)
+
+fn st_nivel(st: Int) -> Int ! alloc
+    b = bytes_view_mem(st, st_size())
+    bytes_get_u32(b, st_off_nivel())
+
+fn st_set_nivel(st: Int, v: Int) -> Int ! alloc
+    b = bytes_view_mem(st, st_size())
+    bytes_set_u32(b, st_off_nivel(), v)
+
+fn st_gw(st: Int) -> Int ! alloc
+    b = bytes_view_mem(st, st_size())
+    bytes_get_u32(b, st_off_gw())
+
+fn st_set_gw(st: Int, v: Int) -> Int ! alloc
+    b = bytes_view_mem(st, st_size())
+    bytes_set_u32(b, st_off_gw(), v)
+
+fn st_gh(st: Int) -> Int ! alloc
+    b = bytes_view_mem(st, st_size())
+    bytes_get_u32(b, st_off_gh())
+
+fn st_set_gh(st: Int, v: Int) -> Int ! alloc
+    b = bytes_view_mem(st, st_size())
+    bytes_set_u32(b, st_off_gh(), v)
 
 fn st_path_set_str(st: Int, s: String) -> Int ! alloc
     n = str_len(s)
@@ -219,76 +265,86 @@ fn files_reload(st: Int) -> Int ! io, alloc
             _e = st_row_push_literal(st, ft_file(), d"(vacío)")
         0
 
-fn files_color_bg() -> Int
-    color_rgb(28, 30, 38)
+fn files_color_bg(st: Int) -> Int ! alloc
+    tema_cliente_bg(st_tema(st))
 
-fn files_color_fg() -> Int
-    color_rgb(220, 224, 236)
+fn files_color_fg(st: Int) -> Int ! alloc
+    tema_texto(st_tema(st))
 
-fn files_color_sel() -> Int
-    color_rgb(56, 72, 104)
+fn files_color_sel(st: Int) -> Int ! alloc
+    tema_menu_sel(st_tema(st))
 
-fn files_color_dir() -> Int
-    color_rgb(140, 200, 255)
+fn files_color_dir(st: Int) -> Int ! alloc
+    tema_acento(st_tema(st))
 
-fn files_row_h() -> Int
-    16
+fn files_row_h(st: Int) -> Int ! alloc
+    st_gh(st)
 
-fn files_top_h() -> Int
-    20
+fn files_top_h(st: Int) -> Int ! alloc
+    st_gh(st) + 4
 
-fn files_texto_psf(psf: Int, plen: Int, pix: Int, plen_pix: Int, cw: Int, ch: Int, stride: Int, bpp: Int, fmt: Int, s: String, x: Int, y: Int, fg: Int, bg: Int) -> Int ! alloc
+fn files_texto_psf(st: Int, psf: Int, plen: Int, pix: Int, plen_pix: Int, cw: Int, ch: Int, stride: Int, bpp: Int, fmt: Int, s: String, x: Int, y: Int, fg: Int, bg: Int) -> Int ! alloc
+    gw = st_gw(st)
     n = str_len(s)
     j = 0
     while j < n
-        _d = fuente_dibujar(psf, plen, pix, plen_pix, stride, bpp, fmt, str_char(s, j), fg, bg, x + j * 8, y)
+        _d = fuente_dibujar(psf, plen, pix, plen_pix, stride, bpp, fmt, str_char(s, j), fg, bg, x + j * gw, y)
         j = j + 1
     0
 
-fn files_texto_bytes(psf: Int, plen: Int, pix: Int, plen_pix: Int, cw: Int, ch: Int, stride: Int, bpp: Int, fmt: Int, txt: Int, n: Int, x: Int, y: Int, fg: Int, bg: Int) -> Int ! alloc
+fn files_texto_bytes(st: Int, psf: Int, plen: Int, pix: Int, plen_pix: Int, cw: Int, ch: Int, stride: Int, bpp: Int, fmt: Int, txt: Int, n: Int, x: Int, y: Int, fg: Int, bg: Int) -> Int ! alloc
+    gw = st_gw(st)
     j = 0
     while j < n
-        if j < cw * 8
+        if j < cw * gw
             b = bytes_view_mem(txt, n)
             cp = bytes_get_u8(b, j)
             if cp != 0
-                _d = fuente_dibujar(psf, plen, pix, plen_pix, stride, bpp, fmt, cp, fg, bg, x + j * 8, y)
+                _d = fuente_dibujar(psf, plen, pix, plen_pix, stride, bpp, fmt, cp, fg, bg, x + j * gw, y)
         j = j + 1
     0
 
 fn files_pintar(st: Int, psf: Int, plen: Int, pix: Int, plen_pix: Int, cw: Int, ch: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
-    bg = files_color_bg()
-    fg = files_color_fg()
+    bg = files_color_bg(st)
+    fg = files_color_fg(st)
+    gw = st_gw(st)
+    gh = st_gh(st)
     _f = rellenar_rect(pix, plen_pix, cw, ch, stride, bpp, fmt, 0, 0, cw, ch, bg)
     path_s = d"/"
     if st_path_is_root(st) == 0
         tmp = bytes_new(st_path_len(st) + 1)
         _c = bytes_copy(bytes_ptr(tmp), 0, st, st_off_path(), st_path_len(st))
-        _t = files_texto_bytes(psf, plen, pix, plen_pix, cw, ch, stride, bpp, fmt, bytes_ptr(tmp), st_path_len(st), 4, 2, fg, bg)
+        _t = files_texto_bytes(st, psf, plen, pix, plen_pix, cw, ch, stride, bpp, fmt, bytes_ptr(tmp), st_path_len(st), gw, 2, fg, bg)
     else
-        _t0 = files_texto_psf(psf, plen, pix, plen_pix, cw, ch, stride, bpp, fmt, d"/", 4, 2, fg, bg)
+        _t0 = files_texto_psf(st, psf, plen, pix, plen_pix, cw, ch, stride, bpp, fmt, d"/", gw, 2, fg, bg)
     sel = st_sel(st)
     n = st_nrows(st)
+    row_h = files_row_h(st)
+    top_h = files_top_h(st)
     i = 0
     while i < n
-        y = files_top_h() + i * files_row_h()
-        if y + files_row_h() <= ch
+        y = top_h + i * row_h
+        if y + row_h <= ch
             row_bg = bg
             if i == sel
-                row_bg = files_color_sel()
-            _r = rellenar_rect(pix, plen_pix, cw, ch, stride, bpp, fmt, 0, y, cw, y + files_row_h(), row_bg)
+                cap_x0 = gw
+                cap_x1 = cw - gw
+                _c = rellenar_rect_redondeado(pix, plen_pix, cw, ch, stride, bpp, fmt, cap_x0, y + 1, cap_x1, y + row_h - 1, metrica_radio(gh), files_color_sel(st))
+                row_bg = files_color_sel(st)
+            else
+                _r = rellenar_rect(pix, plen_pix, cw, ch, stride, bpp, fmt, 0, y, cw, y + row_h, row_bg)
             nlen = st_row_nlen(st, i)
             ft = st_row_type(st, i)
             row_fg = fg
             if ft == ft_dir()
-                row_fg = files_color_dir()
-            px = 8
+                row_fg = files_color_dir(st)
+            px = gw
             if ft == ft_dir()
-                _p = files_texto_psf(psf, plen, pix, plen_pix, cw, ch, stride, bpp, fmt, d"[", px, y + 2, row_fg, row_bg)
-                px = px + 8
-            _n = files_texto_bytes(psf, plen, pix, plen_pix, cw, ch, stride, bpp, fmt, st_row_name_off(st, i), nlen, px, y + 2, row_fg, row_bg)
+                _p = files_texto_psf(st, psf, plen, pix, plen_pix, cw, ch, stride, bpp, fmt, d"[", px, y + 2, row_fg, row_bg)
+                px = px + gw
+            _n = files_texto_bytes(st, psf, plen, pix, plen_pix, cw, ch, stride, bpp, fmt, st_row_name_off(st, i), nlen, px, y + 2, row_fg, row_bg)
             if ft == ft_dir()
-                _q = files_texto_psf(psf, plen, pix, plen_pix, cw, ch, stride, bpp, fmt, d"]", px + nlen * 8, y + 2, row_fg, row_bg)
+                _q = files_texto_psf(st, psf, plen, pix, plen_pix, cw, ch, stride, bpp, fmt, d"]", px + nlen * gw, y + 2, row_fg, row_bg)
         i = i + 1
     0
 
@@ -298,10 +354,10 @@ fn files_danio(sock: Int, cw: Int, ch: Int) -> Int ! io, alloc
     write_fd(sock, md, msg_len())
 
 fn files_row_at_y(st: Int, y: Int) -> Int ! alloc
-    if y < files_top_h()
+    if y < files_top_h(st)
         -1
     else
-        r = (y - files_top_h()) / files_row_h()
+        r = (y - files_top_h(st)) / files_row_h(st)
         if r < 0
             -1
         else
@@ -411,6 +467,15 @@ fn files_bucle(sock: Int, st: Int, psf: Int, plen: Int, pix: Int, plen_pix: Int,
                     ry = msg_get_u32(m, 8)
                     btn = msg_get_u32(m, 12)
                     repint = files_on_raton(st, rx, ry, btn)
+                if op == op_tema()
+                    _tm = st_set_tema(st, msg_get_u32(m, 4))
+                    repint = 1
+                if op == op_escala()
+                    nv = msg_get_u32(m, 4)
+                    _n = st_set_nivel(st, nv)
+                    _gw = st_set_gw(st, msg_get_u32(m, 8))
+                    _gh = st_set_gh(st, msg_get_u32(m, 12))
+                    repint = 1
                 if op == op_cerrar_wm()
                     vivo = 0
                 if op == op_redim()
@@ -453,13 +518,19 @@ fn main() -> Int ! io, alloc
                     stride = cw
                     bpp = 4
                     fmt = msg_get_u32(rep, 20)
+                    tema = msg_get_u32(rep, 24)
+                    nivel = msg_get_u32(rep, 28)
                     st = bytes_ptr(bytes_new(st_size()))
+                    _te = st_set_tema(st, tema)
+                    _nv = st_set_nivel(st, nivel)
+                    _gw0 = st_set_gw(st, fuente_gw(nivel))
+                    _gh0 = st_set_gh(st, fuente_gh(nivel))
                     if argc() > 1
                         _ps = st_path_set_str(st, argv(1))
                     else
                         _pr = st_path_set_str(st, d"/")
                     _ld = files_reload(st)
-                    psf_s = read_file(d"/lib/fonts/spleen-8x16.psf2")
+                    psf_s = read_file(fuente_ruta(nivel))
                     psf_n = str_len(psf_s)
                     psf_buf = bytes_new(psf_n + 1)
                     str_bytes_copy(psf_buf, 0, psf_s)

@@ -1,0 +1,22 @@
+import "../../../user/sal/escritorio/zoom.sal"
+
+fn main() -> Int
+    z = zoom_tecla(61, 2)
+    if zoom_dest(z) != zoom_dest_app()
+        1
+    elsif zoom_sentido(z) != zoom_sentido_mas()
+        2
+    elsif zoom_tecla(45, 2) != zoom_dest_app() * 10 + zoom_sentido_menos()
+        3
+    else
+        z2 = zoom_tecla(42, 3)
+        if zoom_dest(z2) != zoom_dest_wm()
+            4
+        elsif zoom_clamp(4, 1) != 4
+            5
+        elsif zoom_clamp(0, -1) != 0
+            6
+        elsif metrica_barra_alto(16) != 24
+            7
+        else
+            0

@@ -39,6 +39,12 @@ fn op_cerrar_wm() -> Int
 fn op_fotograma() -> Int
     22
 
+fn op_tema() -> Int
+    23
+
+fn op_escala() -> Int
+    24
+
 fn msg_nuevo() -> Int ! alloc
     bytes_ptr(bytes_new(msg_len()))
 
@@ -69,13 +75,27 @@ fn msg_encode_crear(ptr: Int, w: Int, h: Int, titulo_off: Int) -> Int ! alloc
     msg_set_u32(ptr, 12, titulo_off)
     0
 
-fn msg_encode_ventana(ptr: Int, id: Int, shm: Int, w: Int, h: Int, fmt: Int) -> Int ! alloc
+fn msg_encode_ventana(ptr: Int, id: Int, shm: Int, w: Int, h: Int, fmt: Int, tema: Int, escala: Int) -> Int ! alloc
     msg_set_op(ptr, op_ventana())
     msg_set_u32(ptr, 4, id)
     msg_set_u32(ptr, 8, shm)
     msg_set_u32(ptr, 12, w)
     msg_set_u32(ptr, 16, h)
     msg_set_u32(ptr, 20, fmt)
+    msg_set_u32(ptr, 24, tema)
+    msg_set_u32(ptr, 28, escala)
+    0
+
+fn msg_encode_tema(ptr: Int, tema: Int) -> Int ! alloc
+    msg_set_op(ptr, op_tema())
+    msg_set_u32(ptr, 4, tema)
+    0
+
+fn msg_encode_escala(ptr: Int, nivel: Int, gw: Int, gh: Int) -> Int ! alloc
+    msg_set_op(ptr, op_escala())
+    msg_set_u32(ptr, 4, nivel)
+    msg_set_u32(ptr, 8, gw)
+    msg_set_u32(ptr, 12, gh)
     0
 
 fn msg_encode_tecla(ptr: Int, key: Int, mods: Int) -> Int ! alloc

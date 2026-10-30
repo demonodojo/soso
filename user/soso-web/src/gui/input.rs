@@ -11,6 +11,8 @@ pub struct InputState {
     pub key: Option<u32>,
     /// Tras `Redimensionar` del WM hay que recomputar el layout HTML.
     pub layout_dirty: bool,
+    pub tema_claro: bool,
+    pub ui_scale: f32,
     key_decoder: KeyDecoder,
 }
 
@@ -23,6 +25,8 @@ impl Default for InputState {
             btn_left_prev: false,
             key: None,
             layout_dirty: false,
+            tema_claro: false,
+            ui_scale: 1.0,
             key_decoder: KeyDecoder::default(),
         }
     }
@@ -127,6 +131,14 @@ pub fn poll_input_from_wm(st: &mut InputState, fb: &mut super::fb::Framebuffer) 
             st.layout_dirty = true;
         }
         Evento::Foco => {}
+        Evento::Tema { claro } => {
+            st.tema_claro = claro;
+            st.layout_dirty = true;
+        }
+        Evento::Escala { glifo_h, .. } => {
+            st.ui_scale = (glifo_h as f32 / 16.0).max(0.5).min(4.0);
+            st.layout_dirty = true;
+        }
     }
     true
 }

@@ -15,6 +15,8 @@ const OP_RATON: u32 = 18;
 const OP_FOCO: u32 = 19;
 const OP_REDIM: u32 = 20;
 const OP_CERRAR_WM: u32 = 21;
+const OP_TEMA: u32 = 23;
+const OP_ESCALA: u32 = 24;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Evento {
@@ -23,6 +25,8 @@ pub enum Evento {
     Foco,
     Redimensionar { w: u32, h: u32, shm_id: u64 },
     CerrarPedido,
+    Tema { claro: bool },
+    Escala { nivel: u32, glifo_w: u32, glifo_h: u32 },
 }
 
 pub enum Superficie {
@@ -36,6 +40,8 @@ pub enum Superficie {
         stride: u32,
         pixel_format: u8,
         bytes_per_pixel: u8,
+        tema: u32,
+        nivel: u32,
     },
     PantallaCompleta {
         fb: alloc::vec::Vec<u8>,
@@ -111,6 +117,8 @@ impl Superficie {
         let ww = u32_le(&buf, 12);
         let hh = u32_le(&buf, 16);
         let fmt = u32_le(&buf, 20) as u8;
+        let tema = u32_le(&buf, 24);
+        let nivel = u32_le(&buf, 28);
         let va = sys::shm_map(shm_id)?;
         let stride = ww;
         let len = (stride as u64)
@@ -126,7 +134,23 @@ impl Superficie {
             stride,
             pixel_format: fmt,
             bytes_per_pixel: 4,
+            tema,
+            nivel,
         })
+    }
+
+    pub fn tema_claro(&self) -> bool {
+        match self {
+            Superficie::Wm { tema, .. } => *tema != 0,
+            Superficie::PantallaCompleta { .. } => false,
+        }
+    }
+
+    pub fn nivel_inicial(&self) -> u32 {
+        match self {
+            Superficie::Wm { nivel, .. } => *nivel,
+            Superficie::PantallaCompleta { .. } => 1,
+        }
     }
 
     fn abrir_pantalla() -> Result<Self, i64> {
@@ -284,6 +308,14 @@ impl Superficie {
                 }))
             }
             OP_CERRAR_WM => Ok(Some(Evento::CerrarPedido)),
+            OP_TEMA => Ok(Some(Evento::Tema {
+                claro: u32_le(&buf, 4) != 0,
+            })),
+            OP_ESCALA => Ok(Some(Evento::Escala {
+                nivel: u32_le(&buf, 4),
+                glifo_w: u32_le(&buf, 8),
+                glifo_h: u32_le(&buf, 12),
+            })),
             _ => Ok(None),
         }
     }

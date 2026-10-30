@@ -1,0 +1,113 @@
+import "mate.sal"
+
+fn fuente_niveles() -> Int
+    5
+
+fn fuente_gw(nivel: Int) -> Int
+    if nivel == 0
+        6
+    elsif nivel == 1
+        8
+    elsif nivel == 2
+        12
+    elsif nivel == 3
+        16
+    else
+        32
+
+fn fuente_gh(nivel: Int) -> Int
+    if nivel == 0
+        12
+    elsif nivel == 1
+        16
+    elsif nivel == 2
+        24
+    elsif nivel == 3
+        32
+    else
+        64
+
+fn fuente_ruta(nivel: Int) -> String ! alloc
+    if nivel == 0
+        d"/lib/fonts/spleen-6x12.psf2"
+    elsif nivel == 1
+        d"/lib/fonts/spleen-8x16.psf2"
+    elsif nivel == 2
+        d"/lib/fonts/spleen-12x24.psf2"
+    elsif nivel == 3
+        d"/lib/fonts/spleen-16x32.psf2"
+    else
+        d"/lib/fonts/spleen-32x64.psf2"
+
+fn fuente_inicial_por_ancho(sw: Int) -> Int
+    if sw >= 1920
+        2
+    else
+        1
+
+fn fuente_tab_bytes() -> Int
+    fuente_niveles() * 16
+
+fn fuente_tab_ptr(tab: Int, nivel: Int, field: Int) -> Int
+    tab + nivel * 16 + field
+
+fn fuente_tab_get_ptr(tab: Int, nivel: Int) -> Int ! alloc
+    b = bytes_view_mem(tab, fuente_tab_bytes())
+    bytes_get_i64(b, nivel * 16)
+
+fn fuente_tab_get_len(tab: Int, nivel: Int) -> Int ! alloc
+    b = bytes_view_mem(tab, fuente_tab_bytes())
+    v = bytes_get_i64(b, nivel * 16 + 8)
+    if v < 0
+        0
+    else
+        v
+
+fn fuente_tab_set(tab: Int, nivel: Int, ptr: Int, len: Int) -> Int ! alloc
+    b = bytes_view_mem(tab, fuente_tab_bytes())
+    bytes_set_i64(b, nivel * 16, ptr)
+    bytes_set_i64(b, nivel * 16 + 8, len)
+    0
+
+fn fuente_tab_nuevo() -> Int ! alloc
+    bytes_ptr(bytes_new(fuente_tab_bytes()))
+
+fn fuente_cargar(tab: Int, nivel: Int) -> Int ! io, alloc
+    if fuente_tab_get_len(tab, nivel) > 0
+        0
+    else
+        s = read_file(fuente_ruta(nivel))
+        n = str_len(s)
+        if n < 32
+            -1
+        else
+            buf = bytes_new(n + 1)
+            str_bytes_copy(buf, 0, s)
+            _t = fuente_tab_set(tab, nivel, bytes_ptr(buf), n)
+            0
+
+fn fuente_psf(tab: Int, nivel: Int) -> Int ! io, alloc
+    _c = fuente_cargar(tab, nivel)
+    fuente_tab_get_ptr(tab, nivel)
+
+fn fuente_psf_len(tab: Int, nivel: Int) -> Int ! io, alloc
+    _c = fuente_cargar(tab, nivel)
+    fuente_tab_get_len(tab, nivel)
+
+fn metrica_barra_alto(gh: Int) -> Int
+    gh + 8
+
+fn metrica_menu_item_alto(gh: Int) -> Int
+    gh + 6
+
+fn metrica_margen(gw: Int) -> Int
+    gw
+
+fn metrica_radio(gh: Int) -> Int
+    if gh / 2 < 4
+        4
+    else
+        if gh / 2 > 12
+            12
+        else
+            gh / 2

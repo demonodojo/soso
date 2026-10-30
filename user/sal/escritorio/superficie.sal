@@ -12,6 +12,28 @@ fn pix_idx(stride_px: Int, bpp: Int, x: Int, y: Int) -> Int
 fn color_rgb(r: Int, g: Int, b: Int) -> Int
     u8(r) * 65536 + u8(g) * 256 + u8(b)
 
+fn mezclar_rgb(a: Int, b: Int, alfa: Int) -> Int
+    if alfa <= 0
+        b
+    elsif alfa >= 255
+        a
+    else
+        inv = 255 - alfa
+        r = (u8(u32_b2(a)) * alfa + u8(u32_b2(b)) * inv) / 255
+        g = (u8(u32_b1(a)) * alfa + u8(u32_b1(b)) * inv) / 255
+        bb = (u8(u32_b0(a)) * alfa + u8(u32_b0(b)) * inv) / 255
+        color_rgb(r, g, bb)
+
+fn color_interp(a: Int, b: Int, t: Int, denom: Int) -> Int
+    if denom <= 0
+        a
+    else
+        inv = denom - t
+        r = (u8(u32_b2(a)) * inv + u8(u32_b2(b)) * t) / denom
+        g = (u8(u32_b1(a)) * inv + u8(u32_b1(b)) * t) / denom
+        bb = (u8(u32_b0(a)) * inv + u8(u32_b0(b)) * t) / denom
+        color_rgb(r, g, bb)
+
 fn pixel_leer(ptr: Int, len: Int, stride: Int, bpp: Int, fmt: Int, x: Int, y: Int) -> Int ! alloc
     if bpp != 4
         0
@@ -76,6 +98,86 @@ fn rellenar_rect(ptr: Int, len: Int, ancho: Int, alto: Int, stride_px: Int, bpp:
         while y < yb
             off = pix_idx(stride_px, bpp, xa, y)
             bytes_fill_u32(b, off, colb, v)
+            y = y + 1
+        0
+
+fn rellenar_rect_alfa(ptr: Int, len: Int, ancho: Int, alto: Int, stride_px: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, rgb: Int, alfa: Int) -> Int ! alloc
+    ya = max(0, y0)
+    yb = min(alto, y1)
+    xa = max(0, x0)
+    xb = min(ancho, x1)
+    if xb <= xa
+        0
+    else
+        y = ya
+        while y < yb
+            x = xa
+            while x < xb
+                bg = pixel_leer(ptr, len, stride_px, bpp, fmt, x, y)
+                fg = mezclar_rgb(rgb, bg, alfa)
+                _p = pixel_escribir(ptr, len, stride_px, bpp, fmt, x, y, fg)
+                x = x + 1
+            y = y + 1
+        0
+
+fn degradado_vertical(ptr: Int, len: Int, ancho: Int, alto: Int, stride_px: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, arriba: Int, abajo: Int) -> Int ! alloc
+    ya = max(0, y0)
+    yb = min(alto, y1)
+    xa = max(0, x0)
+    xb = min(ancho, x1)
+    h = yb - ya
+    if h <= 0
+        0
+    else
+        y = ya
+        while y < yb
+            t = y - ya
+            c = color_interp(arriba, abajo, t, h - 1)
+            _r = rellenar_rect(ptr, len, ancho, alto, stride_px, bpp, fmt, xa, y, xb, y + 1, c)
+            y = y + 1
+        0
+
+fn rect_esquina_redonda_ok(x: Int, y: Int, x0: Int, y0: Int, x1: Int, y1: Int, radio: Int, esq: Int) -> Int
+    if radio <= 0
+        1
+    else
+        ok = 1
+        if esq == 0
+            cx = x0 + radio
+            cy = y0 + radio
+            if x < x0 + radio
+                if y < y0 + radio
+                    dx = cx - x
+                    dy = cy - y
+                    if dx * dx + dy * dy > radio * radio
+                        ok = 0
+        if esq == 1
+            cx = x1 - radio
+            cy = y0 + radio
+            if x >= x1 - radio
+                if y < y0 + radio
+                    dx = x - cx
+                    dy = cy - y
+                    if dx * dx + dy * dy > radio * radio
+                        ok = 0
+        ok
+
+fn rellenar_rect_redondeado(ptr: Int, len: Int, ancho: Int, alto: Int, stride_px: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, rgb: Int, radio: Int) -> Int ! alloc
+    ya = max(0, y0)
+    yb = min(alto, y1)
+    xa = max(0, x0)
+    xb = min(ancho, x1)
+    if xb <= xa
+        0
+    else
+        y = ya
+        while y < yb
+            x = xa
+            while x < xb
+                if rect_esquina_redonda_ok(x, y, xa, ya, xb, yb, radio, 0) != 0
+                    if rect_esquina_redonda_ok(x, y, xa, ya, xb, yb, radio, 1) != 0
+                        _p = pixel_escribir(ptr, len, stride_px, bpp, fmt, x, y, rgb)
+                x = x + 1
             y = y + 1
         0
 

@@ -6,7 +6,7 @@ fn tab_cap() -> Int
     16
 
 fn tab_slot_bytes() -> Int
-    216
+    224
 
 fn tab_tipo() -> Int
     0
@@ -70,6 +70,9 @@ fn tab_fww() -> Int
 
 fn tab_fwh() -> Int
     208
+
+fn tab_escala() -> Int
+    216
 
 fn tab_slot_off(i: Int) -> Int
     i * tab_slot_bytes()

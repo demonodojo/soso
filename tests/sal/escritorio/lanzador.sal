@@ -1,60 +1,67 @@
 import "../../../user/sal/escritorio/lanzador.sal"
 
-fn botones_ok() -> Int ! alloc
+fn botones_ok(gw: Int, gh: Int) -> Int ! alloc
     ok = 0
     i = 0
     while i < lanz_n_botones()
         if ok == 0
-            x0 = lanz_boton_x0(i)
-            x1 = x0 + lanz_boton_ancho(i)
+            x0 = lanz_boton_x0(i, gw)
+            x1 = x0 + lanz_boton_ancho(i, gw)
             cx = (x0 + x1) / 2
-            cy = barra_alto() / 2
-            if lanz_hit_barra(cx, cy) != lanz_boton_accion(i)
+            cy = barra_alto(gh) / 2
+            if lanz_hit_barra(cx, cy, gw, gh) != lanz_boton_accion(i)
                 ok = 10 + i
-            if lanz_hit_barra(cx, barra_alto()) != lanz_nada()
+            if lanz_hit_barra(cx, barra_alto(gh), gw, gh) != lanz_nada()
                 ok = 20 + i
             if i > 0
-                if x0 < lanz_boton_x0(i - 1) + lanz_boton_ancho(i - 1)
+                if x0 < lanz_boton_x0(i - 1, gw) + lanz_boton_ancho(i - 1, gw)
                     ok = 30 + i
-                if lanz_hit_barra(x0 - 1, cy) != lanz_nada()
+                if lanz_hit_barra(x0 - 1, cy, gw, gh) != lanz_nada()
                     ok = 40 + i
         i = i + 1
     ok
 
-fn menu_ok() -> Int ! alloc
+fn menu_ok(gw: Int, gh: Int, tema: Int) -> Int ! alloc
     ok = 0
     k = 0
     while k < lanz_menu_n()
         if ok == 0
-            cy = lanz_menu_y0() + k * lanz_menu_item_alto() + lanz_menu_item_alto() / 2
-            cx = lanz_menu_x0() + lanz_menu_ancho() / 2
-            if lanz_hit_menu(cx, cy) != lanz_menu_accion(k)
+            cy = lanz_menu_y0(gh) + k * lanz_menu_item_alto(gh) + lanz_menu_item_alto(gh) / 2
+            cx = lanz_menu_x0(gw) + lanz_menu_ancho(gw, gh, tema) / 2
+            if lanz_hit_menu(cx, cy, gw, gh, tema) != lanz_menu_accion(k)
                 ok = 50 + k
-            if str_len(lanz_menu_texto(k)) * 8 + 2 * lanz_margen() > lanz_menu_ancho()
+            if str_len(lanz_menu_texto(k, tema)) * gw + 2 * lanz_margen(gw) > lanz_menu_ancho(gw, gh, tema)
                 ok = 60 + k
         k = k + 1
     ok
 
 fn main() -> Int ! alloc
-    if lanz_boton_accion(0) != lanz_menu()
+    gw = 8
+    gh = 16
+    tema = 0
+    if lanz_menu_n() != 5
+        9
+    elsif lanz_menu_accion(3) != lanz_tema()
+        10
+    elsif lanz_boton_accion(0) != lanz_menu()
         1
-    elsif lanz_hit_barra(lanz_boton_x0(0) + 2, 2) != lanz_menu()
+    elsif lanz_hit_barra(lanz_boton_x0(0, gw) + 2, 2, gw, gh) != lanz_menu()
         2
-    elsif botones_ok() != 0
-        botones_ok()
-    elsif menu_ok() != 0
-        menu_ok()
-    elsif lanz_hit_menu(lanz_menu_x0() + lanz_menu_ancho(), lanz_menu_y0() + 2) != lanz_nada()
+    elsif botones_ok(gw, gh) != 0
+        botones_ok(gw, gh)
+    elsif menu_ok(gw, gh, tema) != 0
+        menu_ok(gw, gh, tema)
+    elsif lanz_hit_menu(lanz_menu_x0(gw) + lanz_menu_ancho(gw, gh, tema), lanz_menu_y0(gh) + 2, gw, gh, tema) != lanz_nada()
         3
-    elsif lanz_hit_menu(lanz_menu_x0() + 2, lanz_menu_y0() + lanz_menu_alto()) != lanz_nada()
+    elsif lanz_hit_menu(lanz_menu_x0(gw) + 2, lanz_menu_y0(gh) + lanz_menu_alto(gh), gw, gh, tema) != lanz_nada()
         4
-    elsif lanz_hit_menu(lanz_menu_x0() + 2, lanz_menu_y0() - 1) != lanz_nada()
+    elsif lanz_hit_menu(lanz_menu_x0(gw) + 2, lanz_menu_y0(gh) - 1, gw, gh, tema) != lanz_nada()
         5
     elsif lanz_menu_accion(lanz_menu_n() - 1) != lanz_salir()
         6
     elsif lanz_menu_accion(2) != lanz_ficheros()
         7
-    elsif str_eq(lanz_menu_texto(2), d"Archivos") == 0
+    elsif str_eq(lanz_menu_texto(2, tema), d"Archivos") == 0
         8
     else
         0

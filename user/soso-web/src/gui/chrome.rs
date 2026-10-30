@@ -81,6 +81,9 @@ impl TabMeta {
 
 #[derive(Clone, Debug, Default)]
 pub struct Chrome {
+    pub tema_claro: bool,
+    /// Factor de escala UI (nivel WM → glifo_h / 16).
+    pub ui_scale: f32,
     pub tabs: Vec<TabMeta>,
     pub active: usize,
     pub url_focus: bool,

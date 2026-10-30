@@ -14,11 +14,45 @@ use super::chrome::{
 };
 use super::fb::Framebuffer;
 use super::layout::{
-    Document, LayoutBox, Node, Style, BAR_ROW_HEIGHT, CHROME_HEIGHT, SCROLLBAR_W, TAB_ROW_HEIGHT,
+    Document, LayoutBox, Node, Style, BAR_ROW_HEIGHT, CHROME_HEIGHT, SCROLLBAR_W,
+    TAB_ROW_HEIGHT,
 };
 use soso_web_core::html::TEXT_ALIGN_CENTER;
 
 pub const DEFAULT_FONT: &str = "/lib/fonts/DejaVuSans.ttf";
+
+struct TemaCromo {
+    shell: (u8, u8, u8),
+    tab_row: (u8, u8, u8),
+    btn: (u8, u8, u8),
+    text: (u8, u8, u8),
+    url_bg: (u8, u8, u8),
+    url_bg_focus: (u8, u8, u8),
+}
+
+impl TemaCromo {
+    fn for_tema(claro: bool) -> Self {
+        if claro {
+            Self {
+                shell: (0xf3, 0xf4, 0xf6),
+                tab_row: (0xe8, 0xea, 0xef),
+                btn: (0xd8, 0xdc, 0xe4),
+                text: (0x1f, 0x24, 0x30),
+                url_bg: (0xff, 0xff, 0xff),
+                url_bg_focus: (0xe8, 0xec, 0xf8),
+            }
+        } else {
+            Self {
+                shell: (0x28, 0x2c, 0x38),
+                tab_row: (0x20, 0x22, 0x28),
+                btn: (0x40, 0x48, 0x58),
+                text: (0xe0, 0xe4, 0xec),
+                url_bg: (0x1c, 0x20, 0x28),
+                url_bg_focus: (0x38, 0x40, 0x50),
+            }
+        }
+    }
+}
 
 pub struct Renderer {
     font: Font,
@@ -164,11 +198,22 @@ impl Renderer {
     }
 
     fn draw_chrome(&mut self, fb: &mut Framebuffer, chrome: &Chrome, bookmarked: bool) {
+        let sc = chrome.ui_scale.max(0.75);
+        let tema = TemaCromo::for_tema(chrome.tema_claro);
+        let chrome_h = CHROME_HEIGHT * sc;
+        let tab_h = TAB_ROW_HEIGHT * sc;
+        let bar_h = BAR_ROW_HEIGHT * sc;
         let w = fb.info.width as f32;
-        fill_rect(fb, 0.0, 0.0, w, CHROME_HEIGHT, 0x28, 0x2c, 0x38);
-        fill_rect(fb, 0.0, 0.0, w, TAB_ROW_HEIGHT, 0x20, 0x22, 0x28);
-        fill_rect(fb, 2.0, 4.0, NEW_TAB_W - 4.0, TAB_ROW_HEIGHT - 8.0, 0x40, 0x48, 0x58);
-        draw_text_ttf(self, fb, "+", 10.0, 5.0, 14.0, 0xE0, 0xE4, 0xEC);
+        let (sr, sg, sb) = tema.shell;
+        fill_rect(fb, 0.0, 0.0, w, chrome_h, sr, sg, sb);
+        let (tr, tg, tb) = tema.tab_row;
+        fill_rect(fb, 0.0, 0.0, w, tab_h, tr, tg, tb);
+        let (br, bg, bb) = tema.btn;
+        let new_w = NEW_TAB_W * sc;
+        let close_w = CLOSE_TAB_W * sc;
+        fill_rect(fb, 2.0, 4.0, new_w - 4.0, tab_h - 8.0, br, bg, bb);
+        let (txr, txg, txb) = tema.text;
+        draw_text_ttf(self, fb, "+", 10.0 * sc, 5.0 * sc, 14.0 * sc, txr, txg, txb);
         fill_rect(
             fb,
             NEW_TAB_W + 2.0,

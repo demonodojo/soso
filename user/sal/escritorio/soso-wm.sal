@@ -44,15 +44,17 @@ fn term_busca_cp(grid: Int, glen: Int, w: Int, h: Int, cp: Int) -> Int ! alloc
         row = row + 1
     found
 
-fn prueba_term_echo(tab: Int, i: Int, cp: Int) -> Int ! alloc
+fn prueba_term_echo(st: Int, tab: Int, i: Int, cp: Int) -> Int ! alloc
     if tab_get(tab, i, tab_tipo()) != tab_tipo_term()
         0
     else
         grid = tab_get(tab, i, tab_shm_ptr())
         ww = tab_get(tab, i, tab_ww())
         wh = tab_get(tab, i, tab_wh())
-        cols = wm_term_cols(ww)
-        rows = wm_term_rows(wh)
+        gw = wm_tab_gw(tab, i)
+        gh = wm_tab_gh(tab, i)
+        cols = wm_term_cols(ww, gw)
+        rows = wm_term_rows(wh, gh, wm_bar_h(st))
         term_busca_cp(grid, cols * rows * celda_bytes(), cols, rows, cp)
 
 fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
@@ -62,7 +64,7 @@ fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, 
         evt = bytes_ptr(bytes_new(24 * 8))
         msg = bytes_ptr(bytes_new(msg_len()))
         st = st_nuevo(evt, msg)
-        _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo())
+        _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo(st))
         _t1 = wm_abrir_terminal(st, sw, sh)
         tab = st_get(st, st_tab())
         t0i = st_get(st, st_focus())
@@ -89,11 +91,11 @@ fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, 
                 tab = st_get(st, st_tab())
                 if uno == 0
                     if t0i >= 0
-                        if prueba_term_echo(tab, t0i, 117) != 0
+                        if prueba_term_echo(st, tab, t0i, 117) != 0
                             uno = 1
                 if dos == 0
                     if t1i >= 0
-                        if prueba_term_echo(tab, t1i, 100) != 0
+                        if prueba_term_echo(st, tab, t1i, 100) != 0
                             dos = 1
                 if demo == 0
                     fi = st_get(st, st_focus())
@@ -101,7 +103,7 @@ fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, 
                         if tab_get(tab, fi, tab_fase()) == 2
                             wx = tab_get(tab, fi, tab_wx())
                             wy = tab_get(tab, fi, tab_wy())
-                            if prueba_pixel_ok(compos, clen, stride, bpp, fmt, wx + 10, wy + barra_alto() + 10, 40, 80, 200) != 0
+                            if prueba_pixel_ok(compos, clen, stride, bpp, fmt, wx + 10, wy + wm_bar_h(st) + 10, 40, 80, 200) != 0
                                 demo = 1
                 if uno != 0
                     if dos != 0
@@ -137,7 +139,7 @@ fn bucle_grafico(ejecutar: String) -> Int ! io, alloc
             compos = wm_comp_ensure(st, sw, sh, stride, sin_comp)
             if compos < 0
                 compos = bytes_ptr(bytes_new(plen))
-            _bg = rellenar_rect(compos, plen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo())
+            _bg = rellenar_rect(compos, plen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo(st))
             listener = tcp_listen(puerto_wm())
             if listener < 0
                 rc = 4
@@ -216,7 +218,7 @@ fn prueba_web_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: I
         evt = bytes_ptr(bytes_new(24 * 8))
         msg = bytes_ptr(bytes_new(msg_len()))
         st = st_nuevo(evt, msg)
-        _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo())
+        _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo(st))
         _p = spawn_io_4(d"/var/paquetes/soso-web/bin/soso-web", d"--grafico", d"--local", d"/var/paquetes/soso-web/share/ejemplo/web-prueba.html", 0, 0, 0, fd_kernel_log())
         t0 = uptime_ms()
         ok = 0
@@ -274,7 +276,7 @@ fn prueba_layout_mosaic(st: Int, sw: Int, sh: Int) -> Int ! alloc
                 wh = tab_get(tab, i, tab_wh())
                 if ww < ventana_min_ancho()
                     ok = 110 + k
-                if wh < ventana_min_alto() + barra_alto()
+                if wh < ventana_min_alto(wm_gh_wm(st)) + wm_bar_h(st)
                     ok = 120 + k
             k = k + 1
         a = 0
@@ -326,13 +328,13 @@ fn prueba_layout_float(st: Int, sw: Int, sh: Int) -> Int ! alloc
     tab = st_get(st, st_tab())
     i = 0
     _x = tab_set(tab, i, tab_wx(), 0)
-    _y = tab_set(tab, i, tab_wy(), 40 + barra_alto())
+    _y = tab_set(tab, i, tab_wy(), 40 + wm_bar_h(st))
     _w = tab_set(tab, i, tab_ww(), 500)
-    _h = tab_set(tab, i, tab_wh(), 350 + barra_alto())
+    _h = tab_set(tab, i, tab_wh(), 350 + wm_bar_h(st))
     _fx = tab_set(tab, i, tab_fwx(), 0)
-    _fy = tab_set(tab, i, tab_fwy(), 40 + barra_alto())
+    _fy = tab_set(tab, i, tab_fwy(), 40 + wm_bar_h(st))
     _fw = tab_set(tab, i, tab_fww(), 500)
-    _fh = tab_set(tab, i, tab_fwh(), 350 + barra_alto())
+    _fh = tab_set(tab, i, tab_fwh(), 350 + wm_bar_h(st))
     rc = 0
     if rc == 0
         _m = st_set(st, st_mosaic(), 1)
@@ -369,7 +371,7 @@ fn prueba_layout_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp
     evt = bytes_ptr(bytes_new(24 * 8))
     msg = bytes_ptr(bytes_new(msg_len()))
     st = st_nuevo(evt, msg)
-    _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo())
+    _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo(st))
     _prep = prueba_layout_preparar(st, sw, sh)
     ok = prueba_layout_mosaic(st, sw, sh)
     if ok == 0
@@ -401,12 +403,12 @@ fn fotograma() -> Int ! io, alloc
             compos = bytes_ptr(bytes_new(plen))
             evt = bytes_ptr(bytes_new(24 * 8))
             msg = bytes_ptr(bytes_new(msg_len()))
-            _bg = rellenar_rect(compos, plen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo())
+            st = st_nuevo(evt, msg)
+            _bg = wm_pintar_fondo(st, compos, plen, sw, sh, stride, bpp, fmt)
             listener = tcp_listen(puerto_wm())
             if listener < 0
                 rc = 4
             if listener >= 0
-                st = st_nuevo(evt, msg)
                 _ic = wm_iniciar_cursor(st, sw, sh)
                 _d0 = wm_marcar_dirty(st, 0, 0, sw, sh)
                 n = 0

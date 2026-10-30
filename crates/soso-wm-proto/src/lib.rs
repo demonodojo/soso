@@ -22,6 +22,12 @@ pub mod op {
     pub const REDIM: u32 = 20;
     pub const CERRAR_WM: u32 = 21;
     pub const FOTOGRAMA: u32 = 22;
+    pub const TEMA: u32 = 23;
+    pub const ESCALA: u32 = 24;
+}
+
+pub mod escala {
+    pub const NIVELES: u32 = 5;
 }
 
 pub mod comp {
@@ -87,7 +93,7 @@ impl Msg {
         m
     }
 
-    pub fn encode_ventana(id: u32, shm: u32, w: u32, h: u32, fmt: u32) -> Self {
+    pub fn encode_ventana(id: u32, shm: u32, w: u32, h: u32, fmt: u32, tema: u32, escala: u32) -> Self {
         let mut m = Self::zero();
         m.set_op(op::VENTANA);
         m.set_u32(4, id);
@@ -95,6 +101,24 @@ impl Msg {
         m.set_u32(12, w);
         m.set_u32(16, h);
         m.set_u32(20, fmt);
+        m.set_u32(24, tema);
+        m.set_u32(28, escala);
+        m
+    }
+
+    pub fn encode_tema(tema: u32) -> Self {
+        let mut m = Self::zero();
+        m.set_op(op::TEMA);
+        m.set_u32(4, tema);
+        m
+    }
+
+    pub fn encode_escala(nivel: u32, gw: u32, gh: u32) -> Self {
+        let mut m = Self::zero();
+        m.set_op(op::ESCALA);
+        m.set_u32(4, nivel);
+        m.set_u32(8, gw);
+        m.set_u32(12, gh);
         m
     }
 
@@ -219,7 +243,7 @@ mod tests {
         assert_eq!(vecs[0], *hola.as_bytes());
         let crear = Msg::encode_crear(640, 480, 16);
         assert_eq!(vecs[1], *crear.as_bytes());
-        let ventana = Msg::encode_ventana(3, 9, 640, 480, 0);
+        let ventana = Msg::encode_ventana(3, 9, 640, 480, 0, 0, 0);
         assert_eq!(vecs[2], *ventana.as_bytes());
         let tecla = Msg::encode_tecla(b'a' as u32, 2);
         assert_eq!(vecs[3], *tecla.as_bytes());
@@ -256,5 +280,21 @@ mod tests {
         let commit = Msg::encode_comp_commit(0, 0, 640, 480, comp::COMMIT_CLEAR_RT);
         assert_eq!(commit.op(), comp::COMMIT);
         assert_eq!(commit.u32(20), comp::COMMIT_CLEAR_RT);
+    }
+
+    #[test]
+    fn tema_escala_y_ventana_offsets() {
+        let v = Msg::encode_ventana(1, 2, 100, 200, 0, 1, 2);
+        assert_eq!(v.u32(24), 1);
+        assert_eq!(v.u32(28), 2);
+        let t = Msg::encode_tema(0);
+        assert_eq!(t.op(), op::TEMA);
+        assert_eq!(t.u32(4), 0);
+        let e = Msg::encode_escala(2, 12, 24);
+        assert_eq!(e.op(), op::ESCALA);
+        assert_eq!(e.u32(4), 2);
+        assert_eq!(e.u32(8), 12);
+        assert_eq!(e.u32(12), 24);
+        assert_eq!(escala::NIVELES, 5);
     }
 }

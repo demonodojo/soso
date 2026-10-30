@@ -687,6 +687,8 @@ fn modo_grafico(a: Args) -> u8 {
         if dirty || !wm {
             let bookmarked =
                 bookmarks::contains_url(chrome_st.active_tab().url_text.as_str());
+            chrome_st.tema_claro = input_st.tema_claro;
+            chrome_st.ui_scale = input_st.ui_scale;
             renderer.draw_frame(
                 &mut fb_dev,
                 &page.doc,
