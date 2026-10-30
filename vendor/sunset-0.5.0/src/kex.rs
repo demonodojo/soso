@@ -57,6 +57,8 @@ const marker_only_kexs: &[&str] = &[
 ];
 
 const fixed_options_hostsig: &[&str] = &[
+    #[cfg(feature = "mldsa")]
+    SSH_NAME_MLDSA_65,
     SSH_NAME_ED25519,
     #[cfg(feature = "rsa")]
     SSH_NAME_RSA_SHA256,
@@ -706,8 +708,13 @@ impl Kex<Server> {
 
     // Not inherently server-only, but no client use yet in sunset.
     pub fn send_ext_info(&self, s: &mut TrafSend) -> Result<()> {
-        if cfg!(feature = "rsa") {
+        if cfg!(any(feature = "rsa", feature = "mldsa")) {
             // OK unwrap: namelist has capacity
+            #[cfg(feature = "mldsa")]
+            let algs = ([SSH_NAME_MLDSA_65, SSH_NAME_ED25519].as_slice())
+                .try_into()
+                .unwrap();
+            #[cfg(all(not(feature = "mldsa"), feature = "rsa"))]
             let algs = ([SSH_NAME_RSA_SHA256, SSH_NAME_ED25519].as_slice())
                 .try_into()
                 .unwrap();

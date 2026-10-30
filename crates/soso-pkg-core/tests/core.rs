@@ -57,9 +57,19 @@ fn indice_comandos_sin_conflicto() {
 }
 
 #[test]
-fn indice_comandos_conflicto_bin() {
+fn indice_comandos_paquete_sustituye_bin() {
     let (man, _) = build_demo();
-    let r = reconstruir(&[("demo".into(), man)], &["demo"]);
+    let idx = reconstruir(&[("demo".into(), man)], &["demo"]).unwrap();
+    assert_eq!(idx.resolver("demo"), Some("/var/paquetes/demo/bin/demo"));
+}
+
+#[test]
+fn indice_comandos_conflicto_dos_paquetes() {
+    let (man, _) = build_demo();
+    let r = reconstruir(
+        &[("demo".into(), man.clone()), ("otro".into(), man)],
+        &[],
+    );
     assert!(r.is_err());
     assert!(r.unwrap_err().contains("demo"));
 }

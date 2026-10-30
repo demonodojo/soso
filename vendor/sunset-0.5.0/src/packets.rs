@@ -327,6 +327,10 @@ pub struct UserauthBanner<'a> {
 #[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
 #[sshwire(variant_prefix)]
 pub enum PubKey<'a> {
+    #[cfg(feature = "mldsa")]
+    #[sshwire(variant = SSH_NAME_MLDSA_65)]
+    Mldsa65(Mldsa65PubKey),
+
     #[sshwire(variant = SSH_NAME_ED25519)]
     Ed25519(Ed25519PubKey),
 
@@ -346,6 +350,8 @@ impl PubKey<'_> {
     /// The algorithm name presented. May be invalid.
     pub fn algorithm_name(&self) -> Result<&str, &Unknown<'_>> {
         match self {
+            #[cfg(feature = "mldsa")]
+            PubKey::Mldsa65(_) => Ok(SSH_NAME_MLDSA_65),
             PubKey::Ed25519(_) => Ok(SSH_NAME_ED25519),
             #[cfg(feature = "rsa")]
             PubKey::RSA(_) => Ok(SSH_NAME_RSA),
@@ -386,6 +392,9 @@ impl TryFrom<&PubKey<'_>> for ssh_key::PublicKey {
     type Error = Error;
     fn try_from(k: &PubKey) -> Result<Self> {
         match k {
+            #[cfg(feature = "mldsa")]
+            PubKey::Mldsa65(_) => Err(Error::msg("Unsupported OpenSSH key")),
+
             PubKey::Ed25519(e) => {
                 Ok(ssh_key::public::Ed25519PublicKey(e.key.0).into())
             }
@@ -424,6 +433,14 @@ impl TryFrom<&PubKey<'_>> for ssh_key::PublicKey {
 #[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
 pub struct Ed25519PubKey {
     pub key: Blob<[u8; 32]>,
+}
+
+/// ML-DSA-65 public key (FIPS 204, 1952-byte encoding).
+#[cfg(feature = "mldsa")]
+#[derive(Debug, Clone, PartialEq, SSHEncode, SSHDecode)]
+#[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
+pub struct Mldsa65PubKey {
+    pub key: Blob<[u8; sign::MLDSA65_PUBKEY_SIZE]>,
 }
 
 #[cfg(feature = "rsa")]
@@ -541,6 +558,10 @@ impl Arbitrary<'_> for ECDSAPubKey<NistP256> {
 #[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
 #[sshwire(variant_prefix)]
 pub enum Signature<'a> {
+    #[cfg(feature = "mldsa")]
+    #[sshwire(variant = SSH_NAME_MLDSA_65)]
+    Mldsa65(Mldsa65Sig<'a>),
+
     #[sshwire(variant = SSH_NAME_ED25519)]
     Ed25519(Ed25519Sig<'a>),
 
@@ -560,6 +581,8 @@ impl<'a> Signature<'a> {
     /// The algorithm name presented. May be invalid.
     pub fn algorithm_name(&self) -> Result<&'a str, &Unknown<'a>> {
         match self {
+            #[cfg(feature = "mldsa")]
+            Signature::Mldsa65(_) => Ok(SSH_NAME_MLDSA_65),
             Signature::Ed25519(_) => Ok(SSH_NAME_ED25519),
             #[cfg(feature = "rsa")]
             Signature::RSA(_) => Ok(SSH_NAME_RSA_SHA256),
@@ -577,6 +600,8 @@ impl<'a> Signature<'a> {
     /// type for each key type.
     pub fn sig_name_for_pubkey(pubkey: &PubKey) -> Result<&'static str> {
         match pubkey {
+            #[cfg(feature = "mldsa")]
+            PubKey::Mldsa65(_) => Ok(SSH_NAME_MLDSA_65),
             PubKey::Ed25519(_) => Ok(SSH_NAME_ED25519),
             #[cfg(feature = "rsa")]
             PubKey::RSA(_) => Ok(SSH_NAME_RSA_SHA256),
@@ -591,6 +616,8 @@ impl<'a> Signature<'a> {
 
     pub fn sig_type(&self) -> Result<SigType> {
         match self {
+            #[cfg(feature = "mldsa")]
+            Signature::Mldsa65(_) => Ok(SigType::Mldsa65),
             Signature::Ed25519(_) => Ok(SigType::Ed25519),
             #[cfg(feature = "rsa")]
             Signature::RSA(_) => Ok(SigType::RSA),
@@ -607,6 +634,10 @@ impl<'a> Signature<'a> {
 impl<'a> From<&'a OwnedSig> for Signature<'a> {
     fn from(s: &'a OwnedSig) -> Self {
         match s {
+            #[cfg(feature = "mldsa")]
+            OwnedSig::Mldsa65(s) => {
+                Signature::Mldsa65(Mldsa65Sig { sig: BinString(s.as_ref()) })
+            }
             OwnedSig::Ed25519(s) => {
                 Signature::Ed25519(Ed25519Sig { sig: BinString(s) })
             }
@@ -626,6 +657,13 @@ impl<'a> From<&'a OwnedSig> for Signature<'a> {
 #[derive(Debug, SSHEncode, SSHDecode, Clone)]
 #[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
 pub struct Ed25519Sig<'a> {
+    pub sig: BinString<'a>,
+}
+
+#[cfg(feature = "mldsa")]
+#[derive(Debug, SSHEncode, SSHDecode, Clone)]
+#[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
+pub struct Mldsa65Sig<'a> {
     pub sig: BinString<'a>,
 }
 

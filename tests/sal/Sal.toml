@@ -1,0 +1,6 @@
+[package]
+name = "sal-tests"
+version = "0.1.0"
+
+[dependencies]
+soso = { path = "../../../sal/std/soso" }

@@ -134,7 +134,13 @@ pub fn has_pending(listener_slot: usize) -> bool {
         .is_some_and(|q| !q.is_empty())
 }
 
-pub fn try_read(pair_id: usize, side: LoopSide, buf: u64, len: u64) -> Result<u64, i64> {
+pub fn try_read(
+    pair_id: usize,
+    side: LoopSide,
+    space: &crate::task::addrspace::AddrSpace,
+    buf: u64,
+    len: u64,
+) -> Result<u64, i64> {
     let mut st = LOOP.lock();
     let Some(pair) = st.pairs.get_mut(pair_id).and_then(|p| p.as_mut()) else {
         return Err(-soso_abi::EBADF);
@@ -149,7 +155,7 @@ pub fn try_read(pair_id: usize, side: LoopSide, buf: u64, len: u64) -> Result<u6
     let avail = data.len() - *read_pos;
     let n = (len as usize).min(avail).min(4096);
     let slice = &data[*read_pos..*read_pos + n];
-    if crate::task::uaccess::copy_to_user(buf, slice).is_err() {
+    if crate::task::uaccess::copy_to_space(space, buf, slice).is_err() {
         return Err(-soso_abi::EFAULT);
     }
     *read_pos += n;
@@ -157,7 +163,13 @@ pub fn try_read(pair_id: usize, side: LoopSide, buf: u64, len: u64) -> Result<u6
     Ok(n as u64)
 }
 
-pub fn try_write(pair_id: usize, side: LoopSide, buf: u64, len: u64) -> Result<u64, i64> {
+pub fn try_write(
+    pair_id: usize,
+    side: LoopSide,
+    space: &crate::task::addrspace::AddrSpace,
+    buf: u64,
+    len: u64,
+) -> Result<u64, i64> {
     let mut st = LOOP.lock();
     let Some(pair) = st.pairs.get_mut(pair_id).and_then(|p| p.as_mut()) else {
         return Err(-soso_abi::EBADF);
@@ -179,7 +191,7 @@ pub fn try_write(pair_id: usize, side: LoopSide, buf: u64, len: u64) -> Result<u
     let room = LOOPBACK_BUF - dst.len();
     let n = (len as usize).min(room).min(4096);
     let mut tmp = [0u8; 4096];
-    if crate::task::uaccess::copy_from_user(buf, &mut tmp[..n]).is_err() {
+    if crate::task::uaccess::copy_from_space(space, buf, &mut tmp[..n]).is_err() {
         return Err(-soso_abi::EFAULT);
     }
     dst.extend_from_slice(&tmp[..n]);

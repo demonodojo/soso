@@ -792,8 +792,15 @@ fn poll_tcp_services(
     if !configured {
         return;
     }
+    let ssh_estados: alloc::vec::Vec<_> = ssh
+        .iter()
+        .enumerate()
+        .map(|(slot, &h)| (slot, sockets.get::<tcp::Socket>(h).state()))
+        .collect();
+    let listener = ssh::elegir_listener(&ssh_estados);
     for (slot, &h) in ssh.iter().enumerate() {
-        ssh::poll(slot, sockets.get_mut::<tcp::Socket>(h));
+        let escuchar = listener == Some(slot);
+        ssh::poll(slot, sockets.get_mut::<tcp::Socket>(h), escuchar);
     }
     for &h in echo {
         let s = sockets.get_mut::<tcp::Socket>(h);
@@ -1089,7 +1096,12 @@ pub fn tcp_accept(listener_slot: usize) -> Result<usize, i64> {
     Err(-soso_abi::EAGAIN)
 }
 
-pub fn tcp_try_read(slot: usize, buf: u64, len: u64) -> Result<u64, i64> {
+pub fn tcp_try_read(
+    slot: usize,
+    space: &crate::task::addrspace::AddrSpace,
+    buf: u64,
+    len: u64,
+) -> Result<u64, i64> {
     let net = NET.get().ok_or(-soso_abi::EIO)?;
     // Ver la nota de `tcp_is_connected`. «Cero bytes» es una respuesta que el
     // llamante ya sabe tratar: vuelve a dormirse y se reintenta.
@@ -1104,14 +1116,19 @@ pub fn tcp_try_read(slot: usize, buf: u64, len: u64) -> Result<u64, i64> {
         return Ok(0);
     }
     if entry.loopback {
-        return tcp_user::try_read_loopback(entry, buf, len);
+        return tcp_user::try_read_loopback(entry, space, buf, len);
     }
     let handle = entry.handle;
     let role = entry.role;
-    tcp_user::try_read(&mut n.sockets, handle, role, buf, len)
+    tcp_user::try_read(&mut n.sockets, handle, role, space, buf, len)
 }
 
-pub fn tcp_try_write(slot: usize, buf: u64, len: u64) -> Result<u64, i64> {
+pub fn tcp_try_write(
+    slot: usize,
+    space: &crate::task::addrspace::AddrSpace,
+    buf: u64,
+    len: u64,
+) -> Result<u64, i64> {
     let net = NET.get().ok_or(-soso_abi::EIO)?;
     // Ver la nota de `tcp_is_connected`.
     let Some(mut n) = net.try_lock() else { return Ok(0) };
@@ -1125,11 +1142,11 @@ pub fn tcp_try_write(slot: usize, buf: u64, len: u64) -> Result<u64, i64> {
         return Err(-soso_abi::EPIPE);
     }
     if entry.loopback {
-        return tcp_user::try_write_loopback(entry, buf, len);
+        return tcp_user::try_write_loopback(entry, space, buf, len);
     }
     let handle = entry.handle;
     let role = entry.role;
-    tcp_user::try_write(&mut n.sockets, handle, role, buf, len)
+    tcp_user::try_write(&mut n.sockets, handle, role, space, buf, len)
 }
 
 pub fn tcp_close(slot: usize) {

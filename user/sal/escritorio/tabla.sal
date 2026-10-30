@@ -163,7 +163,9 @@ fn tab_acc_copiar_msg(tab: Int, i: Int, dst: Int) -> Int ! alloc
         0
     else
         slot = tab + tab_slot_off(i) + tab_acc_off()
-        _c = bytes_copy(dst, 0, slot, 0, 32)
+        dview = bytes_view_mem(dst, 32)
+        sview = bytes_view_mem(slot, 32)
+        _c = bytes_copy(dview, 0, sview, 0, 32)
         _r = tab_acc_reset(tab, i)
         32
 

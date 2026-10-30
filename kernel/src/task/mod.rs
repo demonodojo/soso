@@ -311,6 +311,15 @@ pub fn current_space_id() -> Option<u64> {
     with_current(|p| p.space.as_ref().map(|s| s.id()))
 }
 
+/// Copia barata (`Arc`) del espacio del proceso actual.
+///
+/// Existe para poder copiar a memoria de usuario **sin** retener `PROCS`: las
+/// syscalls de pipe/socket ya no meten `PROCS` en medio de `PIPES` ni de la
+/// red, y el scheduler no puede volver a pedirlo cuando ya lo tiene.
+pub fn current_space() -> Option<AddrSpace> {
+    with_current(|p| p.space.clone())
+}
+
 pub fn space_id_for_pid(pid: u64) -> Option<u64> {
     PROCS
         .lock()
@@ -683,7 +692,7 @@ fn racimo(space: &AddrSpace, region: &mmap::MmapRegion, addr: u64) -> bool {
         };
         dst.copy_from_slice(&buf[i * 4096..(i + 1) * 4096]);
         if space
-            .map_page(va, frame, addrspace::UserProt::R)
+            .map_page(va, frame, mmap::region_prot(region))
             .is_none()
         {
             unsafe {
@@ -1674,7 +1683,15 @@ extern "C" fn schedule_inner() -> ! {
                     continue;
                 }
                 let console = procs[i].console;
-                match tty_read_into(console, buf, len) {
+                // El espacio se presta sólo para la copia: el `match` de abajo
+                // vuelve a tocar `procs[i]`. `tty_read_into` copia con
+                // `copy_to_space`, no con `copy_to_user`, porque `PROCS` ya
+                // está cogido aquí.
+                let leido = {
+                    let espacio = procs[i].space.as_ref().unwrap();
+                    tty_read_into(console, espacio, buf, len)
+                };
+                match leido {
                     LecturaTty::Datos(n) => {
                         procs[i].ctx.rax = n;
                         procs[i].state = State::Runnable;
@@ -1721,7 +1738,11 @@ extern "C" fn schedule_inner() -> ! {
                     continue;
                 }
                 if write {
-                    match pipe_wake_write(pipe_id, buf, len) {
+                    let escrito = {
+                        let espacio = procs[i].space.as_ref().unwrap();
+                        pipe_wake_write(pipe_id, espacio, buf, len)
+                    };
+                    match escrito {
                         Ok(n) if n > 0 => {
                             procs[i].ctx.rax = n;
                             procs[i].state = State::Runnable;
@@ -1733,7 +1754,10 @@ extern "C" fn schedule_inner() -> ! {
                         _ => {}
                     }
                 } else {
-                    let n = pipe_wake_read(pipe_id, buf, len);
+                    let n = {
+                        let espacio = procs[i].space.as_ref().unwrap();
+                        pipe_wake_read(pipe_id, espacio, buf, len)
+                    };
                     if n > 0 || pipe::write_closed(pipe_id) {
                         procs[i].ctx.rax = n;
                         procs[i].state = State::Runnable;
@@ -1802,7 +1826,11 @@ extern "C" fn schedule_inner() -> ! {
                         continue;
                     }
                     if write {
-                        match crate::net::tcp_try_write(slot, buf, len) {
+                        let escrito = {
+                            let espacio = procs[i].space.as_ref().unwrap();
+                            crate::net::tcp_try_write(slot, espacio, buf, len)
+                        };
+                        match escrito {
                             Ok(n) if n > 0 => {
                                 procs[i].ctx.rax = n;
                                 procs[i].state = State::Runnable;
@@ -1810,7 +1838,11 @@ extern "C" fn schedule_inner() -> ! {
                             _ => {}
                         }
                     } else {
-                        match crate::net::tcp_try_read(slot, buf, len) {
+                        let leido = {
+                            let espacio = procs[i].space.as_ref().unwrap();
+                            crate::net::tcp_try_read(slot, espacio, buf, len)
+                        };
+                        match leido {
                             Ok(n) if n > 0 => {
                                 procs[i].ctx.rax = n;
                                 procs[i].state = State::Runnable;
@@ -1864,20 +1896,30 @@ extern "C" fn schedule_inner() -> ! {
     }
 }
 
-fn pipe_wake_read(pipe_id: pipe::PipeId, buf: u64, len: u64) -> u64 {
+fn pipe_wake_read(
+    pipe_id: pipe::PipeId,
+    space: &addrspace::AddrSpace,
+    buf: u64,
+    len: u64,
+) -> u64 {
     if pipe::has_data(pipe_id) || pipe::write_closed(pipe_id) {
-        pipe::try_read(pipe_id, buf, len)
+        pipe::try_read(pipe_id, space, buf, len)
     } else {
         0
     }
 }
 
-fn pipe_wake_write(pipe_id: pipe::PipeId, buf: u64, len: u64) -> Result<u64, i64> {
+fn pipe_wake_write(
+    pipe_id: pipe::PipeId,
+    space: &addrspace::AddrSpace,
+    buf: u64,
+    len: u64,
+) -> Result<u64, i64> {
     if pipe::no_readers(pipe_id) {
         return Err(-soso_abi::EPIPE);
     }
     if pipe::has_space(pipe_id) {
-        pipe::try_write(pipe_id, buf, len)
+        pipe::try_write(pipe_id, space, buf, len)
     } else {
         Ok(0)
     }
@@ -1922,12 +1964,12 @@ pub(crate) fn tty_tomar(console: Console, dst: &mut [u8]) -> LecturaTty {
     }
 }
 
-fn tty_read_into(console: Console, buf: u64, len: u64) -> LecturaTty {
+fn tty_read_into(console: Console, space: &addrspace::AddrSpace, buf: u64, len: u64) -> LecturaTty {
     let mut tmp = alloc::vec![0u8; len as usize];
     match tty_tomar(console, &mut tmp) {
         LecturaTty::Datos(n) => {
             let n = n as usize;
-            if n > 0 && uaccess::copy_to_user(buf, &tmp[..n]).is_err() {
+            if n > 0 && uaccess::copy_to_space(space, buf, &tmp[..n]).is_err() {
                 return LecturaTty::Nada;
             }
             LecturaTty::Datos(n as u64)

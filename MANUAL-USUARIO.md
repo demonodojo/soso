@@ -156,7 +156,10 @@ ssh -tt -i target/soso_test_key -p 2222 soso@localhost
 
 - **Puerto:** 2222 (redirigido al puerto 22 interno de soso).
 - **Usuario:** `soso` (el nombre es convencional; la autenticación es solo por clave).
-- **Cifrado:** SSH-2 con curve25519, ed25519 y chacha20-poly1305.
+- **Cifrado:** SSH-2 con intercambio híbrido post-cuántico `mlkem768x25519-sha256`
+  (ML-KEM-768 + X25519), firmas de host `ssh-mldsa-65` y `ssh-ed25519`, y
+  cifrado de canal chacha20-poly1305. Los clientes OpenSSH recientes lo negocian
+  por defecto; ed25519 sigue disponible para login (`/etc/authorized_key`).
 
 Al conectar verás el mensaje del día (`/etc/motd`) y luego la misma shell **sosh**
 que en la consola serie. Para **cerrar la sesión** usa `exit` o cierra la terminal
@@ -173,8 +176,10 @@ Para usar tu propia clave SSH, asegúrate de tener `~/.ssh/id_ed25519.pub` antes
 compilar, o regenera la imagen con `cargo xtask mkfs`.
 
 > **Nota:** la primera conexión puede avisar de una host key desconocida. La host key
-> del servidor se guarda en `/etc/ssh_host_key` dentro del disco y persiste entre
-> reconstrucciones de la imagen si no borras el disco de datos.
+> del servidor se guardan en `/etc/ssh_host_key` (ed25519) y `/etc/ssh_host_mldsa`
+> (ML-DSA-65) dentro del disco y persisten entre reconstrucciones de la imagen si
+> no borras el disco de datos. Login opcional con ML-DSA: clave pública cruda de
+> 1952 bytes en `/etc/authorized_mldsa` (OpenSSH aún no genera `ssh-mldsa-65`).
 
 ### 2b. Red en hardware real (ethernet Realtek y WiFi Intel)
 
@@ -837,7 +842,8 @@ el **touchpad** interno entra por **HID-over-I2C** (`PNP0C50` tras el controlado
 
 Atajos habituales: **Alt+Intro** (terminal nueva), **Alt+Tab** (cambiar ventana),
 **Alt+Q** (cerrar), **Alt+T** (flotante / mosaico), **Alt+W** (abrir **soso-web** en ventana),
-**Alt+Mayús+E** (volver a consola). La barra superior del escritorio tiene un lanzador:
+**Alt+M** (salvapantallas del mono), **Alt+Mayús+E** (volver a consola). Tras **10 minutos**
+sin tocar teclado ni ratón entra solo el mismo salvapantallas; cualquier entrada lo cierra. La barra superior del escritorio tiene un lanzador:
 el botón **Aplicaciones** despliega un menú con **Terminal**, **Navegador web** y
 **Salir del escritorio**, y los accesos directos **Terminal** y **Web** abren lo mismo de
 un clic. Un clic fuera del menú lo cierra.
@@ -1145,7 +1151,8 @@ versión mínima de arranque exige— y `soso-update` la rechaza si no encaja co
 máquina; en particular, si no trae el driver del disco desde el que arrancas.
 Una release antigua, sin esa declaración, también se rechaza.
 
-**Qué no viaja en una release:** tus claves (`ssh_host_key`, `authorized_key`),
+**Qué no viaja en una release:** tus claves (`ssh_host_key`, `ssh_host_mldsa`,
+`authorized_key`, `authorized_mldsa`),
 tu configuración de `/etc`, los logs de `/var/log`, las cachés y el estado de una
 actualización a medias. Se preservan; la actualización no los toca.
 
@@ -1346,8 +1353,10 @@ Tras el arranque, el filesystem **sosofs** expone al menos:
 │   ├── red.conf        # dirección fija (la crea `ip estatica`)
 │   ├── notifybug.conf  # repo y token PAT para notifybug (local, no OTA)
 │   ├── motd            # Mensaje de bienvenida
-│   ├── authorized_key  # Clave pública ed25519 autorizada (32 bytes)
-│   └── ssh_host_key    # Semilla de la host key del servidor SSH
+│   ├── authorized_key      # Clave pública ed25519 autorizada (32 bytes)
+│   ├── authorized_mldsa    # Opcional: clave pública ML-DSA-65 (1952 bytes)
+│   ├── ssh_host_key        # Semilla host key ed25519 (32 bytes)
+│   └── ssh_host_mldsa      # Semilla host key ML-DSA-65 (32 bytes)
 ├── lib/
 │   ├── firmware/       # Firmware WiFi, NVIDIA GSP, …
 │   └── fonts/          # TTF del sistema (legacy; el paquete soso-web trae la suya)

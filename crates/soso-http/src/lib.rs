@@ -20,6 +20,9 @@ use rustls::{ClientConfig, RootCertStore};
 use rustls::pki_types::UnixTime;
 use soso_abi::SockAddr;
 
+#[cfg(feature = "pq")]
+mod pq;
+
 /// Respuesta HTTP simplificada.
 pub struct Response {
     pub status: u16,
@@ -109,9 +112,13 @@ fn client_config() -> Result<Arc<ClientConfig>, HttpError> {
     }
     let _anchor = UnixTime::since_unix_epoch(Duration::from_secs(secs));
     #[cfg(feature = "crypto-ring")]
-    let provider = rustls::crypto::ring::default_provider();
+    let base = rustls::crypto::ring::default_provider();
     #[cfg(all(feature = "crypto-rust", not(feature = "crypto-ring")))]
-    let provider = rustls_rustcrypto::provider();
+    let base = rustls_rustcrypto::provider();
+    #[cfg(feature = "pq")]
+    let provider = pq::enhanced_provider(base);
+    #[cfg(not(feature = "pq"))]
+    let provider = base;
     #[cfg(not(any(feature = "crypto-ring", feature = "crypto-rust")))]
     compile_error!("soso-http: activa `crypto-ring` o `crypto-rust`");
     let mut roots = RootCertStore::empty();

@@ -88,6 +88,17 @@ struct ShD {
     ffn: usize,
 }
 
+/// Bit de `comb` que marca «los expertos de esa capa vienen de la zona de paso».
+const PIN_BIT: usize = 1 << 40;
+
+struct PinD {
+    base: usize,
+    off: Vec<[usize; 3]>,
+    bytes: [usize; 3],
+    /// Desplazamiento de gate/up/down dentro de un hueco de la zona de paso.
+    slot: [usize; 3],
+}
+
 struct MoeD {
     router: MatDev,
     n_exp: usize,
@@ -104,6 +115,8 @@ struct MoeD {
     rbu: i64,
     rbd: i64,
     sh: Option<ShD>,
+    /// Capa en CPU cuyos expertos están copiados en memoria anclada: se sirven por DMA a la zona de paso en vez de calcularse en el host.
+    pin: Option<PinD>,
 }
 
 struct CapaD {
@@ -173,6 +186,18 @@ pub(super) struct DecodeDev {
     grafos: std::collections::HashMap<(usize, usize, usize), *mut c_void>,
     paradas: std::collections::HashMap<(usize, usize, usize), Option<usize>>,
     kv_gen: u64,
+    /// Zona de paso de los expertos de las capas en CPU (un hueco por experto elegido) y las tres tablas de punteros que leen los kernels.
+    pin_stg: u64,
+    pin_tab: [u64; 3],
+    pin_tab_host: [Vec<u64>; 3],
+    /// Caché LRU de expertos en la zona de paso: huecos de `pin_stride` bytes, quién ocupa cada uno, su última vez y aciertos/accesos.
+    pin_stride: usize,
+    pin_mapa: std::collections::HashMap<(usize, usize), usize>,
+    pin_dueno: Vec<Option<(usize, usize)>>,
+    pin_estampa: Vec<u64>,
+    pin_llamada: u64,
+    pin_hits: u64,
+    pin_total: u64,
 }
 
 impl CudaGpu {
@@ -374,6 +399,7 @@ impl CudaGpu {
                     rbu: 0,
                     rbd: 0,
                     sh,
+                    pin: None,
                 },
             });
         }
@@ -433,6 +459,109 @@ impl CudaGpu {
             (m.dg, m.rbg, m.du, m.rbu, m.dd, m.rbd) = (cod[0].0, cod[0].1, cod[1].0, cod[1].1, cod[2].0, cod[2].1);
             con_gpu += 1;
         }
+        // capas en CPU: sus expertos se copian una vez a memoria anclada y cada token sólo sube al dispositivo los elegidos (DMA ≈ la mitad que calcularlos en el host)
+        let (mut pin_stg, mut pin_tab, mut pin_tab_host) = (0u64, [0u64; 3], [Vec::new(), Vec::new(), Vec::new()]);
+        let (mut pin_huecos, mut pin_stride) = (0usize, 0usize);
+        if self.grafo.is_some() && std::env::var_os("SOSO_SIN_PIN_DEC").is_none() {
+            let t_pin = std::time::Instant::now();
+            let (mut n_pin, mut bytes_pin, mut slot_max) = (0usize, 0usize, 0usize);
+            let g_alloc = self.grafo.as_ref().unwrap().host_alloc;
+            for ci in 0..plan.capas.len() {
+                if capas[ci].moe.en_gpu {
+                    continue;
+                }
+                let moe = &plan.capas[ci].moe;
+                let ne = moe.expertos.len();
+                if ne == 0 {
+                    continue;
+                }
+                let mut cod = [(0i32, 0i64); 3];
+                let mut bytes = [0usize; 3];
+                let mut ok = true;
+                'ex: for (e, tri) in moe.expertos.iter().enumerate() {
+                    for k in 0..3 {
+                        let m = &tri[k];
+                        let Some(cr) = codigo_mma(m.v.dtype, m.cols) else { ok = false; break 'ex };
+                        if m.v.len as i64 != m.rows as i64 * cr.1 {
+                            ok = false;
+                            break 'ex;
+                        }
+                        if e == 0 {
+                            cod[k] = cr;
+                            bytes[k] = m.v.len;
+                        } else if cod[k] != cr || bytes[k] != m.v.len {
+                            ok = false;
+                            break 'ex;
+                        }
+                    }
+                }
+                if !ok {
+                    continue;
+                }
+                let al = |x: usize| x.div_ceil(256) * 256;
+                let slot = [0, al(bytes[0]), al(bytes[0]) + al(bytes[1])];
+                let slot_bytes = al(bytes[0]) + al(bytes[1]) + al(bytes[2]);
+                let total = slot_bytes * ne;
+                let mut base: *mut c_void = std::ptr::null_mut();
+                if unsafe { g_alloc(&mut base, total) } != 0 {
+                    eprintln!("decode GPU: sin memoria anclada para los expertos de la capa {ci}; se calculan en CPU");
+                    break;
+                }
+                let mut off = Vec::with_capacity(ne);
+                for e in 0..ne {
+                    off.push([e * slot_bytes + slot[0], e * slot_bytes + slot[1], e * slot_bytes + slot[2]]);
+                }
+                let (bp, offr) = (base as usize, &off);
+                let nh = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(4, 12);
+                std::thread::scope(|sc| {
+                    for q in 0..nh {
+                        sc.spawn(move || {
+                            for (e, tri) in moe.expertos.iter().enumerate() {
+                                if e % nh != q {
+                                    continue;
+                                }
+                                for k in 0..3 {
+                                    // SAFETY: origen = mapa del modelo (vivo); destino = región anclada de `total` bytes; huecos disjuntos por experto.
+                                    unsafe { std::ptr::copy_nonoverlapping(tri[k].v.ptr as *const u8, (bp + offr[e][k]) as *mut u8, tri[k].v.len) };
+                                }
+                            }
+                        });
+                    }
+                });
+                let m = &mut capas[ci].moe;
+                (m.dg, m.rbg, m.du, m.rbu, m.dd, m.rbd) = (cod[0].0, cod[0].1, cod[1].0, cod[1].1, cod[2].0, cod[2].1);
+                self.pin_regiones.insert(plan.capas[ci].layer, super::PinRegion { base: bp, slot_bytes, n: ne });
+                m.pin = Some(PinD { base: bp, off, bytes, slot });
+                n_pin += 1;
+                bytes_pin += total;
+                slot_max = slot_max.max(slot_bytes);
+            }
+            if n_pin > 0 {
+                let top_k = capas.iter().map(|c| c.moe.top_k).max().unwrap_or(8);
+                let n_exp = capas.iter().map(|c| c.moe.n_exp).max().unwrap_or(256);
+                // la zona de paso es una caché de expertos: más huecos que `top_k` = los calientes se quedan en la tarjeta entre tokens
+                let huecos = std::env::var("SOSO_CACHE_EXPERTOS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(256);
+                // sin pasarse de la mitad de lo que queda de presupuesto (el resto es para el KV espejado y los búferes del prefill)
+                let huecos = huecos.min((self.presupuesto.saturating_sub(self.usado) / 2) / slot_max.max(1)).max(top_k);
+                pin_huecos = huecos;
+                pin_stride = slot_max;
+                pin_stg = self.alloc(huecos * slot_max)?;
+                for k in 0..3 {
+                    pin_tab_host[k] = vec![0u64; n_exp];
+                    pin_tab[k] = self.u64_a_dev(&pin_tab_host[k])?;
+                }
+                for c in capas.iter_mut().filter(|c| c.moe.pin.is_some()) {
+                    (c.moe.tg, c.moe.tu, c.moe.td) = (pin_tab[0], pin_tab[1], pin_tab[2]);
+                }
+                if self.stream_copia.is_null() {
+                    let g = self.grafo.as_ref().unwrap();
+                    let mut st: *mut c_void = std::ptr::null_mut();
+                    ck(unsafe { (g.stream_create)(&mut st, 1) }, "cuStreamCreate(copia)")?;
+                    self.stream_copia = st;
+                }
+                eprintln!("decode GPU: {} capas con los expertos en memoria anclada ({} MiB, {:.1} s); caché de {} expertos en VRAM ({} MiB)", n_pin, bytes_pin >> 20, t_pin.elapsed().as_secs_f64(), pin_huecos, (pin_huecos * slot_max) >> 20);
+            }
+        }
         // lo que no quedó residente no se sube más tarde por tensores sueltos
         self.tope_expertos = self.usado;
         self.flujo_expertos = std::env::var("SOSO_SIN_FLUJO_EXPERTOS").is_err();
@@ -486,7 +615,7 @@ impl CudaGpu {
         for (i, (_, bytes)) in sizes.iter().enumerate() {
             Self::dec_buf(&mut bufs, &self.api, i, *bytes)?;
         }
-        self.dec = Some(DecodeDev { f, capas, h, eps: plan.eps, nfin, lm, vocab: plan.vocab, n_attn, kv_dim, bufs, grafos: Default::default(), paradas: Default::default(), kv_gen: 0 });
+        self.dec = Some(DecodeDev { f, capas, h, eps: plan.eps, nfin, lm, vocab: plan.vocab, n_attn, kv_dim, bufs, grafos: Default::default(), paradas: Default::default(), kv_gen: 0, pin_stg, pin_tab, pin_tab_host, pin_stride, pin_mapa: Default::default(), pin_dueno: vec![None; pin_huecos], pin_estampa: vec![0; pin_huecos], pin_llamada: 0, pin_hits: 0, pin_total: 0 });
         Ok(true)
     }
 
@@ -665,6 +794,7 @@ impl CudaGpu {
         let (mut desde, mut comb) = (0usize, None::<usize>);
         let perfil = std::env::var("SOSO_DECODE_PERFIL").is_ok();
         let (mut t_gpu, mut t_cpu, mut nseg) = (0f64, 0f64, 0u32);
+        let (mut t_bajar, mut t_calc, mut t_subir) = (0f64, 0f64, 0f64);
         let t_ini = std::time::Instant::now();
         loop {
             let t_a = std::time::Instant::now();
@@ -709,6 +839,63 @@ impl CudaGpu {
             let t_b = std::time::Instant::now();
             match parada {
                 None => break,
+                Some(ci) if d.capas[ci].moe.pin.is_some() => {
+                    // expertos desde memoria anclada: sólo los `top_k` elegidos viajan, por DMA, a la zona de paso; el segmento siguiente empieza por sus kernels
+                    let (top_k, g_htod, g_sync, sc) = {
+                        let g = self.grafo.as_ref().unwrap();
+                        (d.capas[ci].moe.top_k, g.htod_async, g.stream_sync, self.stream_copia)
+                    };
+                    let mut idx = vec![0i32; top_k];
+                    ck(unsafe { (self.api.dtoh)(idx.as_mut_ptr() as *mut c_void, bf(b::RIDX), top_k * 4) }, "cuMemcpyDtoH")?;
+                    let t_1 = t_b.elapsed().as_secs_f64();
+                    let pin = d.capas[ci].moe.pin.as_ref().unwrap();
+                    d.pin_llamada += 1;
+                    let llamada = d.pin_llamada;
+                    for &e in idx.iter() {
+                        let e = e as usize;
+                        if e >= pin.off.len() {
+                            return Err(format!("experto {e} fuera de rango en la capa {ci}"));
+                        }
+                        d.pin_total += 1;
+                        let hueco_i = match d.pin_mapa.get(&(ci, e)) {
+                            Some(&hi) => {
+                                d.pin_hits += 1;
+                                d.pin_estampa[hi] = llamada;
+                                hi
+                            }
+                            None => {
+                                // víctima: el hueco menos reciente que no usa este mismo token
+                                let (hi, _) = d.pin_estampa.iter().enumerate().filter(|e| *e.1 < llamada).min_by_key(|e| *e.1).ok_or("caché de expertos sin huecos")?;
+                                if let Some(viejo) = d.pin_dueno[hi].take() {
+                                    d.pin_mapa.remove(&viejo);
+                                }
+                                d.pin_dueno[hi] = Some((ci, e));
+                                d.pin_mapa.insert((ci, e), hi);
+                                d.pin_estampa[hi] = llamada;
+                                let hueco = d.pin_stg + (hi * d.pin_stride) as u64;
+                                for k in 0..3 {
+                                    ck(unsafe { g_htod(hueco + pin.slot[k] as u64, (pin.base + pin.off[e][k]) as *const c_void, pin.bytes[k], sc) }, "cuMemcpyHtoDAsync")?;
+                                }
+                                hi
+                            }
+                        };
+                        let hueco = d.pin_stg + (hueco_i * d.pin_stride) as u64;
+                        for k in 0..3 {
+                            d.pin_tab_host[k][e] = hueco + pin.slot[k] as u64;
+                        }
+                    }
+                    for k in 0..3 {
+                        let t = &d.pin_tab_host[k];
+                        let bytes = unsafe { std::slice::from_raw_parts(t.as_ptr() as *const u8, t.len() * 8) };
+                        ck(unsafe { (self.api.htod)(d.pin_tab[k], bytes.as_ptr() as *const c_void, bytes.len()) }, "cuMemcpyHtoD")?;
+                    }
+                    ck(unsafe { g_sync(sc) }, "cuStreamSynchronize")?;
+                    t_bajar += t_1;
+                    t_calc += t_b.elapsed().as_secs_f64() - t_1;
+                    desde = ci + 1;
+                    comb = Some(ci | PIN_BIT);
+                    t_cpu += t_b.elapsed().as_secs_f64();
+                }
                 Some(ci) => {
                     let m = &d.capas[ci].moe;
                     let mut xn = vec![0f32; h];
@@ -717,10 +904,15 @@ impl CudaGpu {
                     ck(unsafe { (self.api.dtoh)(xn.as_mut_ptr() as *mut c_void, bf(b::XN), h * 4) }, "cuMemcpyDtoH")?;
                     ck(unsafe { (self.api.dtoh)(idx.as_mut_ptr() as *mut c_void, bf(b::RIDX), m.top_k * 4) }, "cuMemcpyDtoH")?;
                     ck(unsafe { (self.api.dtoh)(wt.as_mut_ptr() as *mut c_void, bf(b::RWT), m.top_k * 4) }, "cuMemcpyDtoH")?;
+                    let t_1 = t_b.elapsed().as_secs_f64();
                     let idx_u: Vec<u32> = idx.iter().map(|&i| i as u32).collect();
                     let mut cpu = vec![0f32; h];
                     cpu_moe(ci, &xn, &idx_u, &wt, &mut cpu).map_err(|_| "expertos en CPU: error".to_string())?;
+                    let t_2 = t_b.elapsed().as_secs_f64();
                     self.subir(bf(b::CPUOUT), f32b(&cpu))?;
+                    t_bajar += t_1;
+                    t_calc += t_2 - t_1;
+                    t_subir += t_b.elapsed().as_secs_f64() - t_2;
                     desde = ci + 1;
                     comb = Some(ci);
                     t_cpu += t_b.elapsed().as_secs_f64();
@@ -731,8 +923,11 @@ impl CudaGpu {
         if d.n_attn > 0 {
             ck(unsafe { (self.api.dtoh)(kv_rows.as_mut_ptr() as *mut c_void, bf(b::KST), kv_rows.len() * 2) }, "cuMemcpyDtoH")?;
         }
+        if perfil && d.pin_total > 0 {
+            eprintln!("[dec] caché de expertos: {:.1} % de aciertos ({} accesos)", 100.0 * d.pin_hits as f64 / d.pin_total as f64, d.pin_total);
+        }
         if perfil {
-            eprintln!("[dec] pos {pos}: total {:.1} ms, gpu {:.1} ms en {nseg} segmentos, cpu {:.1} ms", t_ini.elapsed().as_secs_f64() * 1e3, t_gpu * 1e3, t_cpu * 1e3);
+            eprintln!("[dec] pos {pos}: total {:.1} ms, gpu {:.1} ms en {nseg} segmentos, cpu {:.1} ms (bajar {:.2}, expertos {:.2}, subir {:.2})", t_ini.elapsed().as_secs_f64() * 1e3, t_gpu * 1e3, t_cpu * 1e3, t_bajar * 1e3, t_calc * 1e3, t_subir * 1e3);
         }
         self.stats.launches += 1;
         Ok(true)
@@ -744,6 +939,67 @@ impl CudaGpu {
 
     /// Encola las operaciones del token desde la capa `desde` (precedidas, si `comb`, de la suma de los expertos de CPU de esa capa) hasta
     /// el router de la siguiente capa con expertos en CPU —devuelve su índice— o hasta los logits (`None`).
+    /// Kernels de los expertos de una capa (gate/up + SwiGLU, down y combinación con el compartido y el residual) con las tablas de punteros de `m`.
+    fn dec_expertos(&self, d: &DecodeDev, m: &MoeD, ysh: u64) -> Result<(), String> {
+        let h = d.h;
+        let hh = h as i32;
+        let bf = |i: usize| d.bufs[i].0;
+        let blocks256 = |n: usize| (n as u32).div_ceil(256);
+        // producto entero (dp4a) si los formatos son los del modelo: gate/up IQ2_S, down IQ3_XXS o IQ4_XS, ffn = 512
+        let dp4a = m.dg == 22 && m.du == 22 && (m.dd == 18 || m.dd == 23) && m.ffn == 512 && h % 256 == 0 && std::env::var_os("SOSO_DECODE_SIN_DP4A").is_none();
+        let crono = std::env::var_os("SOSO_DECODE_CRONO").is_some();
+        if dp4a {
+            self.dec_quant_a(d, bf(b::XN), h, b::EXQ, b::EXD)?;
+            if crono {
+                ck(unsafe { (self.api.sync)() }, "sync")?;
+            }
+            let t0 = std::time::Instant::now();
+            let mut v1: Vec<u64> = vec![m.tg, m.tu, bf(b::RIDX), bf(b::EXQ), bf(b::EXD), bf(b::ACT), m.ffn as u64, h as u64, m.rbg as u64, m.rbu as u64];
+            let mut p1: Vec<*mut c_void> = v1.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
+            self.lanzar3s(d.f.gateup_s, ((m.ffn as u32).div_ceil(8), 1, m.top_k as u32), (256, 1, 1), 0, &mut p1)?;
+            if crono {
+                ck(unsafe { (self.api.sync)() }, "sync")?;
+                eprintln!("[crono] gateup {:.1} us", t0.elapsed().as_secs_f64() * 1e6);
+            }
+            self.dec_quant_a(d, bf(b::ACT), m.top_k * m.ffn, b::AQ, b::AD)?;
+            let t1 = std::time::Instant::now();
+            let mut v2: Vec<u64> = vec![m.td, bf(b::RIDX), bf(b::AQ), bf(b::AD), bf(b::YS), h as u64, m.ffn as u64, m.dd as u32 as u64, m.rbd as u64];
+            let mut p2: Vec<*mut c_void> = v2.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
+            self.lanzar3s(d.f.down_s, ((h as u32).div_ceil(32), 1, m.top_k as u32), (256, 1, 1), 0, &mut p2)?;
+            if crono {
+                ck(unsafe { (self.api.sync)() }, "sync")?;
+                eprintln!("[crono] down {:.1} us", t1.elapsed().as_secs_f64() * 1e6);
+            }
+        } else {
+            let mut v1: Vec<u64> = vec![m.tg, m.tu, bf(b::RIDX), bf(b::XN), bf(b::ACT), m.ffn as u64, h as u64, m.dg as u32 as u64, m.du as u32 as u64, m.rbg as u64, m.rbu as u64];
+            let mut p1: Vec<*mut c_void> = v1.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
+            if crono {
+                ck(unsafe { (self.api.sync)() }, "sync")?;
+            }
+            let t0 = std::time::Instant::now();
+            self.lanzar3s(d.f.gateup_w, ((m.ffn as u32).div_ceil(8), 1, m.top_k as u32), (256, 1, 1), ((h + h / 32 + 1) * 4) as u32, &mut p1)?;
+            if crono {
+                ck(unsafe { (self.api.sync)() }, "sync")?;
+                eprintln!("[crono] gateup {:.1} us", t0.elapsed().as_secs_f64() * 1e6);
+            }
+            let mut v2: Vec<u64> = vec![m.td, bf(b::RIDX), bf(b::ACT), bf(b::YS), h as u64, m.ffn as u64, m.dd as u32 as u64, m.rbd as u64];
+            let mut p2: Vec<*mut c_void> = v2.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
+            let t1 = std::time::Instant::now();
+            self.lanzar3s(d.f.down_w, ((h as u32).div_ceil(8), 1, m.top_k as u32), (256, 1, 1), ((m.ffn + m.ffn / 32 + 1) * 4) as u32, &mut p2)?;
+            if crono {
+                ck(unsafe { (self.api.sync)() }, "sync")?;
+                eprintln!("[crono] down {:.1} us", t1.elapsed().as_secs_f64() * 1e6);
+            }
+        }
+        self.lanzar_a(
+            d.f.combine,
+            (blocks256(h), 1, 1),
+            (256, 1, 1),
+            &[Arg::P(bf(b::HID)), Arg::P(bf(b::YS)), Arg::P(bf(b::RWT)), Arg::P(ysh), Arg::P(bf(b::SG)), Arg::I(m.top_k as i32), Arg::I(hh)],
+        )?;
+        Ok(())
+    }
+
     fn dec_emitir(&self, d: &DecodeDev, desde: usize, comb: Option<usize>, nsplit: usize) -> Result<Option<usize>, String> {
         let h = d.h;
         let hh = h as i32;
@@ -755,7 +1011,11 @@ impl CudaGpu {
         let add = |s: &Self, a: u64, bb: u64, n: usize| -> Result<(), String> {
             s.lanzar_a(d.f.add, (blocks256(n), 1, 1), (256, 1, 1), &[Arg::P(a), Arg::P(bb), Arg::I(n as i32)])
         };
-        if let Some(ci) = comb {
+        if let Some(ci) = comb.filter(|c| c & PIN_BIT != 0).map(|c| c & !PIN_BIT) {
+            // expertos de una capa en CPU servidos desde memoria anclada: ya están en la zona de paso y en las tablas
+            let ysh = if d.capas[ci].moe.sh.is_some() { bf(b::YSH) } else { 0 };
+            self.dec_expertos(d, &d.capas[ci].moe, ysh)?;
+        } else if let Some(ci) = comb {
             let ysh = if d.capas[ci].moe.sh.is_some() { bf(b::YSH) } else { 0 };
             self.lanzar_a(
                 d.f.combine_cpu,
@@ -857,58 +1117,7 @@ impl CudaGpu {
             }
             let ysh = if m.sh.is_some() { bf(b::YSH) } else { 0 };
             if m.en_gpu && !Self::salta("moe") {
-                // producto entero (dp4a) si los formatos son los del modelo: gate/up IQ2_S, down IQ3_XXS o IQ4_XS, ffn = 512
-                let dp4a = m.dg == 22 && m.du == 22 && (m.dd == 18 || m.dd == 23) && m.ffn == 512 && h % 256 == 0 && std::env::var_os("SOSO_DECODE_SIN_DP4A").is_none();
-                let crono = std::env::var_os("SOSO_DECODE_CRONO").is_some();
-                if dp4a {
-                    self.dec_quant_a(d, bf(b::XN), h, b::EXQ, b::EXD)?;
-                    if crono {
-                        ck(unsafe { (self.api.sync)() }, "sync")?;
-                    }
-                    let t0 = std::time::Instant::now();
-                    let mut v1: Vec<u64> = vec![m.tg, m.tu, bf(b::RIDX), bf(b::EXQ), bf(b::EXD), bf(b::ACT), m.ffn as u64, h as u64, m.rbg as u64, m.rbu as u64];
-                    let mut p1: Vec<*mut c_void> = v1.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
-                    self.lanzar3s(d.f.gateup_s, ((m.ffn as u32).div_ceil(8), 1, m.top_k as u32), (256, 1, 1), 0, &mut p1)?;
-                    if crono {
-                        ck(unsafe { (self.api.sync)() }, "sync")?;
-                        eprintln!("[crono] gateup {:.1} us", t0.elapsed().as_secs_f64() * 1e6);
-                    }
-                    self.dec_quant_a(d, bf(b::ACT), m.top_k * m.ffn, b::AQ, b::AD)?;
-                    let t1 = std::time::Instant::now();
-                    let mut v2: Vec<u64> = vec![m.td, bf(b::RIDX), bf(b::AQ), bf(b::AD), bf(b::YS), h as u64, m.ffn as u64, m.dd as u32 as u64, m.rbd as u64];
-                    let mut p2: Vec<*mut c_void> = v2.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
-                    self.lanzar3s(d.f.down_s, ((h as u32).div_ceil(32), 1, m.top_k as u32), (256, 1, 1), 0, &mut p2)?;
-                    if crono {
-                        ck(unsafe { (self.api.sync)() }, "sync")?;
-                        eprintln!("[crono] down {:.1} us", t1.elapsed().as_secs_f64() * 1e6);
-                    }
-                } else {
-                    let mut v1: Vec<u64> = vec![m.tg, m.tu, bf(b::RIDX), bf(b::XN), bf(b::ACT), m.ffn as u64, h as u64, m.dg as u32 as u64, m.du as u32 as u64, m.rbg as u64, m.rbu as u64];
-                    let mut p1: Vec<*mut c_void> = v1.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
-                    if crono {
-                        ck(unsafe { (self.api.sync)() }, "sync")?;
-                    }
-                    let t0 = std::time::Instant::now();
-                    self.lanzar3s(d.f.gateup_w, ((m.ffn as u32).div_ceil(8), 1, m.top_k as u32), (256, 1, 1), ((h + h / 32 + 1) * 4) as u32, &mut p1)?;
-                    if crono {
-                        ck(unsafe { (self.api.sync)() }, "sync")?;
-                        eprintln!("[crono] gateup {:.1} us", t0.elapsed().as_secs_f64() * 1e6);
-                    }
-                    let mut v2: Vec<u64> = vec![m.td, bf(b::RIDX), bf(b::ACT), bf(b::YS), h as u64, m.ffn as u64, m.dd as u32 as u64, m.rbd as u64];
-                    let mut p2: Vec<*mut c_void> = v2.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
-                    let t1 = std::time::Instant::now();
-                    self.lanzar3s(d.f.down_w, ((h as u32).div_ceil(8), 1, m.top_k as u32), (256, 1, 1), ((m.ffn + m.ffn / 32 + 1) * 4) as u32, &mut p2)?;
-                    if crono {
-                        ck(unsafe { (self.api.sync)() }, "sync")?;
-                        eprintln!("[crono] down {:.1} us", t1.elapsed().as_secs_f64() * 1e6);
-                    }
-                }
-                self.lanzar_a(
-                    d.f.combine,
-                    (blocks256(h), 1, 1),
-                    (256, 1, 1),
-                    &[Arg::P(bf(b::HID)), Arg::P(bf(b::YS)), Arg::P(bf(b::RWT)), Arg::P(ysh), Arg::P(bf(b::SG)), Arg::I(m.top_k as i32), Arg::I(hh)],
-                )?;
+                self.dec_expertos(d, m, ysh)?;
             } else if !m.en_gpu {
                 // expertos en CPU: el token se corta aquí; el host los calcula y el segmento siguiente suma el resultado
                 return Ok(Some(ci));

@@ -26,6 +26,8 @@ pub const SSH_NAME_STRICT_KEX_S: &str = "kex-strict-s-v00@openssh.com";
 /// OpenSSH [PROTOCOL](https://cvsweb.openbsd.org/checkout/src/usr.bin/ssh/PROTOCOL?rev=HEAD)
 pub const SSH_NAME_STRICT_KEX_C: &str = "kex-strict-c-v00@openssh.com";
 
+/// [draft-sfluhrer-ssh-mldsa](https://datatracker.ietf.org/doc/html/draft-sfluhrer-ssh-mldsa)
+pub const SSH_NAME_MLDSA_65: &str = "ssh-mldsa-65";
 /// [RFC8709](https://tools.ietf.org/html/rfc8709)
 pub const SSH_NAME_ED25519: &str = "ssh-ed25519";
 /// [RFC8332](https://tools.ietf.org/html/rfc8332)

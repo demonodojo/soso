@@ -1,0 +1,300 @@
+import "mate.sal"
+import "superficie.sal"
+
+fn mono_umbral_ms() -> Int
+    600000
+
+fn mono_frame_ms() -> Int
+    80
+
+fn mono_ancho() -> Int
+    32
+
+fn mono_alto() -> Int
+    32
+
+fn mono_lcg(seed: Int) -> Int
+    mod_pos(seed * 1103515245 + 12345, 2147483647)
+
+fn mono_ocioso(last_ms: Int, now_ms: Int, inited: Int) -> Int
+    if inited == 0
+        0
+    else
+        if now_ms - last_ms >= mono_umbral_ms()
+            1
+        else
+            0
+
+fn mono_paso_x(paso: Int, ancho: Int, mono_w: Int) -> Int
+    if ancho <= mono_w
+        0
+    else
+        mod_pos(paso * 17 + 11, ancho - mono_w)
+
+fn mono_paso_y(paso: Int, alto: Int, mono_h: Int) -> Int
+    if alto <= mono_h
+        0
+    else
+        t = paso / 3
+        mod_pos(t * 23 + 7, alto - mono_h)
+
+fn mono_fotograma(paso: Int) -> Int
+    mod_pos(paso, 2)
+
+fn mono_golpe_activo(paso: Int) -> Int
+    if mono_fotograma(paso) == 1
+        1
+    else
+        0
+
+fn mono_cuerpo_ok(lx: Int, ly: Int) -> Int
+    ok = 0
+    if lx >= 10
+        if lx < 22
+            if ly >= 8
+                if ly < 24
+                    ok = 1
+    if lx >= 12
+        if lx < 20
+            if ly >= 4
+                if ly < 12
+                    ok = 1
+    ok
+
+fn mono_cara_ok(lx: Int, ly: Int) -> Int
+    if lx >= 13
+        if lx < 19
+            if ly >= 5
+                if ly < 11
+                    1
+                else
+                    0
+            else
+                0
+        else
+            0
+    else
+        0
+
+fn mono_ojo(lx: Int, ly: Int) -> Int
+    if ly == 7
+        if lx == 14
+            1
+        elsif lx == 17
+            1
+        else
+            0
+    else
+        0
+
+fn mono_brazo_izq(lx: Int, ly: Int, fotograma: Int) -> Int
+    ok = 0
+    if fotograma == 0
+        if lx >= 4
+            if lx < 10
+                if ly >= 12
+                    if ly < 20
+                        ok = 1
+    if fotograma == 1
+        if lx >= 2
+            if lx < 12
+                if ly >= 6
+                    if ly < 14
+                        ok = 1
+    ok
+
+fn mono_brazo_der(lx: Int, ly: Int, fotograma: Int) -> Int
+    ok = 0
+    if fotograma == 0
+        if lx >= 22
+            if lx < 28
+                if ly >= 14
+                    if ly < 22
+                        ok = 1
+    if fotograma == 1
+        if lx >= 24
+            if lx < 30
+                if ly >= 8
+                    if ly < 18
+                        ok = 1
+    ok
+
+fn mono_pixel_rgb(lx: Int, ly: Int, fotograma: Int) -> Int
+    if lx < 0
+        0
+    elsif lx >= mono_ancho()
+        0
+    elsif ly < 0
+        0
+    elsif ly >= mono_alto()
+        0
+    elsif mono_ojo(lx, ly) != 0
+        color_rgb(20, 20, 20)
+    elsif mono_cara_ok(lx, ly) != 0
+        color_rgb(220, 180, 140)
+    elsif mono_brazo_izq(lx, ly, fotograma) != 0
+        color_rgb(120, 80, 40)
+    elsif mono_brazo_der(lx, ly, fotograma) != 0
+        color_rgb(120, 80, 40)
+    elsif mono_cuerpo_ok(lx, ly) != 0
+        color_rgb(90, 60, 30)
+    else
+        0
+
+fn mono_sprite_opaco(fotograma: Int) -> Int
+    n = 0
+    ly = 0
+    while ly < mono_alto()
+        lx = 0
+        while lx < mono_ancho()
+            if mono_pixel_rgb(lx, ly, fotograma) != 0
+                n = n + 1
+            lx = lx + 1
+        ly = ly + 1
+    n
+
+fn mono_sprite_cambia(f0: Int, f1: Int) -> Int
+    if mono_sprite_opaco(f0) != mono_sprite_opaco(f1)
+        1
+    else
+        ly = 0
+        dif = 0
+        while ly < mono_alto()
+            if dif == 0
+                lx = 0
+                while lx < mono_ancho()
+                    if dif == 0
+                        a = mono_pixel_rgb(lx, ly, f0)
+                        b = mono_pixel_rgb(lx, ly, f1)
+                        if a != b
+                            dif = 1
+                    lx = lx + 1
+            ly = ly + 1
+        dif
+
+fn mono_golpe_x0(mx: Int, my: Int, fotograma: Int) -> Int
+    if fotograma == 1
+        mx + 22
+    else
+        mx + 8
+
+fn mono_golpe_y0(my: Int, fotograma: Int) -> Int
+    if fotograma == 1
+        my + 10
+    else
+        my + 14
+
+fn mono_golpe_w() -> Int
+    28
+
+fn mono_golpe_h() -> Int
+    24
+
+fn mono_romper_rect(ptr: Int, len: Int, stride: Int, bpp: Int, fmt: Int, w: Int, h: Int, x0: Int, y0: Int, x1: Int, y1: Int, seed: Int) -> Int ! alloc
+    ya = max(0, y0)
+    yb = min(h, y1)
+    xa = max(0, x0)
+    xb = min(w, x1)
+    if xb <= xa
+        0
+    else
+        if yb <= ya
+            0
+        else
+            s = seed
+            y = ya
+            while y < yb
+                x = xa
+                while x < xb
+                    s = mono_lcg(s + x * 3 + y * 5)
+                    v = mod_pos(s, 4)
+                    px = pixel_leer(ptr, len, stride, bpp, fmt, x, y)
+                    px = mezclar_rgb(color_rgb(0, 0, 0), px, 80 + v * 20)
+                    if v == 1
+                        nx = x + 2
+                        ny = y + 1
+                        if nx >= 0
+                            if nx < w
+                                if ny >= 0
+                                    if ny < h
+                                        p2 = pixel_leer(ptr, len, stride, bpp, fmt, nx, ny)
+                                        _w = pixel_escribir(ptr, len, stride, bpp, fmt, nx, ny, px)
+                                        px = p2
+                    if v == 2
+                        px = mezclar_rgb(color_rgb(40, 30, 20), px, 140)
+                    _p = pixel_escribir(ptr, len, stride, bpp, fmt, x, y, px)
+                    x = x + 1
+                y = y + 1
+            0
+
+fn mono_dibujar(ptr: Int, len: Int, stride: Int, bpp: Int, fmt: Int, w: Int, h: Int, mx: Int, my: Int, fotograma: Int) -> Int ! alloc
+    ly = 0
+    while ly < mono_alto()
+        lx = 0
+        while lx < mono_ancho()
+            col = mono_pixel_rgb(lx, ly, fotograma)
+            if col != 0
+                px = mx + lx
+                py = my + ly
+                if px >= 0
+                    if py >= 0
+                        if px < w
+                            if py < h
+                                _p = pixel_escribir(ptr, len, stride, bpp, fmt, px, py, col)
+            lx = lx + 1
+        ly = ly + 1
+    0
+
+fn mono_danio_x0(mx: Int, my: Int, paso: Int, w: Int, h: Int) -> Int ! alloc
+    fotograma = mono_fotograma(paso)
+    x0 = mono_golpe_x0(mx, my, fotograma)
+    y0 = mono_golpe_y0(my, fotograma)
+    x1 = x0 + mono_golpe_w()
+    y1 = y0 + mono_golpe_h()
+    gx0 = mx
+    if x0 < gx0
+        gx0 = x0
+    gy0 = my
+    if y0 < gy0
+        gy0 = y0
+    if gx0 < 0
+        gx0 = 0
+    if gy0 < 0
+        gy0 = 0
+    gx0
+
+fn mono_danio_y0(mx: Int, my: Int, paso: Int, w: Int, h: Int) -> Int ! alloc
+    fotograma = mono_fotograma(paso)
+    x0 = mono_golpe_x0(mx, my, fotograma)
+    y0 = mono_golpe_y0(my, fotograma)
+    gy0 = my
+    if y0 < gy0
+        gy0 = y0
+    if gy0 < 0
+        gy0 = 0
+    gy0
+
+fn mono_danio_x1(mx: Int, my: Int, paso: Int, w: Int, h: Int) -> Int ! alloc
+    fotograma = mono_fotograma(paso)
+    x0 = mono_golpe_x0(mx, my, fotograma)
+    y0 = mono_golpe_y0(my, fotograma)
+    x1 = x0 + mono_golpe_w()
+    y1 = y0 + mono_golpe_h()
+    gx1 = mx + mono_ancho()
+    if x1 > gx1
+        gx1 = x1
+    if gx1 > w
+        gx1 = w
+    gx1
+
+fn mono_danio_y1(mx: Int, my: Int, paso: Int, w: Int, h: Int) -> Int ! alloc
+    fotograma = mono_fotograma(paso)
+    x0 = mono_golpe_x0(mx, my, fotograma)
+    y0 = mono_golpe_y0(my, fotograma)
+    y1 = y0 + mono_golpe_h()
+    gy1 = my + mono_alto()
+    if y1 > gy1
+        gy1 = y1
+    if gy1 > h
+        gy1 = h
+    gy1

@@ -82,6 +82,7 @@ fn main() {
     let t1 = Instant::now();
     let logits = rt.logits_gpu(&mut source, par, &mut gpu).expect("logits").to_vec();
     eprintln!("prefill {} token(s): {:.2?}; logits: {:.2?}", ids.len(), t_prefill, t1.elapsed());
+    soso_llm_api::cuda::traza_kern_volcar();
 
     // `DECODIFICAR=N`: N pasos de decodificación (un token + logits) tras el prefill; imprime ms por paso.
     if let Some(pasos) = std::env::var("DECODIFICAR")

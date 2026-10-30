@@ -281,23 +281,60 @@ impl Runtime {
             let ys_p = ys.as_mut_ptr() as usize;
             let fallo = core::sync::atomic::AtomicBool::new(false);
             let seq = Sequential;
-            par.for_rows(idx.len(), &|k0, k1| {
-                let mut gate = vec![0.0f32; ffn];
-                let mut up = vec![0.0f32; ffn];
-                for k in k0..k1 {
-                    let vista = |i: usize| TensorView {
-                        bytes: unsafe { core::slice::from_raw_parts(vistas[k][i].0 as *const u8, vistas[k][i].1) },
-                        dtype: vistas[k][i].2,
-                        elems: vistas[k][i].3,
+            // Cada experto se parte en `partes` franjas de filas por matvec: con más unidades que expertos trabajan más núcleos (los matvec son
+            // de un solo hilo, ~1,3 GB/s de pesos por hilo). Dos fases con una barrera: gate/up de todos los expertos, y luego down.
+            let partes = decode_partes();
+            let ne = idx.len();
+            let mut gate = vec![0.0f32; ne * ffn];
+            let mut up = vec![0.0f32; ne * ffn];
+            let (gate_p, up_p) = (gate.as_mut_ptr() as usize, up.as_mut_ptr() as usize);
+            // vista de las filas `r0..r1` de una matriz de `cols` columnas
+            let franja = |t: (usize, usize, u8, usize), cols: usize, r0: usize, r1: usize| -> Option<TensorView<'static>> {
+                let rb = sosomodel::dequant::row_bytes(t.2, cols)?;
+                if t.1 != (t.3 / cols) * rb {
+                    return None;
+                }
+                Some(TensorView {
+                    bytes: unsafe { core::slice::from_raw_parts((t.0 + r0 * rb) as *const u8, (r1 - r0) * rb) },
+                    dtype: t.2,
+                    elems: (r1 - r0) * cols,
+                })
+            };
+            par.for_rows(ne * partes, &|u0, u1| {
+                for u in u0..u1 {
+                    let (k, q) = (u / partes, u % partes);
+                    let (r0, r1) = (q * ffn / partes, (q + 1) * ffn / partes);
+                    // SAFETY: franjas disjuntas de `gate`/`up` por unidad.
+                    let (g, uu) = unsafe {
+                        (
+                            core::slice::from_raw_parts_mut((gate_p as *mut f32).add(k * ffn + r0), r1 - r0),
+                            core::slice::from_raw_parts_mut((up_p as *mut f32).add(k * ffn + r0), r1 - r0),
+                        )
                     };
-                    // SAFETY: cada hilo escribe sólo la fila `k` de `ys`.
-                    let y = unsafe { core::slice::from_raw_parts_mut((ys_p as *mut f32).add(k * h), h) };
-                    let ok = matvec_view_par(&vista(0), ffn, h, xn, &mut gate, &seq).is_ok()
-                        && matvec_view_par(&vista(1), ffn, h, xn, &mut up, &seq).is_ok()
-                        && {
-                            crate::gemm::swiglu_inplace(&mut up, &gate);
-                            matvec_view_par(&vista(2), h, ffn, &up, y, &seq).is_ok()
-                        };
+                    let ok = match (franja(vistas[k][0], h, r0, r1), franja(vistas[k][1], h, r0, r1)) {
+                        (Some(vg), Some(vu)) => matvec_view_par(&vg, r1 - r0, h, xn, g, &seq).is_ok() && matvec_view_par(&vu, r1 - r0, h, xn, uu, &seq).is_ok(),
+                        _ => false,
+                    };
+                    if !ok {
+                        fallo.store(true, core::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            });
+            for k in 0..ne {
+                crate::gemm::swiglu_inplace(&mut up[k * ffn..(k + 1) * ffn], &gate[k * ffn..(k + 1) * ffn]);
+            }
+            let up_p = up.as_ptr() as usize;
+            par.for_rows(ne * partes, &|u0, u1| {
+                for u in u0..u1 {
+                    let (k, q) = (u / partes, u % partes);
+                    let (r0, r1) = (q * h / partes, (q + 1) * h / partes);
+                    // SAFETY: cada unidad escribe sólo su franja de la fila `k` de `ys`; `up` sólo se lee.
+                    let y = unsafe { core::slice::from_raw_parts_mut((ys_p as *mut f32).add(k * h + r0), r1 - r0) };
+                    let x = unsafe { core::slice::from_raw_parts((up_p as *const f32).add(k * ffn), ffn) };
+                    let ok = match franja(vistas[k][2], ffn, r0, r1) {
+                        Some(vd) => matvec_view_par(&vd, r1 - r0, ffn, x, y, &seq).is_ok(),
+                        None => false,
+                    };
                     if !ok {
                         fallo.store(true, core::sync::atomic::Ordering::Relaxed);
                     }
@@ -341,4 +378,15 @@ impl Runtime {
         self.advance_pos();
         Ok(true)
     }
+}
+
+/// Franjas por experto en los matvec de los expertos en CPU del decode (`SOSO_DEC_PARTES`, por defecto 1).
+fn decode_partes() -> usize {
+    #[cfg(feature = "std")]
+    {
+        static P: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        return *P.get_or_init(|| std::env::var("SOSO_DEC_PARTES").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&p| p >= 1 && p <= 8).unwrap_or(1));
+    }
+    #[allow(unreachable_code)]
+    1
 }

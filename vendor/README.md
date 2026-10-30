@@ -42,3 +42,14 @@ leía en ese bloque).
 
 Los arneses (`xtask/src/test.rs`, `scripts/l6-g1-vfio-test.sh`) mantienen stdin
 abierto con un FIFO de todas formas: es más robusto y no depende de este parche.
+
+### PARCHE soso: ML-DSA-65 (`feature mldsa`)
+
+Añade el algoritmo de firma SSH `ssh-mldsa-65` (FIPS 204 / borrador
+draft-sfluhrer-ssh-mldsa): tipos en `packets.rs`, firma y verificación en
+`sign.rs`, preferencia en `fixed_options_hostsig` y en `ext-info` cuando aplica.
+Depende de `ml-dsa` 0.1.1 y `signature` 3. El kernel activa `mlkem` + `mldsa`
+en `sunset` (KEX híbrido `mlkem768x25519-sha256` ya venía upstream; ML-DSA es
+el parche nuevo). Tests del vendor: desde `vendor/sunset-0.5.0`, `cargo test
+--features alloc,mlkem,mldsa` (tabla `[workspace]` vacía en su `Cargo.toml` para
+no heredar el workspace raíz).

@@ -16,6 +16,8 @@
 //!   el driver los compila para la tarjeta que haya.
 
 mod capa;
+pub use capa::traza_kern_volcar;
+use capa::traza_kern;
 mod decode;
 
 use std::collections::HashMap;
@@ -90,6 +92,22 @@ struct PlanExp {
 /// Bytes máximos de expertos que se suben de una vez al búfer de paso del prefill.
 const TROZO_PASO: usize = 96 << 20;
 
+/// Región anclada con los expertos de una capa, un hueco de `slot_bytes` por experto con gate, up y down alineados igual que en la zona de paso.
+#[derive(Clone, Copy)]
+pub(crate) struct PinRegion {
+    pub base: usize,
+    pub slot_bytes: usize,
+    pub n: usize,
+}
+
+/// `L12.E034.ffn_gate` → (12, 34)
+fn capa_y_experto(clave: &str) -> Option<(u32, usize)> {
+    let mut it = clave.split('.');
+    let capa = it.next()?.strip_prefix('L')?.parse().ok()?;
+    let e = it.next()?.strip_prefix('E')?.parse().ok()?;
+    Some((capa, e))
+}
+
 /// Tokens que procesa de una vez el kernel por lotes.
 const NT: usize = 8;
 /// Filas que procesa cada warp en `matmul_q4_0r8` (debe coincidir con `Q40R_ROWS` del kernel).
@@ -118,6 +136,7 @@ type CuFunction = *mut c_void;
 unsafe extern "C" {
     fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    fn mallopt(param: c_int, value: c_int) -> c_int;
 }
 
 struct Api {
@@ -214,8 +233,8 @@ impl Api {
             ctx_set_current: simbolo(lib, "cuCtxSetCurrent")?,
             mem_alloc: simbolo(lib, "cuMemAlloc_v2")?,
             mem_free: simbolo(lib, "cuMemFree_v2")?,
-            htod: simbolo(lib, "cuMemcpyHtoD_v2")?,
-            dtoh: simbolo(lib, "cuMemcpyDtoH_v2")?,
+            htod: if capa::traza_kern_activa() { capa::htod_t as _ } else { simbolo(lib, "cuMemcpyHtoD_v2")? },
+            dtoh: if capa::traza_kern_activa() { capa::dtoh_t as _ } else { simbolo(lib, "cuMemcpyDtoH_v2")? },
             dtod: simbolo(lib, "cuMemcpyDtoD_v2")?,
             ev_create: simbolo(lib, "cuEventCreate")?,
             ev_record: simbolo(lib, "cuEventRecord")?,
@@ -275,6 +294,22 @@ pub struct CudaGpu {
     blq: [(u64, usize); 14],
     f_iq_matmul_n: CuFunction,
     f_gateup_multi: CuFunction,
+    f_gateup_h: CuFunction,
+    f_down_h: CuFunction,
+    f_matmul_h: CuFunction,
+    f_cvt_f16: CuFunction,
+    f_q8mmq: CuFunction,
+    f_gateup_q: CuFunction,
+    f_down_q: CuFunction,
+    /// Activación de los expertos cuantizada a i8 (+ escalas) para `iq_down_mmq`.
+    aq: (u64, usize),
+    f_quant_x: CuFunction,
+    xq_fuente: std::cell::Cell<(u64, usize)>,
+    sin_mmq: bool,
+    /// Activaciones convertidas a f16 para los productos por bloque, y de qué búfer (puntero, floats) son.
+    xh: (u64, usize),
+    xh_fuente: std::cell::Cell<(u64, usize)>,
+    sin_xh: bool,
     f_combinar: CuFunction,
     f_gdn_conv: CuFunction,
     f_gdn_rec: CuFunction,
@@ -320,6 +355,8 @@ pub struct CudaGpu {
     stg2: [(u64, usize); 2],
     pin: [(usize, usize); 2],
     stream_copia: *mut c_void,
+    /// Capas cuyos expertos viven en memoria anclada (las crea `decode_preparar`): el prefill las copia a la tarjeta sin pasar por la CPU.
+    pub(crate) pin_regiones: HashMap<u32, PinRegion>,
     dec: Option<decode::DecodeDev>,
 }
 
@@ -328,6 +365,16 @@ unsafe impl Send for CudaGpu {}
 impl CudaGpu {
     /// Inicializa CUDA en el dispositivo 0. Falla (sin pánico) si no hay driver o tarjeta.
     pub fn nueva() -> Result<CudaGpu, String> {
+        // El prefill pide y suelta varios búferes de 8 MiB por capa; con el umbral de mmap por defecto cada uno vuelve al sistema y la capa
+        // siguiente paga los fallos de página de nuevo (≈2 ms por búfer). Con el montón retenido se reutilizan. 32 MiB es el máximo que admite glibc.
+        if std::env::var_os("SOSO_SIN_MALLOPT").is_none() {
+            // M_TRIM_THRESHOLD = -1, M_TOP_PAD = -2, M_MMAP_THRESHOLD = -3
+            unsafe {
+                mallopt(-3, 32 << 20);
+                mallopt(-1, i32::MAX);
+                mallopt(-2, 64 << 20);
+            }
+        }
         let api = Api::cargar()?;
         unsafe {
             ck((api.init)(0), "cuInit")?;
@@ -353,6 +400,9 @@ impl CudaGpu {
                 let c = CString::new(n).unwrap();
                 let mut f: CuFunction = std::ptr::null_mut();
                 ck((api.module_fn)(&mut f, m, c.as_ptr()), n)?;
+                if let Ok(mut t) = traza_kern().lock() {
+                    t.nombres.insert(f as usize, n.to_string());
+                }
                 Ok(f)
             };
             let f_matvec_q4 = func(m4, "matvec_q4_0r")?;
@@ -375,6 +425,14 @@ impl CudaGpu {
                 }
             }
             let f_gateup_multi = func(mod_iq, "iq_gateup_mma")?;
+            let f_gateup_h = func(mod_iq, "iq_gateup_mma_h")?;
+            let f_down_h = func(mod_iq, "iq_down_mma_h")?;
+            let f_matmul_h = func(mod_iq, "iq_matmul_mma_h")?;
+            let f_cvt_f16 = func(mod_iq, "cvt_f16")?;
+            let f_q8mmq = func(mod_iq, "q8_mmq")?;
+            let f_gateup_q = func(mod_iq, "iq_gateup_mmq")?;
+            let f_down_q = func(mod_iq, "iq_down_mmq")?;
+            let f_quant_x = func(mod_iq, "dec_quant_x")?;
             let f_combinar = func(mod_iq, "iq_combinar")?;
             let f_gdn_conv = func(mod_iq, "gdn_conv_silu")?;
             let f_gdn_rec = func(mod_iq, "gdn_rec")?;
@@ -420,6 +478,20 @@ impl CudaGpu {
                 f_attn_prefill,
                 f_attn_mma,
                 f_gateup_multi,
+                f_gateup_h,
+                f_down_h,
+                f_matmul_h,
+                f_cvt_f16,
+                f_q8mmq,
+                f_gateup_q,
+                f_down_q,
+                aq: (0, 0),
+                f_quant_x,
+                xq_fuente: std::cell::Cell::new((0, 0)),
+                sin_mmq: std::env::var_os("SOSO_SIN_MMQ").is_some(),
+                xh: (0, 0),
+                xh_fuente: std::cell::Cell::new((0, 0)),
+                sin_xh: std::env::var_os("SOSO_SIN_XH").is_some(),
                 f_combinar,
                 f_gdn_conv,
                 f_gdn_rec,
@@ -444,6 +516,7 @@ impl CudaGpu {
                 stg2: [(0, 0); 2],
                 pin: [(0, 0); 2],
                 stream_copia: std::ptr::null_mut(),
+                pin_regiones: HashMap::new(),
                 dec: None,
                 x_cap: 0,
                 y_dev: 0,
@@ -854,6 +927,80 @@ impl CudaGpu {
         self.lanzar3s(f, grid, block, 0, &mut ptrs)
     }
 
+    /// Prueba: `y[n × rows] = x · Wᵀ` con pesos Q8_0 de sosomodel (36 B por bloque) por el camino entero (`q8_mmq`), o por el f16 con `entero == false`.
+    pub fn probar_matmul_q8(&mut self, w: &[u8], rows: usize, cols: usize, x: &[f32], n: usize, entero: bool) -> Result<Vec<f32>, String> {
+        unsafe { ck((self.api.ctx_set_current)(self.ctx), "cuCtxSetCurrent")? };
+        let rb = (cols / 32 * 36) as i64;
+        let wd = self.alloc(w.len())?;
+        self.subir(wd, w)?;
+        let xd = self.alloc(x.len() * 4)?;
+        self.subir(xd, unsafe { std::slice::from_raw_parts(x.as_ptr() as *const u8, x.len() * 4) })?;
+        let yd = self.alloc(n * rows * 4)?;
+        self.xh_asegurar(n * cols * 2)?;
+        let sin = self.sin_mmq;
+        self.sin_mmq = !entero;
+        let r = self.matmul_blq(wd, rows, cols, 1000, rb, xd, yd, n);
+        self.sin_mmq = sin;
+        r?;
+        ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
+        let mut y = vec![0f32; n * rows];
+        ck(unsafe { (self.api.dtoh)(y.as_mut_ptr() as *mut c_void, yd, y.len() * 4) }, "cuMemcpyDtoH")?;
+        unsafe {
+            (self.api.mem_free)(wd);
+            (self.api.mem_free)(xd);
+            (self.api.mem_free)(yd);
+        }
+        Ok(y)
+    }
+
+    fn xh_asegurar(&mut self, bytes: usize) -> Result<(), String> {
+        if bytes > self.xh.1 {
+            if self.xh.0 != 0 {
+                unsafe { (self.api.mem_free)(self.xh.0) };
+            }
+            // la mitad baja guarda X en f16 y la alta (`xh.1 / 2`) X cuantizada a i8 con sus escalas
+            let cap = (2 * bytes).max(1 << 16).next_power_of_two();
+            self.xh = (self.alloc(cap)?, cap);
+        }
+        self.xh_fuente.set((0, 0));
+        self.xq_fuente.set((0, 0));
+        Ok(())
+    }
+
+    /// Convierte `floats` de `x` a f16 en el búfer `xh` (si no lo están ya) y devuelve su puntero.
+    fn x_a_f16(&self, x: u64, floats: usize) -> Result<u64, String> {
+        if self.xh_fuente.get() != (x, floats) {
+            self.lanzar_a(self.f_cvt_f16, ((floats as u32).div_ceil(512), 1, 1), (256, 1, 1), &[Arg::P(x), Arg::P(self.xh.0), Arg::L(floats as i64)])?;
+            self.xh_fuente.set((x, floats));
+        }
+        Ok(self.xh.0)
+    }
+
+    /// `y[n × rows] = x[n × cols] · Wᵀ` con `x` en el dispositivo: con las activaciones en f16 (una conversión que comparten los productos del mismo `x`)
+    /// si la forma lo permite; si no, el kernel de siempre. `xh_asegurar` debe haberse llamado antes con n × cols × 2 bytes.
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_blq(&self, w: u64, rows: usize, cols: usize, dtype: i32, rb: i64, x: u64, y: u64, n: usize) -> Result<(), String> {
+        let grid = ((rows as u32).div_ceil(64), (n as u32).div_ceil(64), 1);
+        // Q8_0: producto entero con tensor cores (activaciones a i8 por grupos de 32, una cuantización por `x`, en la mitad alta del búfer `xh`)
+        if dtype == 1000 && !self.sin_mmq && cols % 128 == 0 && self.xh.1 / 2 >= n * cols * 9 / 8 {
+            let xq = self.xh.0 + (self.xh.1 / 2) as u64;
+            let xd = xq + (n * cols) as u64;
+            if self.xq_fuente.get() != (x, n * cols) {
+                self.lanzar_a(self.f_quant_x, ((((n * cols) / 32) as u32).div_ceil(8), 1, 1), (256, 1, 1), &[Arg::P(x), Arg::P(xq), Arg::P(xd), Arg::I((n * cols) as i32)])?;
+                self.xq_fuente.set((x, n * cols));
+            }
+            return self.lanzar_a(self.f_q8mmq, grid, (128, 1, 1),
+                &[Arg::P(w), Arg::P(xq), Arg::P(xd), Arg::P(y), Arg::I(rows as i32), Arg::I(cols as i32), Arg::I(n as i32), Arg::L(rb)]);
+        }
+        if !self.sin_xh && cols % 8 == 0 && self.xh.1 / 2 >= n * cols * 2 {
+            let xh = self.x_a_f16(x, n * cols)?;
+            return self.lanzar_a(self.f_matmul_h, grid, (128, 1, 1),
+                &[Arg::P(w), Arg::P(xh), Arg::P(y), Arg::I(rows as i32), Arg::I(cols as i32), Arg::I(n as i32), Arg::I(dtype), Arg::L(rb)]);
+        }
+        self.lanzar_a(self.f_iq_matmul_n, grid, (128, 1, 1),
+            &[Arg::P(w), Arg::P(x), Arg::P(y), Arg::I(rows as i32), Arg::I(cols as i32), Arg::I(n as i32), Arg::I(dtype), Arg::L(rb)])
+    }
+
     fn gbuf_asegurar(&mut self, i: usize, bytes: usize) -> Result<u64, String> {
         if bytes > self.gbuf[i].1 {
             if self.gbuf[i].0 != 0 {
@@ -944,10 +1091,8 @@ impl CudaGpu {
         self.subir(a_dev, f(c.a))?;
         self.subir(nw_dev, f(c.norma))?;
         let nn = n as i32;
-        let mm = |s: &Self, w: u64, rows: usize, cols: usize, dtype: i32, rb: i64, x: u64, y: u64| {
-            s.lanzar_a(s.f_iq_matmul_n, ((rows as u32).div_ceil(64), (n as u32).div_ceil(64), 1), (128, 1, 1),
-                &[Arg::P(w), Arg::P(x), Arg::P(y), Arg::I(rows as i32), Arg::I(cols as i32), Arg::I(nn), Arg::I(dtype), Arg::L(rb)])
-        };
+        self.xh_asegurar(n * h.max(v_dim) * 2)?;
+        let mm = |s: &Self, w: u64, rows: usize, cols: usize, dtype: i32, rb: i64, x: u64, y: u64| s.matmul_blq(w, rows, cols, dtype, rb, x, y, n);
         mm(self, w[0], qkv_dim, h, cod[0].0, cod[0].1, x_dev, qkv_dev)?;
         mm(self, w[1], v_dim, h, cod[1].0, cod[1].1, x_dev, z_dev)?;
         mm(self, bw_dev, n_v, h, 1001, (h * 4) as i64, x_dev, braw_dev)?;
@@ -1184,11 +1329,8 @@ impl CudaGpu {
         self.subir(nw_dev + (hd * 4) as u64, f(c.knorm))?;
         // KV del dispositivo: capacidad para el bloque y las filas anteriores que le falten (las nuevas las escribe `att_prep_bloque`)
         let (kd, vd) = self.kv_espejo(layer, total, seq_antes, filas_validas, seq_antes, k_host, v_host, kv_dim)?;
-        let nn = n as i32;
-        let mm = |s: &Self, w: u64, rows: usize, cols: usize, dtype: i32, rb: i64, x: u64, y: u64| {
-            s.lanzar_a(s.f_iq_matmul_n, ((rows as u32).div_ceil(64), (n as u32).div_ceil(64), 1), (128, 1, 1),
-                &[Arg::P(w), Arg::P(x), Arg::P(y), Arg::I(rows as i32), Arg::I(cols as i32), Arg::I(nn), Arg::I(dtype), Arg::L(rb)])
-        };
+        self.xh_asegurar(n * h.max(q_dim) * 2)?;
+        let mm = |s: &Self, w: u64, rows: usize, cols: usize, dtype: i32, rb: i64, x: u64, y: u64| s.matmul_blq(w, rows, cols, dtype, rb, x, y, n);
         mm(self, w[0], q_full, h, cod[0].0, cod[0].1, x_dev, qf_dev)?;
         mm(self, w[1], kv_dim, h, cod[1].0, cod[1].1, x_dev, k_dev)?;
         mm(self, w[2], kv_dim, h, cod[2].0, cod[2].1, x_dev, v_dev)?;
@@ -1303,11 +1445,8 @@ impl CudaGpu {
         let pw_dev = self.gbuf_asegurar(13, h * 4)?;
         self.subir(x_dev, f(xs))?;
         self.subir(pw_dev, f(pg_w))?;
-        let nn = n as i32;
-        let mm = |s: &Self, w: u64, rows: usize, cols: usize, dtype: i32, rb: i64, x: u64, y: u64| {
-            s.lanzar_a(s.f_iq_matmul_n, ((rows as u32).div_ceil(64), (n as u32).div_ceil(64), 1), (128, 1, 1),
-                &[Arg::P(w), Arg::P(x), Arg::P(y), Arg::I(rows as i32), Arg::I(cols as i32), Arg::I(nn), Arg::I(dtype), Arg::L(rb)])
-        };
+        self.xh_asegurar(n * h.max(ffn) * 2)?;
+        let mm = |s: &Self, w: u64, rows: usize, cols: usize, dtype: i32, rb: i64, x: u64, y: u64| s.matmul_blq(w, rows, cols, dtype, rb, x, y, n);
         mm(self, w[0], ffn, h, cod[0].0, cod[0].1, x_dev, g_dev)?;
         mm(self, w[1], ffn, h, cod[1].0, cod[1].1, x_dev, u_dev)?;
         self.lanzar_a(self.f_swiglu_blq, (((n * ffn) as u32).div_ceil(256), 1, 1), (256, 1, 1), &[Arg::P(u_dev), Arg::P(g_dev), Arg::I((n * ffn) as i32)])?;
@@ -1533,10 +1672,43 @@ impl CudaGpu {
                 self.pin[b] = (p as usize, cap); // (no se libera: vive lo que el proceso)
             }
         }
+        // Si todas las capas de este paso tienen su región anclada, el DMA sale directo de ella (sin la memcpy de la caché de páginas): los expertos
+        // consecutivos de un trozo son un tramo contiguo de la región. Por trozo: (desplazamiento en el trozo, origen, bytes).
+        let region_runs: Option<Vec<Vec<(usize, usize, usize)>>> = if con_pin && std::env::var_os("SOSO_SIN_PIN_PREFILL").is_none() {
+            (|| {
+                let mut todos = Vec::with_capacity(trozos.len());
+                for (t, _) in &trozos {
+                    let mut runs: Vec<(usize, usize, usize, usize, usize)> = Vec::new(); // (e, capa, inicio en trozo, fin en trozo, origen)
+                    for (i, d) in t {
+                        let (capa, e) = capa_y_experto(exps[*i].claves[0])?;
+                        let r = self.pin_regiones.get(&capa)?;
+                        if e >= r.n || d[0].0 % ALINEACION != 0 {
+                            return None;
+                        }
+                        let (ini, fin) = (d[0].0, d[2].0 + d[2].2);
+                        let origen = r.base + e * r.slot_bytes;
+                        match runs.last_mut() {
+                            Some(l) if l.1 == capa as usize && l.0 + 1 == e && l.4 + (ini - l.2) == origen => {
+                                l.0 = e;
+                                l.3 = fin;
+                            }
+                            _ => runs.push((e, capa as usize, ini, fin, origen)),
+                        }
+                    }
+                    todos.push(runs.into_iter().map(|(_, _, ini, fin, origen)| (ini, origen, fin - ini)).collect());
+                }
+                Some(todos)
+            })()
+        } else {
+            None
+        };
         // copia de un trozo a un destino del host (anclado) con varios hilos
         let copiar = |t: &Vec<Sub>, dst: usize| {
+            if region_runs.is_some() {
+                return;
+            }
             let piezas: Vec<(usize, usize, usize)> = t.iter().flat_map(|(_, d)| d.iter().map(|x| (x.0, x.1, x.2))).collect();
-            let nh = 4usize.min(piezas.len().max(1));
+            let nh = std::env::var("SOSO_HILOS_COPIA").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(4, 12)).min(piezas.len().max(1));
             std::thread::scope(|sc| {
                 for q in 0..nh {
                     let piezas = &piezas;
@@ -1560,6 +1732,12 @@ impl CudaGpu {
             let (pin, stg, sc) = (self.pin, self.stg2, self.stream_copia);
             let dma = |k: usize| -> Result<(), String> {
                 let b = k % 2;
+                if let Some(rr) = &region_runs {
+                    for &(off, origen, len) in &rr[k] {
+                        ck(unsafe { g_htod(stg[b].0 + off as u64, origen as *const c_void, len, sc) }, "cuMemcpyHtoDAsync")?;
+                    }
+                    return Ok(());
+                }
                 ck(unsafe { g_htod(stg[b].0, pin[b].0 as *const c_void, trozos[k].1, sc) }, "cuMemcpyHtoDAsync")
             };
             let sincro = || ck(unsafe { g_sync(sc) }, "cuStreamSynchronize");
@@ -1567,12 +1745,17 @@ impl CudaGpu {
             let t_p = std::time::Instant::now();
             copiar(&trozos[0].0, pin[0].0);
             let t_copia0 = t_p.elapsed().as_secs_f64() * 1e3;
-            dma(0)?;
-            sincro()?;
+            // el DMA del trozo 0 y la copia del 1 al anclado corren a la vez
+            std::thread::scope(|sc| -> Result<(), String> {
+                let h1 = (m > 1).then(|| sc.spawn(|| copiar(&trozos[1].0, pin[1].0)));
+                dma(0)?;
+                sincro()?;
+                if let Some(hh) = h1 {
+                    let _ = hh.join();
+                }
+                Ok(())
+            })?;
             let t_dma0 = t_p.elapsed().as_secs_f64() * 1e3 - t_copia0;
-            if m > 1 {
-                copiar(&trozos[1].0, pin[1].0);
-            }
             let (mut t_calc, mut t_join, mut t_sync) = (0f64, 0f64, 0f64);
             let t_prologo = t_p.elapsed().as_secs_f64() * 1e3;
             for k in 0..m {
@@ -1713,12 +1896,14 @@ impl CudaGpu {
         // 3) un descriptor por experto y DOS lanzamientos para todos (gate+up+SwiGLU y down), una sola espera
         let mut desc: Vec<u64> = Vec::with_capacity(plan.len() * 12);
         let mut max_cnt = 0usize;
+        let mut todo_q = true;
         for pl in plan {
             let cnt = exps[pl.i].tokens.len();
             max_cnt = max_cnt.max(cnt);
             let (dg, du, dd) = (pl.w[0].1, pl.w[1].1, pl.w[2].1);
             let cm = |d: u8, c: usize| codigo_mma(d, c).unwrap_or((0, 0));
             let (cg, cu, cd) = (cm(dg, h), cm(du, h), cm(dd, ffn));
+            todo_q &= cg.0 == 22 && cu.0 == 22 && (cd.0 == 18 || cd.0 == 23);
             desc.extend_from_slice(&[
                 pl.w[0].0, pl.w[1].0, pl.w[2].0, pl.abase as u64, cnt as u64, cg.0 as u64, cu.0 as u64, cd.0 as u64, cg.1 as u64, cu.1 as u64, cd.1 as u64, pl.abase as u64,
             ]);
@@ -1727,7 +1912,59 @@ impl CudaGpu {
         self.subir(d_dev, unsafe { std::slice::from_raw_parts(desc.as_ptr() as *const u8, desc.len() * 8) })?;
         let tiles = (max_cnt as u32).div_ceil(64);
         let nexp = plan.len() as u32;
-        let (mut a0, mut a1, mut a2, mut a3) = (d_dev, x_dev, tok_dev, act_dev);
+        // X en f16 una vez para todos los expertos y `act` en f16 (la lee `iq_down_mma_h`); los kernels f32 quedan para formas que no sean múltiplo de 8
+        // Producto entero (mmq): gate/up IQ2_S y down IQ3_XXS/IQ4_XS con las activaciones en i8; si no, el camino f16
+        // opt-in (`SOSO_MMQ_EXPERTOS=1`): correcto pero sin ganancia medida frente al camino f16 (gateup 720→660 ms, down 249→266 ms por 4096); lo limita la descodificación (≈58 %), no el mma
+        let usar_q = !self.sin_mmq && std::env::var_os("SOSO_MMQ_EXPERTOS").is_some() && todo_q && h % 256 == 0 && ffn % 256 == 0;
+        if usar_q {
+            self.xh_asegurar(n * h * 2)?;
+            let xq = self.xh.0 + (self.xh.1 / 2) as u64;
+            let xd = xq + (n * h) as u64;
+            self.lanzar_a(self.f_quant_x, ((((n * h) / 32) as u32).div_ceil(8), 1, 1), (256, 1, 1), &[Arg::P(x_dev), Arg::P(xq), Arg::P(xd), Arg::I((n * h) as i32)])?;
+            let (mut q0, mut q1, mut q2, mut q3, mut q4) = (d_dev, xq, xd, tok_dev, act_dev);
+            let (mut q5, mut q6) = (ffn as c_int, h as c_int);
+            let mut args = [
+                &mut q0 as *mut _ as *mut c_void,
+                &mut q1 as *mut _ as *mut c_void,
+                &mut q2 as *mut _ as *mut c_void,
+                &mut q3 as *mut _ as *mut c_void,
+                &mut q4 as *mut _ as *mut c_void,
+                &mut q5 as *mut _ as *mut c_void,
+                &mut q6 as *mut _ as *mut c_void,
+            ];
+            self.lanzar3s(self.f_gateup_q, (((ffn as u32) + 63) / 64, tiles, nexp), (128, 1, 1), 0, &mut args)?;
+            // act (f32) → i8 + escalas
+            let bytes = total * ffn + total * ffn / 32 * 4;
+            if bytes > self.aq.1 {
+                if self.aq.0 != 0 {
+                    unsafe { (self.api.mem_free)(self.aq.0) };
+                }
+                let cap = bytes.max(1 << 20).next_power_of_two();
+                self.aq = (self.alloc(cap)?, cap);
+            }
+            let (aq, ad) = (self.aq.0, self.aq.0 + (total * ffn) as u64);
+            self.lanzar_a(self.f_quant_x, ((((total * ffn) / 32) as u32).div_ceil(8), 1, 1), (256, 1, 1), &[Arg::P(act_dev), Arg::P(aq), Arg::P(ad), Arg::I((total * ffn) as i32)])?;
+            let (mut d0, mut d1, mut d2, mut d3, mut d4) = (d_dev, aq, ad, y_dev, h as c_int);
+            let (mut d5, mut d6) = (ffn as c_int, dest_dev);
+            let mut args = [
+                &mut d0 as *mut _ as *mut c_void,
+                &mut d1 as *mut _ as *mut c_void,
+                &mut d2 as *mut _ as *mut c_void,
+                &mut d3 as *mut _ as *mut c_void,
+                &mut d4 as *mut _ as *mut c_void,
+                &mut d5 as *mut _ as *mut c_void,
+                &mut d6 as *mut _ as *mut c_void,
+            ];
+            self.lanzar3s(self.f_down_q, (((h as u32) + 63) / 64, tiles, nexp), (128, 1, 1), 0, &mut args)?;
+        }
+        let usar_h = !usar_q && !self.sin_xh && h % 8 == 0 && ffn % 8 == 0;
+        let xin = if usar_h {
+            self.xh_asegurar(n * h * 2)?;
+            self.x_a_f16(x_dev, n * h)?
+        } else {
+            x_dev
+        };
+        let (mut a0, mut a1, mut a2, mut a3) = (d_dev, xin, tok_dev, act_dev);
         let (mut a4, mut a5) = (ffn as c_int, h as c_int);
         let mut args = [
             &mut a0 as *mut _ as *mut c_void,
@@ -1737,7 +1974,19 @@ impl CudaGpu {
             &mut a4 as *mut _ as *mut c_void,
             &mut a5 as *mut _ as *mut c_void,
         ];
-        self.lanzar3s(self.f_gateup_multi, (((ffn as u32) + 63) / 64, tiles, nexp), (128, 1, 1), 0, &mut args)?;
+        let traza_k = std::env::var_os("SOSO_TRAZA_KERN").is_some();
+        if traza_k {
+            ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
+        }
+        let t_k0 = std::time::Instant::now();
+        let fg = if usar_h { self.f_gateup_h } else { self.f_gateup_multi };
+        if !usar_q {
+            self.lanzar3s(fg, (((ffn as u32) + 63) / 64, tiles, nexp), (128, 1, 1), 0, &mut args)?;
+        }
+        if traza_k {
+            ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
+        }
+        let t_k1 = std::time::Instant::now();
         let (mut b0, mut b1, mut b2) = (d_dev, act_dev, y_dev);
         let (mut b3, mut b4, mut b5) = (h as c_int, ffn as c_int, dest_dev);
         let mut args = [
@@ -1748,7 +1997,14 @@ impl CudaGpu {
             &mut b4 as *mut _ as *mut c_void,
             &mut b5 as *mut _ as *mut c_void,
         ];
-        self.lanzar3s(self.f_down_multi, (((h as u32) + 63) / 64, tiles, nexp), (128, 1, 1), 0, &mut args)?;
+        let fd = if usar_h { self.f_down_h } else { self.f_down_multi };
+        if !usar_q {
+            self.lanzar3s(fd, (((h as u32) + 63) / 64, tiles, nexp), (128, 1, 1), 0, &mut args)?;
+        }
+        if traza_k {
+            ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
+            eprintln!("[kern] gateup {:.2} ms, down {:.2} ms ({} exps, {} asign)", (t_k1 - t_k0).as_secs_f64() * 1e3, t_k1.elapsed().as_secs_f64() * 1e3, plan.len(), total);
+        }
         let (mut c0, mut c1, mut c2, mut c3, mut c4, mut c5) = (y_dev, wd_dev, out_dev, top_k as c_int, h as c_int, acum as c_int);
         let mut args = [
             &mut c0 as *mut _ as *mut c_void,

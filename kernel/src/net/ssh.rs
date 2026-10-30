@@ -39,9 +39,14 @@ pub const SSH_SESSIONS: usize = 4;
 /// Host key ed25519: persistente desde /etc/ssh_host_key (semilla de 32
 /// bytes) o generada al arranque si el fichero no existe.
 static HOST_KEY: Once<SignKey> = Once::new();
+/// Host key ML-DSA-65: semilla en /etc/ssh_host_mldsa (32 bytes).
+static HOST_KEY_MLDSA: Once<SignKey> = Once::new();
 /// Clave pública ed25519 autorizada (32 bytes) de /etc/authorized_key.
-/// None => no hay fichero: se rechaza cualquier login.
 static AUTHORIZED: Once<Option<[u8; 32]>> = Once::new();
+/// Clave pública ML-DSA-65 autorizada (1952 bytes) de /etc/authorized_mldsa.
+static AUTHORIZED_MLDSA: Once<Option<[u8; 1952]>> = Once::new();
+
+const MLDSA65_PUBKEY_BYTES: usize = 1952;
 
 struct Colas {
     rx: Mutex<VecDeque<u8>>,
@@ -148,12 +153,53 @@ pub fn init() {
         }
     };
     AUTHORIZED.call_once(|| auth);
+
+    let auth_mldsa = match leer_fichero("/etc/authorized_mldsa") {
+        Some(k) if k.len() >= MLDSA65_PUBKEY_BYTES => {
+            let mut a = [0u8; MLDSA65_PUBKEY_BYTES];
+            a.copy_from_slice(&k[..MLDSA65_PUBKEY_BYTES]);
+            crate::klogln!("ssh: auth por clave pública ssh-mldsa-65 (/etc/authorized_mldsa)");
+            Some(a)
+        }
+        _ => None,
+    };
+    AUTHORIZED_MLDSA.call_once(|| auth_mldsa);
 }
 
-/// ¿Coincide `pk` con la clave autorizada?
+/// `MlDsaSigningKey::from_seed` usa mucha pila; en `net::init` aún estamos en
+/// la pila de arranque y provoca double fault. Se carga en el primer `poll`.
+fn ensure_mldsa_host_key() {
+    HOST_KEY_MLDSA.call_once(|| {
+        let mldsa = match leer_fichero("/etc/ssh_host_mldsa") {
+            Some(seed) if seed.len() >= 32 => {
+                let mut s = [0u8; 32];
+                s.copy_from_slice(&seed[..32]);
+                SignKey::mldsa65_from_seed(&s)
+            }
+            _ => {
+                crate::klogln!("ssh: /etc/ssh_host_mldsa ausente, generando host key ML-DSA efímera");
+                SignKey::generate(sunset::KeyType::Mldsa65, None)
+                    .expect("no se pudo generar la host key ML-DSA-65")
+            }
+        };
+        crate::klogln!("ssh: host key ssh-mldsa-65 cargada");
+        mldsa
+    });
+}
+
+/// ¿Coincide `pk` con alguna clave autorizada?
 fn pubkey_autorizada(pk: &sunset::PubKey) -> bool {
-    let Some(Some(esperada)) = AUTHORIZED.get() else { return false };
-    matches!(pk, sunset::PubKey::Ed25519(k) if &k.key.0 == esperada)
+    match pk {
+        sunset::PubKey::Ed25519(k) => AUTHORIZED
+            .get()
+            .and_then(|a| a.as_ref())
+            .is_some_and(|esperada| &k.key.0 == esperada),
+        sunset::PubKey::Mldsa65(k) => AUTHORIZED_MLDSA
+            .get()
+            .and_then(|a| a.as_ref())
+            .is_some_and(|esperada| k.key.0.as_slice() == esperada.as_slice()),
+        _ => false,
+    }
 }
 
 /// Estado de una sesión SSH en una ranura.
@@ -215,6 +261,7 @@ fn reciclar_listen(
     socket: &mut tcp::Socket,
     guard: &mut Option<SshSession>,
     motivo: &str,
+    escuchar: bool,
 ) {
     if guard.is_some() {
         teardown(slot, guard);
@@ -222,7 +269,9 @@ fn reciclar_listen(
     }
     match socket.state() {
         tcp::State::Closed | tcp::State::TimeWait => {
-            let _ = socket.listen(SSH_PORT);
+            if escuchar {
+                let _ = socket.listen(SSH_PORT);
+            }
         }
         tcp::State::CloseWait | tcp::State::Established | tcp::State::SynReceived => {
             socket.close();
@@ -231,10 +280,29 @@ fn reciclar_listen(
     }
 }
 
+/// Ranura que debe tener `listen(22)` activo: la que ya acepta o la primera libre.
+pub fn elegir_listener(states: &[(usize, tcp::State)]) -> Option<usize> {
+    for &(slot, st) in states {
+        if matches!(
+            st,
+            tcp::State::Listen | tcp::State::SynSent | tcp::State::SynReceived
+        ) {
+            return Some(slot);
+        }
+    }
+    for &(slot, st) in states {
+        if matches!(st, tcp::State::Closed | tcp::State::TimeWait) {
+            return Some(slot);
+        }
+    }
+    None
+}
+
 /// Avanza la sesión SSH usando `socket` como transporte. Llamada desde
 /// `net::poll` con el socket TCP del puerto 22 ya poll-eado por la iface.
-pub fn poll(slot: usize, socket: &mut tcp::Socket) {
+pub fn poll(slot: usize, socket: &mut tcp::Socket, escuchar: bool) {
     use tcp::State;
+    ensure_mldsa_host_key();
     let Some(mutex) = SESIONES.get(slot) else {
         return;
     };
@@ -242,7 +310,7 @@ pub fn poll(slot: usize, socket: &mut tcp::Socket) {
 
     match socket.state() {
         State::Closed | State::TimeWait => {
-            reciclar_listen(slot, socket, &mut guard, "fin");
+            reciclar_listen(slot, socket, &mut guard, "fin", escuchar);
             return;
         }
         State::Listen | State::SynSent | State::SynReceived => {
@@ -253,7 +321,7 @@ pub fn poll(slot: usize, socket: &mut tcp::Socket) {
         }
         // El cliente cerró (Ctrl-C, hangup): FIN nuestro, no RST.
         State::CloseWait => {
-            reciclar_listen(slot, socket, &mut guard, "cliente");
+            reciclar_listen(slot, socket, &mut guard, "cliente", escuchar);
             return;
         }
         // Cierre ordenado en curso. Sin sesión no inventar otra.
@@ -278,7 +346,7 @@ pub fn poll(slot: usize, socket: &mut tcp::Socket) {
     };
     if let Some(e) = drive_err {
         crate::klogln!("ssh[{slot}]: sesión terminada ({e:?})");
-        reciclar_listen(slot, socket, &mut guard, "error");
+        reciclar_listen(slot, socket, &mut guard, "error", escuchar);
     }
 }
 
@@ -291,7 +359,8 @@ fn teardown(slot: usize, guard: &mut Option<SshSession>) {
 
 fn drive(sess: &mut SshSession, socket: &mut tcp::Socket) -> Result<(), sunset::Error> {
     let slot = sess.slot as usize;
-    let key = HOST_KEY.get().expect("ssh sin host key");
+    let key_ed = HOST_KEY.get().expect("ssh sin host key ed25519");
+    let key_pq = HOST_KEY_MLDSA.get().expect("ssh sin host key ML-DSA");
     let colas = COLAS.get(slot).expect("ranura ssh inválida");
 
     // 1) Rellenar netbuf desde el socket si está vacío y el runner acepta.
@@ -320,7 +389,7 @@ fn drive(sess: &mut SshSession, socket: &mut tcp::Socket) -> Result<(), sunset::
             let ev = sess.runner.progress()?;
             match ev {
                 Event::Serv(ServEvent::Hostkeys(h)) => {
-                    h.hostkeys(&[key])?;
+                    h.hostkeys(&[key_ed, key_pq])?;
                 }
                 Event::Serv(ServEvent::FirstAuth(mut a)) => {
                     // Solo clave pública: nada de aceptar el primer intento

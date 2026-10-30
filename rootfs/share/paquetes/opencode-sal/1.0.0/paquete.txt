@@ -1,0 +1,7 @@
+SOSOPKG v1
+nombre=opencode-sal
+version=1.0.0
+abi=1
+f c6895748df295af0584d63456132600415d41d0bf938383ca334cce75154231c 117992 bin/opencode
+f 5963564b4593fc3159197d4573eb9199ceacc9e6c6016a01bc72ce104df77395 89232 bin/soso-improve-sal
+f fd2135eacc358ac57846b53ea955f6fb437cf0c8fcc539f17a769bcd770bd430 19 share/opencode/VERSION

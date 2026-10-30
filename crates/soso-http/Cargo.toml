@@ -10,8 +10,15 @@ build = "build.rs"
 # de C y ensamblador para `ring`; `crypto-rust` (RustCrypto, Rust puro) no: es el que usa la
 # compilación dentro de soso mientras el guest no tenga C (T42, C-115). Si se piden
 # los dos gana `ring`.
-default = ["crypto-ring"]
-std = []
+default = ["crypto-ring", "pq"]
+std = ["rustls/std"]
+pq = [
+    "dep:ml-kem",
+    "dep:ml-dsa",
+    "dep:x25519-dalek",
+    "dep:rustls-pki-types",
+    "dep:signature3",
+]
 crypto-ring = ["dep:ring", "dep:cc", "rustls/ring"]
 crypto-rust = ["dep:rustls-rustcrypto"]
 
@@ -30,3 +37,11 @@ ring = { version = "0.17", features = ["less-safe-getrandom-custom-or-rdrand"], 
 rustls = { version = "0.23", default-features = false, features = ["tls12"] }
 rustls-rustcrypto = { version = "0.0.2-alpha", default-features = false, features = ["alloc", "tls12", "zeroize"], optional = true }
 webpki-roots = "0.26"
+ml-kem = { version = "0.3.3", default-features = false, features = ["zeroize"], optional = true }
+ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc", "zeroize"], optional = true }
+x25519-dalek = { version = "2.0", default-features = false, features = ["zeroize"], optional = true }
+rand_core = { version = "0.6", default-features = false }
+rustls-pki-types = { version = "1.15", optional = true }
+signature3 = { package = "signature", version = "3", default-features = false, optional = true }
+[dev-dependencies]
+rcgen = { version = "0.13", default-features = false, features = ["ring"] }

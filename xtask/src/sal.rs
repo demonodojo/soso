@@ -78,6 +78,7 @@ pub fn build(args: &[String]) {
         ("user/sal/escritorio/soso-wm.sal", "soso-wm"),
         ("user/sal/escritorio/soso-comp.sal", "soso-comp"),
         ("user/sal/escritorio/demo-cliente.sal", "demo-cliente"),
+        ("user/sal/escritorio/soso-mono.sal", "soso-mono"),
         ("user/sal/escritorio/soso-files.sal", "soso-files"),
         ("tests/sal/hello.sal", "hello"),
         ("tests/sal/runtime.sal", "runtime"),
@@ -135,6 +136,7 @@ fn instalar_guest(root: &Path) {
                 "target/sal/soso-wm",
                 "target/sal/soso-comp",
                 "target/sal/demo-cliente",
+                "target/sal/soso-mono",
                 "target/sal/soso-files",
                 "target/sal/hello",
                 "target/sal/runtime",
@@ -192,6 +194,10 @@ pub fn install(root: &Path) -> bool {
     changed |= copiar(
         &prepared.join("demo-cliente"),
         &root.join("rootfs/bin/demo-cliente"),
+    );
+    changed |= copiar(
+        &prepared.join("soso-mono"),
+        &root.join("rootfs/bin/soso-mono"),
     );
     changed |= copiar(
         &prepared.join("soso-files"),

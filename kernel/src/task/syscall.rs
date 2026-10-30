@@ -528,10 +528,12 @@ pub(crate) fn user_slice(ptr: u64, len: u64) -> Result<&'static [u8], i64> {
 }
 
 pub(crate) fn user_slice_mut(ptr: u64, len: u64) -> Result<UserBufMut, i64> {
+    let space = super::current_space().ok_or(-abi::EFAULT)?;
     if len == 0 {
         return Ok(UserBufMut {
             ptr,
             data: &mut [],
+            space,
         });
     }
     if !user_range_ok(ptr, len, true) {
@@ -542,12 +544,20 @@ pub(crate) fn user_slice_mut(ptr: u64, len: u64) -> Result<UserBufMut, i64> {
     Ok(UserBufMut {
         ptr,
         data: alloc::boxed::Box::leak(v.into_boxed_slice()),
+        space,
     })
 }
 
 pub struct UserBufMut {
     ptr: u64,
     data: &'static mut [u8],
+    /// Espacio del proceso, capturado al entrar en la syscall.
+    ///
+    /// `flush` corre dentro de `with_fd`, que ya tiene `PROCS` cogido (`sys_read`
+    /// de un fichero vuelca ahí lo que leyó de la caché). Volver a pedirlo con
+    /// `copy_to_user` era un abrazo mortal en el mismo núcleo y dejaba la
+    /// máquina entera girando en `PROCS.lock()` al primer `read`.
+    space: super::addrspace::AddrSpace,
 }
 
 impl UserBufMut {
@@ -556,7 +566,7 @@ impl UserBufMut {
     }
 
     pub fn flush(self) -> Result<(), i64> {
-        super::uaccess::copy_to_user(self.ptr, self.data)
+        super::uaccess::copy_to_space(&self.space, self.ptr, self.data)
     }
 }
 
@@ -968,7 +978,8 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
         if pipe::no_readers(id) {
             return Err(-abi::EPIPE);
         }
-        let n = pipe::try_write(id, buf, len)?;
+        let espacio = super::current_space().ok_or(-abi::EFAULT)?;
+        let n = pipe::try_write(id, &espacio, buf, len)?;
         if n > 0 {
             return Ok(n);
         }
@@ -1004,7 +1015,8 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
         if !user_range_ok(buf, len, false) {
             return Err(-abi::EFAULT);
         }
-        let n = crate::net::tcp_try_write(slot, buf, len)?;
+        let espacio = super::current_space().ok_or(-abi::EFAULT)?;
+        let n = crate::net::tcp_try_write(slot, &espacio, buf, len)?;
         if n > 0 {
             return Ok(n);
         }
@@ -1134,7 +1146,8 @@ fn sys_read(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i6
         if len == 0 {
             return Ok(0);
         }
-        let n = pipe::try_read(id, buf, len);
+        let espacio = super::current_space().ok_or(-abi::EFAULT)?;
+        let n = pipe::try_read(id, &espacio, buf, len);
         if n > 0 {
             return Ok(n);
         }
@@ -1165,7 +1178,8 @@ fn sys_read(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i6
         // Sin validar aquí: `dst` de arriba ya comprobó `buf`/`len` con permiso de
         // escritura, que es lo que necesita este camino. En `sys_read_timeout` sí
         // hace falta, porque allí no se pasa por `user_slice_mut`.
-        let n = crate::net::tcp_try_read(slot, buf, len)?;
+        let espacio = super::current_space().ok_or(-abi::EFAULT)?;
+        let n = crate::net::tcp_try_read(slot, &espacio, buf, len)?;
         if n > 0 {
             return Ok(n);
         }
@@ -2659,7 +2673,8 @@ fn sys_read_timeout(
         if !user_range_ok(buf, len, true) {
             return Err(-abi::EFAULT);
         }
-        let n = pipe::try_read(id, buf, len);
+        let espacio = super::current_space().ok_or(-abi::EFAULT)?;
+        let n = pipe::try_read(id, &espacio, buf, len);
         if n > 0 {
             return Ok(n);
         }
@@ -2686,7 +2701,8 @@ fn sys_read_timeout(
         if !user_range_ok(buf, len, true) {
             return Err(-abi::EFAULT);
         }
-        let n = crate::net::tcp_try_read(slot, buf, len)?;
+        let espacio = super::current_space().ok_or(-abi::EFAULT)?;
+        let n = crate::net::tcp_try_read(slot, &espacio, buf, len)?;
         if n > 0 {
             return Ok(n);
         }

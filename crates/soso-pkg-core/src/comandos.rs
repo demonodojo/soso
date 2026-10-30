@@ -92,8 +92,14 @@ pub fn reconstruir(
     for (nombre_pkg, man) in paquetes {
         let pref = format!("/var/paquetes/{nombre_pkg}");
         for e in entradas_de_manifiesto(man, &pref) {
-            if vistos.contains_key(&e.nombre) {
-                let origen = vistos.get(&e.nombre).cloned().unwrap_or_default();
+            if let Some(origen) = vistos.get(&e.nombre) {
+                if origen == "/bin" {
+                    // En el rootfs muchos binarios viven en /bin y también como
+                    // paquete en /var/paquetes; el índice debe apuntar al paquete.
+                    vistos.insert(e.nombre.clone(), format!("paquete {nombre_pkg}"));
+                    idx.insertar(e.nombre, e.ruta);
+                    continue;
+                }
                 return Err(format!(
                     "comando «{}» ya existe ({origen} y paquete {nombre_pkg})",
                     e.nombre

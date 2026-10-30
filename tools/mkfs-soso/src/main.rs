@@ -5,6 +5,7 @@
 //! Antes de construir la imagen inyecta en `<directorio>/etc`:
 //! - `ssh_host_key`: semilla ed25519 de 32 bytes (persistente: solo se
 //!   genera si no existe, para que la host key no cambie entre mkfs).
+//! - `ssh_host_mldsa`: semilla ML-DSA-65 de 32 bytes (misma regla).
 //! - `authorized_key`: los 32 bytes de la clave pública ed25519 indicada
 //!   (extraídos de su formato OpenSSH), si se pasa una.
 
@@ -63,6 +64,16 @@ fn inyectar_claves(src: &Path, pubkey_path: Option<&str>) {
             .expect("no se pudo leer /dev/urandom");
         std::fs::write(&host_key, seed).expect("no se pudo escribir ssh_host_key");
         println!("mkfs-soso: host key ed25519 generada -> etc/ssh_host_key");
+    }
+
+    let host_mldsa = etc.join("ssh_host_mldsa");
+    if !host_mldsa.exists() {
+        let mut seed = [0u8; 32];
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| f.read_exact(&mut seed))
+            .expect("no se pudo leer /dev/urandom");
+        std::fs::write(&host_mldsa, seed).expect("no se pudo escribir ssh_host_mldsa");
+        println!("mkfs-soso: host key ML-DSA-65 generada -> etc/ssh_host_mldsa");
     }
 
     // Clave autorizada: extraer los 32 bytes de la clave pública OpenSSH.

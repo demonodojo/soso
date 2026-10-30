@@ -61,6 +61,7 @@ Tests layout Rust: `cargo test -p soso-wm-proto`.
 | Alt+Q | Cerrar ventana |
 | Alt+T | Flotante / mosaico |
 | Alt+W | `soso-web --grafico` (página de prueba empaquetada) |
+| Alt+M | Salvapantallas (mono) |
 | Alt+D / menú «Modo claro/oscuro» | Alterna `tema.sal` (repinta + `op TEMA` a clientes) |
 | Ctrl+/- | Escala fuente **solo ventana con foco** (`tab_escala`, `op ESCALA`) |
 | Ctrl+Mayús+/- | Escala **solo WM** (barra/títulos; `REDIM` a clientes si cambia barra) |

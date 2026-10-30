@@ -256,6 +256,78 @@ impl Estado {
 
 type Dim3 = (u32, u32, u32);
 
+/// Diagnóstico (`SOSO_TRAZA_KERN2=1`): tiempo acumulado por kernel, con una espera antes y después de cada lanzamiento.
+#[derive(Default)]
+pub(super) struct TrazaKern {
+    pub nombres: std::collections::HashMap<usize, String>,
+    pub acum: std::collections::BTreeMap<String, (f64, u32)>,
+}
+
+pub(super) fn traza_kern() -> &'static std::sync::Mutex<TrazaKern> {
+    static T: std::sync::OnceLock<std::sync::Mutex<TrazaKern>> = std::sync::OnceLock::new();
+    T.get_or_init(Default::default)
+}
+
+pub(super) fn traza_kern_activa() -> bool {
+    static A: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *A.get_or_init(|| std::env::var_os("SOSO_TRAZA_KERN2").is_some())
+}
+
+fn real_copia(nombre: &str, c: &'static std::sync::OnceLock<usize>) -> usize {
+    *c.get_or_init(|| {
+        let lib = unsafe { super::dlopen(CString::new("libcuda.so.1").unwrap().as_ptr(), 2) };
+        let sim = unsafe { super::dlsym(lib, CString::new(nombre).unwrap().as_ptr()) };
+        sim as usize
+    })
+}
+
+fn contar(nombre: &str, bytes: usize, t0: std::time::Instant) {
+    if let Ok(mut t) = traza_kern().lock() {
+        let e = t.acum.entry(format!("{nombre} ({} MiB)", bytes >> 20)).or_insert((0.0, 0));
+        e.0 += t0.elapsed().as_secs_f64() * 1e3;
+        e.1 += 1;
+    }
+}
+
+pub(super) unsafe extern "C" fn htod_t(dst: u64, src: *const c_void, n: usize) -> c_int {
+    static R: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let f: unsafe extern "C" fn(u64, *const c_void, usize) -> c_int = unsafe { std::mem::transmute(real_copia("cuMemcpyHtoD_v2", &R)) };
+    let t0 = std::time::Instant::now();
+    let r = unsafe { f(dst, src, n) };
+    contar("htod", n.next_power_of_two().max(1 << 20) / 2 * 2, t0);
+    r
+}
+
+pub(super) unsafe extern "C" fn dtoh_t(dst: *mut c_void, src: u64, n: usize) -> c_int {
+    static R: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    let f: unsafe extern "C" fn(*mut c_void, u64, usize) -> c_int = unsafe { std::mem::transmute(real_copia("cuMemcpyDtoH_v2", &R)) };
+    if std::env::var_os("SOSO_TRAZA_TOCAR").is_some() {
+        let t = std::time::Instant::now();
+        let mut i = 0;
+        while i < n {
+            unsafe { std::ptr::write_volatile((dst as *mut u8).add(i), 0) };
+            i += 4096;
+        }
+        contar("dtoh-tocar", n.next_power_of_two().max(1 << 20) / 2 * 2, t);
+    }
+    let t0 = std::time::Instant::now();
+    let r = unsafe { f(dst, src, n) };
+    contar("dtoh", n.next_power_of_two().max(1 << 20) / 2 * 2, t0);
+    r
+}
+
+/// Vuelca (y vacía) lo acumulado.
+pub fn traza_kern_volcar() {
+    if let Ok(mut t) = traza_kern().lock() {
+        let mut v: Vec<_> = t.acum.iter().map(|(k, e)| (k.clone(), *e)).collect();
+        v.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap());
+        for (k, (ms, n)) in v {
+            eprintln!("[kern2] {k:28} {ms:9.1} ms  {n:6} lanz  {:.3} ms/lanz", ms / n as f64);
+        }
+        t.acum.clear();
+    }
+}
+
 impl CudaGpu {
     pub(super) fn capa_puede(&self, layer: u32) -> bool {
         !self.capa.rechazadas.contains(&layer)
@@ -273,7 +345,14 @@ impl CudaGpu {
         if !self.saltar.is_empty() && self.saltar.contains(&(f as usize)) {
             return Ok(());
         }
-        ck(
+        let medir = traza_kern_activa();
+        let t0 = if medir {
+            ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        let r = ck(
             unsafe {
                 (self.api.launch)(
                     f,
@@ -290,7 +369,17 @@ impl CudaGpu {
                 )
             },
             "cuLaunchKernel",
-        )
+        );
+        if let Some(t0) = t0 {
+            ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
+            if let Ok(mut t) = traza_kern().lock() {
+                let nombre = t.nombres.get(&(f as usize)).cloned().unwrap_or_else(|| format!("{:x}", f as usize));
+                let e = t.acum.entry(nombre).or_insert((0.0, 0));
+                e.0 += t0.elapsed().as_secs_f64() * 1e3;
+                e.1 += 1;
+            }
+        }
+        r
     }
 
     /// `Y[n×rows] = X[n×cols] · W^T` para `n` tokens leyendo los pesos una vez por varios tokens (Q4_K y Q8_0); con
@@ -341,7 +430,14 @@ impl CudaGpu {
         block: Dim3,
         args: &mut [*mut c_void],
     ) -> Result<(), String> {
-        ck(
+        let medir = traza_kern_activa();
+        let t0 = if medir {
+            ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        let r = ck(
             unsafe {
                 (self.api.launch)(
                     f,
@@ -358,7 +454,17 @@ impl CudaGpu {
                 )
             },
             "cuLaunchKernel",
-        )
+        );
+        if let Some(t0) = t0 {
+            ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
+            if let Ok(mut t) = traza_kern().lock() {
+                let nombre = t.nombres.get(&(f as usize)).cloned().unwrap_or_else(|| format!("{:x}", f as usize));
+                let e = t.acum.entry(nombre).or_insert((0.0, 0));
+                e.0 += t0.elapsed().as_secs_f64() * 1e3;
+                e.1 += 1;
+            }
+        }
+        r
     }
 
     /// Búfer de trabajo de al menos `floats` floats (4 bytes cada uno); devuelve el puntero de dispositivo.

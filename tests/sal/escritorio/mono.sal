@@ -1,0 +1,27 @@
+import "../../../user/sal/escritorio/mono.sal"
+
+fn main() -> Int ! alloc
+    if mono_umbral_ms() != 600000
+        1
+    elsif mono_ocioso(1000, 1000 + 599999, 1) != 0
+        2
+    elsif mono_ocioso(1000, 1000 + 600000, 1) == 0
+        3
+    elsif mono_sprite_opaco(0) == 0
+        4
+    elsif mono_sprite_cambia(0, 1) == 0
+        5
+    else
+        buf = bytes_new(4 * 4 * 4)
+        ptr = bytes_ptr(buf)
+        _f = rellenar_rect(ptr, 64, 4, 4, 4, 4, fmt_bgr(), 0, 0, 4, 4, color_rgb(100, 120, 140))
+        px0 = pixel_leer(ptr, 64, 4, 4, fmt_bgr(), 1, 1)
+        px3 = pixel_leer(ptr, 64, 4, 4, fmt_bgr(), 3, 3)
+        _r = mono_romper_rect(ptr, 64, 4, 4, fmt_bgr(), 4, 4, 0, 0, 2, 2, 42)
+        px1 = pixel_leer(ptr, 64, 4, 4, fmt_bgr(), 1, 1)
+        if px0 == px1
+            6
+        elsif px3 != px0
+            7
+        else
+            0

@@ -51,6 +51,7 @@ ecdsa256 = [
 embedded-io = ["dep:embedded-io"]
 larger = []
 mlkem = ["dep:ml-kem"]
+mldsa = ["dep:ml-dsa", "dep:signature3"]
 openssh-key = ["ssh-key"]
 rsa = [
     "dep:rsa",
@@ -139,6 +140,18 @@ version = "0.3.2"
 features = ["zeroize"]
 optional = true
 default-features = false
+
+[dependencies.ml-dsa]
+version = "0.1.1"
+features = ["alloc", "zeroize"]
+optional = true
+default-features = false
+
+[dependencies.signature3]
+package = "signature"
+version = "3"
+default-features = false
+optional = true
 
 [dependencies.p256]
 version = "0.14.0-rc.9"
@@ -241,3 +254,6 @@ codegen-units = 8
 debug = 0
 debug-assertions = false
 overflow-checks = false
+
+# PARCHE soso: permite `cargo test` en este directorio sin heredar el workspace raíz.
+[workspace]

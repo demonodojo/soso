@@ -78,7 +78,7 @@ smoltcp = { version = "0.13.1", default-features = false, features = [
     "alloc",
 ] }
 talc = { version = "4", default-features = false, features = ["lock_api"] }
-sunset = { version = "0.5", default-features = false, features = ["alloc"] }
+sunset = { version = "0.5", default-features = false, features = ["alloc", "mlkem", "mldsa"] }
 xhci-nostd = { path = "../crates/xhci-nostd" }
 log = { version = "0.4", default-features = false }
 # Misma versión que usa sunset: Cargo unifica la instancia, así podemos

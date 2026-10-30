@@ -1,0 +1,8 @@
+import "../../../sal/std/soso/time.sal"
+
+fn main() -> Int ! io
+    u = uptime_ms()
+    if u < 0
+        1
+    else
+        0

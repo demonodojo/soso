@@ -36,7 +36,9 @@ fn la_configuracion_local_se_puede_seguir_editando() {
         "/etc/notifybug.conf",
         "/etc/llm.conf",
         "/etc/ssh_host_key",
+        "/etc/ssh_host_mldsa",
         "/etc/authorized_key",
+        "/etc/authorized_mldsa",
         "/etc/soso-release",
         "/etc/actualiza.estado",
     ] {

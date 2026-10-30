@@ -306,6 +306,7 @@ pub fn tiene_conexion(sockets: &smoltcp::iface::SocketSet<'static>, handle: Sock
 
 pub fn try_read_loopback(
     entry: &UserTcp,
+    space: &crate::task::addrspace::AddrSpace,
     buf: u64,
     len: u64,
 ) -> Result<u64, i64> {
@@ -313,11 +314,12 @@ pub fn try_read_loopback(
         return Err(-soso_abi::ENOTCONN);
     }
     let pair = entry.loop_pair.ok_or(-soso_abi::ENOTCONN)?;
-    super::loopback::try_read(pair, entry.loop_side, buf, len)
+    super::loopback::try_read(pair, entry.loop_side, space, buf, len)
 }
 
 pub fn try_write_loopback(
     entry: &UserTcp,
+    space: &crate::task::addrspace::AddrSpace,
     buf: u64,
     len: u64,
 ) -> Result<u64, i64> {
@@ -325,13 +327,14 @@ pub fn try_write_loopback(
         return Err(-soso_abi::ENOTCONN);
     }
     let pair = entry.loop_pair.ok_or(-soso_abi::ENOTCONN)?;
-    super::loopback::try_write(pair, entry.loop_side, buf, len)
+    super::loopback::try_write(pair, entry.loop_side, space, buf, len)
 }
 
 pub fn try_read(
     sockets: &mut smoltcp::iface::SocketSet<'static>,
     handle: SocketHandle,
     role: TcpRole,
+    space: &crate::task::addrspace::AddrSpace,
     buf: u64,
     len: u64,
 ) -> Result<u64, i64> {
@@ -355,7 +358,7 @@ pub fn try_read(
     if n == 0 {
         return Ok(0);
     }
-    crate::task::uaccess::copy_to_user(buf, &tmp[..n])?;
+    crate::task::uaccess::copy_to_space(space, buf, &tmp[..n])?;
     Ok(n as u64)
 }
 
@@ -363,6 +366,7 @@ pub fn try_write(
     sockets: &mut smoltcp::iface::SocketSet<'static>,
     handle: SocketHandle,
     role: TcpRole,
+    space: &crate::task::addrspace::AddrSpace,
     buf: u64,
     len: u64,
 ) -> Result<u64, i64> {
@@ -379,7 +383,7 @@ pub fn try_write(
     }
     let mut tmp = [0u8; 4096];
     let chunk = src_len.min(tmp.len());
-    crate::task::uaccess::copy_from_user(buf, &mut tmp[..chunk])?;
+    crate::task::uaccess::copy_from_space(space, buf, &mut tmp[..chunk])?;
     let n = s.send_slice(&tmp[..chunk]).unwrap_or(0);
     Ok(n as u64)
 }

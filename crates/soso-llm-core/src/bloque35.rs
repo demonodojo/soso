@@ -94,9 +94,17 @@ pub fn forward_layer_block_q35<S: TensorSource>(
     #[cfg(feature = "std")]
     let t_capa = std::time::Instant::now();
     let prefix = format!("L{layer:02}");
+    #[cfg(feature = "std")]
+    let mut t_cpu = 0.0f64;
+    #[cfg(feature = "std")]
+    let t_x = std::time::Instant::now();
     let residual: Vec<f32> = hs.to_vec();
     source.load_f32(&format!("{prefix}.attn_norm"), &mut s.norm_w[..h])?;
     rmsnorm_filas(par, hs, &s.norm_w[..h], h, n, eps);
+    #[cfg(feature = "std")]
+    {
+        t_cpu += t_x.elapsed().as_secs_f64() * 1e3;
+    }
 
     let mut salida_attn = vec![0.0f32; n * h];
     match spec.attn_kind {
@@ -104,24 +112,42 @@ pub fn forward_layer_block_q35<S: TensorSource>(
         _ => atencion_bloque(exec, layer, pos0, n, hs, &mut salida_attn, bs, s, kv, source, par, &prefix, gpu, use_gpu)?,
     }
     // hs = residual + salida de atención; luego FFN con su residual.
+    #[cfg(feature = "std")]
+    let t_x = std::time::Instant::now();
     suma_filas(par, &residual, &salida_attn, hs, h, n);
     drop(salida_attn);
     #[cfg(feature = "std")]
+    {
+        t_cpu += t_x.elapsed().as_secs_f64() * 1e3;
+    }
+    #[cfg(feature = "std")]
     let t_mezcla = t_capa.elapsed().as_secs_f64() * 1e3;
 
+    #[cfg(feature = "std")]
+    let t_x = std::time::Instant::now();
     let residual2: Vec<f32> = hs.to_vec();
     source.load_f32(&format!("{prefix}.ffn_norm"), &mut s.norm_w[..h])?;
     rmsnorm_filas(par, hs, &s.norm_w[..h], h, n, eps);
     let mut salida_ffn = vec![0.0f32; n * h];
+    #[cfg(feature = "std")]
+    {
+        t_cpu += t_x.elapsed().as_secs_f64() * 1e3;
+    }
     if m.layer_is_moe(layer) {
         moe_bloque(exec, layer, n, hs, &mut salida_ffn, bs, par, source, &prefix, gpu, use_gpu)?;
     } else {
         ffn_denso_bloque(exec, layer, n, hs, &mut salida_ffn, bs, par, source, &prefix, gpu, use_gpu)?;
     }
+    #[cfg(feature = "std")]
+    let t_x = std::time::Instant::now();
     suma_filas(par, &residual2, &salida_ffn, hs, h, n);
     #[cfg(feature = "std")]
+    {
+        t_cpu += t_x.elapsed().as_secs_f64() * 1e3;
+    }
+    #[cfg(feature = "std")]
     if std::env::var_os("SOSO_TRAZA_CAPAS").is_some() {
-        std::eprintln!("[capa] L{layer} n={n} {:?}: {:.1} ms (mezcla {:.1})", spec.attn_kind, t_capa.elapsed().as_secs_f64() * 1e3, t_mezcla);
+        std::eprintln!("[capa] L{layer} n={n} {:?}: {:.1} ms (mezcla {:.1}, cpu del bloque {:.1})", spec.attn_kind, t_capa.elapsed().as_secs_f64() * 1e3, t_mezcla, t_cpu);
     }
     Ok(())
 }

@@ -12,6 +12,25 @@ use ed25519_dalek as dalek;
 use ed25519_dalek::{Signer, Verifier};
 use zeroize::ZeroizeOnDrop;
 
+#[cfg(feature = "mldsa")]
+use alloc::boxed::Box;
+#[cfg(feature = "mldsa")]
+use {
+    ml_dsa::{
+        EncodedSignature, EncodedVerifyingKey, KeyExport, MlDsa65,
+        Signature as MlDsaSignature, SigningKey as MlDsaSigningKey,
+        VerifyingKey as MlDsaVerifyingKey,
+    },
+    signature3::{Signer as MlDsaSigner, Verifier as MlDsaVerifier},
+};
+
+/// ML-DSA-65 public key size (FIPS 204 / draft-sfluhrer-ssh-mldsa).
+#[cfg(feature = "mldsa")]
+pub(crate) const MLDSA65_PUBKEY_SIZE: usize = 1952;
+/// ML-DSA-65 signature size.
+#[cfg(feature = "mldsa")]
+pub(crate) const MLDSA65_SIG_SIZE: usize = 3309;
+
 use crate::*;
 use packets::{Ed25519PubKey, Ed25519Sig, PubKey, Signature};
 use sshnames::*;
@@ -41,6 +60,10 @@ use digest::Digest;
 // TODO remove once we use byupdate.
 // signatures are for hostkey (32 byte sessiid) or pubkey (auth packet || sessid).
 // we assume a max 40 character username here.
+/// Auth and KEX messages fit here; ML-DSA signs the same SSH-serialized blob.
+#[cfg(feature = "mldsa")]
+const MAX_MLDSA65_SIG_MSG: usize = 512;
+
 const MAX_ED25519_SIG_MSG: usize = 1
     + 4
     + 40
@@ -57,6 +80,8 @@ const MAX_ED25519_SIG_MSG: usize = 1
 
 #[derive(Debug, Clone, Copy)]
 pub enum SigType {
+    #[cfg(feature = "mldsa")]
+    Mldsa65,
     Ed25519,
     #[cfg(feature = "rsa")]
     RSA,
@@ -75,6 +100,8 @@ impl SigType {
     /// Must be a valid name
     pub fn from_name(name: &'static str) -> Result<Self> {
         match name {
+            #[cfg(feature = "mldsa")]
+            SSH_NAME_MLDSA_65 => Ok(SigType::Mldsa65),
             SSH_NAME_ED25519 => Ok(SigType::Ed25519),
             #[cfg(feature = "rsa")]
             SSH_NAME_RSA_SHA256 => Ok(SigType::RSA),
@@ -87,6 +114,8 @@ impl SigType {
     /// Returns a valid name
     pub fn algorithm_name(&self) -> &'static str {
         match self {
+            #[cfg(feature = "mldsa")]
+            SigType::Mldsa65 => SSH_NAME_MLDSA_65,
             SigType::Ed25519 => SSH_NAME_ED25519,
             #[cfg(feature = "rsa")]
             SigType::RSA => SSH_NAME_RSA_SHA256,
@@ -130,6 +159,11 @@ impl SigType {
         }
 
         let ret = match (self, pubkey, sig) {
+            #[cfg(feature = "mldsa")]
+            (SigType::Mldsa65, PubKey::Mldsa65(k), Signature::Mldsa65(s)) => {
+                Self::verify_mldsa65(k, msg, s)
+            }
+
             (SigType::Ed25519, PubKey::Ed25519(k), Signature::Ed25519(s)) => {
                 Self::verify_ed25519(k, msg, s)
             }
@@ -160,6 +194,27 @@ impl SigType {
         return self.fuzz_fake_verify(sig);
 
         ret
+    }
+
+    #[cfg(feature = "mldsa")]
+    fn verify_mldsa65(
+        k: &packets::Mldsa65PubKey,
+        msg: &dyn SSHEncode,
+        s: &packets::Mldsa65Sig<'_>,
+    ) -> Result<()> {
+        if s.sig.0.len() != MLDSA65_SIG_SIZE {
+            return Err(Error::BadSig);
+        }
+        let mut enc_sig = EncodedSignature::<MlDsa65>::default();
+        enc_sig.copy_from_slice(s.sig.0);
+        let sig = MlDsaSignature::<MlDsa65>::decode(&enc_sig)
+            .ok_or(Error::BadSig)?;
+        let mut enc_pk = EncodedVerifyingKey::<MlDsa65>::default();
+        enc_pk.copy_from_slice(&k.key.0);
+        let vk = MlDsaVerifyingKey::decode(&enc_pk);
+        let mut buf = [0u8; MAX_MLDSA65_SIG_MSG];
+        let l = sshwire::write_ssh(&mut buf, msg).map_err(|_| Error::BadSig)?;
+        MlDsaVerifier::verify(&vk, &buf[..l], &sig).map_err(|_| Error::BadSig)
     }
 
     fn verify_ed25519(
@@ -260,6 +315,8 @@ impl SigType {
 
 pub enum OwnedSig {
     // just store raw bytes here.
+    #[cfg(feature = "mldsa")]
+    Mldsa65(Box<[u8; MLDSA65_SIG_SIZE]>),
     Ed25519([u8; 64]),
     #[cfg(feature = "rsa")]
     RSA(Box<[u8]>),
@@ -281,6 +338,15 @@ impl TryFrom<Signature<'_>> for OwnedSig {
     type Error = Error;
     fn try_from(s: Signature) -> Result<Self> {
         match s {
+            #[cfg(feature = "mldsa")]
+            Signature::Mldsa65(s) => {
+                if s.sig.0.len() != MLDSA65_SIG_SIZE {
+                    return Err(Error::BadSig);
+                }
+                let mut boxed = Box::new([0u8; MLDSA65_SIG_SIZE]);
+                boxed.copy_from_slice(s.sig.0);
+                Ok(OwnedSig::Mldsa65(boxed))
+            }
             Signature::Ed25519(s) => {
                 let s: [u8; 64] = s.sig.0.try_into().map_err(|_| Error::BadSig)?;
                 Ok(OwnedSig::Ed25519(s))
@@ -316,6 +382,8 @@ impl TryFrom<Signature<'_>> for OwnedSig {
 #[derive(Debug, Clone, Copy)]
 pub enum KeyType {
     Ed25519,
+    #[cfg(feature = "mldsa")]
+    Mldsa65,
     #[cfg(feature = "rsa")]
     RSA,
 }
@@ -324,7 +392,7 @@ pub enum KeyType {
 ///
 /// This may hold the private key part locally
 /// or potentially send the signing requests to an SSH agent or other entity.
-#[derive(ZeroizeOnDrop, Clone, PartialEq, Eq)]
+#[derive(ZeroizeOnDrop, Clone)]
 pub enum SignKey {
     // TODO: we could just have the 32 byte seed here to save memory, but
     // computing the public part may be slow.
@@ -332,6 +400,13 @@ pub enum SignKey {
 
     #[zeroize(skip)]
     AgentEd25519(dalek::VerifyingKey),
+
+    #[cfg(feature = "mldsa")]
+    Mldsa65(MlDsaSigningKey<MlDsa65>),
+
+    #[cfg(feature = "mldsa")]
+    #[zeroize(skip)]
+    AgentMldsa65(MlDsaVerifyingKey<MlDsa65>),
 
     #[cfg(feature = "rsa")]
     // TODO zeroize doesn't seem supported? though BigUint has Zeroize
@@ -350,6 +425,14 @@ pub enum SignKey {
 }
 
 impl SignKey {
+    /// Host key ML-DSA-65 desde semilla de 32 bytes (FIPS 204).
+    #[cfg(feature = "mldsa")]
+    pub fn mldsa65_from_seed(seed: &[u8; 32]) -> Self {
+        let mut s = ml_dsa::Seed::default();
+        s.copy_from_slice(seed);
+        Self::Mldsa65(MlDsaSigningKey::from_seed(&s))
+    }
+
     pub fn generate(ty: KeyType, bits: Option<usize>) -> Result<Self> {
         match ty {
             KeyType::Ed25519 => {
@@ -358,6 +441,16 @@ impl SignKey {
                 }
                 let k = dalek::SigningKey::generate(&mut rand_core::OsRng);
                 Ok(Self::Ed25519(k))
+            }
+
+            #[cfg(feature = "mldsa")]
+            KeyType::Mldsa65 => {
+                if bits.is_some() && bits != Some(256) {
+                    return Err(Error::msg("Bad key size"));
+                }
+                let mut seed = ml_dsa::Seed::default();
+                random::fill_random(&mut seed).map_err(|_| Error::bug())?;
+                Ok(Self::Mldsa65(MlDsaSigningKey::from_seed(&seed)))
             }
 
             #[cfg(feature = "rsa")]
@@ -392,6 +485,22 @@ impl SignKey {
                 PubKey::Ed25519(Ed25519PubKey { key: Blob(pk.to_bytes()) })
             }
 
+            #[cfg(feature = "mldsa")]
+            SignKey::Mldsa65(k) => {
+                let enc = KeyExport::to_bytes(k.as_ref());
+                let mut raw = [0u8; MLDSA65_PUBKEY_SIZE];
+                raw.copy_from_slice(enc.as_slice());
+                PubKey::Mldsa65(packets::Mldsa65PubKey { key: Blob(raw) })
+            }
+
+            #[cfg(feature = "mldsa")]
+            SignKey::AgentMldsa65(pk) => {
+                let enc = KeyExport::to_bytes(pk);
+                let mut raw = [0u8; MLDSA65_PUBKEY_SIZE];
+                raw.copy_from_slice(enc.as_slice());
+                PubKey::Mldsa65(packets::Mldsa65PubKey { key: Blob(raw) })
+            }
+
             #[cfg(feature = "rsa")]
             SignKey::RSA(k) => PubKey::RSA(RSAPubKey { key: k.into() }),
 
@@ -424,6 +533,16 @@ impl SignKey {
                 Ok(Self::AgentEd25519(k))
             }
 
+            #[cfg(feature = "mldsa")]
+            PubKey::Mldsa65(k) => {
+                if k.key.0.len() != MLDSA65_PUBKEY_SIZE {
+                    return Err(Error::BadKey);
+                }
+                let mut enc = EncodedVerifyingKey::<MlDsa65>::default();
+                enc.copy_from_slice(&k.key.0);
+                Ok(Self::AgentMldsa65(MlDsaVerifyingKey::decode(&enc)))
+            }
+
             #[cfg(feature = "rsa")]
             PubKey::RSA(k) => Ok(Self::AgentRSA(k.key.clone())),
             #[cfg(feature = "ecdsa256")]
@@ -436,6 +555,11 @@ impl SignKey {
     /// Returns whether this `SignKey` can create a given signature type
     pub(crate) fn can_sign(&self, sig_type: SigType) -> bool {
         match self {
+            #[cfg(feature = "mldsa")]
+            SignKey::Mldsa65(_) | SignKey::AgentMldsa65(_) => {
+                matches!(sig_type, SigType::Mldsa65)
+            }
+
             SignKey::Ed25519(_) | SignKey::AgentEd25519(_) => {
                 matches!(sig_type, SigType::Ed25519)
             }
@@ -453,6 +577,17 @@ impl SignKey {
 
     pub(crate) fn sign(&self, msg: &impl SSHEncode) -> Result<OwnedSig> {
         let sig: OwnedSig = match self {
+            #[cfg(feature = "mldsa")]
+            SignKey::Mldsa65(k) => {
+                let mut buf = [0u8; MAX_MLDSA65_SIG_MSG];
+                let l = sshwire::write_ssh(&mut buf, msg)?;
+                let sig = MlDsaSigner::try_sign(k, &buf[..l]).map_err(|_| Error::bug())?;
+                let enc = sig.encode();
+                let mut boxed = Box::new([0u8; MLDSA65_SIG_SIZE]);
+                boxed.copy_from_slice(enc.as_slice());
+                OwnedSig::Mldsa65(boxed)
+            }
+
             SignKey::Ed25519(k) => {
                 // TODO: pending merge of https://github.com/dalek-cryptography/curve25519-dalek/pull/556
                 // let exk: dalek::hazmat::ExpandedSecretKey = (&k.to_bytes()).into();
@@ -502,6 +637,8 @@ impl SignKey {
 
             // callers should check for agent keys first
             SignKey::AgentEd25519(_) => unreachable!(),
+            #[cfg(feature = "mldsa")]
+            SignKey::AgentMldsa65(_) => unreachable!(),
             #[cfg(feature = "rsa")]
             SignKey::AgentRSA(_) => unreachable!(),
             #[cfg(feature = "ecdsa256")]
@@ -523,12 +660,16 @@ impl SignKey {
     pub(crate) fn is_agent(&self) -> bool {
         match self {
             SignKey::Ed25519(_) => false,
+            #[cfg(feature = "mldsa")]
+            SignKey::Mldsa65(_) => false,
             #[cfg(feature = "rsa")]
             SignKey::RSA(_) => false,
             #[cfg(feature = "ecdsa256")]
             SignKey::ECDSA256(_) => false,
 
             SignKey::AgentEd25519(_) => true,
+            #[cfg(feature = "mldsa")]
+            SignKey::AgentMldsa65(_) => true,
             #[cfg(feature = "rsa")]
             SignKey::AgentRSA(_) => true,
             #[cfg(feature = "ecdsa256")]
@@ -542,6 +683,10 @@ impl core::fmt::Debug for SignKey {
         let s = match self {
             Self::Ed25519(_) => "Ed25519",
             Self::AgentEd25519(_) => "AgentEd25519",
+            #[cfg(feature = "mldsa")]
+            Self::Mldsa65(_) => "Mldsa65",
+            #[cfg(feature = "mldsa")]
+            Self::AgentMldsa65(_) => "AgentMldsa65",
             #[cfg(feature = "rsa")]
             Self::RSA(_) => "RSA",
             #[cfg(feature = "rsa")]
@@ -587,7 +732,31 @@ impl TryFrom<ssh_key::PrivateKey> for SignKey {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "mldsa"))]
 pub(crate) mod tests {
-    // TODO: tests for sign()/verify() and invalid signatures
+    use super::*;
+    use crate::packets::{Mldsa65PubKey, Mldsa65Sig, PubKey, Signature};
+    use crate::sshwire::{BinString, Blob, SSHEncode};
+
+    struct Msg<'a>(&'a [u8]);
+    impl SSHEncode for Msg<'_> {
+        fn enc(&self, s: &mut dyn crate::sshwire::SSHSink) -> crate::sshwire::WireResult<()> {
+            self.0.enc(s)
+        }
+    }
+
+    #[test]
+    fn mldsa65_sign_verify_roundtrip() {
+        let key = SignKey::generate(KeyType::Mldsa65, None).expect("gen");
+        let msg = Msg(b"kex-hash-bytes");
+        let sig = key.sign(&msg).expect("sign");
+        let pk = key.pubkey();
+        let PubKey::Mldsa65(_) = &pk else { panic!("pubkey") };
+        let owned: OwnedSig = sig;
+        let wire: Signature = (&owned).into();
+        let Signature::Mldsa65(_) = &wire else { panic!("sig wire") };
+        SigType::Mldsa65
+            .verify(&pk, &msg, &wire)
+            .expect("verify host sig");
+    }
 }

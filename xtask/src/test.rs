@@ -654,7 +654,7 @@ fn run_shard_llm_dense(slot: &QemuSlot, key: &Path, report: &Report, filter: &Te
     let arrancado = report
         .paso(sid, "arranque hasta la shell", || {
             esperar_en_fichero(&slot.serial, "sosh —", Duration::from_secs(180))?;
-            esperar_en_fichero(&slot.serial, "net: dhcp", Duration::from_secs(120))
+            esperar_red_guest(&slot.serial)
         })
         .is_ok();
     if arrancado {
@@ -723,6 +723,29 @@ fn run_shard_llm_dense(slot: &QemuSlot, key: &Path, report: &Report, filter: &Te
 
 /// Un comando trivial que debe contestar rápido: detecta la máquina ahogada
 /// por hilos que quedaron girando.
+/// Comprueba que OpenSSH negocia `mlkem768x25519-sha256` con el servidor soso.
+pub(crate) fn ssh_pq_kex(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let key_s = key.display().to_string();
+    let out = Command::new("sh")
+        .args(["-c", &format!(
+            "ssh -vvv -i '{key_s}' -p {ssh_port} \
+             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+             -o ConnectTimeout=15 -o BatchMode=yes \
+             soso@localhost exit 2>&1 || true"
+        )])
+        .output()
+        .map_err(|e| format!("ssh -vvv: {e}"))?;
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    if !text.contains("mlkem768x25519-sha256") {
+        return Err(format!(
+            "no se negoció mlkem768x25519-sha256; extracto:\n{}",
+            &text[..text.len().min(4000)]
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn ssh_vive(key: &Path, ssh_port: u16) -> Result<(), String> {
     let texto = ssh_guion(key, ssh_port, "echo vivo\nexit\n", Duration::from_secs(45))?;
     if texto.contains("vivo") {
@@ -780,8 +803,12 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
     };
     let arrancado = report
         .paso(sid, "arranque hasta la shell", || {
-            esperar_en_fichero(&slot.serial, "sosh —", Duration::from_secs(90))?;
-            esperar_en_fichero(&slot.serial, "net: dhcp", Duration::from_secs(120))
+            let mut espera = Duration::from_secs(90);
+            if super::qemu_accel_mode() == "tcg" {
+                espera += Duration::from_secs(180);
+            }
+            esperar_en_fichero(&slot.serial, "sosh —", espera)?;
+            esperar_red_guest(&slot.serial)
         })
         .is_ok();
     if arrancado {
@@ -790,6 +817,15 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
         let _ = report.paso(sid, &format!("echo TCP en :{echo}"), || echo_tcp(echo));
         let _ = report.paso_ssh_sys(&mut qemu, slot, sid, "marca /tmp/sosh-ready", || {
             ssh_sosh_ready(key, port)
+        });
+        filter.if_step(sid, "ssh: KEX mlkem768x25519-sha256", || {
+            report.paso_ssh_sys(
+                &mut qemu,
+                slot,
+                sid,
+                "ssh: KEX post-cuántico",
+                || ssh_pq_kex(key, port),
+            );
         });
         filter.if_step(sid, "ssh: dos sesiones concurrentes", || {
             report.paso_ssh_sys(
@@ -923,6 +959,11 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
         filter.if_step(sid, "soso-wm: fotograma", || {
             report.paso_ssh_sys(&mut qemu, slot, sid, "soso-wm: fotograma", || {
                 ssh_soso_wm_fotograma(key, port)
+            });
+        });
+        filter.if_step(sid, "soso-wm: prueba-mono", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "soso-wm: prueba-mono", || {
+                ssh_soso_wm_prueba_mono(key, port)
             });
         });
         filter.if_step(sid, "soso-wm: prueba", || {
@@ -1215,7 +1256,7 @@ fn reiniciar_guest_sys(qemu: &mut Child, slot: &QemuSlot) -> Result<(), String> 
         .open(&slot.serial);
     *qemu = lanzar_qemu(slot).map_err(|e| format!("relanzar QEMU: {e}"))?;
     esperar_en_fichero(&slot.serial, "sosh —", Duration::from_secs(90))?;
-    esperar_en_fichero(&slot.serial, "net: dhcp", Duration::from_secs(120))?;
+    esperar_red_guest(&slot.serial)?;
     Ok(())
 }
 
@@ -1431,6 +1472,15 @@ pub(crate) fn esperar_en_fichero(
     Err(format!("no apareció {patron:?} en {limite:?}"))
 }
 
+/// DHCP real o fallback slirp en QEMU. No usar `net: dhcp` a secas: también
+/// coincide con `net: dhcp…` del arranque, antes de tener IP.
+pub(crate) fn esperar_red_guest(serial: &std::path::Path) -> Result<(), String> {
+    if esperar_en_fichero(serial, "net: dhcp 10.", Duration::from_secs(120)).is_ok() {
+        return Ok(());
+    }
+    esperar_en_fichero(serial, "net: sin dhcp", Duration::from_secs(30))
+}
+
 fn echo_tcp(echo_port: u16) -> Result<(), String> {
     let mut s = conectar_reintentando(echo_port, Duration::from_secs(10))?;
     s.set_read_timeout(Some(Duration::from_secs(10))).ok();
@@ -1608,7 +1658,13 @@ fn ssh_guion_inner(
         });
     }
 
-    let fin_prompt = Instant::now() + Duration::from_secs(45);
+    let mut espera_prompt = limite.max(Duration::from_secs(90));
+    if super::qemu_accel_mode() == "tcg" {
+        // prefault_imagen() en /bin/sosh puede tardar minutos sin TCG; el motd
+        // llega antes de la línea de ayuda y del «$ ».
+        espera_prompt += Duration::from_secs(240);
+    }
+    let fin_prompt = Instant::now() + espera_prompt;
     loop {
         let mut visto = prompt.0.lock().unwrap();
         if *visto {
@@ -1626,7 +1682,7 @@ fn ssh_guion_inner(
             let _ = hijo.kill();
             let _ = hijo.wait();
             return Err(format!(
-                "no apareció el prompt en 45s; stdout parcial: {:?}; ssh dijo: {:?}",
+                "no apareció el prompt en {espera_prompt:?}; stdout parcial: {:?}; ssh dijo: {:?}",
                 String::from_utf8_lossy(&acum.lock().unwrap()),
                 err.trim()
             ));
@@ -2702,17 +2758,17 @@ exit
 
 fn ssh_opencode_sal(key: &Path, ssh_port: u16) -> Result<(), String> {
     let guion = "\
+soso-pkg listar
 soso-pkg instalar /share/paquetes-prueba/opencode-sal --forzar
 opencode --version
-echo OC=$?
 exit
 ";
     let texto = ssh_guion(key, ssh_port, guion, Duration::from_secs(120))?;
-    if !texto.contains("opencode-sal") {
-        return Err(format!("opencode --version sin texto esperado; stdout: {texto:?}"));
+    if texto.contains("soso-pkg salió con código") {
+        return Err(format!("soso-pkg instalar opencode-sal falló; stdout: {texto:?}"));
     }
-    if !texto.contains("OC=0") {
-        return Err(format!("opencode --version falló; stdout: {texto:?}"));
+    if !texto.contains("opencode-sal 0.3.0") && !texto.contains("opencode-sal 1.0.0") {
+        return Err(format!("opencode --version inesperado; stdout: {texto:?}"));
     }
     Ok(())
 }
@@ -2872,6 +2928,24 @@ fn ssh_soso_wm_fotograma(key: &Path, ssh_port: u16) -> Result<(), String> {
     )?;
     if !texto.contains("soso-wm: fotograma OK") {
         return Err(format!("soso-wm --fotograma sin línea OK (¿colgado?): {texto:?}"));
+    }
+    Ok(())
+}
+
+fn ssh_soso_wm_prueba_mono(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let texto = ssh_guion_inner(
+        key,
+        ssh_port,
+        "soso-wm --prueba-mono && echo MONO_OK\nexit\n",
+        Duration::from_secs(120),
+        true,
+        None,
+    )?;
+    if !texto.contains("soso-wm: prueba-mono OK") {
+        return Err(format!("soso-wm --prueba-mono sin línea OK: {texto:?}"));
+    }
+    if !texto.contains("MONO_OK") {
+        return Err(format!("soso-wm --prueba-mono falló (exit distinto de 0): {texto:?}"));
     }
     Ok(())
 }

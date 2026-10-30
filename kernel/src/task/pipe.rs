@@ -146,7 +146,7 @@ pub fn no_readers(id: PipeId) -> bool {
 const CHUNK: usize = 256;
 
 /// Lee hasta `len` bytes al buffer de usuario. Devuelve bytes leídos.
-pub fn read_into_user(id: PipeId, buf: u64, len: u64) -> u64 {
+pub fn read_into_user(id: PipeId, space: &super::addrspace::AddrSpace, buf: u64, len: u64) -> u64 {
     let mut pipes = PIPES.lock();
     let Some(p) = pipes.get_mut(id).and_then(|s| s.as_mut()) else {
         return 0;
@@ -159,7 +159,7 @@ pub fn read_into_user(id: PipeId, buf: u64, len: u64) -> u64 {
         if n == 0 {
             break;
         }
-        if super::uaccess::copy_to_user(buf + total, &tmp[..n]).is_err() {
+        if super::uaccess::copy_to_space(space, buf + total, &tmp[..n]).is_err() {
             break;
         }
         total += n as u64;
@@ -172,7 +172,12 @@ pub fn read_into_user(id: PipeId, buf: u64, len: u64) -> u64 {
 /// Transfiere todo lo que quepa en el pipe (4 KiB), no 256 bytes. Sigue pudiendo
 /// ser una escritura CORTA —si el pipe se llena—, y eso es legítimo: lo que no es
 /// legítimo es que el tope lo pusiera el tamaño de un temporal del kernel.
-pub fn write_from_user(id: PipeId, buf: u64, len: u64) -> Result<u64, i64> {
+pub fn write_from_user(
+    id: PipeId,
+    space: &super::addrspace::AddrSpace,
+    buf: u64,
+    len: u64,
+) -> Result<u64, i64> {
     use soso_abi as abi;
     let mut pipes = PIPES.lock();
     let Some(p) = pipes.get_mut(id).and_then(|s| s.as_mut()) else {
@@ -189,7 +194,7 @@ pub fn write_from_user(id: PipeId, buf: u64, len: u64) -> Result<u64, i64> {
             break;
         }
         let want = ((len - total) as usize).min(CHUNK).min(hueco);
-        if super::uaccess::copy_from_user(buf + total, &mut src[..want]).is_err() {
+        if super::uaccess::copy_from_space(space, buf + total, &mut src[..want]).is_err() {
             return Err(-abi::EFAULT);
         }
         let n = p.write_from(&src[..want]);
@@ -202,10 +207,10 @@ pub fn write_from_user(id: PipeId, buf: u64, len: u64) -> Result<u64, i64> {
 }
 
 /// Intenta leer todo lo pedido en bucle corto (sin bloquear).
-pub fn try_read(id: PipeId, buf: u64, len: u64) -> u64 {
+pub fn try_read(id: PipeId, space: &super::addrspace::AddrSpace, buf: u64, len: u64) -> u64 {
     let mut total = 0u64;
     while total < len {
-        let n = read_into_user(id, buf + total, len - total);
+        let n = read_into_user(id, space, buf + total, len - total);
         if n == 0 {
             break;
         }
@@ -215,10 +220,15 @@ pub fn try_read(id: PipeId, buf: u64, len: u64) -> u64 {
 }
 
 /// Intenta escribir todo lo pedido en bucle corto (sin bloquear).
-pub fn try_write(id: PipeId, buf: u64, len: u64) -> Result<u64, i64> {
+pub fn try_write(
+    id: PipeId,
+    space: &super::addrspace::AddrSpace,
+    buf: u64,
+    len: u64,
+) -> Result<u64, i64> {
     let mut total = 0u64;
     while total < len {
-        let n = write_from_user(id, buf + total, len - total)?;
+        let n = write_from_user(id, space, buf + total, len - total)?;
         if n == 0 {
             break;
         }

@@ -188,11 +188,13 @@ fn copiar_rect(dptr: Int, dlen: Int, dstride_px: Int, sptr: Int, slen: Int, sstr
         if h <= 0
             0
         else
+            dview = bytes_view_mem(dptr, dlen)
+            sview = bytes_view_mem(sptr, slen)
             row = 0
             nb = w * bpp
             while row < h
                 doff = pix_idx(dstride_px, bpp, dx, dy + row)
                 soff = pix_idx(sstride_px, bpp, sx, sy + row)
-                bytes_copy(dptr, doff, sptr, soff, nb)
+                bytes_copy(dview, doff, sview, soff, nb)
                 row = row + 1
             0

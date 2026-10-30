@@ -159,7 +159,9 @@ pub fn materializar_opencode_sal_en_rootfs(root: &Path) -> Result<(), String> {
     let cat = root
         .join("rootfs/share/paquetes/opencode-sal")
         .join(OPENCODE_SAL_VERSION);
-    materializar_opencode_sal(root, &cat, true)
+    // No instalar en rootfs/var: la fase QEMU «opencode-sal» debe ejercitar
+    // `soso-pkg instalar` desde paquetes-prueba sin choque en /bin/opencode.
+    materializar_opencode_sal(root, &cat, false)
 }
 
 fn materializar_opencode_sal(
@@ -202,13 +204,37 @@ fn materializar_opencode_sal(
         files,
     )
     .map_err(|e| format!("{e}"))?;
+    if catalog_dir.exists() {
+        fs::remove_dir_all(catalog_dir).ok();
+    }
     fs::create_dir_all(catalog_dir).map_err(|e| e.to_string())?;
     fs::write(catalog_dir.join("paquete.txt"), &man_text).map_err(|e| e.to_string())?;
     fs::write(catalog_dir.join("paquete.pack"), &pack).map_err(|e| e.to_string())?;
+    for f in &man.files {
+        let start = f.offset as usize;
+        let end = start + f.size as usize;
+        let dest = catalog_dir.join(&f.path);
+        if let Some(p) = dest.parent() {
+            fs::create_dir_all(p).map_err(|e| e.to_string())?;
+        }
+        fs::write(&dest, &pack[start..end]).map_err(|e| e.to_string())?;
+    }
     let prueba = root.join("rootfs/share/paquetes-prueba/opencode-sal");
+    if prueba.exists() {
+        fs::remove_dir_all(&prueba).ok();
+    }
     fs::create_dir_all(&prueba).map_err(|e| e.to_string())?;
     fs::write(prueba.join("paquete.txt"), &man_text).map_err(|e| e.to_string())?;
-    fs::write(prueba.join("paquete.pack"), &pack).map_err(|e| e.to_string())?;
+    // En QEMU, `soso-pkg` ensambla desde ficheros sueltos (como v1/v2 del demo).
+    for f in &man.files {
+        let start = f.offset as usize;
+        let end = start + f.size as usize;
+        let dest = prueba.join(&f.path);
+        if let Some(p) = dest.parent() {
+            fs::create_dir_all(p).map_err(|e| e.to_string())?;
+        }
+        fs::write(&dest, &pack[start..end]).map_err(|e| e.to_string())?;
+    }
     if instalar_en_rootfs {
         escribir_instalado_opencode(root, &man_text, &pack, &man)?;
     }

@@ -5,6 +5,7 @@ import "ventanas.sal"
 import "proto.sal"
 import "tabla.sal"
 import "wm.sal"
+import "mono.sal"
 
 fn puerto_wm() -> Int
     7430
@@ -112,6 +113,107 @@ fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, 
         close_fd(listener)
         if ok == 1
             _pr = print_str(d"soso-wm: prueba OK\n")
+            ok = 0
+    ok
+
+fn prueba_mono_shm_ok(ptr: Int, slen: Int, cw: Int, ch: Int, fmt: Int, paso: Int) -> Int ! alloc
+    mx = mono_paso_x(paso, cw, mono_ancho())
+    my = mono_paso_y(paso, ch, mono_alto())
+    fotograma = mono_fotograma(paso)
+    lx = 15
+    ly = 9
+    exp = mono_pixel_rgb(lx, ly, fotograma)
+    if exp == 0
+        0
+    else
+        got = pixel_leer(ptr, slen, cw, 4, fmt, mx + lx, my + ly)
+        if got == exp
+            1
+        else
+            0
+
+fn prueba_mono_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
+    listener = tcp_listen(puerto_wm())
+    ok = 3
+    if listener >= 0
+        evt = bytes_ptr(bytes_new(24 * 8))
+        msg = bytes_ptr(bytes_new(msg_len()))
+        st = st_nuevo(evt, msg)
+        _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo(st))
+        _ss = wm_ss_armar(st, compos, clen, sw, sh, stride, bpp, fmt)
+        sock = -1
+        if _ss == 0
+            ok = 4
+        if _ss != 0
+            _mp = st_set(st, st_ss_pid(), 1)
+            t0 = uptime_ms()
+            hola = 0
+            crear = 0
+            ventana = 0
+            pintado = 0
+            paso = 0
+            while ok == 3
+                if uptime_ms() - t0 > 20000
+                    ok = 5
+                if ok == 3
+                    if sock < 0
+                        sock = tcp_connect(puerto_wm(), 500)
+                    _t = wm_tick(st, listener, compos, clen, sw, sh, stride, bpp, fmt)
+                if sock >= 0
+                    si = st_get(st, st_ss_slot())
+                    if si >= 0
+                        tab = st_get(st, st_tab())
+                        fa = tab_get(tab, si, tab_fase())
+                        if hola == 0
+                            if fa == 0
+                                m = msg_nuevo()
+                                _h = msg_encode_hola(m, 1)
+                                _w = write_fd(sock, m, msg_len())
+                                hola = 1
+                        if hola != 0
+                            if crear == 0
+                                if fa == 1
+                                    m2 = msg_nuevo()
+                                    _t = msg_titulo_copiar(m2, 16, d"Mono")
+                                    _c = msg_encode_crear(m2, sw, sh, 16)
+                                    _w2 = write_fd(sock, m2, msg_len())
+                                    crear = 1
+                            if crear != 0
+                                if ventana == 0
+                                    if fa == 2
+                                        rep = msg_nuevo()
+                                        n = read_fd(sock, rep, msg_len())
+                                        if n == msg_len()
+                                            if msg_get_op(rep) == op_ventana()
+                                                ventana = 1
+                                if ventana != 0
+                                    ptr = tab_get(tab, si, tab_shm_ptr())
+                                    cw = tab_get(tab, si, tab_cw())
+                                    ch = tab_get(tab, si, tab_ch())
+                                    slen = cw * ch * 4
+                                    if ptr > 0
+                                        mx = mono_paso_x(paso, cw, mono_ancho())
+                                        my = mono_paso_y(paso, ch, mono_alto())
+                                        fot = mono_fotograma(paso)
+                                        _d = mono_dibujar(ptr, slen, cw, 4, fmt, cw, ch, mx, my, fot)
+                                        md = msg_nuevo()
+                                        dx0 = mono_danio_x0(mx, my, paso, cw, ch)
+                                        dy0 = mono_danio_y0(mx, my, paso, cw, ch)
+                                        dx1 = mono_danio_x1(mx, my, paso, cw, ch)
+                                        dy1 = mono_danio_y1(mx, my, paso, cw, ch)
+                                        _dm = msg_encode_danio(md, dx0, dy0, dx1 - dx0, dy1 - dy0)
+                                        _wd = write_fd(sock, md, msg_len())
+                                        if prueba_mono_shm_ok(ptr, slen, cw, ch, fmt, paso) != 0
+                                            pintado = 1
+                                        paso = paso + 1
+                if pintado != 0
+                    ok = 1
+            if sock >= 0
+                _xc = close_fd(sock)
+        _x = wm_ss_cerrar(st)
+        close_fd(listener)
+        if ok == 1
+            _pr = print_str(d"soso-wm: prueba-mono OK\n")
             ok = 0
     ok
 
@@ -475,8 +577,12 @@ fn main() -> Int ! io, alloc
                                     if rc2 != 0
                                         rc = rc2
             if arg_flag(d"--prueba-layout") == 0
-                if arg_flag(d"--fotograma") != 0
-                    rc = fotograma()
-                if arg_flag(d"--fotograma") == 0
-                    rc = bucle_grafico(d"")
+                if arg_flag(d"--prueba-mono") != 0
+                    compos = compos_ram(640, 480, 640, 4)
+                    rc = prueba_mono_modo(compos, compos_len(640, 480, 4), 640, 480, 640, 4, fmt_bgr())
+                if arg_flag(d"--prueba-mono") == 0
+                    if arg_flag(d"--fotograma") != 0
+                        rc = fotograma()
+                    if arg_flag(d"--fotograma") == 0
+                        rc = bucle_grafico(d"")
     rc

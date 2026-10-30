@@ -1,0 +1,5 @@
+# opencode-sal empaquetado para soso-pkg (T87)
+nombre=opencode-sal
+version=1.0.0
+repo=../opencode-sal
+build=build.sh
