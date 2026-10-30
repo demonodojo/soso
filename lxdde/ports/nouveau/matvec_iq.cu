@@ -1133,67 +1133,117 @@ __device__ __forceinline__ float gdn_suma128(float v, float *red)
     return r;
 }
 
-extern "C" __global__ void __launch_bounds__(256) gdn_rec(const float *up, const float *z, const float *decay, const float *beta, const float *nw,
+extern "C" __global__ void __launch_bounds__(128) gdn_rec(const float *up, const float *z, const float *decay, const float *beta, const float *nw,
                                                           float *state, float *out, int n, int n_k, int n_v, float eps)
 {
-    __shared__ float qs[128], ks[128], vs[128], kvp[2][128], op[2][128], red[4];
-    int tid = (int)threadIdx.x;
+    /* Una cabeza V por bloque, un hilo por columna: el estado entero de la columna (128 filas) vive en registros, así que los productos escalares sobre filas no cruzan hilos.
+     * q y k crudos del token siguiente se cargan (y se suman sus cuadrados) mientras se calcula el actual: st[etapa][0..127] = q, [128..255] = k, [256] = Σq², [257] = Σk². */
+    __shared__ __align__(16) float st[2][260];
+    __shared__ float red[4];
+    int tid = (int)threadIdx.x, lane = tid & 31;
     int vh = (int)blockIdx.x;
     int kh = vh % n_k;
-    int col = tid & 127, half = tid >> 7;
     int qk_dim = n_k * 128, qkv_dim = 2 * qk_dim + n_v * 128, v_dim = n_v * 128;
     float *S = state + (long)vh * 128 * 128;
-    float s[64];
+    float s[128];
 #pragma unroll
-    for (int r = 0; r < 64; r++) {
-        s[r] = S[(long)(half * 64 + r) * 128 + col];
+    for (int r = 0; r < 128; r++) {
+        s[r] = S[(long)r * 128 + tid];
     }
     const float escala = rsqrtf(128.0f);
+    const float nwc = nw[tid];
+    float4 nx = make_float4(0.f, 0.f, 0.f, 0.f);
+    if (tid < 64) {
+        const float *b0 = up + (tid < 32 ? kh * 128 : qk_dim + kh * 128);
+        nx = *(const float4 *)(b0 + 4 * (tid & 31));
+        float p = nx.x * nx.x + nx.y * nx.y + nx.z * nx.z + nx.w * nx.w;
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) {
+            p += __shfl_xor_sync(0xffffffffu, p, o);
+        }
+        *(float4 *)(&st[0][4 * tid]) = nx;
+        if (lane == 0) {
+            st[0][256 + (tid >> 5)] = p;
+        }
+    }
+    float vn = up[2 * qk_dim + vh * 128 + tid], gn = decay[vh], bn = beta[vh];
     for (int t = 0; t < n; t++) {
-        const float *base = up + (long)t * qkv_dim;
-        float qr = 0.0f, kr = 0.0f;
-        if (tid < 128) {
-            qr = base[kh * 128 + tid];
-            kr = base[qk_dim + kh * 128 + tid];
-            vs[tid] = base[2 * qk_dim + vh * 128 + tid];
-        }
-        float ssq = gdn_suma128(qr * qr, red);
-        float ssk = gdn_suma128(kr * kr, red);
-        if (tid < 128) {
-            qs[tid] = qr * (1.0f / sqrtf(ssq + eps)) * escala;
-            ks[tid] = kr * (1.0f / sqrtf(ssk + eps));
-        }
         __syncthreads();
-        float kv = 0.0f;
+        const int cur = t & 1;
+        const bool hay = t + 1 < n;
+        if (hay && tid < 64) {
+            const float *b1 = up + (long)(t + 1) * qkv_dim + (tid < 32 ? kh * 128 : qk_dim + kh * 128);
+            nx = *(const float4 *)(b1 + 4 * (tid & 31));
+        }
+        const float vv = vn;
+        const float g = gn, bt = bn;
+        if (hay) {
+            vn = up[(long)(t + 1) * qkv_dim + 2 * qk_dim + vh * 128 + tid];
+            gn = decay[(t + 1) * n_v + vh];
+            bn = beta[(t + 1) * n_v + vh];
+        }
+        const float zz = z[(long)t * v_dim + vh * 128 + tid];
+        const float4 *qq = (const float4 *)st[cur], *kk = (const float4 *)(st[cur] + 128);
+        const float invq = 1.0f / sqrtf(st[cur][256] + eps), invk = 1.0f / sqrtf(st[cur][257] + eps);
+        float kv0 = 0.f, kv1 = 0.f, kv2 = 0.f, kv3 = 0.f;
 #pragma unroll
-        for (int r = 0; r < 64; r++) {
-            kv += s[r] * ks[half * 64 + r];
+        for (int j = 0; j < 32; j++) {
+            float4 k4 = kk[j];
+            kv0 += s[4 * j] * k4.x;
+            kv1 += s[4 * j + 1] * k4.y;
+            kv2 += s[4 * j + 2] * k4.z;
+            kv3 += s[4 * j + 3] * k4.w;
+            if ((j & 7) == 7) {
+                asm volatile("" ::: "memory");
+            }
         }
-        kvp[half][col] = kv;
-        __syncthreads();
-        float g = decay[t * n_v + vh], b = beta[t * n_v + vh];
-        float delta = (vs[col] - g * (kvp[0][col] + kvp[1][col])) * b;
-        float o = 0.0f;
+        float kv = ((kv0 + kv1) + (kv2 + kv3)) * invk;
+        float kd = (vv - g * kv) * bt * invk;
+        float o0 = 0.f, o1 = 0.f, o2 = 0.f, o3 = 0.f;
 #pragma unroll
-        for (int r = 0; r < 64; r++) {
-            float ns = g * s[r] + ks[half * 64 + r] * delta;
-            s[r] = ns;
-            o += ns * qs[half * 64 + r];
+        for (int j = 0; j < 32; j++) {
+            float4 k4 = kk[j], q4 = qq[j];
+            float n0 = g * s[4 * j] + k4.x * kd, n1 = g * s[4 * j + 1] + k4.y * kd, n2 = g * s[4 * j + 2] + k4.z * kd, n3 = g * s[4 * j + 3] + k4.w * kd;
+            s[4 * j] = n0;
+            s[4 * j + 1] = n1;
+            s[4 * j + 2] = n2;
+            s[4 * j + 3] = n3;
+            o0 += n0 * q4.x;
+            o1 += n1 * q4.y;
+            o2 += n2 * q4.z;
+            o3 += n3 * q4.w;
+            if ((j & 7) == 7) {
+                asm volatile("" ::: "memory");
+            }
         }
-        op[half][col] = o;
-        __syncthreads();
-        float val = tid < 128 ? op[0][tid] + op[1][tid] : 0.0f;
-        float ss = gdn_suma128(val * val, red);
-        if (tid < 128) {
-            float zz = z[(long)t * v_dim + vh * 128 + tid];
-            float sil = zz / (1.0f + expf(-zz));
-            out[(long)t * v_dim + vh * 128 + tid] = val * rsqrtf(ss / 128.0f + eps) * nw[tid] * sil;
+        float val = ((o0 + o1) + (o2 + o3)) * invq * escala;
+        float ssv = val * val;
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) {
+            ssv += __shfl_xor_sync(0xffffffffu, ssv, o);
+        }
+        if (lane == 0) {
+            red[tid >> 5] = ssv;
+        }
+        if (hay && tid < 64) {
+            float p = nx.x * nx.x + nx.y * nx.y + nx.z * nx.z + nx.w * nx.w;
+#pragma unroll
+            for (int o = 16; o > 0; o >>= 1) {
+                p += __shfl_xor_sync(0xffffffffu, p, o);
+            }
+            *(float4 *)(&st[cur ^ 1][4 * tid]) = nx;
+            if (lane == 0) {
+                st[cur ^ 1][256 + (tid >> 5)] = p;
+            }
         }
         __syncthreads();
+        float ss = (red[0] + red[1]) + (red[2] + red[3]);
+        float sil = zz / (1.0f + expf(-zz));
+        out[(long)t * v_dim + vh * 128 + tid] = val * rsqrtf(ss / 128.0f + eps) * nwc * sil;
     }
 #pragma unroll
-    for (int r = 0; r < 64; r++) {
-        S[(long)(half * 64 + r) * 128 + col] = s[r];
+    for (int r = 0; r < 128; r++) {
+        S[(long)r * 128 + tid] = s[r];
     }
 }
 
@@ -2026,6 +2076,74 @@ extern "C" __global__ void __launch_bounds__(256) sgemm_nt(const float *W, const
     }
 }
 
+/* Y[t][r] = Σ_k W[r][k] X[t][k] en f32 (router). Tile 64 filas × 32 tokens, 128 hilos con micro-tile de 4 tokens × 4 filas en registros, K en pasos de 16 (K % 16 == 0). */
+extern "C" __global__ void __launch_bounds__(128) sgemm_nt64(const float *W, const float *X, float *Y, int rows, int K, int n)
+{
+    __shared__ __align__(16) float Ws[16][68];
+    __shared__ __align__(16) float Xs[16][36];
+    int tid = (int)threadIdx.x, tx = tid & 15, ty = tid >> 4;
+    int r0 = (int)blockIdx.x * 64, t0 = (int)blockIdx.y * 32;
+    float acc[4][4];
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            acc[i][j] = 0.0f;
+        }
+    }
+    for (int k0 = 0; k0 < K; k0 += 16) {
+#pragma unroll
+        for (int q = 0; q < 2; q++) {
+            int idx = tid + 128 * q, m = idx >> 2, kq = idx & 3;
+            float4 v = make_float4(0.f, 0.f, 0.f, 0.f);
+            if (r0 + m < rows) {
+                v = __ldg((const float4 *)(W + (long)(r0 + m) * K + k0 + 4 * kq));
+            }
+            Ws[4 * kq][m] = v.x;
+            Ws[4 * kq + 1][m] = v.y;
+            Ws[4 * kq + 2][m] = v.z;
+            Ws[4 * kq + 3][m] = v.w;
+        }
+        {
+            int m = tid >> 2, kq = tid & 3;
+            float4 v = make_float4(0.f, 0.f, 0.f, 0.f);
+            if (t0 + m < n) {
+                v = __ldg((const float4 *)(X + (long)(t0 + m) * K + k0 + 4 * kq));
+            }
+            Xs[4 * kq][m] = v.x;
+            Xs[4 * kq + 1][m] = v.y;
+            Xs[4 * kq + 2][m] = v.z;
+            Xs[4 * kq + 3][m] = v.w;
+        }
+        __syncthreads();
+#pragma unroll
+        for (int kk = 0; kk < 16; kk++) {
+            float4 a = *(const float4 *)&Ws[kk][tx * 4];
+            float4 b = *(const float4 *)&Xs[kk][ty * 4];
+            float av[4] = {a.x, a.y, a.z, a.w}, bv[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+            for (int i = 0; i < 4; i++) {
+#pragma unroll
+                for (int j = 0; j < 4; j++) {
+                    acc[i][j] += av[j] * bv[i];
+                }
+            }
+        }
+        __syncthreads();
+    }
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+        int t = t0 + ty * 4 + i;
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            int r = r0 + tx * 4 + j;
+            if (t < n && r < rows) {
+                Y[(long)t * rows + r] = acc[i][j];
+            }
+        }
+    }
+}
+
 /* ---------------------------------------------------------------------------------------------------------------------
  * Decode con producto entero para Q8_0 (como el mmvq de llama.cpp): la activación se cuantiza a int8 por bloques de 32 (escala = máx|x| / 127)
  * y cada `__dp4a` hace 4 productos de int8. Las cargas son de 16 B: 4 bloques de Q8_0 de sosomodel (36 B: escala f32 + 32 i8) = 144 B = 9 × 16 B
@@ -2285,6 +2403,10 @@ extern "C" __global__ void __launch_bounds__(256) dec_moe_down_s(const unsigned 
  * Una vuelta = un superbloque de 256 columnas. IQ3_XXS e IQ4_XS tienen una escala por 32 pesos (mma k32); IQ2_S una por 16 (dos mma k16).
  * Bloque de 128 hilos = 4 warps × 16 filas, 64 tokens; grid = (ceil(filas / 64), tiles de 64 tokens, expertos), igual que `iq_gateup_mma`.
  * ------------------------------------------------------------------------------------------------------------------ */
+#ifndef MQ_NT
+#define MQ_NT 32 /* tokens por tile del mmq de expertos */
+#endif
+#define MQ_NJ (MQ_NT / 8)
 #define MQ_LD 272 /* bytes por fila / por token en shared: 256 + 16 (sin conflictos de banco en los fragmentos) */
 
 __device__ __forceinline__ void mma_s8_k16(int *c, unsigned a0, unsigned a1, unsigned b0)
@@ -2294,72 +2416,115 @@ __device__ __forceinline__ void mma_s8_k16(int *c, unsigned a0, unsigned a1, uns
                  : "r"(a0), "r"(a1), "r"(b0));
 }
 
-/* Descodifica el superbloque `sb` de las 16 filas del warp: i8 en Wsw[fila * MQ_LD + k] y escalas (float) en Sc[fila * 16 + grupo]. Lane: fila = lane / 2, sub-bloques (lane & 1) * 4 + 0..3. */
+/* Bytes crudos del superbloque `sb` que descodifica este lane (fila = lane / 2, sub-bloques (lane & 1) * 4 + 0..3), en registros. Se cargan con anticipación (antes del mma
+ * del superbloque anterior) para que la latencia de memoria quede tapada. r: IQ2_S qs[4] sg[4] qh sc | IQ3_XXS qs[8] aux[4] | IQ4_XS sl q4[16]; sh y d aparte. */
 template <int FMT>
-__device__ __forceinline__ void mq_decodificar(const unsigned char *w, long rb, int rows, int row_w, int sb, unsigned char *Wsw, float *Sc)
+struct MqCrudo {
+    unsigned r[FMT == 22 ? 10 : (FMT == 18 ? 12 : 17)];
+    unsigned d, sh;
+};
+
+__device__ __forceinline__ unsigned mq_u16(const unsigned char *p)
+{
+    return (unsigned)__ldg((const unsigned short *)p);
+}
+__device__ __forceinline__ unsigned mq_u32a2(const unsigned char *p)
+{
+    return mq_u16(p) | (mq_u16(p + 2) << 16);
+}
+
+template <int FMT>
+__device__ __forceinline__ void mq_cargar(const unsigned char *w, long rb, int rows, int row_w, int sb, MqCrudo<FMT> &c)
 {
     int lane = (int)threadIdx.x & 31;
     int r = lane >> 1, ib0 = (lane & 1) * 4;
-    int2 cero = make_int2(0, 0);
     bool ok = row_w + r < rows;
     const unsigned char *b = w + (long)(row_w + r) * rb + (long)sb * (FMT == 22 ? 82 : FMT == 18 ? 98 : 136);
+    if (!ok) {
+#pragma unroll
+        for (int i = 0; i < (int)(sizeof(c.r) / 4); i++) {
+            c.r[i] = 0;
+        }
+        c.d = 0;
+        c.sh = 0;
+        return;
+    }
+    c.d = mq_u16(b);
+    if (FMT == 22) {
+#pragma unroll
+        for (int i = 0; i < 4; i++) {
+            c.r[i] = mq_u32a2(b + 2 + ib0 * 4 + 4 * i);
+            c.r[4 + i] = mq_u32a2(b + 34 + ib0 * 4 + 4 * i);
+        }
+        c.r[8] = mq_u32a2(b + 66 + ib0);
+        c.r[9] = mq_u32a2(b + 74 + ib0);
+    } else if (FMT == 18) {
+#pragma unroll
+        for (int i = 0; i < 8; i++) {
+            c.r[i] = mq_u32a2(b + 2 + ib0 * 8 + 4 * i);
+        }
+#pragma unroll
+        for (int i = 0; i < 4; i++) {
+            c.r[8 + i] = mq_u32a2(b + 66 + 4 * (ib0 + i));
+        }
+    } else {
+        c.sh = mq_u16(b + 2);
+        c.r[0] = mq_u16(b + 4 + (ib0 >> 1));
+#pragma unroll
+        for (int i = 0; i < 16; i++) {
+            c.r[1 + i] = __ldg((const unsigned *)(b + 8 + 16 * ib0) + i);
+        }
+    }
+}
+
+/* Descodifica a Wsw (i8 por fila, MQ_LD) y Sc (escala float por grupo) desde los bytes crudos. */
+template <int FMT>
+__device__ __forceinline__ void mq_decodificar(const MqCrudo<FMT> &c, unsigned char *Wsw, float *Sc)
+{
+    int lane = (int)threadIdx.x & 31;
+    int r = lane >> 1;
     unsigned char *fila = Wsw + r * MQ_LD;
-    float d = ok ? iq_f16(b) : 0.0f;
+    unsigned char d2[2] = {(unsigned char)c.d, (unsigned char)(c.d >> 8)};
+    float d = iq_f16(d2);
 #pragma unroll
     for (int i = 0; i < 4; i++) {
-        int ib = ib0 + i;
+        int ib = (lane & 1) * 4 + i;
         if (FMT == 22) {
-            unsigned s = ok ? b[74 + ib] : 0u;
+            unsigned s = (c.r[9] >> (8 * i)) & 0xffu, qh = (c.r[8] >> (8 * i)) & 0xffu;
             Sc[r * 16 + 2 * ib] = d * (0.5f + (float)(s & 0xf)) * 0.25f;
             Sc[r * 16 + 2 * ib + 1] = d * (0.5f + (float)(s >> 4)) * 0.25f;
 #pragma unroll
             for (int l = 0; l < 4; l++) {
-                int2 v = cero;
-                if (ok) {
-                    unsigned long long g = IQ2S_GRID_D[b[2 + ib * 4 + l] | (((int)b[66 + ib] << (8 - 2 * l)) & 0x300)];
-                    unsigned sg = b[34 + ib * 4 + l];
-                    unsigned m0 = iq_mascara4(sg), m1 = iq_mascara4(sg >> 4);
-                    v.x = __vsub4((int)((unsigned)g ^ m0), (int)m0);
-                    v.y = __vsub4((int)((unsigned)(g >> 32) ^ m1), (int)m1);
-                }
+                unsigned long long g = IQ2S_GRID_D[((c.r[i] >> (8 * l)) & 0xffu) | ((qh << (8 - 2 * l)) & 0x300)];
+                unsigned sg = (c.r[4 + i] >> (8 * l)) & 0xffu;
+                unsigned m0 = iq_mascara4(sg), m1 = iq_mascara4(sg >> 4);
+                int2 v;
+                v.x = __vsub4((int)((unsigned)g ^ m0), (int)m0);
+                v.y = __vsub4((int)((unsigned)(g >> 32) ^ m1), (int)m1);
                 *(int2 *)(fila + ib * 32 + l * 8) = v;
             }
         } else if (FMT == 18) {
-            unsigned aux = 0;
-            if (ok) {
-                const unsigned char *ga = b + 2 + 64 + 4 * ib;
-                aux = (unsigned)ga[0] | ((unsigned)ga[1] << 8) | ((unsigned)ga[2] << 16) | ((unsigned)ga[3] << 24);
-            }
+            unsigned aux = c.r[8 + i];
             Sc[r * 16 + ib] = d * (0.5f + (float)(aux >> 28)) * 0.5f;
 #pragma unroll
             for (int l = 0; l < 4; l++) {
-                int2 v = cero;
-                if (ok) {
-                    unsigned sg = KSIGNS_IQ2XS_D[(aux >> (7 * l)) & 127];
-                    unsigned g1 = IQ3XXS_GRID_D[b[2 + ib * 8 + 2 * l]];
-                    unsigned g2 = IQ3XXS_GRID_D[b[2 + ib * 8 + 2 * l + 1]];
-                    unsigned m0 = iq_mascara4(sg), m1 = iq_mascara4(sg >> 4);
-                    v.x = __vsub4((int)(g1 ^ m0), (int)m0);
-                    v.y = __vsub4((int)(g2 ^ m1), (int)m1);
-                }
+                unsigned sg = KSIGNS_IQ2XS_D[(aux >> (7 * l)) & 127];
+                unsigned q = c.r[2 * i + (l >> 1)] >> (16 * (l & 1));
+                unsigned g1 = IQ3XXS_GRID_D[q & 0xffu];
+                unsigned g2 = IQ3XXS_GRID_D[(q >> 8) & 0xffu];
+                unsigned m0 = iq_mascara4(sg), m1 = iq_mascara4(sg >> 4);
+                int2 v;
+                v.x = __vsub4((int)(g1 ^ m0), (int)m0);
+                v.y = __vsub4((int)(g2 ^ m1), (int)m1);
                 *(int2 *)(fila + ib * 32 + l * 8) = v;
             }
         } else {
-            int ls = 32;
-            if (ok) {
-                unsigned sh = (unsigned)b[2] | ((unsigned)b[3] << 8);
-                unsigned sl = b[4 + (ib >> 1)];
-                ls = (int)((sl >> (4 * (ib & 1))) & 0xf) | (int)(((sh >> (2 * ib)) & 3u) << 4);
-            }
+            unsigned sl = (c.r[0] >> (8 * (i >> 1))) & 0xffu;
+            int ls = (int)((sl >> (4 * (i & 1))) & 0xf) | (int)(((c.sh >> (2 * ib)) & 3u) << 4);
             Sc[r * 16 + ib] = d * (float)(ls - 32);
 #pragma unroll
             for (int w4 = 0; w4 < 4; w4++) {
-                int2 v = cero;
-                if (ok) {
-                    unsigned q4 = (unsigned)b[8 + 16 * ib + 4 * w4] | ((unsigned)b[9 + 16 * ib + 4 * w4] << 8) | ((unsigned)b[10 + 16 * ib + 4 * w4] << 16) |
-                                  ((unsigned)b[11 + 16 * ib + 4 * w4] << 24);
-                    v = iq4_tabla16(q4);
-                }
+                int2 v = iq4_tabla16(c.r[1 + 4 * i + w4]);
                 *(int *)(fila + ib * 32 + 4 * w4) = v.x;
                 *(int *)(fila + ib * 32 + 16 + 4 * w4) = v.y;
             }
@@ -2367,35 +2532,94 @@ __device__ __forceinline__ void mq_decodificar(const unsigned char *w, long rb, 
     }
 }
 
-/* acc[j][q] += W[filas del warp] · X[tokens j*8..] sobre K columnas. Xs/Ds: tile de X compartido por el bloque. tok == null: tokens consecutivos desde tokoff + t0. */
-template <int FMT>
-__device__ void mq_tile(const unsigned char *w, long rb, int rows, int row_w, int K, const signed char *xq, const float *xd, const int *tok, int tokoff, int t0, int nt,
-                        float acc[8][4], unsigned char *Wsw, float *Sc, signed char *Xs, float *Ds)
+/* Disposición de una etapa de smem del mmq de expertos: Ws[4 warps][16 * MQ_LD] | Sc[4][256] float | Xs[MQ_NT * MQ_LD] | Ds[MQ_NT * 8] float. Dos etapas (doble búfer). */
+#define MQ_ST_WS (4 * 16 * MQ_LD)
+#define MQ_ST_SC (4 * 256 * 4)
+#define MQ_ST_XS (MQ_NT * MQ_LD)
+#define MQ_ST_DS (MQ_NT * 8 * 4)
+#define MQ_STAGE (MQ_ST_WS + MQ_ST_SC + MQ_ST_XS + MQ_ST_DS)
+#ifndef MQ_ETAPAS
+#define MQ_ETAPAS 1 /* 2 = doble búfer de smem (62 KB: sólo cabe 1 bloque por SM en la 5070 Ti laptop y pierde ocupación) */
+#endif
+#define MQ_SMEM (MQ_ETAPAS * MQ_STAGE)
+
+/* Carga a registros el tile de X (i8 y escalas) del superbloque `sb`: xr[k] = fila t = (tid + 128k) / 16, trozo i = e & 15. */
+__device__ __forceinline__ void mq_x_cargar(const signed char *xq, const float *xd, const int *tok, int tokoff, int t0, int nt, int K, int sb, uint4 xr[MQ_NJ], float4 &dv)
 {
     int tid = (int)threadIdx.x;
-    int lane = tid & 31, g = lane >> 2, c4 = lane & 3;
-    for (int sb = 0; sb < K / 256; sb++) {
-        for (int e = tid; e < 64 * 16; e += 128) {
-            int t = e >> 4, i = e & 15;
-            uint4 v = make_uint4(0, 0, 0, 0);
-            if (t < nt) {
-                long tr = tok ? (long)tok[t0 + t] : (long)(tokoff + t0 + t);
-                v = __ldg((const uint4 *)(xq + tr * K + sb * 256) + i);
-            }
-            *(uint4 *)(Xs + t * MQ_LD + i * 16) = v;
+#pragma unroll
+    for (int k = 0; k < MQ_NJ; k++) {
+        int e = tid + 128 * k;
+        int t = e >> 4, i = e & 15;
+        uint4 v = make_uint4(0, 0, 0, 0);
+        if (t < nt) {
+            long tr = tok ? (long)tok[t0 + t] : (long)(tokoff + t0 + t);
+            v = __ldg((const uint4 *)(xq + tr * K + sb * 256) + i);
         }
-        {
-            int t = tid >> 1, hf = tid & 1;
-            float4 v = make_float4(0.f, 0.f, 0.f, 0.f);
-            if (t < nt) {
-                long tr = tok ? (long)tok[t0 + t] : (long)(tokoff + t0 + t);
-                v = __ldg((const float4 *)(xd + tr * (K / 32) + sb * 8) + hf);
+        xr[k] = v;
+    }
+    int t = tid >> 1, hf = tid & 1;
+    dv = make_float4(0.f, 0.f, 0.f, 0.f);
+    if (t < nt) {
+        long tr = tok ? (long)tok[t0 + t] : (long)(tokoff + t0 + t);
+        dv = __ldg((const float4 *)(xd + tr * (K / 32) + sb * 8) + hf);
+    }
+}
+
+__device__ __forceinline__ void mq_x_guardar(signed char *Xs, float *Ds, const uint4 xr[MQ_NJ], const float4 &dv)
+{
+    int tid = (int)threadIdx.x;
+#pragma unroll
+    for (int k = 0; k < MQ_NJ; k++) {
+        int e = tid + 128 * k;
+        *(uint4 *)(Xs + (e >> 4) * MQ_LD + (e & 15) * 16) = xr[k];
+    }
+    int t = tid >> 1;
+    if (t < MQ_NT) {
+        *(float4 *)(Ds + t * 8 + (tid & 1) * 4) = dv;
+    }
+}
+
+/* acc[j][q] += W[filas del warp] · X[tokens j*8..] sobre K columnas. `sm`: smem dinámica de MQ_SMEM bytes, doble búfer: la etapa siguiente (X, bytes crudos de pesos y su
+ * descodificación) se prepara mientras el mma consume la actual. tok == null: tokens consecutivos desde tokoff + t0. Termina con __syncthreads. */
+template <int FMT>
+__device__ void mq_tile(const unsigned char *w, long rb, int rows, int row_w, int K, const signed char *xq, const float *xd, const int *tok, int tokoff, int t0, int nt,
+                        float acc[MQ_NJ][4], unsigned char *sm)
+{
+    int tid = (int)threadIdx.x;
+    int lane = tid & 31, g = lane >> 2, c4 = lane & 3, warp = tid >> 5;
+    const int nsb = K / 256;
+    MqCrudo<FMT> cr;
+    uint4 xr[MQ_NJ];
+    float4 dv;
+    mq_cargar<FMT>(w, rb, rows, row_w, 0, cr);
+    mq_x_cargar(xq, xd, tok, tokoff, t0, nt, K, 0, xr, dv);
+    {
+        unsigned char *st = sm;
+        mq_decodificar<FMT>(cr, st + warp * 16 * MQ_LD, (float *)(st + MQ_ST_WS) + warp * 256);
+        mq_x_guardar((signed char *)(st + MQ_ST_WS + MQ_ST_SC), (float *)(st + MQ_ST_WS + MQ_ST_SC + MQ_ST_XS), xr, dv);
+    }
+    if (nsb > 1) {
+        mq_cargar<FMT>(w, rb, rows, row_w, 1, cr);
+    }
+    __syncthreads();
+    for (int sb = 0; sb < nsb; sb++) {
+        unsigned char *st = sm + (MQ_ETAPAS == 2 ? (sb & 1) * MQ_STAGE : 0), *sn = sm + (MQ_ETAPAS == 2 ? ((sb & 1) ^ 1) * MQ_STAGE : 0);
+        bool hay = sb + 1 < nsb;
+        if (hay) {
+            mq_x_cargar(xq, xd, tok, tokoff, t0, nt, K, sb + 1, xr, dv);
+            if (MQ_ETAPAS == 2) {
+                mq_decodificar<FMT>(cr, sn + warp * 16 * MQ_LD, (float *)(sn + MQ_ST_WS) + warp * 256);
+                if (sb + 2 < nsb) {
+                    mq_cargar<FMT>(w, rb, rows, row_w, sb + 2, cr);
+                }
             }
-            *(float4 *)(Ds + t * 8 + hf * 4) = v;
         }
-        mq_decodificar<FMT>(w, rb, rows, row_w, sb, Wsw, Sc);
+        const unsigned char *Wsw = st + warp * 16 * MQ_LD;
+        const float *Sc = (const float *)(st + MQ_ST_WS) + warp * 256;
+        const signed char *Xs = (const signed char *)(st + MQ_ST_WS + MQ_ST_SC);
+        const float *Ds = (const float *)(st + MQ_ST_WS + MQ_ST_SC + MQ_ST_XS);
         __syncwarp();
-        __syncthreads();
 #pragma unroll
         for (int b = 0; b < 8; b++) {
             const unsigned char *r0 = Wsw + g * MQ_LD + b * 32 + 4 * c4;
@@ -2406,7 +2630,7 @@ __device__ void mq_tile(const unsigned char *w, long rb, int rows, int row_w, in
                     unsigned a0 = *(const unsigned *)(r0 + hf * 16), a1 = *(const unsigned *)(r1 + hf * 16);
                     float d0 = Sc[g * 16 + 2 * b + hf], d1 = Sc[(g + 8) * 16 + 2 * b + hf];
 #pragma unroll
-                    for (int j = 0; j < 8; j++) {
+                    for (int j = 0; j < MQ_NJ; j++) {
                         if (j * 8 < nt) {
                             int c[4] = {0, 0, 0, 0};
                             mma_s8_k16(c, a0, a1, *(const unsigned *)(Xs + (j * 8 + g) * MQ_LD + b * 32 + hf * 16 + 4 * c4));
@@ -2422,11 +2646,11 @@ __device__ void mq_tile(const unsigned char *w, long rb, int rows, int row_w, in
                 unsigned a0 = *(const unsigned *)r0, a1 = *(const unsigned *)r1, a2 = *(const unsigned *)(r0 + 16), a3 = *(const unsigned *)(r1 + 16);
                 float d0 = Sc[g * 16 + b], d1 = Sc[(g + 8) * 16 + b];
 #pragma unroll
-                for (int j = 0; j < 8; j++) {
+                for (int j = 0; j < MQ_NJ; j++) {
                     if (j * 8 < nt) {
-                        const unsigned char *xr = (const unsigned char *)(Xs + (j * 8 + g) * MQ_LD + b * 32 + 4 * c4);
+                        const unsigned char *xr8 = (const unsigned char *)(Xs + (j * 8 + g) * MQ_LD + b * 32 + 4 * c4);
                         int c[4] = {0, 0, 0, 0};
-                        mma_s8(c, a0, a1, a2, a3, *(const unsigned *)xr, *(const unsigned *)(xr + 16));
+                        mma_s8(c, a0, a1, a2, a3, *(const unsigned *)xr8, *(const unsigned *)(xr8 + 16));
                         float dxa = Ds[(j * 8 + 2 * c4) * 8 + b], dxb = Ds[(j * 8 + 2 * c4 + 1) * 8 + b];
                         acc[j][0] += (float)c[0] * (d0 * dxa);
                         acc[j][1] += (float)c[1] * (d0 * dxb);
@@ -2436,6 +2660,18 @@ __device__ void mq_tile(const unsigned char *w, long rb, int rows, int row_w, in
                 }
             }
         }
+        if (MQ_ETAPAS == 1) {
+            __syncthreads();
+            if (hay) {
+                mq_decodificar<FMT>(cr, sn + warp * 16 * MQ_LD, (float *)(sn + MQ_ST_WS) + warp * 256);
+                if (sb + 2 < nsb) {
+                    mq_cargar<FMT>(w, rb, rows, row_w, sb + 2, cr);
+                }
+            }
+        }
+        if (hay) {
+            mq_x_guardar((signed char *)(sn + MQ_ST_WS + MQ_ST_SC), (float *)(sn + MQ_ST_WS + MQ_ST_SC + MQ_ST_XS), xr, dv);
+        }
         __syncthreads();
     }
 }
@@ -2443,22 +2679,19 @@ __device__ void mq_tile(const unsigned char *w, long rb, int rows, int row_w, in
 /* gate/up + SwiGLU de los expertos del descriptor (gate y up IQ2_S); `act` en f32 ([abase + t] * ffn + fila), que `dec_quant_x` cuantiza para el down. */
 extern "C" __global__ void __launch_bounds__(128) iq_gateup_mmq(const unsigned long long *desc, const signed char *xq, const float *xd, const int *tok, float *act, int ffn, int h)
 {
-    __shared__ __align__(16) unsigned char Ws[4][16 * MQ_LD];
-    __shared__ __align__(16) signed char Xs[64 * MQ_LD];
-    __shared__ __align__(16) float Ds[64 * 8];
-    __shared__ float Sc[4][16 * 16];
+    extern __shared__ __align__(16) unsigned char mq_sm[];
     const unsigned long long *d = desc + (long)blockIdx.z * IQ_DESC;
     int cnt = (int)d[4];
-    int t0 = (int)blockIdx.y * 64;
+    int t0 = (int)blockIdx.y * MQ_NT;
     if (t0 >= cnt) {
         return;
     }
     int warp = (int)threadIdx.x >> 5, lane = (int)threadIdx.x & 31, g = lane >> 2, c4 = lane & 3;
     int row_w = (int)blockIdx.x * 64 + warp * 16;
-    int nt = cnt - t0 < 64 ? cnt - t0 : 64;
-    float ag[8][4], au[8][4];
+    int nt = cnt - t0 < MQ_NT ? cnt - t0 : MQ_NT;
+    float ag[MQ_NJ][4], au[MQ_NJ][4];
 #pragma unroll
-    for (int j = 0; j < 8; j++) {
+    for (int j = 0; j < MQ_NJ; j++) {
 #pragma unroll
         for (int q = 0; q < 4; q++) {
             ag[j][q] = 0.0f;
@@ -2466,10 +2699,10 @@ extern "C" __global__ void __launch_bounds__(128) iq_gateup_mmq(const unsigned l
         }
     }
     const int *tk = tok + (long)d[11];
-    mq_tile<22>((const unsigned char *)d[0], (long)d[8], ffn, row_w, h, xq, xd, tk, 0, t0, nt, ag, Ws[warp], Sc[warp], Xs, Ds);
-    mq_tile<22>((const unsigned char *)d[1], (long)d[9], ffn, row_w, h, xq, xd, tk, 0, t0, nt, au, Ws[warp], Sc[warp], Xs, Ds);
+    mq_tile<22>((const unsigned char *)d[0], (long)d[8], ffn, row_w, h, xq, xd, tk, 0, t0, nt, ag, mq_sm);
+    mq_tile<22>((const unsigned char *)d[1], (long)d[9], ffn, row_w, h, xq, xd, tk, 0, t0, nt, au, mq_sm);
 #pragma unroll
-    for (int j = 0; j < 8; j++) {
+    for (int j = 0; j < MQ_NJ; j++) {
 #pragma unroll
         for (int q = 0; q < 4; q++) {
             int fila = row_w + g + (q >> 1) * 8;
@@ -2485,34 +2718,31 @@ extern "C" __global__ void __launch_bounds__(128) iq_gateup_mmq(const unsigned l
 /* down de los expertos del descriptor: y[dest[abase + t]] [fila] = W[fila] · act[abase + t]; act cuantizada (actq/actd). El formato (IQ3_XXS o IQ4_XS) va en d[7]. */
 extern "C" __global__ void __launch_bounds__(128) iq_down_mmq(const unsigned long long *desc, const signed char *aq, const float *ad, float *y, int rows, int cols, const int *dest)
 {
-    __shared__ __align__(16) unsigned char Ws[4][16 * MQ_LD];
-    __shared__ __align__(16) signed char Xs[64 * MQ_LD];
-    __shared__ __align__(16) float Ds[64 * 8];
-    __shared__ float Sc[4][16 * 16];
+    extern __shared__ __align__(16) unsigned char mq_sm[];
     const unsigned long long *d = desc + (long)blockIdx.z * IQ_DESC;
     int cnt = (int)d[4];
-    int t0 = (int)blockIdx.y * 64;
+    int t0 = (int)blockIdx.y * MQ_NT;
     if (t0 >= cnt) {
         return;
     }
     int warp = (int)threadIdx.x >> 5, lane = (int)threadIdx.x & 31, g = lane >> 2, c4 = lane & 3;
     int row_w = (int)blockIdx.x * 64 + warp * 16;
-    int nt = cnt - t0 < 64 ? cnt - t0 : 64;
-    float a[8][4];
+    int nt = cnt - t0 < MQ_NT ? cnt - t0 : MQ_NT;
+    float a[MQ_NJ][4];
 #pragma unroll
-    for (int j = 0; j < 8; j++) {
+    for (int j = 0; j < MQ_NJ; j++) {
 #pragma unroll
         for (int q = 0; q < 4; q++) {
             a[j][q] = 0.0f;
         }
     }
     if ((int)d[7] == 18) {
-        mq_tile<18>((const unsigned char *)d[2], (long)d[10], rows, row_w, cols, aq, ad, (const int *)0, (int)d[3], t0, nt, a, Ws[warp], Sc[warp], Xs, Ds);
+        mq_tile<18>((const unsigned char *)d[2], (long)d[10], rows, row_w, cols, aq, ad, (const int *)0, (int)d[3], t0, nt, a, mq_sm);
     } else {
-        mq_tile<23>((const unsigned char *)d[2], (long)d[10], rows, row_w, cols, aq, ad, (const int *)0, (int)d[3], t0, nt, a, Ws[warp], Sc[warp], Xs, Ds);
+        mq_tile<23>((const unsigned char *)d[2], (long)d[10], rows, row_w, cols, aq, ad, (const int *)0, (int)d[3], t0, nt, a, mq_sm);
     }
 #pragma unroll
-    for (int j = 0; j < 8; j++) {
+    for (int j = 0; j < MQ_NJ; j++) {
 #pragma unroll
         for (int q = 0; q < 4; q++) {
             int fila = row_w + g + (q >> 1) * 8;
@@ -2521,5 +2751,38 @@ extern "C" __global__ void __launch_bounds__(128) iq_down_mmq(const unsigned lon
                 y[(long)dest[(int)d[3] + t0 + t] * rows + fila] = a[j][q];
             }
         }
+    }
+}
+
+/* Hidden residente del prefill: [r += y;] xn = rmsnorm(r) * w por token (un bloque de 256 hilos por fila de h). Mismo orden de operaciones que `rmsnorm` de la CPU (x * escala * w). */
+extern "C" __global__ void __launch_bounds__(256) res_suma_rms(float *r, const float *y, const float *w, float *xn, int h, float eps, int sumar)
+{
+    __shared__ float red[8];
+    long t = (long)blockIdx.x;
+    float *rr = r + t * h;
+    float ss = 0.0f;
+    for (int i = (int)threadIdx.x; i < h; i += 256) {
+        float v = rr[i];
+        if (sumar) {
+            v += y[t * h + i];
+            rr[i] = v;
+        }
+        ss += v * v;
+    }
+    for (int o = 16; o > 0; o >>= 1) {
+        ss += __shfl_xor_sync(0xffffffffu, ss, o);
+    }
+    if ((threadIdx.x & 31) == 0) {
+        red[threadIdx.x >> 5] = ss;
+    }
+    __syncthreads();
+    float tot = 0.0f;
+#pragma unroll
+    for (int i = 0; i < 8; i++) {
+        tot += red[i];
+    }
+    float escala = 1.0f / sqrtf(tot / (float)h + eps);
+    for (int i = (int)threadIdx.x; i < h; i += 256) {
+        xn[t * h + i] = rr[i] * escala * w[i];
     }
 }

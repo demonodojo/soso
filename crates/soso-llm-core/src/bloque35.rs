@@ -41,18 +41,6 @@ pub fn soporta(exec: &LayerExecutor<'_>, layer: u32, kv: &LayerKv) -> bool {
 
 /// Una capa de `n` tokens (`hs`, `n` vectores de `hidden_dim`, se actualiza en su sitio).
 #[allow(clippy::too_many_arguments)]
-/// RMSNorm de `n` filas de `h` repartida entre hilos (cada fila es independiente).
-fn rmsnorm_filas(par: &dyn RowParallel, x: &mut [f32], w: &[f32], h: usize, n: usize, eps: f32) {
-    let (x_p, w_p) = (x.as_mut_ptr() as usize, w.as_ptr() as usize);
-    par.for_rows(n, &move |i0, i1| {
-        // SAFETY: filas disjuntas por hilo.
-        let w = unsafe { core::slice::from_raw_parts(w_p as *const f32, h) };
-        for i in i0..i1 {
-            rmsnorm(unsafe { core::slice::from_raw_parts_mut((x_p as *mut f32).add(i * h), h) }, w, eps);
-        }
-    });
-}
-
 /// `dst = a + b` por filas, repartido entre hilos.
 fn suma_filas(par: &dyn RowParallel, a: &[f32], b: &[f32], dst: &mut [f32], h: usize, n: usize) {
     let (a_p, b_p, d_p) = (a.as_ptr() as usize, b.as_ptr() as usize, dst.as_mut_ptr() as usize);
@@ -67,6 +55,90 @@ fn suma_filas(par: &dyn RowParallel, a: &[f32], b: &[f32], dst: &mut [f32], h: u
         };
         add_f32(a, b, d);
     });
+}
+
+/// `res = x; x = rmsnorm(x)` por filas en un solo paso (cada fila queda en caché entre la copia y la normalización).
+fn copia_y_rmsnorm_filas(par: &dyn RowParallel, x: &mut [f32], res: &mut [f32], w: &[f32], h: usize, n: usize, eps: f32) {
+    let (x_p, r_p, w_p) = (x.as_mut_ptr() as usize, res.as_mut_ptr() as usize, w.as_ptr() as usize);
+    par.for_rows(n, &move |i0, i1| {
+        // SAFETY: filas disjuntas por hilo.
+        let w = unsafe { core::slice::from_raw_parts(w_p as *const f32, h) };
+        for i in i0..i1 {
+            let (xr, rr) = unsafe { (core::slice::from_raw_parts_mut((x_p as *mut f32).add(i * h), h), core::slice::from_raw_parts_mut((r_p as *mut f32).add(i * h), h)) };
+            rr.copy_from_slice(xr);
+            rmsnorm(xr, w, eps);
+        }
+    });
+}
+
+/// `res += delta; x = rmsnorm(res)` por filas en un solo paso.
+fn suma_y_rmsnorm_filas(par: &dyn RowParallel, res: &mut [f32], delta: &[f32], x: &mut [f32], w: &[f32], h: usize, n: usize, eps: f32) {
+    let (x_p, r_p, d_p, w_p) = (x.as_mut_ptr() as usize, res.as_mut_ptr() as usize, delta.as_ptr() as usize, w.as_ptr() as usize);
+    par.for_rows(n, &move |i0, i1| {
+        // SAFETY: filas disjuntas por hilo.
+        let w = unsafe { core::slice::from_raw_parts(w_p as *const f32, h) };
+        for i in i0..i1 {
+            let (xr, rr, dr) = unsafe {
+                (
+                    core::slice::from_raw_parts_mut((x_p as *mut f32).add(i * h), h),
+                    core::slice::from_raw_parts_mut((r_p as *mut f32).add(i * h), h),
+                    core::slice::from_raw_parts((d_p as *const f32).add(i * h), h),
+                )
+            };
+            add_f32(rr, dr, xr);
+            rr.copy_from_slice(xr);
+            rmsnorm(xr, w, eps);
+        }
+    });
+}
+
+/// Capa con el hidden residente en el dispositivo: `res_iniciar` ya subió `hs`. Los pasos que la GPU no resuelve pasan por el host (`res_xn_bajar` / `res_y_subir`).
+#[allow(clippy::too_many_arguments)]
+fn forward_res<S: TensorSource>(
+    exec: &LayerExecutor<'_>,
+    layer: u32,
+    pos0: usize,
+    n: usize,
+    hs: &mut [f32],
+    bs: &mut BlockScratch,
+    s: &mut LayerScratch,
+    kv: &mut LayerKv,
+    source: &mut S,
+    par: &dyn RowParallel,
+    gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
+    prefix: &str,
+) -> Result<(), ()> {
+    let m = exec.manifest;
+    let spec = m.layer(layer).cloned().ok_or(())?;
+    let h = m.hidden_dim as usize;
+    let eps = m.rms_eps;
+    source.load_f32(&format!("{prefix}.attn_norm"), &mut s.norm_w[..h])?;
+    gpu.as_deref_mut().ok_or(())?.res_norma(&s.norm_w[..h], n, h, eps, false)?;
+    let mut declinado = false;
+    match spec.attn_kind {
+        AttnKind::Gdn => gdn_bloque(exec, layer, n, &[], &mut [], bs, s, kv, source, par, prefix, gpu, true, Some(&mut declinado))?,
+        _ => atencion_bloque(exec, layer, pos0, n, &[], &mut [], bs, s, kv, source, par, prefix, gpu, true, Some(&mut declinado))?,
+    }
+    if declinado {
+        let mut salida_attn = vec![0.0f32; n * h];
+        gpu.as_deref_mut().ok_or(())?.res_xn_bajar(hs)?; // `hs` sirve de entrada: su contenido ya está en el dispositivo
+        match spec.attn_kind {
+            AttnKind::Gdn => gdn_bloque(exec, layer, n, hs, &mut salida_attn, bs, s, kv, source, par, prefix, gpu, true, None)?,
+            _ => atencion_bloque(exec, layer, pos0, n, hs, &mut salida_attn, bs, s, kv, source, par, prefix, gpu, true, None)?,
+        }
+        gpu.as_deref_mut().ok_or(())?.res_y_subir(&salida_attn)?;
+    }
+    source.load_f32(&format!("{prefix}.ffn_norm"), &mut s.norm_w[..h])?;
+    gpu.as_deref_mut().ok_or(())?.res_norma(&s.norm_w[..h], n, h, eps, true)?;
+    let mut salida_ffn = vec![0.0f32; n * h];
+    if m.layer_is_moe(layer) {
+        moe_bloque(exec, layer, n, &[], &mut salida_ffn, bs, par, source, prefix, gpu, true, true)?;
+    } else {
+        gpu.as_deref_mut().ok_or(())?.res_xn_bajar(hs)?;
+        ffn_denso_bloque(exec, layer, n, hs, &mut salida_ffn, bs, par, source, prefix, gpu, true)?;
+        gpu.as_deref_mut().ok_or(())?.res_y_subir(&salida_ffn)?;
+    }
+    gpu.as_deref_mut().ok_or(())?.res_fin(n, h)
 }
 
 pub fn forward_layer_block_q35<S: TensorSource>(
@@ -94,13 +166,29 @@ pub fn forward_layer_block_q35<S: TensorSource>(
     #[cfg(feature = "std")]
     let t_capa = std::time::Instant::now();
     let prefix = format!("L{layer:02}");
+    // Hidden residente: el residual y las normas viven en el dispositivo durante la capa (una subida y una bajada de `hs` en lugar de cinco).
+    let res = use_gpu && gpu.as_deref_mut().is_some_and(|g| g.available() && matches!(g.res_iniciar(hs, n, h), Ok(true)));
+    if !res {
+        // camino por el host: si el dispositivo guarda un residual más reciente, se vuelca primero
+        if let Some(g) = gpu.as_deref_mut() {
+            g.res_volcar(hs)?;
+        }
+    }
+    if res {
+        let r = forward_res(exec, layer, pos0, n, hs, bs, s, kv, source, par, gpu, &prefix);
+        #[cfg(feature = "std")]
+        if std::env::var_os("SOSO_TRAZA_CAPAS").is_some() {
+            std::eprintln!("[capa] L{layer} n={n} {:?}: {:.1} ms (mezcla {:.1}, cpu del bloque {:.1})", spec.attn_kind, t_capa.elapsed().as_secs_f64() * 1e3, 0.0, 0.0);
+        }
+        return r;
+    }
     #[cfg(feature = "std")]
     let mut t_cpu = 0.0f64;
     #[cfg(feature = "std")]
     let t_x = std::time::Instant::now();
-    let residual: Vec<f32> = hs.to_vec();
+    let mut residual = vec![0.0f32; n * h];
     source.load_f32(&format!("{prefix}.attn_norm"), &mut s.norm_w[..h])?;
-    rmsnorm_filas(par, hs, &s.norm_w[..h], h, n, eps);
+    copia_y_rmsnorm_filas(par, hs, &mut residual, &s.norm_w[..h], h, n, eps);
     #[cfg(feature = "std")]
     {
         t_cpu += t_x.elapsed().as_secs_f64() * 1e3;
@@ -108,14 +196,16 @@ pub fn forward_layer_block_q35<S: TensorSource>(
 
     let mut salida_attn = vec![0.0f32; n * h];
     match spec.attn_kind {
-        AttnKind::Gdn => gdn_bloque(exec, layer, n, hs, &mut salida_attn, bs, s, kv, source, par, &prefix, gpu, use_gpu)?,
-        _ => atencion_bloque(exec, layer, pos0, n, hs, &mut salida_attn, bs, s, kv, source, par, &prefix, gpu, use_gpu)?,
+        AttnKind::Gdn => gdn_bloque(exec, layer, n, hs, &mut salida_attn, bs, s, kv, source, par, &prefix, gpu, use_gpu, None)?,
+        _ => atencion_bloque(exec, layer, pos0, n, hs, &mut salida_attn, bs, s, kv, source, par, &prefix, gpu, use_gpu, None)?,
     }
-    // hs = residual + salida de atención; luego FFN con su residual.
+    // residual += salida de atención; hs = rmsnorm(residual) para el FFN (el residual se queda con la suma).
     #[cfg(feature = "std")]
     let t_x = std::time::Instant::now();
-    suma_filas(par, &residual, &salida_attn, hs, h, n);
+    source.load_f32(&format!("{prefix}.ffn_norm"), &mut s.norm_w[..h])?;
+    suma_y_rmsnorm_filas(par, &mut residual, &salida_attn, hs, &s.norm_w[..h], h, n, eps);
     drop(salida_attn);
+    let mut salida_ffn = vec![0.0f32; n * h];
     #[cfg(feature = "std")]
     {
         t_cpu += t_x.elapsed().as_secs_f64() * 1e3;
@@ -123,24 +213,14 @@ pub fn forward_layer_block_q35<S: TensorSource>(
     #[cfg(feature = "std")]
     let t_mezcla = t_capa.elapsed().as_secs_f64() * 1e3;
 
-    #[cfg(feature = "std")]
-    let t_x = std::time::Instant::now();
-    let residual2: Vec<f32> = hs.to_vec();
-    source.load_f32(&format!("{prefix}.ffn_norm"), &mut s.norm_w[..h])?;
-    rmsnorm_filas(par, hs, &s.norm_w[..h], h, n, eps);
-    let mut salida_ffn = vec![0.0f32; n * h];
-    #[cfg(feature = "std")]
-    {
-        t_cpu += t_x.elapsed().as_secs_f64() * 1e3;
-    }
     if m.layer_is_moe(layer) {
-        moe_bloque(exec, layer, n, hs, &mut salida_ffn, bs, par, source, &prefix, gpu, use_gpu)?;
+        moe_bloque(exec, layer, n, hs, &mut salida_ffn, bs, par, source, &prefix, gpu, use_gpu, false)?;
     } else {
         ffn_denso_bloque(exec, layer, n, hs, &mut salida_ffn, bs, par, source, &prefix, gpu, use_gpu)?;
     }
     #[cfg(feature = "std")]
     let t_x = std::time::Instant::now();
-    suma_filas(par, &residual2, &salida_ffn, hs, h, n);
+    suma_filas(par, &residual, &salida_ffn, hs, h, n);
     #[cfg(feature = "std")]
     {
         t_cpu += t_x.elapsed().as_secs_f64() * 1e3;
@@ -195,6 +275,7 @@ fn gdn_bloque<S: TensorSource>(
     prefix: &str,
     gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
     use_gpu: bool,
+    res: Option<&mut bool>,
 ) -> Result<(), ()> {
     let m = exec.manifest;
     let spec = m.layer(layer).cloned().ok_or(())?;
@@ -250,7 +331,8 @@ fn gdn_bloque<S: TensorSource>(
             let prev = kernel - 1;
             if kv.gdn_conv.len() >= prev * qkv_dim {
                 let ok = gpu.as_deref_mut().is_some_and(|g| {
-                    matches!(g.gdn_capa(&capa, xs, n, h, &mut kv.gdn_conv[..prev * qkv_dim], &mut kv.gdn_s, salida), Ok(true))
+                    let (xs_g, sal_g): (&[f32], &mut [f32]) = if res.is_some() { (&[], &mut []) } else { (xs, &mut *salida) };
+                    matches!(g.gdn_capa(&capa, xs_g, n, h, &mut kv.gdn_conv[..prev * qkv_dim], &mut kv.gdn_s, sal_g), Ok(true))
                 });
                 if ok {
                     perfil_marca(&mut tp, FASE_ROPE_KV);
@@ -258,6 +340,11 @@ fn gdn_bloque<S: TensorSource>(
                 }
             }
         }
+    }
+    if let Some(declinado) = res {
+        // Modo residente: sin la capa entera en el dispositivo no hay entrada en el host; quien llama pasa al camino de CPU.
+        *declinado = true;
+        return Ok(());
     }
     let mut qkv = vec![0.0f32; n * qkv_dim];
     let mut z = vec![0.0f32; n * v_dim];
@@ -425,6 +512,7 @@ fn atencion_bloque<S: TensorSource>(
     prefix: &str,
     gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
     use_gpu: bool,
+    res: Option<&mut bool>,
 ) -> Result<(), ()> {
     let m = exec.manifest;
     let spec = m.layer(layer).cloned().ok_or(())?;
@@ -470,8 +558,9 @@ fn atencion_bloque<S: TensorSource>(
         let mut v_nuevo = vec![0u16; n * kv_dim];
         let mut filas = kv.gpu_kv_filas;
         let ok = gpu.as_deref_mut().is_some_and(|g| {
+            let (xs_g, sal_g): (&[f32], &mut [f32]) = if res.is_some() { (&[], &mut []) } else { (xs, &mut *salida) };
             matches!(
-                g.atencion_capa(layer, &capa, xs, n, h, pos0, &mut filas, kv.k_f16_slice(), kv.v_f16_slice(), &mut k_nuevo, &mut v_nuevo, salida),
+                g.atencion_capa(layer, &capa, xs_g, n, h, pos0, &mut filas, kv.k_f16_slice(), kv.v_f16_slice(), &mut k_nuevo, &mut v_nuevo, sal_g),
                 Ok(true)
             )
         });
@@ -481,6 +570,10 @@ fn atencion_bloque<S: TensorSource>(
             perfil_marca(&mut tp, FASE_ATENCION);
             return Ok(());
         }
+    }
+    if let Some(declinado) = res {
+        *declinado = true;
+        return Ok(());
     }
     let mut qf = vec![0.0f32; n * q_full];
     let mut k = vec![0.0f32; n * kv_dim];
@@ -586,7 +679,7 @@ fn ffn_denso_bloque<S: TensorSource>(
     mv(source, &format!("{prefix}.ffn_down"), layer, h, ffn, &up, n, salida, par, bs, gpu, use_gpu)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, unused_assignments)]
 fn moe_bloque<S: TensorSource>(
     exec: &LayerExecutor<'_>,
     layer: u32,
@@ -599,6 +692,7 @@ fn moe_bloque<S: TensorSource>(
     prefix: &str,
     gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
     use_gpu: bool,
+    res: bool,
 ) -> Result<(), ()> {
     let m = exec.manifest;
     let h = m.hidden_dim as usize;
@@ -608,6 +702,24 @@ fn moe_bloque<S: TensorSource>(
     let n_shared = m.layer(layer).map_or(0, |sp| sp.num_shared_experts) as usize;
     if n_exp == 0 || top_k == 0 {
         return Err(());
+    }
+    // Modo residente: `xs` llega vacío (la entrada normalizada está en el dispositivo) y la salida se queda allí. Si algún paso no se puede resolver en la GPU,
+    // `puente!` baja la entrada y pasa al camino de siempre; al final, `salida` (CPU) se sube como salida del paso.
+    let mut res = res;
+    let mut bridged = false;
+    let mut xs_h: Vec<f32> = Vec::new();
+    let mut xs: &[f32] = xs;
+    macro_rules! puente {
+        ($g:expr) => {
+            if res {
+                xs_h = vec![0.0f32; n * h];
+                $g.res_xn_bajar(&mut xs_h)?;
+                // SAFETY: `xs_h` no se vuelve a tocar y vive hasta el final de la función.
+                xs = unsafe { core::slice::from_raw_parts(xs_h.as_ptr(), n * h) };
+                res = false;
+                bridged = true;
+            }
+        };
     }
     let mut tp = perfil_ahora();
     // Router por lotes y top-k por token.
@@ -640,6 +752,7 @@ fn moe_bloque<S: TensorSource>(
         }
     }
     if !en_gpu {
+        puente!(gpu.as_deref_mut().ok_or(())?);
         mv(source, &format!("{prefix}.ffn_gate_inp"), layer, n_exp, h, xs, n, &mut logits, par, bs, gpu, use_gpu)?;
         for t in 0..n {
             let r = topk_softmax(&mut logits[t * n_exp..(t + 1) * n_exp], top_k);
@@ -707,7 +820,7 @@ fn moe_bloque<S: TensorSource>(
         None
     };
     let mut hecho_gpu = vec![false; activos.len()];
-    let mut suma_gpu = vec![0.0f32; if use_gpu { n * h } else { 0 }];
+    let mut suma_gpu = vec![0.0f32; if use_gpu && !res { n * h } else { 0 }];
     let mut hecha = vec![false; n * top_k]; // asignación (token, posición) ya sumada por la GPU
     if use_gpu {
         if let Some(g) = gpu.as_deref_mut().filter(|g| g.available()) {
@@ -735,6 +848,11 @@ fn moe_bloque<S: TensorSource>(
                 let pgw = unsafe { core::slice::from_raw_parts(*pp as *const f32, *pl) };
                 comp_gpu = matches!(g.moe_compartido([nombres[0].as_str(), nombres[1].as_str(), nombres[2].as_str()], [&vs[0], &vs[1], &vs[2]], pgw, xs, n, h, ffn), Ok(true));
             }
+            if res && !comp_gpu && n_shared > 0 {
+                puente!(g);
+                suma_gpu = vec![0.0f32; n * h];
+            }
+
             {
                 let mut exps: Vec<crate::gpu::ExpertoBloque<'_>> = activos
                     .iter()
@@ -750,8 +868,16 @@ fn moe_bloque<S: TensorSource>(
                     })
                     .collect();
                 let r = g.expertos_bloque(xs, n, h, ffn, top_k, &pesos, &mut exps, &mut suma_gpu, &mut hecho_gpu);
-                if comp_gpu && r.is_err() {
-                    return Err(()); // la suma del dispositivo llevaba el compartido: sin ella el bloque quedaría mal
+                if (comp_gpu || res) && r.is_err() {
+                    return Err(()); // la suma del dispositivo llevaba el compartido (o era lo único que había): sin ella el bloque quedaría mal
+                }
+                if res {
+                    if hecho_gpu.iter().all(|&x| x) && (n_shared == 0 || comp_gpu) {
+                        return Ok(()); // todo resuelto en el dispositivo: la salida se queda allí
+                    }
+                    suma_gpu = vec![0.0f32; n * h];
+                    g.res_y_bajar(&mut suma_gpu)?;
+                    puente!(g);
                 }
             }
             for (k, d) in destinos.iter().enumerate() {
@@ -878,6 +1004,9 @@ fn moe_bloque<S: TensorSource>(
             }
         }
     });
+    if bridged {
+        gpu.as_deref_mut().ok_or(())?.res_y_subir(salida)?;
+    }
     #[cfg(feature = "std")]
     if std::env::var_os("SOSO_TRAZA_MOE").is_some() {
         std::eprintln!("[moe] L{layer} n={n}: router {:.1} | prep+expertos GPU {:.1} | expertos CPU {:.1} | compartido {:.1} | suma {:.1} ms", tm[0], tm[1] - tm[0], tm[2] - tm[1], tm[3] - tm[2], t_r0.elapsed().as_secs_f64() * 1e3 - tm[3]);

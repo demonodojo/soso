@@ -1048,7 +1048,7 @@ impl CudaGpu {
                 self.lanzar_a(
                     d.f.gdn_rec,
                     (g.n_v as u32, 1, 1),
-                    (256, 1, 1),
+                    (128, 1, 1),
                     &[Arg::P(bf(b::UP)), Arg::P(bf(b::Z)), Arg::P(bf(b::DECAY)), Arg::P(bf(b::BETA)), Arg::P(g.nw), Arg::P(g.s), Arg::P(bf(b::O)), Arg::I(1), Arg::I(g.n_k as i32), Arg::I(g.n_v as i32), Arg::F(d.eps)],
                 )?;
                 self.dec_quant(d, bf(b::O), g.v_dim)?;

@@ -933,6 +933,9 @@ impl Runtime {
             );
             if r.is_err() {
                 self.block = Some(bs);
+                if let Some(g) = gpu.as_deref_mut() {
+                    let _ = g.res_volcar(&mut hs);
+                }
                 return Err(());
             }
             if let Some(hook) = self.layer_hook {
@@ -940,6 +943,9 @@ impl Runtime {
             }
         }
         self.block = Some(bs);
+        if let Some(g) = gpu.as_deref_mut() {
+            g.res_volcar(&mut hs)?; // el residual de la última capa puede estar sólo en el dispositivo
+        }
         if !seguir {
             return Ok(false);
         }
@@ -1549,10 +1555,16 @@ impl Runtime {
             );
             if r.is_err() {
                 self.block = Some(bs);
+                if let Some(g) = gpu.as_deref_mut() {
+                    let _ = g.res_volcar(hs);
+                }
                 return Err(());
             }
         }
         self.block = Some(bs);
+        if let Some(g) = gpu.as_deref_mut() {
+            g.res_volcar(hs)?;
+        }
         Ok(())
     }
 

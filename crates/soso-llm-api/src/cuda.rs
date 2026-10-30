@@ -101,6 +101,11 @@ pub(crate) struct PinRegion {
 }
 
 /// `L12.E034.ffn_gate` → (12, 34)
+/// Tokens por tile de los kernels mmq de expertos (`MQ_NT` de matvec_iq.cu).
+const MQ_NT: u32 = 32;
+/// Smem dinámica del mmq de expertos: 1 etapa (`MQ_ETAPAS` de matvec_iq.cu) × (Ws 4·16·272 + Sc 4·256·4 + Xs MQ_NT·272 + Ds MQ_NT·32).
+const MQ_SMEM: u32 = 4 * 16 * 272 + 4 * 256 * 4 + MQ_NT * 272 + MQ_NT * 32;
+
 fn capa_y_experto(clave: &str) -> Option<(u32, usize)> {
     let mut it = clave.split('.');
     let capa = it.next()?.strip_prefix('L')?.parse().ok()?;
@@ -322,7 +327,18 @@ pub struct CudaGpu {
     f_comp_base: CuFunction,
     /// El experto compartido del bloque ya está sumado (con su puerta) en `blq[7]`, con `xs` en `blq[0]`: la siguiente llamada de expertos acumula encima.
     moe_base: bool,
+    f_res_rms: CuFunction,
+    f_res_add: CuFunction,
+    /// Hidden residente del prefill (ver `GpuDispatch::res_iniciar`): activo, búferes (residual, entrada normalizada, salida de CPU subida, pesos de la norma) y puntero
+    /// a la salida parcial vigente en el dispositivo (0 = ninguna).
+    res_activo: bool,
+    res_b: [(u64, usize); 4],
+    res_y: u64,
+    /// El residual del dispositivo es más reciente que el `hs` del host (puntero y longitud del búfer al que pertenece).
+    res_pend: bool,
+    res_hs: (usize, usize),
     f_sgemm: CuFunction,
+    f_sgemm64: CuFunction,
     f_topk: CuFunction,
     /// Matrices de router (f32) subidas por clave.
     router_w: HashMap<String, u64>,
@@ -432,6 +448,9 @@ impl CudaGpu {
             let f_q8mmq = func(mod_iq, "q8_mmq")?;
             let f_gateup_q = func(mod_iq, "iq_gateup_mmq")?;
             let f_down_q = func(mod_iq, "iq_down_mmq")?;
+            // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8
+            (api.func_set_attr)(f_gateup_q, 8, MQ_SMEM as c_int);
+            (api.func_set_attr)(f_down_q, 8, MQ_SMEM as c_int);
             let f_quant_x = func(mod_iq, "dec_quant_x")?;
             let f_combinar = func(mod_iq, "iq_combinar")?;
             let f_gdn_conv = func(mod_iq, "gdn_conv_silu")?;
@@ -443,7 +462,10 @@ impl CudaGpu {
             let f_att_puerta = func(mod_iq, "att_puerta")?;
             let f_swiglu_blq = func(mod_iq, "dec_swiglu")?;
             let f_comp_base = func(mod_iq, "moe_comp_base")?;
+            let f_res_rms = func(mod_iq, "res_suma_rms")?;
+            let f_res_add = func(mod_iq, "dec_add")?;
             let f_sgemm = func(mod_iq, "sgemm_nt")?;
+            let f_sgemm64 = func(mod_iq, "sgemm_nt64")?;
             let f_topk = func(mod_iq, "dec_router_topk")?;
             let f_down_multi = func(mod_iq, "iq_down_mma")?;
             let (mut libre, mut total) = (0usize, 0usize);
@@ -503,7 +525,15 @@ impl CudaGpu {
                 f_swiglu_blq,
                 f_comp_base,
                 moe_base: false,
+                f_res_rms,
+                f_res_add,
+                res_activo: false,
+                res_b: [(0, 0); 4],
+                res_y: 0,
+                res_pend: false,
+                res_hs: (0, 0),
                 f_sgemm,
+                f_sgemm64,
                 f_topk,
                 router_w: HashMap::new(),
                 gbuf: [(0, 0); 17],
@@ -953,6 +983,74 @@ impl CudaGpu {
         Ok(y)
     }
 
+    /// Prueba: `y[n × rows] = x · Wᵀ` en f32 con el kernel del router (`sgemm_nt64`; `k % 16 == 0`).
+    pub fn probar_sgemm(&mut self, w: &[f32], rows: usize, k: usize, x: &[f32], n: usize) -> Result<Vec<f32>, String> {
+        unsafe { ck((self.api.ctx_set_current)(self.ctx), "cuCtxSetCurrent")? };
+        let bytes = |v: &[f32]| unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) };
+        let (wd, xd, yd) = (self.alloc(w.len() * 4)?, self.alloc(x.len() * 4)?, self.alloc(n * rows * 4)?);
+        self.subir(wd, bytes(w))?;
+        self.subir(xd, bytes(x))?;
+        self.lanzar_a(self.f_sgemm64, ((rows as u32).div_ceil(64), (n as u32).div_ceil(32), 1), (128, 1, 1), &[Arg::P(wd), Arg::P(xd), Arg::P(yd), Arg::I(rows as i32), Arg::I(k as i32), Arg::I(n as i32)])?;
+        ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
+        let mut y = vec![0f32; n * rows];
+        ck(unsafe { (self.api.dtoh)(y.as_mut_ptr() as *mut c_void, yd, y.len() * 4) }, "cuMemcpyDtoH")?;
+        unsafe {
+            (self.api.mem_free)(wd);
+            (self.api.mem_free)(xd);
+            (self.api.mem_free)(yd);
+        }
+        Ok(y)
+    }
+
+    /// Prueba: `[r += y;] xn = rmsnorm(r) × w` por token (kernel del hidden residente). Devuelve `(r, xn)`.
+    pub fn probar_res_rms(&mut self, r: &[f32], y: &[f32], w: &[f32], n: usize, h: usize, eps: f32, sumar: bool) -> Result<(Vec<f32>, Vec<f32>), String> {
+        unsafe { ck((self.api.ctx_set_current)(self.ctx), "cuCtxSetCurrent")? };
+        let bytes = |v: &[f32]| unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) };
+        let (rd, yd, wd, xd) = (self.alloc(r.len() * 4)?, self.alloc(y.len() * 4)?, self.alloc(w.len() * 4)?, self.alloc(n * h * 4)?);
+        self.subir(rd, bytes(r))?;
+        self.subir(yd, bytes(y))?;
+        self.subir(wd, bytes(w))?;
+        self.lanzar_a(self.f_res_rms, (n as u32, 1, 1), (256, 1, 1), &[Arg::P(rd), Arg::P(yd), Arg::P(wd), Arg::P(xd), Arg::I(h as i32), Arg::F(eps), Arg::I(sumar as i32)])?;
+        ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
+        let (mut ro, mut xo) = (vec![0f32; r.len()], vec![0f32; n * h]);
+        ck(unsafe { (self.api.dtoh)(ro.as_mut_ptr() as *mut c_void, rd, ro.len() * 4) }, "cuMemcpyDtoH")?;
+        ck(unsafe { (self.api.dtoh)(xo.as_mut_ptr() as *mut c_void, xd, xo.len() * 4) }, "cuMemcpyDtoH")?;
+        unsafe {
+            (self.api.mem_free)(rd);
+            (self.api.mem_free)(yd);
+            (self.api.mem_free)(wd);
+            (self.api.mem_free)(xd);
+        }
+        Ok((ro, xo))
+    }
+
+    /// Prueba: la recurrencia GDN del bloque (`gdn_rec`, d = 128). `up`: `n × (2·n_k·128 + n_v·128)` (q, k, v ya con la conv); `z`: `n × n_v·128`; `decay`/`beta`: `n × n_v`;
+    /// `estado`: `n_v × 128 × 128` (entra y sale). Devuelve la salida `n × n_v·128`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn probar_gdn_rec(&mut self, up: &[f32], z: &[f32], decay: &[f32], beta: &[f32], nw: &[f32], estado: &mut [f32], n: usize, n_k: usize, n_v: usize, eps: f32) -> Result<Vec<f32>, String> {
+        unsafe { ck((self.api.ctx_set_current)(self.ctx), "cuCtxSetCurrent")? };
+        let bytes = |v: &[f32]| unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) };
+        let v_dim = n_v * 128;
+        let ds: Vec<u64> = [up.len(), z.len(), decay.len(), beta.len(), nw.len(), estado.len(), n * v_dim].iter().map(|&l| self.alloc(l * 4)).collect::<Result<_, _>>()?;
+        for (d, v) in ds.iter().zip([up, z, decay, beta, nw, &*estado]) {
+            self.subir(*d, bytes(v))?;
+        }
+        self.lanzar_a(
+            self.f_gdn_rec,
+            (n_v as u32, 1, 1),
+            (128, 1, 1),
+            &[Arg::P(ds[0]), Arg::P(ds[1]), Arg::P(ds[2]), Arg::P(ds[3]), Arg::P(ds[4]), Arg::P(ds[5]), Arg::P(ds[6]), Arg::I(n as i32), Arg::I(n_k as i32), Arg::I(n_v as i32), Arg::F(eps)],
+        )?;
+        ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
+        let mut out = vec![0f32; n * v_dim];
+        ck(unsafe { (self.api.dtoh)(out.as_mut_ptr() as *mut c_void, ds[6], out.len() * 4) }, "cuMemcpyDtoH")?;
+        ck(unsafe { (self.api.dtoh)(estado.as_mut_ptr() as *mut c_void, ds[5], estado.len() * 4) }, "cuMemcpyDtoH")?;
+        for d in ds {
+            unsafe { (self.api.mem_free)(d) };
+        }
+        Ok(out)
+    }
+
     fn xh_asegurar(&mut self, bytes: usize) -> Result<(), String> {
         if bytes > self.xh.1 {
             if self.xh.0 != 0 {
@@ -1012,6 +1110,37 @@ impl CudaGpu {
         Ok(self.gbuf[i].0)
     }
 
+    /// Búfer `i` del hidden residente con al menos `bytes`.
+    fn res_asegurar(&mut self, i: usize, bytes: usize) -> Result<u64, String> {
+        if bytes > self.res_b[i].1 {
+            if self.res_b[i].0 != 0 {
+                unsafe { (self.api.mem_free)(self.res_b[i].0) };
+            }
+            let cap = bytes.max(1 << 16).next_power_of_two();
+            self.res_b[i] = (self.alloc(cap)?, cap);
+        }
+        Ok(self.res_b[i].0)
+    }
+
+    /// Entrada `xs` (`n × h`) en `x_dev`: del host, o (modo residente, `xs` vacío) copiada en el dispositivo desde la entrada normalizada.
+    fn entrada_x(&self, x_dev: u64, xs: &[f32], n: usize, h: usize) -> Result<(), String> {
+        if xs.is_empty() {
+            ck(unsafe { (self.api.dtod)(x_dev, self.res_b[1].0, n * h * 4) }, "cuMemcpyDtoD")
+        } else {
+            self.subir(x_dev, unsafe { std::slice::from_raw_parts(xs.as_ptr() as *const u8, xs.len() * 4) })
+        }
+    }
+
+    /// ¿Vale `xs` para esta llamada? Normal: `n × h`; residente: vacío con el modo activo.
+    fn xs_valido(&self, xs: &[f32], n: usize, h: usize) -> bool {
+        xs.len() == n * h || (xs.is_empty() && self.res_activo && self.res_b[1].1 >= n * h * 4)
+    }
+
+    /// ¿Valen `xs` y `salida` para esta llamada? Normal: ambos de `n × h`; residente: ambos vacíos y el modo activo.
+    fn io_valido(&self, xs: &[f32], salida: &[f32], n: usize, h: usize) -> bool {
+        (xs.len() == n * h && salida.len() == n * h) || (xs.is_empty() && salida.is_empty() && self.res_activo && self.res_b[1].1 >= n * h * 4)
+    }
+
     /// Capa GDN entera de un bloque en el dispositivo: ver [`GpuDispatch::gdn_capa`].
     fn gdn_capa_gpu(
         &mut self,
@@ -1031,7 +1160,7 @@ impl CudaGpu {
             return Ok(false);
         }
         let (qkv_dim, v_dim, prev) = (2 * n_k * d + n_v * d, n_v * d, ker - 1);
-        if xs.len() != n * h || salida.len() != n * h || conv_estado.len() != prev * qkv_dim || estado.len() != n_v * d * d
+        if !self.io_valido(xs, salida, n, h) || conv_estado.len() != prev * qkv_dim || estado.len() != n_v * d * d
             || c.beta_w.len() != n_v * h || c.alpha_w.len() != n_v * h || c.conv_w.len() != qkv_dim * ker
         {
             return Ok(false);
@@ -1064,7 +1193,7 @@ impl CudaGpu {
             }
         }
         let f = |v: &[f32]| unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) };
-        let x_dev = self.gbuf_asegurar(0, xs.len() * 4)?;
+        let x_dev = self.gbuf_asegurar(0, n * h * 4)?;
         let qkv_dev = self.gbuf_asegurar(1, n * qkv_dim * 4)?;
         let z_dev = self.gbuf_asegurar(2, n * v_dim * 4)?;
         let braw_dev = self.gbuf_asegurar(3, n * n_v * 4)?;
@@ -1081,7 +1210,7 @@ impl CudaGpu {
         let cw_dev = self.gbuf_asegurar(14, c.conv_w.len() * 4)?;
         let par_dev = self.gbuf_asegurar(15, (c.dt.len() + c.a.len() + c.norma.len()) * 4)?;
         let (dt_dev, a_dev, nw_dev) = (par_dev, par_dev + (c.dt.len() * 4) as u64, par_dev + ((c.dt.len() + c.a.len()) * 4) as u64);
-        self.subir(x_dev, f(xs))?;
+        self.entrada_x(x_dev, xs, n, h)?;
         self.subir(s_dev, f(estado))?;
         self.subir(cs_dev, f(conv_estado))?;
         self.subir(bw_dev, f(c.beta_w))?;
@@ -1101,14 +1230,18 @@ impl CudaGpu {
             &[Arg::P(araw_dev), Arg::P(braw_dev), Arg::P(dt_dev), Arg::P(a_dev), Arg::P(dec_dev), Arg::P(bet_dev), Arg::I(nn), Arg::I(n_v as i32)])?;
         self.lanzar_a(self.f_gdn_conv2, ((qkv_dim as u32).div_ceil(256), n as u32, 1), (256, 1, 1),
             &[Arg::P(cs_dev), Arg::P(qkv_dev), Arg::P(cw_dev), Arg::P(up_dev), Arg::I(nn), Arg::I(qkv_dim as i32), Arg::I(ker as i32)])?;
-        self.lanzar_a(self.f_gdn_rec, (n_v as u32, 1, 1), (256, 1, 1),
+        self.lanzar_a(self.f_gdn_rec, (n_v as u32, 1, 1), (128, 1, 1),
             &[Arg::P(up_dev), Arg::P(z_dev), Arg::P(dec_dev), Arg::P(bet_dev), Arg::P(nw_dev), Arg::P(s_dev), Arg::P(o_dev), Arg::I(nn), Arg::I(n_k as i32), Arg::I(n_v as i32), Arg::F(c.eps)])?;
         mm(self, w[2], h, v_dim, cod[2].0, cod[2].1, o_dev, y_dev)?;
         // estado de la conv para el bloque siguiente: las `prev` últimas filas de qkv (se baja antes de pisarlo)
         self.lanzar_a(self.f_gdn_cola, (((prev * qkv_dim) as u32).div_ceil(256), 1, 1), (256, 1, 1),
             &[Arg::P(qkv_dev), Arg::P(cs_dev), Arg::I(nn), Arg::I(qkv_dim as i32), Arg::I(prev as i32)])?;
         ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
-        ck(unsafe { (self.api.dtoh)(salida.as_mut_ptr() as *mut c_void, y_dev, salida.len() * 4) }, "cuMemcpyDtoH")?;
+        if salida.is_empty() {
+            self.res_y = y_dev;
+        } else {
+            ck(unsafe { (self.api.dtoh)(salida.as_mut_ptr() as *mut c_void, y_dev, salida.len() * 4) }, "cuMemcpyDtoH")?;
+        }
         ck(unsafe { (self.api.dtoh)(estado.as_mut_ptr() as *mut c_void, s_dev, estado.len() * 4) }, "cuMemcpyDtoH")?;
         ck(unsafe { (self.api.dtoh)(conv_estado.as_mut_ptr() as *mut c_void, cs_dev, conv_estado.len() * 4) }, "cuMemcpyDtoH")?;
         self.stats.launches += 1;
@@ -1186,7 +1319,7 @@ impl CudaGpu {
             &mut b9 as *mut _ as *mut c_void,
             &mut b10 as *mut _ as *mut c_void,
         ];
-        self.lanzar3s(self.f_gdn_rec, (n_v as u32, 1, 1), (256, 1, 1), 0, &mut args)?;
+        self.lanzar3s(self.f_gdn_rec, (n_v as u32, 1, 1), (128, 1, 1), 0, &mut args)?;
         ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
         ck(unsafe { (self.api.dtoh)(salida.as_mut_ptr() as *mut c_void, o_dev, salida.len() * 4) }, "cuMemcpyDtoH")?;
         ck(unsafe { (self.api.dtoh)(estado.as_mut_ptr() as *mut c_void, s_dev, estado.len() * 4) }, "cuMemcpyDtoH")?;
@@ -1283,7 +1416,7 @@ impl CudaGpu {
         let (q_dim, kv_dim) = (heads * hd, kv_heads * hd);
         let q_full = 2 * q_dim;
         let total = seq_antes + n;
-        if xs.len() != n * h || salida.len() != n * h || k_nuevo.len() != n * kv_dim || v_nuevo.len() != n * kv_dim
+        if !self.io_valido(xs, salida, n, h) || k_nuevo.len() != n * kv_dim || v_nuevo.len() != n * kv_dim
             || k_host.len() < seq_antes * kv_dim || v_host.len() < seq_antes * kv_dim || c.qnorm.len() != hd || c.knorm.len() != hd
         {
             return Ok(false);
@@ -1315,7 +1448,7 @@ impl CudaGpu {
             }
         }
         let f = |v: &[f32]| unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) };
-        let x_dev = self.gbuf_asegurar(0, xs.len() * 4)?;
+        let x_dev = self.gbuf_asegurar(0, n * h * 4)?;
         let qf_dev = self.gbuf_asegurar(1, n * q_full * 4)?;
         let k_dev = self.gbuf_asegurar(2, n * kv_dim * 4)?;
         let v_dev = self.gbuf_asegurar(3, n * kv_dim * 4)?;
@@ -1324,7 +1457,7 @@ impl CudaGpu {
         let a_dev = self.gbuf_asegurar(6, n * q_dim * 4)?;
         let y_dev = self.gbuf_asegurar(7, n * h * 4)?;
         let nw_dev = self.gbuf_asegurar(8, 2 * hd * 4)?;
-        self.subir(x_dev, f(xs))?;
+        self.entrada_x(x_dev, xs, n, h)?;
         self.subir(nw_dev, f(c.qnorm))?;
         self.subir(nw_dev + (hd * 4) as u64, f(c.knorm))?;
         // KV del dispositivo: capacidad para el bloque y las filas anteriores que le falten (las nuevas las escribe `att_prep_bloque`)
@@ -1342,7 +1475,11 @@ impl CudaGpu {
             &[Arg::P(a_dev), Arg::P(g_dev), Arg::I((n * q_dim) as i32)])?;
         mm(self, w[3], h, q_dim, cod[3].0, cod[3].1, a_dev, y_dev)?;
         ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
-        ck(unsafe { (self.api.dtoh)(salida.as_mut_ptr() as *mut c_void, y_dev, salida.len() * 4) }, "cuMemcpyDtoH")?;
+        if salida.is_empty() {
+            self.res_y = y_dev;
+        } else {
+            ck(unsafe { (self.api.dtoh)(salida.as_mut_ptr() as *mut c_void, y_dev, salida.len() * 4) }, "cuMemcpyDtoH")?;
+        }
         ck(unsafe { (self.api.dtoh)(k_nuevo.as_mut_ptr() as *mut c_void, kd + (seq_antes * kv_dim * 2) as u64, k_nuevo.len() * 2) }, "cuMemcpyDtoH")?;
         ck(unsafe { (self.api.dtoh)(v_nuevo.as_mut_ptr() as *mut c_void, vd + (seq_antes * kv_dim * 2) as u64, v_nuevo.len() * 2) }, "cuMemcpyDtoH")?;
         *filas_validas = total;
@@ -1416,7 +1553,7 @@ impl CudaGpu {
         ffn: usize,
     ) -> Result<bool, String> {
         self.moe_base = false;
-        if std::env::var_os("SOSO_SIN_MOE_COMPARTIDO").is_some() || n == 0 || pg_w.len() != h || xs.len() != n * h {
+        if std::env::var_os("SOSO_SIN_MOE_COMPARTIDO").is_some() || n == 0 || pg_w.len() != h || !self.xs_valido(xs, n, h) {
             return Ok(false);
         }
         unsafe { ck((self.api.ctx_set_current)(self.ctx), "cuCtxSetCurrent")? };
@@ -1443,7 +1580,7 @@ impl CudaGpu {
         let sd_dev = self.gbuf_asegurar(11, n * h * 4)?;
         let pg_dev = self.gbuf_asegurar(12, n * 4)?;
         let pw_dev = self.gbuf_asegurar(13, h * 4)?;
-        self.subir(x_dev, f(xs))?;
+        self.entrada_x(x_dev, xs, n, h)?;
         self.subir(pw_dev, f(pg_w))?;
         self.xh_asegurar(n * h.max(ffn) * 2)?;
         let mm = |s: &Self, w: u64, rows: usize, cols: usize, dtype: i32, rb: i64, x: u64, y: u64| s.matmul_blq(w, rows, cols, dtype, rb, x, y, n);
@@ -1472,7 +1609,7 @@ impl CudaGpu {
         idx: &mut [i32],
         pesos: &mut [f32],
     ) -> Result<bool, String> {
-        if w.len() != n_exp * h || xs.len() != n * h || idx.len() != n * top_k || pesos.len() != n * top_k || n_exp > 1024 || n == 0 {
+        if w.len() != n_exp * h || !self.xs_valido(xs, n, h) || idx.len() != n * top_k || pesos.len() != n * top_k || n_exp > 1024 || n == 0 {
             return Ok(false);
         }
         unsafe { ck((self.api.ctx_set_current)(self.ctx), "cuCtxSetCurrent")? };
@@ -1489,13 +1626,13 @@ impl CudaGpu {
         let l_dev = self.blq_asegurar(9, n * n_exp * 4)?;
         let i_dev = self.blq_asegurar(10, n * top_k * 4)?;
         let p_dev = self.blq_asegurar(11, n * top_k * 4)?;
-        self.subir(x_dev, unsafe { std::slice::from_raw_parts(xs.as_ptr() as *const u8, xs.len() * 4) })?;
-        self.lanzar_a(
-            self.f_sgemm,
-            ((n_exp as u32).div_ceil(16), (n as u32).div_ceil(16), 1),
-            (16, 16, 1),
-            &[Arg::P(w_dev), Arg::P(x_dev), Arg::P(l_dev), Arg::I(n_exp as i32), Arg::I(h as i32), Arg::I(n as i32)],
-        )?;
+        self.entrada_x(x_dev, xs, n, h)?;
+        let sg_args = [Arg::P(w_dev), Arg::P(x_dev), Arg::P(l_dev), Arg::I(n_exp as i32), Arg::I(h as i32), Arg::I(n as i32)];
+        if h % 16 == 0 && std::env::var_os("SOSO_SIN_SGEMM64").is_none() {
+            self.lanzar_a(self.f_sgemm64, ((n_exp as u32).div_ceil(64), (n as u32).div_ceil(32), 1), (128, 1, 1), &sg_args)?;
+        } else {
+            self.lanzar_a(self.f_sgemm, ((n_exp as u32).div_ceil(16), (n as u32).div_ceil(16), 1), (16, 16, 1), &sg_args)?;
+        }
         self.lanzar_a(self.f_topk, (n as u32, 1, 1), (256, 1, 1), &[Arg::P(l_dev), Arg::P(i_dev), Arg::P(p_dev), Arg::I(n_exp as i32), Arg::I(top_k as i32)])?;
         ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
         ck(unsafe { (self.api.dtoh)(idx.as_mut_ptr() as *mut c_void, i_dev, idx.len() * 4) }, "cuMemcpyDtoH")?;
@@ -1566,7 +1703,11 @@ impl CudaGpu {
             if base {
                 ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
                 let out_dev = self.blq_asegurar(7, n * h * 4)?;
-                ck(unsafe { (self.api.dtoh)(suma.as_mut_ptr() as *mut c_void, out_dev, n * h * 4) }, "cuMemcpyDtoH")?;
+                if suma.is_empty() {
+                    self.res_y = out_dev;
+                } else {
+                    ck(unsafe { (self.api.dtoh)(suma.as_mut_ptr() as *mut c_void, out_dev, n * h * 4) }, "cuMemcpyDtoH")?;
+                }
             }
             return Ok(());
         }
@@ -1867,7 +2008,7 @@ impl CudaGpu {
         let total: usize = plan.iter().map(|p| exps[p.i].tokens.len()).sum();
         let t_b = std::time::Instant::now();
         // 2) datos del bloque a la tarjeta
-        let x_dev = self.blq_asegurar(0, xs.len() * 4)?;
+        let x_dev = self.blq_asegurar(0, n * h * 4)?;
         let tok_dev = self.blq_asegurar(1, total * 4)?;
         let act_dev = self.blq_asegurar(2, total * ffn * 4)?;
         let y_dev = self.blq_asegurar(3, n * top_k * h * 4)?;
@@ -1875,7 +2016,7 @@ impl CudaGpu {
         let wd_dev = self.blq_asegurar(6, n * top_k * 4)?;
         let out_dev = self.blq_asegurar(7, n * h * 4)?;
         if subir_x {
-            self.subir(x_dev, unsafe { std::slice::from_raw_parts(xs.as_ptr() as *const u8, xs.len() * 4) })?;
+            self.entrada_x(x_dev, xs, n, h)?;
         }
         let mut toks: Vec<i32> = Vec::with_capacity(total);
         for pl in plan {
@@ -1911,11 +2052,12 @@ impl CudaGpu {
         let d_dev = self.blq_asegurar(4, desc.len() * 8)?;
         self.subir(d_dev, unsafe { std::slice::from_raw_parts(desc.as_ptr() as *const u8, desc.len() * 8) })?;
         let tiles = (max_cnt as u32).div_ceil(64);
+        let tiles_q = (max_cnt as u32).div_ceil(MQ_NT);
         let nexp = plan.len() as u32;
         // X en f16 una vez para todos los expertos y `act` en f16 (la lee `iq_down_mma_h`); los kernels f32 quedan para formas que no sean múltiplo de 8
         // Producto entero (mmq): gate/up IQ2_S y down IQ3_XXS/IQ4_XS con las activaciones en i8; si no, el camino f16
-        // opt-in (`SOSO_MMQ_EXPERTOS=1`): correcto pero sin ganancia medida frente al camino f16 (gateup 720→660 ms, down 249→266 ms por 4096); lo limita la descodificación (≈58 %), no el mma
-        let usar_q = !self.sin_mmq && std::env::var_os("SOSO_MMQ_EXPERTOS").is_some() && todo_q && h % 256 == 0 && ffn % 256 == 0;
+        // por defecto (`SOSO_SIN_MMQ_EXPERTOS=1` lo quita): con los bytes crudos del superbloque siguiente cargados antes del mma, gateup 720→382 ms y down 249→173 ms por 4096
+        let usar_q = !self.sin_mmq && std::env::var_os("SOSO_SIN_MMQ_EXPERTOS").is_none() && todo_q && h % 256 == 0 && ffn % 256 == 0;
         if usar_q {
             self.xh_asegurar(n * h * 2)?;
             let xq = self.xh.0 + (self.xh.1 / 2) as u64;
@@ -1932,7 +2074,7 @@ impl CudaGpu {
                 &mut q5 as *mut _ as *mut c_void,
                 &mut q6 as *mut _ as *mut c_void,
             ];
-            self.lanzar3s(self.f_gateup_q, (((ffn as u32) + 63) / 64, tiles, nexp), (128, 1, 1), 0, &mut args)?;
+            self.lanzar3s(self.f_gateup_q, (((ffn as u32) + 63) / 64, tiles_q, nexp), (128, 1, 1), MQ_SMEM, &mut args)?;
             // act (f32) → i8 + escalas
             let bytes = total * ffn + total * ffn / 32 * 4;
             if bytes > self.aq.1 {
@@ -1955,7 +2097,7 @@ impl CudaGpu {
                 &mut d5 as *mut _ as *mut c_void,
                 &mut d6 as *mut _ as *mut c_void,
             ];
-            self.lanzar3s(self.f_down_q, (((h as u32) + 63) / 64, tiles, nexp), (128, 1, 1), 0, &mut args)?;
+            self.lanzar3s(self.f_down_q, (((h as u32) + 63) / 64, tiles_q, nexp), (128, 1, 1), MQ_SMEM, &mut args)?;
         }
         let usar_h = !usar_q && !self.sin_xh && h % 8 == 0 && ffn % 8 == 0;
         let xin = if usar_h {
@@ -2019,7 +2161,11 @@ impl CudaGpu {
         ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
         let t_e = std::time::Instant::now();
         if bajar {
-            ck(unsafe { (self.api.dtoh)(suma.as_mut_ptr() as *mut c_void, out_dev, n * h * 4) }, "cuMemcpyDtoH")?;
+            if suma.is_empty() {
+                self.res_y = out_dev;
+            } else {
+                ck(unsafe { (self.api.dtoh)(suma.as_mut_ptr() as *mut c_void, out_dev, n * h * 4) }, "cuMemcpyDtoH")?;
+            }
         }
         if std::env::var_os("SOSO_TRAZA_GPU").is_some() {
             let t_f = std::time::Instant::now();
@@ -2468,6 +2614,116 @@ impl GpuDispatch for CudaGpu {
                 Err(())
             }
         }
+    }
+
+    fn res_iniciar(&mut self, hs: &[f32], n: usize, h: usize) -> Result<bool, ()> {
+        self.res_activo = false;
+        self.res_y = 0;
+        if std::env::var_os("SOSO_SIN_HIDDEN_RES").is_some() || n == 0 || hs.len() != n * h {
+            return Ok(false);
+        }
+        let marca = (hs.as_ptr() as usize, hs.len());
+        if self.res_pend {
+            if self.res_hs == marca && self.res_b[0].1 >= n * h * 4 && std::env::var_os("SOSO_SIN_HIDDEN_ENTRE_CAPAS").is_none() {
+                self.res_activo = true; // el residual de la capa anterior sigue en el dispositivo
+                return Ok(true);
+            }
+            return Ok(false); // el llamante lo vuelca a su `hs` antes de seguir por el host
+        }
+        self.res_hs = marca;
+        let r = (|| -> Result<(), String> {
+            unsafe { ck((self.api.ctx_set_current)(self.ctx), "cuCtxSetCurrent")? };
+            let r = self.res_asegurar(0, n * h * 4)?;
+            self.res_asegurar(1, n * h * 4)?;
+            self.res_asegurar(2, n * h * 4)?;
+            self.res_asegurar(3, h * 4)?;
+            self.subir(r, unsafe { std::slice::from_raw_parts(hs.as_ptr() as *const u8, hs.len() * 4) })
+        })();
+        match r {
+            Ok(()) => {
+                self.res_activo = true;
+                Ok(true)
+            }
+            Err(e) => {
+                if !self.avisado {
+                    eprintln!("cuda: {e}; sigo sin hidden residente");
+                    self.avisado = true;
+                }
+                Ok(false)
+            }
+        }
+    }
+
+    fn res_norma(&mut self, w: &[f32], n: usize, h: usize, eps: f32, sumar: bool) -> Result<(), ()> {
+        if !self.res_activo || w.len() != h || (sumar && self.res_y == 0) {
+            return Err(());
+        }
+        let r = (|| -> Result<(), String> {
+            self.subir(self.res_b[3].0, unsafe { std::slice::from_raw_parts(w.as_ptr() as *const u8, w.len() * 4) })?;
+            let (rd, xn, wd) = (self.res_b[0].0, self.res_b[1].0, self.res_b[3].0);
+            let y = if sumar { self.res_y } else { rd };
+            self.lanzar_a(self.f_res_rms, (n as u32, 1, 1), (256, 1, 1), &[Arg::P(rd), Arg::P(y), Arg::P(wd), Arg::P(xn), Arg::I(h as i32), Arg::F(eps), Arg::I(sumar as i32)])?;
+            self.res_y = 0;
+            Ok(())
+        })();
+        r.map_err(|e| eprintln!("cuda: {e}"))
+    }
+
+    fn res_xn_bajar(&mut self, xs: &mut [f32]) -> Result<(), ()> {
+        if !self.res_activo || xs.len() * 4 > self.res_b[1].1 {
+            return Err(());
+        }
+        ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize").map_err(|e| eprintln!("cuda: {e}"))?;
+        ck(unsafe { (self.api.dtoh)(xs.as_mut_ptr() as *mut c_void, self.res_b[1].0, xs.len() * 4) }, "cuMemcpyDtoH").map_err(|e| eprintln!("cuda: {e}"))
+    }
+
+    fn res_y_bajar(&mut self, y: &mut [f32]) -> Result<bool, ()> {
+        if !self.res_activo {
+            return Err(());
+        }
+        if self.res_y == 0 {
+            return Ok(false);
+        }
+        ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize").map_err(|e| eprintln!("cuda: {e}"))?;
+        ck(unsafe { (self.api.dtoh)(y.as_mut_ptr() as *mut c_void, self.res_y, y.len() * 4) }, "cuMemcpyDtoH").map_err(|e| eprintln!("cuda: {e}"))?;
+        Ok(true)
+    }
+
+    fn res_y_subir(&mut self, y: &[f32]) -> Result<(), ()> {
+        if !self.res_activo || y.len() * 4 > self.res_b[2].1 {
+            return Err(());
+        }
+        let yb = self.res_b[2].0;
+        self.subir(yb, unsafe { std::slice::from_raw_parts(y.as_ptr() as *const u8, y.len() * 4) }).map_err(|e| eprintln!("cuda: {e}"))?;
+        self.res_y = yb;
+        Ok(())
+    }
+
+    fn res_fin(&mut self, n: usize, h: usize) -> Result<(), ()> {
+        if !self.res_activo || self.res_b[0].1 < n * h * 4 {
+            return Err(());
+        }
+        if self.res_y != 0 {
+            let rd = self.res_b[0].0;
+            self.lanzar_a(self.f_res_add, (((n * h) as u32).div_ceil(256), 1, 1), (256, 1, 1), &[Arg::P(rd), Arg::P(self.res_y), Arg::I((n * h) as i32)])
+                .map_err(|e| eprintln!("cuda: {e}"))?;
+        }
+        self.res_activo = false;
+        self.res_y = 0;
+        self.res_pend = true;
+        Ok(())
+    }
+
+    fn res_volcar(&mut self, hs: &mut [f32]) -> Result<(), ()> {
+        if !self.res_pend {
+            return Ok(());
+        }
+        self.res_pend = false;
+        if self.res_hs != (hs.as_ptr() as usize, hs.len()) || hs.len() * 4 > self.res_b[0].1 {
+            return Ok(()); // el residual pendiente era de otro búfer: nada que volcar aquí
+        }
+        ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize").map_err(|e| eprintln!("cuda: {e}"))?;
+        ck(unsafe { (self.api.dtoh)(hs.as_mut_ptr() as *mut c_void, self.res_b[0].0, hs.len() * 4) }, "cuMemcpyDtoH").map_err(|e| eprintln!("cuda: {e}"))
     }
 
     fn expertos_bloque(

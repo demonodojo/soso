@@ -1443,6 +1443,10 @@ impl<'a> LayerExecutor<'a> {
         if crate::bloque35::soporta(self, layer, kv) {
             return crate::bloque35::forward_layer_block_q35(self, layer, pos0, n, hs, bs, s, kv, source, gpu, use_gpu);
         }
+        // El resto de caminos lee `hs` en el host: si una capa anterior dejó el residual en el dispositivo, se vuelca ya.
+        if let Some(g) = gpu.as_deref_mut() {
+            g.res_volcar(hs)?;
+        }
         if crate::gemma::es_capa_gemma(self.manifest.layer(layer).map_or(0, |l| l.flags)) {
             return crate::gemma::forward_layer_gemma_block(self, layer, pos0, n, hs, bs, s, kv, source, gpu, use_gpu);
         }

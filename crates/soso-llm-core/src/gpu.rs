@@ -592,6 +592,52 @@ pub trait GpuDispatch {
         Ok(false)
     }
 
+    /// Hidden residente del prefill de una capa: sube `hs` (`n × h`) al dispositivo y lo deja allí como residual (si el dispositivo ya lo tiene vigente de la capa anterior, no sube nada). Mientras dura (hasta `res_fin`),
+    /// `gdn_capa`, `atencion_capa`, `router_topk`, `moe_compartido` y `expertos_bloque` aceptan `xs` y `salida`/`suma` **vacíos**: leen la
+    /// entrada normalizada que dejó `res_norma` y dejan su salida en el dispositivo, sin pasarlas por el bus. `Ok(false)` = no disponible.
+    fn res_iniciar(&mut self, hs: &[f32], n: usize, h: usize) -> Result<bool, ()> {
+        let _ = (hs, n, h);
+        Ok(false)
+    }
+
+    /// `[residual += salida del paso anterior (si `sumar`)]; xn = rmsnorm(residual) × w` en el dispositivo.
+    fn res_norma(&mut self, w: &[f32], n: usize, h: usize, eps: f32, sumar: bool) -> Result<(), ()> {
+        let _ = (w, n, h, eps, sumar);
+        Err(())
+    }
+
+    /// Puente hacia el camino de CPU: baja la entrada normalizada (`n × h`).
+    fn res_xn_bajar(&mut self, xs: &mut [f32]) -> Result<(), ()> {
+        let _ = xs;
+        Err(())
+    }
+
+    /// Puente: baja la salida parcial que el dispositivo guarda (`n × h`); `Ok(false)` si no había ninguna.
+    fn res_y_bajar(&mut self, y: &mut [f32]) -> Result<bool, ()> {
+        let _ = y;
+        Ok(false)
+    }
+
+    /// Puente: sube como salida del paso actual la que calculó la CPU (`n × h`).
+    fn res_y_subir(&mut self, y: &[f32]) -> Result<(), ()> {
+        let _ = y;
+        Err(())
+    }
+
+    /// Cierra la capa: `residual += salida`. El residual **se queda en el dispositivo** como valor vigente de `hs` (que en el host queda obsoleto): la
+    /// capa siguiente lo recoge en `res_iniciar` sin subirlo otra vez. Quien lea `hs` después (fin del bucle de capas, capa que no usa el modo
+    /// residente) debe llamar antes a `res_volcar`.
+    fn res_fin(&mut self, n: usize, h: usize) -> Result<(), ()> {
+        let _ = (n, h);
+        Err(())
+    }
+
+    /// Si el dispositivo guarda un residual más reciente que `hs`, lo baja a `hs`. Sin nada pendiente no hace nada.
+    fn res_volcar(&mut self, hs: &mut [f32]) -> Result<(), ()> {
+        let _ = hs;
+        Ok(())
+    }
+
     /// Tokens por bloque que prefiere el despacho para el prefill de un MoE (p. ej. cuando sus expertos pasan por el bus).
     fn bloque_prefill_moe(&self) -> Option<usize> {
         None
