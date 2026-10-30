@@ -231,7 +231,7 @@ Plan/ID, estado (catálogo = ficha = fila), evidencia, bloqueo, siguiente ficha
 
 Estado vigente y siguiente ficha en [README](../../../docs/self-improvement/README.md).
 
-**2026-10-30 (D12 / OpenCode en Sal).** T83–T94 **hechas**: D12, `sal/std/soso`, repo `opencode-sal`, `cargo xtask pkg-pack opencode-sal`, guest `opencode --version`. Coordinador: `soso-improve-sal campana`. Paridad/autonomía: [tests/self-improvement/opencode-sal/README.md](../../../tests/self-improvement/opencode-sal/README.md).
+**2026-10-30 (D12 / OpenCode en Sal).** T83–T94 **hechas**: D12, `sal/std/io`, repo `opencode-sal`, `cargo xtask pkg-pack opencode-sal`, guest `opencode --version`. Coordinador: `soso-improve-sal campana`. Paridad/autonomía: [tests/self-improvement/opencode-sal/README.md](../../../tests/self-improvement/opencode-sal/README.md).
 
 **Actualización 2026-10-24 (línea T29 / campañas).** Cifra de referencia: **banco ciego 5 (R41–R50): combo Qwen3.6-35B-A3B → Qwen3.6-27B
 denso 7/10** (MoE solo 3/10; Claude Sonnet 5.5: 10/10 como techo); el banco ajustado R31–R40 daba 9/10 (inflado). Gemma 12B: 2/10. Modelo de trabajo D11 **aceptada** (2026-10-24). Antes de lanzar

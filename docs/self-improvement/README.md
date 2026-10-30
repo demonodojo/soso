@@ -7,7 +7,7 @@
 
 ## Por dónde empezar
 
-> **Estado (2026-10-30).** [D12](DECISIONES.md): línea T83–T94 **cerrada** — repo [`opencode-sal`](../../../opencode-sal), `std/soso` en Sal, `cargo xtask pkg-pack opencode-sal`, fase guest `opencode-sal: instalar y --version`. Paridad R41–R50 y autonomía total: ver [tests/self-improvement/opencode-sal/README.md](../../tests/self-improvement/opencode-sal/README.md) (evidencia parcial hasta modelo 100 % en soso).
+> **Estado (2026-10-30).** [D12](DECISIONES.md): línea T83–T94 **cerrada** — repo [`opencode-sal`](../../../opencode-sal), `std/io` en Sal, `cargo xtask pkg-pack opencode-sal`, fase guest `opencode-sal: instalar y --version`. Paridad R41–R50 y autonomía total: ver [tests/self-improvement/opencode-sal/README.md](../../tests/self-improvement/opencode-sal/README.md) (evidencia parcial hasta modelo 100 % en soso).
 >
 > **Estado (2026-10-24).** T29 está **hecha** y su línea de trabajo cambió de modelo. Cifra de referencia: **banco ciego 5 (R41–R50), combo
 > Qwen3.6-35B-A3B → Qwen3.6-27B denso 7/10** (MoE solo 3/10; Claude Sonnet 5.5, 10/10); en el banco ajustado R31–R40 daba 9/10 (inflado por el ajuste del arnés) y Gemma 12B 2/10. Decisión
@@ -214,7 +214,7 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T81](T81-reutilizar-kv.md) | Reutilizar el prefijo del KV entre peticiones | SI-3 | — | **Hecha** (2026-10-08; turnos 2+ de ~500 s a ~20 s, exacto) |
 | [T82](T82-prefill-por-lotes.md) | Prefill por lotes | SI-3 | T81 | **Hecha** (2026-10-08: guest 3 846 s → 1 217 s con el prompt de OpenCode, 3,2×) |
 | [T83](T83-opencode-sal-decision.md) | Decisión D12: OpenCode en Sal | SI-6 | — | **Hecha** (2026-10-30) |
-| [T84](T84-lib-soso-sal.md) | Biblioteca Sal `std/soso` | SI-6 | T83 | **Hecha** (2026-10-30) |
+| [T84](T84-lib-soso-sal.md) | Biblioteca Sal `std/io` | SI-6 | T83 | **Hecha** (2026-10-30) |
 | [T85](T85-contenedores-json.md) | Contenedores / arena JSON | SI-6 | T84 | **Hecha** (2026-10-30) |
 | [T86](T86-json-http-sse.md) | json, http, sse | SI-6 | T84, T85 | **Hecha** (2026-10-30) |
 | [T87](T87-opencode-sal-repo.md) | Repo e instalación `soso-pkg` | SI-6 | T84, T86 | **Hecha** (2026-10-30) |

@@ -8,22 +8,23 @@ freestanding para módulos del kernel ni autohospedaje del compilador escrito en
 
 Los cambios del compilador y del runtime C están en el repositorio hermano
 [Sal](https://github.com/demonodojo/sal), no en una copia dentro de soso.
-La revisión integrada es `ed3bc6dc47d0e29dcde5ddc32f10e3635afdfaa6`.
+La revisión integrada es `7090ba44030bac0272cdb8ed112e328dcc8c96e7`.
 [`config/sal-source.lock`](../config/sal-source.lock) fija esa revisión (campo
 `base`) y el SHA-256 del contenido de `Cargo.toml`, `Cargo.lock`, `build.rs`,
 `src/` y `runtime/`. Se verifica antes y después del build.
 
-**Escritorio (S0):** el pin `sha256=9f394405…` incluye operadores Int (`% & | ^ << >>`),
-tipo `Bytes`, builtin `syscall` → `sal_os_syscall` en `user/sal-runtime`, y el
-benchmark 1080p en `benches/framebuffer/`. Siguen abiertos `exec_dyn` y
-`selfhost_ir`; el autohospedado no aprende la sintaxis nueva (desfase en `SPEC.md`).
+**Escritorio (S0):** operadores Int (`% & | ^ << >>`), tipo `Bytes` y builtin
+`syscall`. `sal_os_syscall` vive en `runtime.o` (`sal_runtime.c` con `SAL_SOSO`,
+instrucción `syscall` con la ABI de soso: `rdi`/`rsi`/`rdx`/`r10`). La E/S de
+biblioteca está en `sal/std/io` y se copia a `/usr/share/sal/std/io`; un proyecto
+la importa como `io/…` si está en `sal_modules/io` o como dependencia `path` de
+`Sal.toml`. Las banderas de `open` son las de soso (`O_CREAT` = 4, `O_TRUNC` = 8),
+no las de Linux.
 
-El port ya está registrado en el commit `0f900ff` de Sal, disponible en
-`origin/main` al comprobarlo el 25 de octubre. `ed3bc6d` añade un cambio en
-`examples/infer/tiny_prefill.sal`; está en el checkout local y todavía no en
-`origin/main`. El compilador y el runtime tienen el mismo hash de contenido
-que la integración anterior sobre `dbfe6b3`; ya no dependen de cambios sin
-commit en Sal.
+`7090ba4` (`sal modules`, 30 de octubre) añade paquetes (`Sal.toml` / `Sal.lock`),
+la búsqueda en `sal_modules/` y la puerta real de `syscall` en el runtime de
+soso. El checkout de Sal está en `origin/main`. La evidencia anterior
+(`0f900ff`, `ed3bc6d`) queda en el apartado del 25 de octubre.
 
 | Etapa | Implementación |
 |---|---|
@@ -177,3 +178,13 @@ con el pin nuevo. Evidencia conservada en `target/sal/update-2026-10-25/`:
 Los resultados generales del día anterior se conservan como evidencia histórica;
 esta actualización no los da por resueltos ni repite las suites globales, ya
 que las entradas del compilador/runtime son idénticas a las validadas entonces.
+
+### Actualización del 30 de octubre de 2026
+
+Pin `7090ba4`, hash
+`2755f68df2e40db9feb79252fd1dd8976a54cba72bf8dd799de8e51345a72eaf`.
+`cargo xtask sal-build --cross-only` enlaza el escritorio, `sal-contar`,
+`hello` y `runtime` como ELF estáticos. `tests/sal/escritorio/probar_host.py`
+y `tests/sal/soso-lib.sal` (`--target soso`) salen con código 0. No se ha
+repetido `cargo xtask test-sal`: falta la toolchain Rust de soso para el
+compilador nativo, y `--cross-only` retira `/bin/sal` si el pin no coincide.

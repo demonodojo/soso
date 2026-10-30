@@ -542,7 +542,7 @@ fn wm_ss_capturar(st: Int, compos: Int, clen: Int, cap: Int, cap_len: Int, sw: I
     0
 
 fn wm_ss_armar(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
-    if st_get(st, st_ss_pid()) >= 0
+    if st_get(st, st_ss_cap()) > 0
         0
     else
         _ic = wm_iniciar_cursor(st, sw, sh)
@@ -553,18 +553,24 @@ fn wm_ss_armar(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, b
         1
 
 fn wm_ss_iniciar(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
-    ok = wm_ss_armar(st, compos, clen, sw, sh, stride, bpp, fmt)
-    if ok == 0
-        0
-    else
-        pid = spawn_io_full(d"/bin/soso-mono", 0, 0, 0, fd_kernel_log())
-        if pid < 0
-            _r = st_set(st, st_ss_cap(), 0)
-            _t = st_set(st, st_ss_last(), uptime_ms())
+    if st_get(st, st_ss_cap()) > 0
+        if st_get(st, st_ss_pid()) >= 0
             0
         else
-            _pid = st_set(st, st_ss_pid(), pid)
-            1
+            wm_ss_armar(st, compos, clen, sw, sh, stride, bpp, fmt)
+    else
+        ok = wm_ss_armar(st, compos, clen, sw, sh, stride, bpp, fmt)
+        if ok == 0
+            0
+        else
+            pid = spawn_io_full(d"/bin/soso-mono", 0, 0, 0, fd_kernel_log())
+            if pid < 0
+                _r = st_set(st, st_ss_cap(), 0)
+                _t = st_set(st, st_ss_last(), uptime_ms())
+                0
+            else
+                _pid = st_set(st, st_ss_pid(), pid)
+                1
 
 fn wm_ss_cerrar(st: Int) -> Int ! io, alloc
     si = st_get(st, st_ss_slot())
@@ -593,7 +599,7 @@ fn wm_ss_idle(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bp
                 else
                     0
 
-fn wm_on_crear_ss(st: Int, fd: Int, tab: Int, i: Int, fmt: Int, sw: Int, sh: Int) -> Int ! io, alloc
+fn wm_on_crear_ss(st: Int, fd: Int, tab: Int, i: Int, fmt: Int, sw: Int, sh: Int, stride: Int) -> Int ! io, alloc
     cw = sw
     ch = sh
     ok = 0
@@ -609,6 +615,8 @@ fn wm_on_crear_ss(st: Int, fd: Int, tab: Int, i: Int, fmt: Int, sw: Int, sh: Int
                 if sptr >= 0
                     cap = st_get(st, st_ss_cap())
                     if cap > 0
+                        cap_len = stride * sh * 4
+                        _cp = copiar_rect(sptr, slen, cw, cap, cap_len, stride, 4, fmt, 0, 0, 0, 0, sw, sh)
                         _z = st_set(st, st_ss_cap(), 0)
                     _v = wm_enviar_ventana(st, fd, 1, sid, cw, ch, fmt)
                     _a = st_set(st, st_shm_id(), sid)
@@ -1723,13 +1731,18 @@ fn wm_dispatch_msg(st: Int, tab: Int, i: Int, compos: Int, clen: Int, stride: In
     fd = tab_get(tab, i, tab_fd())
     op = msg_get_op(m)
     if op == op_hola()
+        if st_get(st, st_ss_pid()) >= 0
+            if st_get(st, st_ss_slot()) < 0
+                peer = tcp_peer_pid(fd)
+                if peer == st_get(st, st_ss_pid())
+                    _ss = st_set(st, st_ss_slot(), i)
         _f = tab_set(tab, i, tab_fase(), 1)
     if op == op_crear()
         if tab_get(tab, i, tab_fase()) == 1
             _s = wm_st_desde_tab(st, tab, i)
             ok = 0
             if wm_es_ss(st, i) != 0
-                ok = wm_on_crear_ss(st, fd, tab, i, fmt, sw, sh)
+                ok = wm_on_crear_ss(st, fd, tab, i, fmt, sw, sh, stride)
             else
                 ok = wm_on_crear(st, fd, m, fmt, sw, sh)
             _t = wm_tab_desde_st(st, tab, i)
@@ -2091,13 +2104,17 @@ fn wm_aceptar_cliente(st: Int, acc: Int) -> Int ! io, alloc
         _n = st_set(st, st_nz(), nn)
         _fo = st_set(st, st_focus(), si)
         _sc = tab_set(tab, si, tab_escala(), wm_escala_apps(st))
-        if st_get(st, st_ss_pid()) >= 0
-            if st_get(st, st_ss_slot()) < 0
+        if st_get(st, st_ss_slot()) < 0
+            if st_get(st, st_ss_cap()) > 0
                 _ss = st_set(st, st_ss_slot(), si)
-            else
+            if st_get(st, st_ss_pid()) >= 0
+                _ss = st_set(st, st_ss_slot(), si)
+        if st_get(st, st_ss_slot()) >= 0
+            if st_get(st, st_ss_pid()) >= 0
                 peer = tcp_peer_pid(acc)
                 if peer == st_get(st, st_ss_pid())
-                    _ss = st_set(st, st_ss_slot(), si)
+                    if st_get(st, st_ss_slot()) != si
+                        _ss = st_set(st, st_ss_slot(), si)
         ok = 1
     ok
 

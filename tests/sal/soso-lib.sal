@@ -1,4 +1,4 @@
-import "../../../sal/std/soso/time.sal"
+import "../../../sal/std/io/time.sal"
 
 fn main() -> Int ! io
     u = uptime_ms()

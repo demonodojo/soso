@@ -3,7 +3,7 @@ import "proto.sal"
 import "superficie.sal"
 import "mono.sal"
 
-fn mono_cliente_crear(sock: Int, w: Int, h: Int) -> Int ! io, alloc
+fn mono_cliente_crear(sock: Int, w: Int, h: Int, once: Int) -> Int ! io, alloc
     m = msg_nuevo()
     _h = msg_encode_hola(m, 1)
     _w1 = write_fd(sock, m, msg_len())
@@ -12,7 +12,20 @@ fn mono_cliente_crear(sock: Int, w: Int, h: Int) -> Int ! io, alloc
     _c = msg_encode_crear(m2, w, h, 16)
     _w2 = write_fd(sock, m2, msg_len())
     rep = msg_nuevo()
-    n = read_fd(sock, rep, msg_len())
+    n = 0
+    espera = 0
+    limite = 60000
+    if once != 0
+        limite = 3000
+    while n != msg_len()
+        if espera >= limite
+            n = -1
+        if n != msg_len()
+            if n != -1
+                n = read_timeout_fd(sock, rep, msg_len(), 100)
+            if n != msg_len()
+                _s = sleep_ms(10)
+                espera = espera + 110
     if n != msg_len()
         1
     else
@@ -56,21 +69,34 @@ fn mono_cliente_crear(sock: Int, w: Int, h: Int) -> Int ! io, alloc
                     if paso >= 0
                         _s = sleep_ms(mono_frame_ms())
                         paso = paso + 1
+                        if once != 0
+                            if paso >= 1
+                                paso = -1
                 _x = close_fd(sock)
                 0
+
+fn mono_arg_once() -> Int ! io, alloc
+    a = 1
+    ok = 0
+    while a < argc()
+        if ok == 0
+            if str_eq(argv(a), d"--once") != 0
+                ok = 1
+        a = a + 1
+    ok
 
 fn main() -> Int ! io, alloc
     sock = -1
     intento = 0
-    while intento < 40
+    while intento < 60
         if sock < 0
-            sock = tcp_connect(7430, 500)
+            sock = tcp_connect(7430, 5000)
         if sock >= 0
-            intento = 40
+            intento = 60
         if sock < 0
             intento = intento + 1
-            _s = sleep_ms(50)
+            _s = sleep_ms(100)
     if sock < 0
         1
     else
-        mono_cliente_crear(sock, 640, 480)
+        mono_cliente_crear(sock, 640, 480, mono_arg_once())

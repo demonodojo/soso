@@ -243,8 +243,8 @@ pub fn install(root: &Path) -> bool {
             }
         }
     }
-    let share_std = root.join("rootfs/usr/share/sal/std/soso");
-    let sal_std = root.join("../sal/std/soso");
+    let share_std = root.join("rootfs/usr/share/sal/std/io");
+    let sal_std = root.join("../sal/std/io");
     if sal_std.is_dir() {
         if let Ok(entries) = fs::read_dir(&sal_std) {
             for entry in entries.flatten() {
