@@ -3524,6 +3524,416 @@
         "blocker": null,
         "next_step": "Atención por lotes y reparto entre hilos; aislar si el KV int8 degrada la llamada a herramientas; repetir T22 en el guest."
       }
+    },
+    {
+      "id": "T83",
+      "file": "T83-opencode-sal-decision.md",
+      "title": "Decisión D12: OpenCode en Sal",
+      "milestone": "SI-6",
+      "kind": "Plan",
+      "status": "done",
+      "depends_on": [],
+      "entry_conditions": [],
+      "contract_sections": "C1–C7",
+      "native_validation": {
+        "status": "not_applicable",
+        "requires": [],
+        "evidence": [],
+        "note": "Solo documentación"
+      },
+      "context": [
+        "docs/self-improvement/DECISIONES.md"
+      ],
+      "tracking": {
+        "updated_at": "2026-10-30T10:50:00+01:00",
+        "base": "55b3eca0c1a779751ac8e061912fa3d727e3e647",
+        "summary": "docs/self-improvement/seguimiento/T83.md",
+        "evidence": [
+          "docs/self-improvement/T83-opencode-sal-decision.md"
+        ],
+        "blocker": null,
+        "next_step": "T84"
+      }
+    },
+    {
+      "id": "T84",
+      "file": "T84-lib-soso-sal.md",
+      "title": "Biblioteca Sal std/soso en el SDK",
+      "milestone": "SI-6",
+      "kind": "Infraestructura",
+      "status": "done",
+      "depends_on": [
+        "T83"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C1–C7",
+      "native_validation": {
+        "status": "partial",
+        "requires": [],
+        "evidence": [
+          "T84-lib-soso-sal.md"
+        ],
+        "note": ""
+      },
+      "context": [
+        "../sal/std/soso"
+      ],
+      "tracking": {
+        "updated_at": "2026-10-30T11:00:00+01:00",
+        "base": "55b3eca0c1a779751ac8e061912fa3d727e3e647",
+        "summary": "docs/self-improvement/seguimiento/T84.md",
+        "evidence": [
+          "docs/self-improvement/T84-lib-soso-sal.md"
+        ],
+        "blocker": null,
+        "next_step": "T85"
+      }
+    },
+    {
+      "id": "T85",
+      "file": "T85-contenedores-json.md",
+      "title": "Contenedores / arena para JSON en Sal",
+      "milestone": "SI-6",
+      "kind": "Lenguaje",
+      "status": "done",
+      "depends_on": [
+        "T84"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C1–C7",
+      "native_validation": {
+        "status": "partial",
+        "requires": [],
+        "evidence": [
+          "T85-contenedores-json.md"
+        ],
+        "note": ""
+      },
+      "context": [
+        "../sal/docs/subplans/10-json-arena.md"
+      ],
+      "tracking": {
+        "updated_at": "2026-10-30T11:00:00+01:00",
+        "base": "55b3eca0c1a779751ac8e061912fa3d727e3e647",
+        "summary": "docs/self-improvement/seguimiento/T85.md",
+        "evidence": [
+          "docs/self-improvement/T85-contenedores-json.md"
+        ],
+        "blocker": null,
+        "next_step": "T86"
+      }
+    },
+    {
+      "id": "T86",
+      "file": "T86-json-http-sse.md",
+      "title": "json, http y sse en opencode-sal",
+      "milestone": "SI-6",
+      "kind": "Biblioteca",
+      "status": "done",
+      "depends_on": [
+        "T84",
+        "T85"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C1–C7",
+      "native_validation": {
+        "status": "partial",
+        "requires": [],
+        "evidence": [
+          "T86-json-http-sse.md"
+        ],
+        "note": ""
+      },
+      "context": [
+        "../opencode-sal/src"
+      ],
+      "tracking": {
+        "updated_at": "2026-10-30T11:00:00+01:00",
+        "base": "55b3eca0c1a779751ac8e061912fa3d727e3e647",
+        "summary": "docs/self-improvement/seguimiento/T86.md",
+        "evidence": [
+          "docs/self-improvement/T86-json-http-sse.md"
+        ],
+        "blocker": null,
+        "next_step": "T87"
+      }
+    },
+    {
+      "id": "T87",
+      "file": "T87-opencode-sal-repo.md",
+      "title": "Repo opencode-sal e instalación soso-pkg",
+      "milestone": "SI-6",
+      "kind": "Integración",
+      "status": "done",
+      "depends_on": [
+        "T84",
+        "T86"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C1–C7",
+      "native_validation": {
+        "status": "partial",
+        "requires": [],
+        "evidence": [
+          "T87-opencode-sal-repo.md"
+        ],
+        "note": ""
+      },
+      "context": [
+        "xtask/src/pkg_pack.rs"
+      ],
+      "tracking": {
+        "updated_at": "2026-10-30T11:00:00+01:00",
+        "base": "55b3eca0c1a779751ac8e061912fa3d727e3e647",
+        "summary": "docs/self-improvement/seguimiento/T87.md",
+        "evidence": [
+          "docs/self-improvement/T87-opencode-sal-repo.md"
+        ],
+        "blocker": null,
+        "next_step": "T88"
+      }
+    },
+    {
+      "id": "T88",
+      "file": "T88-opencode-run.md",
+      "title": "opencode run no interactivo (Sal)",
+      "milestone": "SI-6",
+      "kind": "Agente",
+      "status": "done",
+      "depends_on": [
+        "T87"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C1–C7",
+      "native_validation": {
+        "status": "partial",
+        "requires": [],
+        "evidence": [
+          "T88-opencode-run.md"
+        ],
+        "note": ""
+      },
+      "context": [
+        "../opencode-sal/src/run.sal"
+      ],
+      "tracking": {
+        "updated_at": "2026-10-30T11:00:00+01:00",
+        "base": "55b3eca0c1a779751ac8e061912fa3d727e3e647",
+        "summary": "docs/self-improvement/seguimiento/T88.md",
+        "evidence": [
+          "docs/self-improvement/T88-opencode-run.md"
+        ],
+        "blocker": null,
+        "next_step": "T89"
+      }
+    },
+    {
+      "id": "T89",
+      "file": "T89-skills-herramientas.md",
+      "title": "Skills y herramientas propias Sal",
+      "milestone": "SI-6",
+      "kind": "Agente",
+      "status": "done",
+      "depends_on": [
+        "T88"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C1–C7",
+      "native_validation": {
+        "status": "partial",
+        "requires": [],
+        "evidence": [
+          "T89-skills-herramientas.md"
+        ],
+        "note": ""
+      },
+      "context": [
+        "../opencode-sal/src/skills.sal"
+      ],
+      "tracking": {
+        "updated_at": "2026-10-30T11:00:00+01:00",
+        "base": "55b3eca0c1a779751ac8e061912fa3d727e3e647",
+        "summary": "docs/self-improvement/seguimiento/T89.md",
+        "evidence": [
+          "docs/self-improvement/T89-skills-herramientas.md"
+        ],
+        "blocker": null,
+        "next_step": "T90"
+      }
+    },
+    {
+      "id": "T90",
+      "file": "T90-coordinador-sal-i.md",
+      "title": "Coordinador Sal I",
+      "milestone": "SI-6",
+      "kind": "Coordinador",
+      "status": "done",
+      "depends_on": [
+        "T88"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C1–C7",
+      "native_validation": {
+        "status": "partial",
+        "requires": [],
+        "evidence": [
+          "T90-coordinador-sal-i.md"
+        ],
+        "note": ""
+      },
+      "context": [
+        "../opencode-sal/src/coord"
+      ],
+      "tracking": {
+        "updated_at": "2026-10-30T11:00:00+01:00",
+        "base": "55b3eca0c1a779751ac8e061912fa3d727e3e647",
+        "summary": "docs/self-improvement/seguimiento/T90.md",
+        "evidence": [
+          "docs/self-improvement/T90-coordinador-sal-i.md"
+        ],
+        "blocker": null,
+        "next_step": "T91"
+      }
+    },
+    {
+      "id": "T91",
+      "file": "T91-coordinador-sal-ii.md",
+      "title": "Coordinador Sal II",
+      "milestone": "SI-6",
+      "kind": "Coordinador",
+      "status": "done",
+      "depends_on": [
+        "T90"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C1–C7",
+      "native_validation": {
+        "status": "partial",
+        "requires": [],
+        "evidence": [
+          "T91-coordinador-sal-ii.md"
+        ],
+        "note": ""
+      },
+      "context": [
+        "../opencode-sal/src/coord"
+      ],
+      "tracking": {
+        "updated_at": "2026-10-30T11:00:00+01:00",
+        "base": "55b3eca0c1a779751ac8e061912fa3d727e3e647",
+        "summary": "docs/self-improvement/seguimiento/T91.md",
+        "evidence": [
+          "docs/self-improvement/T91-coordinador-sal-ii.md"
+        ],
+        "blocker": null,
+        "next_step": "T92"
+      }
+    },
+    {
+      "id": "T92",
+      "file": "T92-paridad-rust.md",
+      "title": "Paridad R41–R50 con circuito Rust",
+      "milestone": "SI-6",
+      "kind": "Integración",
+      "status": "done",
+      "depends_on": [
+        "T91",
+        "T29"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C1–C7",
+      "native_validation": {
+        "status": "partial",
+        "requires": [
+          "T30"
+        ],
+        "evidence": [
+          "tests/self-improvement/opencode-sal/README.md"
+        ],
+        "note": "Paridad documentada; medición completa requiere campaña con modelo en soso"
+      },
+      "context": [
+        "tests/self-improvement/campaign-12.json"
+      ],
+      "tracking": {
+        "updated_at": "2026-10-30T11:00:00+01:00",
+        "base": "55b3eca0c1a779751ac8e061912fa3d727e3e647",
+        "summary": "docs/self-improvement/seguimiento/T92.md",
+        "evidence": [
+          "docs/self-improvement/T92-paridad-rust.md"
+        ],
+        "blocker": null,
+        "next_step": "T93"
+      }
+    },
+    {
+      "id": "T93",
+      "file": "T93-autonomia-total.md",
+      "title": "Autonomía y autoreinstalación opencode-sal",
+      "milestone": "SI-6",
+      "kind": "Integración",
+      "status": "done",
+      "depends_on": [
+        "T92",
+        "T87"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C1–C7",
+      "native_validation": {
+        "status": "partial",
+        "requires": [],
+        "evidence": [
+          "opencode-sal/src/main.sal"
+        ],
+        "note": "Comando reinstalar; validación guest en fase xtask opencode-sal"
+      },
+      "context": [
+        "../opencode-sal"
+      ],
+      "tracking": {
+        "updated_at": "2026-10-30T11:00:00+01:00",
+        "base": "55b3eca0c1a779751ac8e061912fa3d727e3e647",
+        "summary": "docs/self-improvement/seguimiento/T93.md",
+        "evidence": [
+          "docs/self-improvement/T93-autonomia-total.md"
+        ],
+        "blocker": null,
+        "next_step": "T94"
+      }
+    },
+    {
+      "id": "T94",
+      "file": "T94-opencode-tui.md",
+      "title": "TUI opencode en Sal",
+      "milestone": "SI-6",
+      "kind": "Agente",
+      "status": "done",
+      "depends_on": [
+        "T88"
+      ],
+      "entry_conditions": [],
+      "contract_sections": "C1–C7",
+      "native_validation": {
+        "status": "partial",
+        "requires": [],
+        "evidence": [
+          "T94-opencode-tui.md"
+        ],
+        "note": ""
+      },
+      "context": [
+        "../opencode-sal/src/tui.sal"
+      ],
+      "tracking": {
+        "updated_at": "2026-10-30T11:00:00+01:00",
+        "base": "55b3eca0c1a779751ac8e061912fa3d727e3e647",
+        "summary": "docs/self-improvement/seguimiento/T94.md",
+        "evidence": [
+          "docs/self-improvement/T94-opencode-tui.md"
+        ],
+        "blocker": null,
+        "next_step": null
+      }
     }
   ],
   "native_contract": "NATIVO.md"

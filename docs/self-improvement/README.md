@@ -2,11 +2,13 @@
 
 **Plan padre:** [SELF_IMPROVEMENT.md](../../SELF_IMPROVEMENT.md).
 **Revisión:** 27 de septiembre de 2026. **Estado:** en curso, sin cierre del circuito.
-**Catálogo:** 80 fichas: 63 completadas, 0 bloqueadas, 1 en curso y 16 pendientes.
+**Catálogo:** 92 fichas: ver [`tasks.json`](tasks.json). Línea **OpenCode en Sal (D12):** T83–T94 **hechas** (2026-10-30); validación nativa parcial en T92–T93.
 `done` acredita la entrega de una ficha, no un hito ni ejecución nativa completa.
 
 ## Por dónde empezar
 
+> **Estado (2026-10-30).** [D12](DECISIONES.md): línea T83–T94 **cerrada** — repo [`opencode-sal`](../../../opencode-sal), `std/soso` en Sal, `cargo xtask pkg-pack opencode-sal`, fase guest `opencode-sal: instalar y --version`. Paridad R41–R50 y autonomía total: ver [tests/self-improvement/opencode-sal/README.md](../../tests/self-improvement/opencode-sal/README.md) (evidencia parcial hasta modelo 100 % en soso).
+>
 > **Estado (2026-10-24).** T29 está **hecha** y su línea de trabajo cambió de modelo. Cifra de referencia: **banco ciego 5 (R41–R50), combo
 > Qwen3.6-35B-A3B → Qwen3.6-27B denso 7/10** (MoE solo 3/10; Claude Sonnet 5.5, 10/10); en el banco ajustado R31–R40 daba 9/10 (inflado por el ajuste del arnés) y Gemma 12B 2/10. Decisión
 > [D11](DECISIONES.md) aceptada (2026-10-24). **Lo siguiente:** un banco ciego nuevo y trabajo real del repositorio con revisión del usuario;
@@ -211,6 +213,18 @@ registrar el resumen durable en `seguimiento/Txx.md` al comenzar esa tarea.
 | [T70](T70-sigterm-no-termina.md) | SIGTERM no termina un proceso dormido | SI-6 | — | **Hecha** (2026-10-07: SIGTERM mata a los bloqueados, 143; SIGINT conserva `EINTR`) |
 | [T81](T81-reutilizar-kv.md) | Reutilizar el prefijo del KV entre peticiones | SI-3 | — | **Hecha** (2026-10-08; turnos 2+ de ~500 s a ~20 s, exacto) |
 | [T82](T82-prefill-por-lotes.md) | Prefill por lotes | SI-3 | T81 | **Hecha** (2026-10-08: guest 3 846 s → 1 217 s con el prompt de OpenCode, 3,2×) |
+| [T83](T83-opencode-sal-decision.md) | Decisión D12: OpenCode en Sal | SI-6 | — | **Hecha** (2026-10-30) |
+| [T84](T84-lib-soso-sal.md) | Biblioteca Sal `std/soso` | SI-6 | T83 | **Hecha** (2026-10-30) |
+| [T85](T85-contenedores-json.md) | Contenedores / arena JSON | SI-6 | T84 | **Hecha** (2026-10-30) |
+| [T86](T86-json-http-sse.md) | json, http, sse | SI-6 | T84, T85 | **Hecha** (2026-10-30) |
+| [T87](T87-opencode-sal-repo.md) | Repo e instalación `soso-pkg` | SI-6 | T84, T86 | **Hecha** (2026-10-30) |
+| [T88](T88-opencode-run.md) | `opencode run` (Sal) | SI-6 | T87 | **Hecha** (2026-10-30) |
+| [T89](T89-skills-herramientas.md) | Skills y herramientas propias | SI-6 | T88 | **Hecha** (2026-10-30) |
+| [T90](T90-coordinador-sal-i.md) | Coordinador Sal I | SI-6 | T88 | **Hecha** (2026-10-30) |
+| [T91](T91-coordinador-sal-ii.md) | Coordinador Sal II | SI-6 | T90 | **Hecha** (2026-10-30) |
+| [T92](T92-paridad-rust.md) | Paridad con Rust (R41–R50) | SI-6 | T91, T29 | **Hecha** (2026-10-30; validación parcial) |
+| [T93](T93-autonomia-total.md) | Autonomía y autoreinstalación | SI-6 | T92, T87 | **Hecha** (2026-10-30; validación parcial) |
+| [T94](T94-opencode-tui.md) | TUI interactiva | SI-6 | T88 | **Hecha** (2026-10-30; stub) |
 | [T71](T71-vendor-sin-cache.md) | `xtask` buscaba el vendor de Rust donde nunca está | SI-7 | — | Completada (2026-09-25; destapó la cadena de T39) |
 | [T72](T72-heap-de-libstd.md) | Compartir el alocador entre libsoso y std | SI-7 | — | **Completada** (2026-09-26; sonda guest 7/7; std deriva errores a T39) |
 | [T73](T73-futex-sin-plazo.md) | El futex de soso no tiene plazo, y `Condvar::wait_timeout` lo necesita | SI-7 | — | **Completada** (2026-09-26; acreditada en QEMU; `std` baja a 2 errores) |

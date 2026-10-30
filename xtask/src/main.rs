@@ -1003,6 +1003,9 @@ pub(crate) fn build_user() -> bool {
     }
     cambiado |= sal::install(&root);
     write_paquete_prueba(&root);
+    if let Err(e) = pkg_pack::materializar_opencode_sal_en_rootfs(&root) {
+        eprintln!("aviso: opencode-sal no empaquetado: {e}");
+    }
     if let Err(e) = pkg_pack::materializar_soso_web_en_rootfs(&root) {
         eprintln!("xtask: aviso: paquete soso-web: {e}");
     }

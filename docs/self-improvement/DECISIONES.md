@@ -152,6 +152,8 @@ como decisión de plan del usuario. Portar Bun/OpenCode es del orden de meses y 
 - El **port de OpenCode/Bun** (N-005…N-008, N-011) queda **aplazado**, sin ficha de entrada, y puede recuperarse si algún día interesa; las N-xxx ya hechas no se pierden.
 - N-006 sigue aplazada (no hay consumidor de C).
 
+**Nota (2026-10-30):** la parte «el port de OpenCode no se hace» queda **revocada** por [D12](#d12--opencode-en-sal-reimplementación-compatible-no-port-de-bun-2026-10-30). D10 sigue vigente para la **ruta T35 ya entregada** (agente nativo Rust); no obliga a mantener OpenCode/Bun aplazado para siempre.
+
 ## D11 — Modelo de trabajo del agente nativo: Qwen3.6-35B-A3B + Qwen3.6-27B denso (2026-10-23) — **aceptada** (2026-10-24, por el usuario: «acepto D11»)
 
 **Contexto.** D9 fijó `qwen2.5-coder-14b` para T25–T29 y T29 cerró con Gemma 4 12B (2/10 en el banco R31–R40 con el arnés v10–v33). La calibración con Claude Sonnet 5.5 (campaña 49, misma configuración, suscripción vía `claude -p`) dio **10/10**: el arnés no es el límite, lo es el modelo.
@@ -170,4 +172,19 @@ como decisión de plan del usuario. Portar Bun/OpenCode es del orden de meses y 
 **Sustituye a D9** (`qwen2.5-coder-14b`) como modelo de trabajo de la línea T25–T29 en adelante; Qwen2.5-Coder-7B sigue siendo el perfil ligero. **Cifra de referencia.** La del banco ciego 5: **combo local 7/10** (Claude 10/10); los 9/10 de R31–R40 estaban inflados por el ajuste del arnés a esas tareas. **Propuesta.** Modelo de trabajo = **Qwen3.6-35B-A3B** (pasada A: banco entero en ≈75 min) y **Qwen3.6-27B denso** con 5400 s por tarea sólo para lo rechazado (pasada B: ≈35 min por tarea). Sin razonamiento (modo instruct, T=0,7): con razonamiento el MoE no mejora el total. Claude queda como **techo de calibración**, no como dependencia. Requisitos de la máquina: ≈10 GB de RAM libres para el MoE y ≈12 GB de VRAM; el denso no cabe entero (57/64 capas en GPU).
 
 **Límites que cambian el trabajo futuro.** (1) Aún se sirve con llama.cpp (CUDA) en el host: el runtime de soso no tiene atención lineal (Gated DeltaNet) en GPU. (2) El banco R31–R40 ya no es ciego (el arnés se afinó mirando sus fallos): hace falta un banco nuevo para medir. (3) La memoria manda: Chrome/Cursor llevaron la máquina al límite varias veces y las campañas fallaron por tiempo, no por el modelo. (4) Un hueco estable, R37 (cortar el host por el primer `/` o `?`), sólo lo resuelve Claude.
+
+## D12 — OpenCode en Sal: reimplementación compatible, no port de Bun (2026-10-30, decidida por el usuario)
+
+**Situación.** La automejora autónoma exige agente y coordinador **dentro** de soso sin depender del host para OpenCode ni para `soso-improve` Rust. D10 cerró T35 con un agente nativo Rust; el inventario T32–T34 sigue válido: portar Bun/OpenCode tal cual no es viable. Sal ya compila para soso (`cargo xtask sal-build`) y `soso-pkg` puede instalar aplicaciones en `/var/paquetes/`.
+
+**Decisión.** Reimplementar **OpenCode en Sal** con compatibilidad de formatos (`opencode.json`, `AGENTS.md`, skills, sesiones, `run --format json`), en el repositorio **`demonodojo/opencode-sal`**, instalable con `soso-pkg`. Reimplementar también el **coordinador de automejora en Sal** (casos, captura, ejecutor, validador, campaña). No se portan Bun, JavaScriptCore ni los `.node` de npm. El agente Rust (`soso-improve` / `soso-improve-core`) sigue operativo hasta paridad acreditada en T92.
+
+**Consecuencias en el plan.**
+- **SI-6** deja de leerse como «sustituido por D10» y pasa a la línea **T83–T94** (fichas nuevas).
+- **T35/T37** no se reabren: su entrega (agente nativo Rust) permanece; T37 en adelante puede referir «agente Sal (T88)» cuando exista.
+- Las herramientas TypeScript de `.opencode/tools` no se ejecutan; equivalente Sal/JSON (T89).
+- TLS/`webfetch` remoto queda aplazado; el modelo se consume por HTTP en LAN o `127.0.0.1` (`soso-llm`).
+- Autonomía total (T93) exige modelo servido en soso o endpoint LAN aceptado; no llama.cpp en el host como dependencia permanente.
+
+**Hecho al aceptarla (2026-10-30):** esta decisión, fichas T83–T94 en el catálogo y actualización de [PLAN-PUESTA-EN-MARCHA.md](PLAN-PUESTA-EN-MARCHA.md) y [README.md](README.md).
 

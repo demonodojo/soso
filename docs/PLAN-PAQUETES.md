@@ -9,7 +9,7 @@ las apps instaladas viven en `/var/paquetes/` y no viajan en el `rootfs.pack`.
 | Fase | Contenido | Estado |
 |------|-----------|--------|
 | P0 | Contrato `paquete.txt` / `paquete.pack`, índice, `soso-pkg-core`, cliente `soso-pkg` (local + HTTPS), índice de comandos, sosh | Hecho |
-| P1 | Repositorio publicado, `cargo xtask pkg-pack`, paquete referencia `soso-web`, dependencias entre paquetes | En curso (`pkg-pack`, `soso-web` fuera del OTA; repo Git separado diferido) |
+| P1 | Repositorio publicado, `cargo xtask pkg-pack`, paquete referencia `soso-web`, dependencias entre paquetes | En curso (`pkg-pack`, `soso-web` fuera del OTA; **`opencode-sal`** empaquetable vía `cargo xtask pkg-pack opencode-sal`) |
 | P2 | Servicios/demonios, `.desktop` / escritorio | Pendiente |
 | P3 | Descarga por rangos (packs > 64 MiB) | Pendiente |
 

@@ -73,6 +73,10 @@ fn es_clave_experto(key: &str) -> bool {
 fn es_iq_gpu(dtype: u8) -> bool {
     matches!(dtype, DTYPE_Q5_K | DTYPE_IQ2_S | DTYPE_IQ2_XS | DTYPE_IQ3_S | DTYPE_IQ3_XXS | DTYPE_IQ4_XS)
 }
+/// Filas de Q y posiciones por tile del kernel de atención con tensor cores (deben coincidir con `AM_ROWS`/`AM_TK`).
+const AM_FILAS: usize = 64;
+const AM_TK: usize = 32;
+
 /// Elementos de un superbloque Q4_K: el kernel exige `cols` múltiplo.
 const Q4_K_ELEMS: usize = 256;
 
@@ -133,6 +137,7 @@ struct Api {
     module_load: unsafe extern "C" fn(*mut CuModule, *const c_void) -> CuResult,
     module_fn: unsafe extern "C" fn(*mut CuFunction, CuModule, *const c_char) -> CuResult,
     func_attr: unsafe extern "C" fn(*mut c_int, c_int, CuFunction) -> CuResult,
+    func_set_attr: unsafe extern "C" fn(CuFunction, c_int, c_int) -> CuResult,
     launch: unsafe extern "C" fn(
         CuFunction,
         u32,
@@ -219,6 +224,7 @@ impl Api {
             module_load: simbolo(lib, "cuModuleLoadData")?,
             module_fn: simbolo(lib, "cuModuleGetFunction")?,
             func_attr: simbolo(lib, "cuFuncGetAttribute")?,
+            func_set_attr: simbolo(lib, "cuFuncSetAttribute")?,
             launch: simbolo(lib, "cuLaunchKernel")?,
             mem_info: simbolo(lib, "cuMemGetInfo_v2")?,
             sync: simbolo(lib, "cuCtxSynchronize")?,
@@ -289,6 +295,8 @@ pub struct CudaGpu {
     gbuf: [(u64, usize); 17],
     f_down_multi: CuFunction,
     f_attn_prefill: CuFunction,
+    /// Atención de prefill con tensor cores para `hd` 256 y 128 (nulas si la tarjeta no admite la memoria compartida que piden).
+    f_attn_mma: [CuFunction; 2],
     /// KV espejado por capa para la atención del prefill: (K, V, filas de capacidad).
     kvdev: HashMap<u32, (u64, u64, usize)>,
     x_cap: usize,
@@ -356,6 +364,16 @@ impl CudaGpu {
             func(mod_iq, "iq_down_n")?;
             let f_iq_matmul_n = func(mod_iq, "iq_matmul_mma")?;
             let f_attn_prefill = func(mod_iq, "attn_prefill_f16")?;
+            let mut f_attn_mma: [CuFunction; 2] = [std::ptr::null_mut(); 2];
+            for (i, (nombre, hd)) in [("attn_prefill_mma256", 256usize), ("attn_prefill_mma128", 128usize)].iter().enumerate() {
+                let f = func(mod_iq, nombre)?;
+                // 64 filas de Q + 2 tiles de 32 posiciones, cada fila con 8 halves de relleno
+                let smem = ((AM_FILAS + 2 * AM_TK) * (hd + 8) * 2) as c_int;
+                // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8
+                if (api.func_set_attr)(f, 8, smem) == 0 {
+                    f_attn_mma[i] = f;
+                }
+            }
             let f_gateup_multi = func(mod_iq, "iq_gateup_mma")?;
             let f_combinar = func(mod_iq, "iq_combinar")?;
             let f_gdn_conv = func(mod_iq, "gdn_conv_silu")?;
@@ -400,6 +418,7 @@ impl CudaGpu {
                 blq: [(0, 0); 14],
                 f_iq_matmul_n,
                 f_attn_prefill,
+                f_attn_mma,
                 f_gateup_multi,
                 f_combinar,
                 f_gdn_conv,
@@ -1062,6 +1081,31 @@ impl CudaGpu {
         Ok((kd, vd))
     }
 
+    /// Lanza la atención causal del bloque (q f32, KV f16 del dispositivo): con tensor cores si `hd` y `group` lo admiten, si no el kernel escalar.
+    #[allow(clippy::too_many_arguments)]
+    fn lanzar_atencion(&self, q_dev: u64, kd: u64, vd: u64, o_dev: u64, n: usize, seq_antes: usize, heads: usize, kv_heads: usize, hd: usize, group: usize) -> Result<(), String> {
+        let idx = match hd {
+            256 => 0,
+            128 => 1,
+            _ => 2,
+        };
+        let args = [Arg::P(q_dev), Arg::P(kd), Arg::P(vd), Arg::P(o_dev), Arg::I(n as i32), Arg::I(seq_antes as i32), Arg::I(heads as i32), Arg::I(kv_heads as i32), Arg::I(hd as i32), Arg::I(group as i32)];
+        if idx < 2 && !self.f_attn_mma[idx].is_null() && AM_FILAS % group == 0 && std::env::var_os("SOSO_SIN_ATENCION_MMA").is_none() {
+            let tb = AM_FILAS / group;
+            let mut vals: Vec<u64> = args.iter().enumerate().filter(|(i, _)| *i != 8).map(|(_, a)| match *a {
+                Arg::P(v) => v,
+                Arg::I(v) => v as u32 as u64,
+                Arg::L(v) => v as u64,
+                Arg::F(v) => v.to_bits() as u64,
+            }).collect();
+            let mut ptrs: Vec<*mut c_void> = vals.iter_mut().map(|v| v as *mut u64 as *mut c_void).collect();
+            let smem = ((AM_FILAS + 2 * AM_TK) * (hd + 8) * 2) as u32;
+            return self.lanzar3s(self.f_attn_mma[idx], (kv_heads as u32, (n as u32).div_ceil(tb as u32), 1), (128, 1, 1), smem, &mut ptrs);
+        }
+        let tb = 16 / group;
+        self.lanzar_a(self.f_attn_prefill, (kv_heads as u32, (n as u32).div_ceil(tb as u32), 1), (256, 1, 1), &args)
+    }
+
     /// Capa de atención (Gated) entera de un bloque en el dispositivo: ver [`GpuDispatch::atencion_capa`].
     #[allow(clippy::too_many_arguments)]
     fn atencion_capa_gpu(
@@ -1151,9 +1195,7 @@ impl CudaGpu {
         self.lanzar_a(self.f_att_prep, ((heads + kv_heads) as u32, n as u32, 1), (256, 1, 1),
             &[Arg::P(qf_dev), Arg::P(nw_dev), Arg::P(nw_dev + (hd * 4) as u64), Arg::P(k_dev), Arg::P(v_dev), Arg::P(q_dev), Arg::P(g_dev), Arg::P(kd), Arg::P(vd),
               Arg::I(seq_antes as i32), Arg::I(heads as i32), Arg::I(kv_heads as i32), Arg::I(hd as i32), Arg::I(rope_n as i32), Arg::F(c.theta), Arg::F(c.eps)])?;
-        let tb = 16 / group;
-        self.lanzar_a(self.f_attn_prefill, (kv_heads as u32, (n as u32).div_ceil(tb as u32), 1), (256, 1, 1),
-            &[Arg::P(q_dev), Arg::P(kd), Arg::P(vd), Arg::P(a_dev), Arg::I(nn), Arg::I(seq_antes as i32), Arg::I(heads as i32), Arg::I(kv_heads as i32), Arg::I(hd as i32), Arg::I(group as i32)])?;
+        self.lanzar_atencion(q_dev, kd, vd, a_dev, n, seq_antes, heads, kv_heads, hd, group)?;
         self.lanzar_a(self.f_att_puerta, (((n * q_dim) as u32).div_ceil(256), 1, 1), (256, 1, 1),
             &[Arg::P(a_dev), Arg::P(g_dev), Arg::I((n * q_dim) as i32)])?;
         mm(self, w[3], h, q_dim, cod[3].0, cod[3].1, a_dev, y_dev)?;
@@ -1198,22 +1240,7 @@ impl CudaGpu {
         let q_dev = self.blq_asegurar(0, q.len() * 4)?;
         let o_dev = self.blq_asegurar(3, out.len() * 4)?;
         self.subir(q_dev, unsafe { std::slice::from_raw_parts(q.as_ptr() as *const u8, q.len() * 4) })?;
-        let tb = 16 / group;
-        let (mut a0, mut a1, mut a2, mut a3) = (q_dev, kd, vd, o_dev);
-        let (mut a4, mut a5, mut a6, mut a7, mut a8, mut a9) = (n as c_int, seq_antes as c_int, heads as c_int, kv_heads as c_int, hd as c_int, group as c_int);
-        let mut args = [
-            &mut a0 as *mut _ as *mut c_void,
-            &mut a1 as *mut _ as *mut c_void,
-            &mut a2 as *mut _ as *mut c_void,
-            &mut a3 as *mut _ as *mut c_void,
-            &mut a4 as *mut _ as *mut c_void,
-            &mut a5 as *mut _ as *mut c_void,
-            &mut a6 as *mut _ as *mut c_void,
-            &mut a7 as *mut _ as *mut c_void,
-            &mut a8 as *mut _ as *mut c_void,
-            &mut a9 as *mut _ as *mut c_void,
-        ];
-        self.lanzar3s(self.f_attn_prefill, (kv_heads as u32, (n as u32).div_ceil(tb as u32), 1), (256, 1, 1), 0, &mut args)?;
+        self.lanzar_atencion(q_dev, kd, vd, o_dev, n, seq_antes, heads, kv_heads, hd, group)?;
         ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
         ck(unsafe { (self.api.dtoh)(out.as_mut_ptr() as *mut c_void, o_dev, out.len() * 4) }, "cuMemcpyDtoH")?;
         self.stats.launches += 1;

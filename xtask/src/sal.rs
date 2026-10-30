@@ -237,6 +237,18 @@ pub fn install(root: &Path) -> bool {
             }
         }
     }
+    let share_std = root.join("rootfs/usr/share/sal/std/soso");
+    let sal_std = root.join("../sal/std/soso");
+    if sal_std.is_dir() {
+        if let Ok(entries) = fs::read_dir(&sal_std) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "sal") || path.file_name().is_some_and(|n| n == "Sal.toml") {
+                    changed |= copiar(&path, &share_std.join(path.file_name().unwrap()));
+                }
+            }
+        }
+    }
     if fs::read(prepared.join("native/source.lock")).ok()
         == fs::read(prepared.join("source.lock")).ok()
     {

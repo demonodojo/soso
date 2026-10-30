@@ -1261,6 +1261,166 @@ extern "C" __global__ void att_prep_bloque(const float *qf, const float *qnw, co
     }
 }
 
+/* Atención de prefill con tensor cores (mma m16n8k16 f16): grid = (kv_heads, ceil(n / (64 / group))), 128 hilos (4 warps). Las 64 filas de un bloque
+ * son (token, cabeza de la consulta) de una cabeza KV: cada warp lleva 16 filas. Q (ya escalada) va en f16 a memoria compartida; K y V se cargan por
+ * tiles de 32 posiciones; softmax en línea en registros y P·V con P como fragmento A. `group` debe dividir 64 y `HD` ser 128 o 256. Memoria
+ * compartida dinámica: (64 + 2 * 32) * (HD + 8) * 2 bytes. */
+#define AM_ROWS 64
+#define AM_TK 32
+
+__device__ __forceinline__ unsigned am_pack(float lo, float hi)
+{
+    return (unsigned)mm_h(lo) | ((unsigned)mm_h(hi) << 16);
+}
+
+template <int HD>
+__device__ __forceinline__ void attn_mma_cuerpo(const float *q, const unsigned short *K, const unsigned short *V, float *out, int n, int seq_antes,
+                                                int heads, int kv_heads, int group)
+{
+    extern __shared__ unsigned short am_sm[];
+    const int LD = HD + 8;
+    unsigned short *Qs = am_sm;
+    unsigned short *Ks = Qs + AM_ROWS * LD;
+    unsigned short *Vs = Ks + AM_TK * LD;
+    int tid = (int)threadIdx.x, warp = tid >> 5, lane = tid & 31;
+    int kvh = (int)blockIdx.x;
+    int tb = AM_ROWS / group;
+    int tok0 = (int)blockIdx.y * tb;
+    int kv_dim = kv_heads * HD, q_dim = heads * HD;
+    float inv = rsqrtf((float)HD);
+    for (int idx = tid; idx < AM_ROWS * (HD / 2); idx += 128) {
+        int r = idx / (HD / 2), d2 = idx % (HD / 2);
+        int tok = tok0 + r / group, g = r % group;
+        float v0 = 0.0f, v1 = 0.0f;
+        if (tok < n) {
+            float2 v = *(const float2 *)&q[(long)tok * q_dim + (long)(kvh * group + g) * HD + 2 * d2];
+            v0 = v.x * inv;
+            v1 = v.y * inv;
+        }
+        *(unsigned *)&Qs[r * LD + 2 * d2] = am_pack(v0, v1);
+    }
+    int ntok = n - tok0 < tb ? n - tok0 : tb;
+    int max_pos = seq_antes + tok0 + ntok;
+    int fila0 = warp * 16 + (lane >> 2), fila1 = fila0 + 8;
+    int lim0 = min(seq_antes + tok0 + fila0 / group + 1, max_pos), lim1 = min(seq_antes + tok0 + fila1 / group + 1, max_pos);
+    float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.0f, l1 = 0.0f;
+    float o[HD / 8][4];
+#pragma unroll
+    for (int j = 0; j < HD / 8; j++) {
+        o[j][0] = o[j][1] = o[j][2] = o[j][3] = 0.0f;
+    }
+    __syncthreads();
+    for (int t0 = 0; t0 < max_pos; t0 += AM_TK) {
+        for (int idx = tid; idx < AM_TK * (HD / 8); idx += 128) {
+            int key = idx / (HD / 8), c = idx % (HD / 8);
+            int pos = t0 + key;
+            uint4 kk = make_uint4(0, 0, 0, 0), vv = make_uint4(0, 0, 0, 0);
+            if (pos < max_pos) {
+                kk = *(const uint4 *)&K[(long)pos * kv_dim + (long)kvh * HD + c * 8];
+                vv = *(const uint4 *)&V[(long)pos * kv_dim + (long)kvh * HD + c * 8];
+            }
+            *(uint4 *)&Ks[key * LD + c * 8] = kk;
+            *(uint4 *)&Vs[key * LD + c * 8] = vv;
+        }
+        __syncthreads();
+        float s[AM_TK / 8][4];
+#pragma unroll
+        for (int j = 0; j < AM_TK / 8; j++) {
+            s[j][0] = s[j][1] = s[j][2] = s[j][3] = 0.0f;
+        }
+#pragma unroll 4
+        for (int ks = 0; ks < HD / 16; ks++) {
+            int kc = ks * 16 + (lane & 3) * 2;
+            unsigned a0 = *(unsigned *)&Qs[fila0 * LD + kc], a1 = *(unsigned *)&Qs[fila1 * LD + kc];
+            unsigned a2 = *(unsigned *)&Qs[fila0 * LD + kc + 8], a3 = *(unsigned *)&Qs[fila1 * LD + kc + 8];
+#pragma unroll
+            for (int j = 0; j < AM_TK / 8; j++) {
+                int kr = (j * 8 + (lane >> 2)) * LD + kc;
+                mm_mma(s[j], a0, a1, a2, a3, *(unsigned *)&Ks[kr], *(unsigned *)&Ks[kr + 8]);
+            }
+        }
+        float mx0 = -INFINITY, mx1 = -INFINITY;
+#pragma unroll
+        for (int j = 0; j < AM_TK / 8; j++) {
+            int p = t0 + j * 8 + (lane & 3) * 2;
+            if (p >= lim0) s[j][0] = -INFINITY;
+            if (p + 1 >= lim0) s[j][1] = -INFINITY;
+            if (p >= lim1) s[j][2] = -INFINITY;
+            if (p + 1 >= lim1) s[j][3] = -INFINITY;
+            mx0 = fmaxf(mx0, fmaxf(s[j][0], s[j][1]));
+            mx1 = fmaxf(mx1, fmaxf(s[j][2], s[j][3]));
+        }
+        mx0 = fmaxf(mx0, __shfl_xor_sync(0xffffffffu, mx0, 1));
+        mx0 = fmaxf(mx0, __shfl_xor_sync(0xffffffffu, mx0, 2));
+        mx1 = fmaxf(mx1, __shfl_xor_sync(0xffffffffu, mx1, 1));
+        mx1 = fmaxf(mx1, __shfl_xor_sync(0xffffffffu, mx1, 2));
+        float mn0 = fmaxf(m0, mx0), mn1 = fmaxf(m1, mx1);
+        float al0 = mn0 == -INFINITY ? 1.0f : (m0 == -INFINITY ? 0.0f : expf(m0 - mn0));
+        float al1 = mn1 == -INFINITY ? 1.0f : (m1 == -INFINITY ? 0.0f : expf(m1 - mn1));
+        m0 = mn0;
+        m1 = mn1;
+        l0 *= al0;
+        l1 *= al1;
+#pragma unroll
+        for (int j = 0; j < AM_TK / 8; j++) {
+            s[j][0] = s[j][0] == -INFINITY ? 0.0f : expf(s[j][0] - mn0);
+            s[j][1] = s[j][1] == -INFINITY ? 0.0f : expf(s[j][1] - mn0);
+            s[j][2] = s[j][2] == -INFINITY ? 0.0f : expf(s[j][2] - mn1);
+            s[j][3] = s[j][3] == -INFINITY ? 0.0f : expf(s[j][3] - mn1);
+            l0 += s[j][0] + s[j][1];
+            l1 += s[j][2] + s[j][3];
+        }
+#pragma unroll
+        for (int j = 0; j < HD / 8; j++) {
+            o[j][0] *= al0;
+            o[j][1] *= al0;
+            o[j][2] *= al1;
+            o[j][3] *= al1;
+        }
+#pragma unroll
+        for (int kp = 0; kp < AM_TK / 16; kp++) {
+            unsigned a0 = am_pack(s[2 * kp][0], s[2 * kp][1]), a1 = am_pack(s[2 * kp][2], s[2 * kp][3]);
+            unsigned a2 = am_pack(s[2 * kp + 1][0], s[2 * kp + 1][1]), a3 = am_pack(s[2 * kp + 1][2], s[2 * kp + 1][3]);
+            int kr = kp * 16 + (lane & 3) * 2;
+#pragma unroll 8
+            for (int jd = 0; jd < HD / 8; jd++) {
+                int d = jd * 8 + (lane >> 2);
+                unsigned b0 = (unsigned)Vs[kr * LD + d] | ((unsigned)Vs[(kr + 1) * LD + d] << 16);
+                unsigned b1 = (unsigned)Vs[(kr + 8) * LD + d] | ((unsigned)Vs[(kr + 9) * LD + d] << 16);
+                mm_mma(o[jd], a0, a1, a2, a3, b0, b1);
+            }
+        }
+        __syncthreads();
+    }
+    l0 += __shfl_xor_sync(0xffffffffu, l0, 1);
+    l0 += __shfl_xor_sync(0xffffffffu, l0, 2);
+    l1 += __shfl_xor_sync(0xffffffffu, l1, 1);
+    l1 += __shfl_xor_sync(0xffffffffu, l1, 2);
+    float i0 = l0 > 0.0f ? 1.0f / l0 : 0.0f, i1 = l1 > 0.0f ? 1.0f / l1 : 0.0f;
+    int tk0 = tok0 + fila0 / group, tk1 = tok0 + fila1 / group;
+    int g0 = fila0 % group, g1 = fila1 % group;
+#pragma unroll
+    for (int jd = 0; jd < HD / 8; jd++) {
+        int d = jd * 8 + (lane & 3) * 2;
+        if (tk0 < n)
+            *(float2 *)&out[(long)tk0 * q_dim + (long)(kvh * group + g0) * HD + d] = make_float2(o[jd][0] * i0, o[jd][1] * i0);
+        if (tk1 < n)
+            *(float2 *)&out[(long)tk1 * q_dim + (long)(kvh * group + g1) * HD + d] = make_float2(o[jd][2] * i1, o[jd][3] * i1);
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(128) attn_prefill_mma256(const float *q, const unsigned short *K, const unsigned short *V, float *out, int n,
+                                                                       int seq_antes, int heads, int kv_heads, int group)
+{
+    attn_mma_cuerpo<256>(q, K, V, out, n, seq_antes, heads, kv_heads, group);
+}
+
+extern "C" __global__ void __launch_bounds__(128) attn_prefill_mma128(const float *q, const unsigned short *K, const unsigned short *V, float *out, int n,
+                                                                       int seq_antes, int heads, int kv_heads, int group)
+{
+    attn_mma_cuerpo<128>(q, K, V, out, n, seq_antes, heads, kv_heads, group);
+}
+
 /* Base de la suma de un bloque MoE: out[i] = compartido[i] * sigmoid(pg[i / h]) (el experto compartido con su puerta por token). */
 extern "C" __global__ void moe_comp_base(float *out, const float *sd, const float *pg, int total, int h)
 {

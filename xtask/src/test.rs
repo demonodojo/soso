@@ -902,6 +902,11 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 ssh_soso_pkg(key, port)
             });
         });
+        filter.if_step(sid, "opencode-sal: instalar y --version", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "opencode-sal: instalar y --version", || {
+                ssh_opencode_sal(key, port)
+            });
+        });
         filter.if_step(
             sid,
             "init test (syscalls, hilos, FPU, GPU)",
@@ -2691,6 +2696,23 @@ exit
     }
     if !texto.contains("BORRADO=0") {
         return Err(format!("borrar demo falló; stdout: {texto:?}"));
+    }
+    Ok(())
+}
+
+fn ssh_opencode_sal(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let guion = "\
+soso-pkg instalar /share/paquetes-prueba/opencode-sal --forzar
+opencode --version
+echo OC=$?
+exit
+";
+    let texto = ssh_guion(key, ssh_port, guion, Duration::from_secs(120))?;
+    if !texto.contains("opencode-sal") {
+        return Err(format!("opencode --version sin texto esperado; stdout: {texto:?}"));
+    }
+    if !texto.contains("OC=0") {
+        return Err(format!("opencode --version falló; stdout: {texto:?}"));
     }
     Ok(())
 }

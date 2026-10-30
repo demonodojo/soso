@@ -1093,6 +1093,17 @@ imagen de prueba). El navegador **soso-web** suele venir precargado en
 reinstalar o bajar versión, añade `--forzar`. `--origen DIR` usa un índice y
 paquetes locales en lugar de HTTPS.
 
+**OpenCode en Sal (`opencode-sal`, D12):** agente compatible con `opencode.json` y
+coordinador de automejora dentro de soso. En el host: `cargo xtask pkg-pack opencode-sal`
+(usa `../opencode-sal/build.sh`). En el guest:
+
+```sh
+soso-pkg instalar /share/paquetes/opencode-sal/1.0.0
+opencode --version
+opencode run --format json "tu prompt"
+soso-improve-sal campana /var/self-improvement/campana
+```
+
 ### soso-update — actualizar soso instalado
 
 Comprueba y aplica releases publicadas en GitHub (`demonodojo/soso`):

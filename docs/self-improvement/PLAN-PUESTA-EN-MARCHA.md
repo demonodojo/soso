@@ -18,7 +18,7 @@ máquina física y de cerrar T43/T44/T51.
 ## 1. Dónde estamos
 
 ### Catálogo
-82 fichas: **77 hechas, 5 pendientes** (T30, T31, T43, T44, T51: todas de máquina física o de circuito nativo). Validación nativa:
+92 fichas: **78 hechas, 14 pendientes** (T84–T94 OpenCode/coordinador Sal; T30, T31, T43, T44, T51 máquina física / circuito nativo). Validación nativa:
 16 verificadas, 23 parciales, 31 pendientes, 12 no aplicables. Ningún hito SI se declara cerrado en el plan padre.
 
 ### Hitos SI, con la evidencia que hay
@@ -30,7 +30,7 @@ máquina física y de cerrar T43/T44/T51.
 | SI-3 primera mejora real | Hecha (T22: R03 con 14B a T=0 en host y en guest) y ahora **cuatro parches reales revisados** (R51, R54, R55, R56) |
 | SI-4 iteraciones que acumulan | Hecho (T29): ejecutor repetible, 62 campañas; **referencia vigente: banco ciego 5, combo 7/10** |
 | SI-5 hardware real | Pendiente (T30, T31): sin máquina física elegida |
-| SI-6 OpenCode en soso | **Sustituido por D10**: agente nativo en Rust (T35, hecha); el port de OpenCode no se hace |
+| SI-6 OpenCode en soso | **D12** (2026-10-30): reimplementación compatible en Sal (`opencode-sal`) + coordinador Sal; línea T83–T94. T35 (agente Rust) sigue hasta paridad T92 |
 | SI-7 compilación/actualización nativas | Parcial: rustc, cargo, C y ensamblador corren en el guest (T40–T42); faltan T43, T44, T51 |
 
 ### Capacidad medida del agente local (mismo arnés, 40 turnos, 1 ronda)
