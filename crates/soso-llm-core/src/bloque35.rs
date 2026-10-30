@@ -587,6 +587,8 @@ fn moe_bloque<S: TensorSource>(
     // Router por lotes y top-k por token.
     #[cfg(feature = "std")]
     let t_r0 = std::time::Instant::now();
+    #[cfg(feature = "std")]
+    let mut tm = [0.0f64; 6];
     let mut logits = vec![0.0f32; n * n_exp];
     let mut ranking: Vec<Vec<(usize, f32)>> = Vec::with_capacity(n);
     let mut por_experto: Vec<Vec<(usize, usize)>> = vec![Vec::new(); n_exp]; // (token, posición en su ranking)
@@ -628,6 +630,10 @@ fn moe_bloque<S: TensorSource>(
         std::eprintln!("[router] n={n}: matmul {:.1} ms, topk {:.1} ms", t_r1, t_r0.elapsed().as_secs_f64() * 1e3 - t_r1);
     }
     perfil_marca(&mut tp, FASE_QKV);
+    #[cfg(feature = "std")]
+    {
+        tm[0] = t_r0.elapsed().as_secs_f64() * 1e3;
+    }
     // Salida de cada (token, posición del ranking).
     let mut y = vec![0.0f32; n * top_k * h];
     // Los expertos activos se reparten entre hilos **de uno en uno**: cada experto lee sus pesos una vez para todos sus tokens y no hay
@@ -657,6 +663,23 @@ fn moe_bloque<S: TensorSource>(
     perfil_marca(&mut tp, crate::layer::FASE_SWIGLU);
     // Con GPU: los expertos con pesos en la tarjeta se resuelven allí de una vez (una subida de los vectores, un lanzamiento por experto y
     // una sola espera); los demás siguen por la CPU a la vez que se reparten abajo.
+    let mut comp_gpu = false; // el experto compartido (con su puerta) ya va sumado en el dispositivo
+    let comp_raw = if use_gpu && n_shared == 1 {
+        let nombres = [format!("{prefix}.S00.ffn_gate"), format!("{prefix}.S00.ffn_up"), format!("{prefix}.S00.ffn_down")];
+        let name_pg = format!("{prefix}.ffn_gate_inp_shexp");
+        (|| {
+            let mut r = [(0usize, 0usize, 0u8, 0usize); 3];
+            for i in 0..3 {
+                let v = source.tensor_view(&nombres[i]).ok()?;
+                r[i] = (v.bytes.as_ptr() as usize, v.bytes.len(), v.dtype, v.elems);
+            }
+            let pv = source.tensor_view(&name_pg).ok()?;
+            let f = pv.f32()?;
+            Some((nombres, r, (f.as_ptr() as usize, f.len())))
+        })()
+    } else {
+        None
+    };
     let mut hecho_gpu = vec![false; activos.len()];
     let mut suma_gpu = vec![0.0f32; if use_gpu { n * h } else { 0 }];
     let mut hecha = vec![false; n * top_k]; // asignación (token, posición) ya sumada por la GPU
@@ -680,6 +703,12 @@ fn moe_bloque<S: TensorSource>(
                     pesos[t * top_k + j] = *w;
                 }
             }
+            if let Some((nombres, r, (pp, pl))) = &comp_raw {
+                let vs: [crate::layer::TensorView<'_>; 3] =
+                    core::array::from_fn(|i| crate::layer::TensorView { bytes: unsafe { core::slice::from_raw_parts(r[i].0 as *const u8, r[i].1) }, dtype: r[i].2, elems: r[i].3 });
+                let pgw = unsafe { core::slice::from_raw_parts(*pp as *const f32, *pl) };
+                comp_gpu = matches!(g.moe_compartido([nombres[0].as_str(), nombres[1].as_str(), nombres[2].as_str()], [&vs[0], &vs[1], &vs[2]], pgw, xs, n, h, ffn), Ok(true));
+            }
             {
                 let mut exps: Vec<crate::gpu::ExpertoBloque<'_>> = activos
                     .iter()
@@ -694,7 +723,10 @@ fn moe_bloque<S: TensorSource>(
                         destinos: d.as_slice(),
                     })
                     .collect();
-                let _ = g.expertos_bloque(xs, n, h, ffn, top_k, &pesos, &mut exps, &mut suma_gpu, &mut hecho_gpu);
+                let r = g.expertos_bloque(xs, n, h, ffn, top_k, &pesos, &mut exps, &mut suma_gpu, &mut hecho_gpu);
+                if comp_gpu && r.is_err() {
+                    return Err(()); // la suma del dispositivo llevaba el compartido: sin ella el bloque quedaría mal
+                }
             }
             for (k, d) in destinos.iter().enumerate() {
                 if hecho_gpu[k] {
@@ -706,6 +738,10 @@ fn moe_bloque<S: TensorSource>(
         }
     }
     perfil_marca(&mut tp, crate::layer::FASE_FFN_DOWN);
+    #[cfg(feature = "std")]
+    {
+        tm[1] = t_r0.elapsed().as_secs_f64() * 1e3;
+    }
     let (y_p, xs_p) = (y.as_mut_ptr() as usize, xs.as_ptr() as usize);
     let fallo = core::sync::atomic::AtomicBool::new(false);
     let seq = Sequential;
@@ -754,7 +790,12 @@ fn moe_bloque<S: TensorSource>(
         return Err(());
     }
     perfil_marca(&mut tp, FASE_FFN_UP_GATE);
+    #[cfg(feature = "std")]
+    {
+        tm[2] = t_r0.elapsed().as_secs_f64() * 1e3;
+    }
     // Experto compartido (puerta sigmoide por token si existe `ffn_gate_inp_shexp`).
+    let n_shared = if comp_gpu { 0 } else { n_shared };
     let mut compartido = vec![0.0f32; n_shared * n * h];
     let mut puerta = vec![1.0f32; n];
     if n_shared > 0 {
@@ -778,6 +819,10 @@ fn moe_bloque<S: TensorSource>(
         }
     }
     perfil_marca(&mut tp, FASE_O);
+    #[cfg(feature = "std")]
+    {
+        tm[3] = t_r0.elapsed().as_secs_f64() * 1e3;
+    }
     // Suma por token: lo que ya sumó la GPU, luego los expertos de la CPU en el orden del ranking y por último los compartidos.
     let sal_p = salida.as_mut_ptr() as usize;
     let (sg, y_r, comp, ranking_r, hecha_r, puerta_r) = (&suma_gpu, &y, &compartido, &ranking, &hecha, &puerta);
@@ -807,5 +852,9 @@ fn moe_bloque<S: TensorSource>(
             }
         }
     });
+    #[cfg(feature = "std")]
+    if std::env::var_os("SOSO_TRAZA_MOE").is_some() {
+        std::eprintln!("[moe] L{layer} n={n}: router {:.1} | prep+expertos GPU {:.1} | expertos CPU {:.1} | compartido {:.1} | suma {:.1} ms", tm[0], tm[1] - tm[0], tm[2] - tm[1], tm[3] - tm[2], t_r0.elapsed().as_secs_f64() * 1e3 - tm[3]);
+    }
     Ok(())
 }

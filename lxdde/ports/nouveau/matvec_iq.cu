@@ -1261,6 +1261,14 @@ extern "C" __global__ void att_prep_bloque(const float *qf, const float *qnw, co
     }
 }
 
+/* Base de la suma de un bloque MoE: out[i] = compartido[i] * sigmoid(pg[i / h]) (el experto compartido con su puerta por token). */
+extern "C" __global__ void moe_comp_base(float *out, const float *sd, const float *pg, int total, int h)
+{
+    int i = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    if (i < total)
+        out[i] = sd[i] * (1.0f / (1.0f + expf(-pg[i / h])));
+}
+
 /* attn[i] *= sigmoid(gate[i]) */
 extern "C" __global__ void att_puerta(float *attn, const float *gate, int total)
 {

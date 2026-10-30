@@ -277,6 +277,10 @@ pub struct CudaGpu {
     f_gdn_cola: CuFunction,
     f_att_prep: CuFunction,
     f_att_puerta: CuFunction,
+    f_swiglu_blq: CuFunction,
+    f_comp_base: CuFunction,
+    /// El experto compartido del bloque ya está sumado (con su puerta) en `blq[7]`, con `xs` en `blq[0]`: la siguiente llamada de expertos acumula encima.
+    moe_base: bool,
     f_sgemm: CuFunction,
     f_topk: CuFunction,
     /// Matrices de router (f32) subidas por clave.
@@ -361,6 +365,8 @@ impl CudaGpu {
             let f_gdn_cola = func(mod_iq, "gdn_cola")?;
             let f_att_prep = func(mod_iq, "att_prep_bloque")?;
             let f_att_puerta = func(mod_iq, "att_puerta")?;
+            let f_swiglu_blq = func(mod_iq, "dec_swiglu")?;
+            let f_comp_base = func(mod_iq, "moe_comp_base")?;
             let f_sgemm = func(mod_iq, "sgemm_nt")?;
             let f_topk = func(mod_iq, "dec_router_topk")?;
             let f_down_multi = func(mod_iq, "iq_down_mma")?;
@@ -403,6 +409,9 @@ impl CudaGpu {
                 f_gdn_cola,
                 f_att_prep,
                 f_att_puerta,
+                f_swiglu_blq,
+                f_comp_base,
+                moe_base: false,
                 f_sgemm,
                 f_topk,
                 router_w: HashMap::new(),
@@ -1224,6 +1233,66 @@ impl CudaGpu {
     }
 
     /// Router por bloque en la GPU: ver [`GpuDispatch::router_topk`].
+    /// Experto compartido de un bloque MoE entero en el dispositivo (gate, up, SwiGLU, down y puerta sigmoide por token): deja
+    /// `compartido × sigmoid(pg)` en `blq[7]` y `xs` en `blq[0]` para que `expertos_bloque` acumule encima y baje la suma una sola vez.
+    #[allow(clippy::too_many_arguments)]
+    fn moe_compartido_gpu(
+        &mut self,
+        claves: [&str; 3],
+        vistas: [&TensorView<'_>; 3],
+        pg_w: &[f32],
+        xs: &[f32],
+        n: usize,
+        h: usize,
+        ffn: usize,
+    ) -> Result<bool, String> {
+        self.moe_base = false;
+        if std::env::var_os("SOSO_SIN_MOE_COMPARTIDO").is_some() || n == 0 || pg_w.len() != h || xs.len() != n * h {
+            return Ok(false);
+        }
+        unsafe { ck((self.api.ctx_set_current)(self.ctx), "cuCtxSetCurrent")? };
+        let dims = [(ffn, h), (ffn, h), (h, ffn)];
+        let mut w = [0u64; 3];
+        let mut cod = [(0i32, 0i64); 3];
+        for k in 0..3 {
+            let Some(cr) = codigo_mma(vistas[k].dtype, dims[k].1) else { return Ok(false) };
+            cod[k] = cr;
+            if !self.pesos.contains_key(claves[k]) {
+                let p = self.subir_peso(vistas[k], dims[k].0, dims[k].1)?;
+                self.pesos.insert(claves[k].to_string(), p);
+            }
+            match self.pesos.get(claves[k]) {
+                Some(Some(p)) if p.dtype == vistas[k].dtype && p.rows == dims[k].0 && p.cols == dims[k].1 => w[k] = p.d,
+                _ => return Ok(false),
+            }
+        }
+        let f = |v: &[f32]| unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) };
+        let x_dev = self.blq_asegurar(0, n * h * 4)?;
+        let out_dev = self.blq_asegurar(7, n * h * 4)?;
+        let g_dev = self.gbuf_asegurar(9, n * ffn * 4)?;
+        let u_dev = self.gbuf_asegurar(10, n * ffn * 4)?;
+        let sd_dev = self.gbuf_asegurar(11, n * h * 4)?;
+        let pg_dev = self.gbuf_asegurar(12, n * 4)?;
+        let pw_dev = self.gbuf_asegurar(13, h * 4)?;
+        self.subir(x_dev, f(xs))?;
+        self.subir(pw_dev, f(pg_w))?;
+        let nn = n as i32;
+        let mm = |s: &Self, w: u64, rows: usize, cols: usize, dtype: i32, rb: i64, x: u64, y: u64| {
+            s.lanzar_a(s.f_iq_matmul_n, ((rows as u32).div_ceil(64), (n as u32).div_ceil(64), 1), (128, 1, 1),
+                &[Arg::P(w), Arg::P(x), Arg::P(y), Arg::I(rows as i32), Arg::I(cols as i32), Arg::I(nn), Arg::I(dtype), Arg::L(rb)])
+        };
+        mm(self, w[0], ffn, h, cod[0].0, cod[0].1, x_dev, g_dev)?;
+        mm(self, w[1], ffn, h, cod[1].0, cod[1].1, x_dev, u_dev)?;
+        self.lanzar_a(self.f_swiglu_blq, (((n * ffn) as u32).div_ceil(256), 1, 1), (256, 1, 1), &[Arg::P(u_dev), Arg::P(g_dev), Arg::I((n * ffn) as i32)])?;
+        mm(self, w[2], h, ffn, cod[2].0, cod[2].1, u_dev, sd_dev)?;
+        mm(self, pw_dev, 1, h, 1001, (h * 4) as i64, x_dev, pg_dev)?;
+        self.lanzar_a(self.f_comp_base, (((n * h) as u32).div_ceil(256), 1, 1), (256, 1, 1),
+            &[Arg::P(out_dev), Arg::P(sd_dev), Arg::P(pg_dev), Arg::I((n * h) as i32), Arg::I(h as i32)])?;
+        self.moe_base = true;
+        self.stats.launches += 1;
+        Ok(true)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn router_topk_gpu(
         &mut self,
@@ -1326,17 +1395,23 @@ impl CudaGpu {
         }
         self.stats.flujo_aciertos += plan.len() as u64;
         self.stats.flujo_fallos += (exps.len() - plan.len()) as u64;
+        let base = std::mem::take(&mut self.moe_base);
         if plan.is_empty() && stream.is_empty() {
+            if base {
+                ck(unsafe { (self.api.sync)() }, "cuCtxSynchronize")?;
+                let out_dev = self.blq_asegurar(7, n * h * 4)?;
+                ck(unsafe { (self.api.dtoh)(suma.as_mut_ptr() as *mut c_void, out_dev, n * h * 4) }, "cuMemcpyDtoH")?;
+            }
             return Ok(());
         }
         if !plan.is_empty() {
-            self.correr_plan(xs, n, h, ffn, top_k, pesos, &*exps, &plan, suma, (true, false, stream.is_empty()))?;
+            self.correr_plan(xs, n, h, ffn, top_k, pesos, &*exps, &plan, suma, (!base, base, stream.is_empty()))?;
             for pl in &plan {
                 hecho[pl.i] = true;
             }
         }
         if !stream.is_empty() {
-            self.expertos_de_paso(xs, n, h, ffn, top_k, pesos, &*exps, &stream, suma, hecho, !plan.is_empty())?;
+            self.expertos_de_paso(xs, n, h, ffn, top_k, pesos, &*exps, &stream, suma, hecho, base || !plan.is_empty())?;
         }
         if std::env::var_os("SOSO_TRAZA_GPU").is_some() {
             eprintln!("[gpu] llamada expertos: {:.1} ms total ({} residentes, {} de paso)", t_a.elapsed().as_secs_f64() * 1e3, plan.len(), stream.len());
@@ -2036,6 +2111,29 @@ impl GpuDispatch for CudaGpu {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    fn moe_compartido(
+        &mut self,
+        claves: [&str; 3],
+        vistas: [&TensorView<'_>; 3],
+        pg_w: &[f32],
+        xs: &[f32],
+        n: usize,
+        h: usize,
+        ffn: usize,
+    ) -> Result<bool, ()> {
+        match self.moe_compartido_gpu(claves, vistas, pg_w, xs, n, h, ffn) {
+            Ok(b) => Ok(b),
+            Err(e) => {
+                if !self.avisado {
+                    eprintln!("cuda: {e}; sigo en CPU");
+                    self.avisado = true;
+                }
+                Err(())
+            }
+        }
+    }
+
     fn atencion_capa(
         &mut self,
         layer: u32,

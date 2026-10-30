@@ -43,6 +43,7 @@ uso: soso-agent-probe <sonda> [fase]
   monton                asignación, realloc y liberación del montón
   canales               tubería con salida grande y EOF, TCP con reconexión
   coste                 coste de escritura en sosofs (paso 1 de N-001)
+  moli                  reservas VA, JIT RW/RX, hilos, multi-socket (port moli)
 
   codigos: 0 todo bien, 1 alguna capacidad falló, 2 uso incorrecto";
 
@@ -64,6 +65,7 @@ fn main(args: &[String]) -> u8 {
         "busqueda" => sondas::busqueda::ejecutar(),
         "vigilancia" => sondas::vigilancia::ejecutar(),
         "rutas" => sondas::rutas::ejecutar(),
+        "moli" => sondas::moli::ejecutar(),
         // Auxiliares: la sonda de señales se lanza a sí misma para tener
         // hijos de verdad a los que matar.
         "dormir" => return sondas::senales::dormir(args.get(1).map(|s| s.as_str()).unwrap_or("0")),

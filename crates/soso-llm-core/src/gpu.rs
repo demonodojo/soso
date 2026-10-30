@@ -508,6 +508,24 @@ pub trait GpuDispatch {
         Ok(false)
     }
 
+    /// Experto compartido de un bloque MoE entero en el dispositivo, con su puerta sigmoide por token (`pg_w`: `h` f32). Si devuelve `Ok(true)`,
+    /// el dispositivo conserva `compartido × sigmoid(pg)` y la **siguiente** llamada a `expertos_bloque` (con los mismos `xs`) lo suma a su
+    /// resultado y baja el total en `suma`. `Ok(false)` = hacerlo como hasta ahora.
+    #[allow(clippy::too_many_arguments)]
+    fn moe_compartido(
+        &mut self,
+        claves: [&str; 3],
+        vistas: [&TensorView<'_>; 3],
+        pg_w: &[f32],
+        xs: &[f32],
+        n: usize,
+        h: usize,
+        ffn: usize,
+    ) -> Result<bool, ()> {
+        let _ = (claves, vistas, pg_w, xs, n, h, ffn);
+        Ok(false)
+    }
+
     /// Capa de atención con puerta entera de un bloque de `n` tokens (`xs`: `n` vectores de `h` ya normalizados) que empieza en la fila
     /// `seq_antes` del KV (= posición absoluta). `salida` (`n × h`) es la proyección de salida (sin el residual). `k_host`/`v_host`: el KV del host
     /// (`seq_antes` filas); `filas_validas`: filas del principio que el dispositivo ya espeja (se actualiza). Devuelve en `k_nuevo`/`v_nuevo`
