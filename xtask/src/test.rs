@@ -1020,12 +1020,12 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 || ssh_probe_archivos(key, port),
             );
         });
-        filter.if_step(sid, "probe: páginas ejecutables (W+X)", || {
+        filter.if_step(sid, "probe: páginas ejecutables (W^X)", || {
             report.paso_ssh_sys(
                 &mut qemu,
                 slot,
                 sid,
-                "probe: páginas ejecutables (W+X)",
+                "probe: páginas ejecutables (W^X)",
                 || ssh_probe_ejecutable(key, port),
             );
         });
@@ -3121,7 +3121,7 @@ fn ssh_probe_ejecutable(key: &Path, ssh_port: u16) -> Result<(), String> {
         "exec/mmap",
         "exec/prot-exec-existe",
         "exec/w-mas-x",
-        "exec/tras-quitar-escritura",
+        "exec/rx-ejecuta",
         "exec/volver-a-escribir",
         "exec/monton",
     ] {

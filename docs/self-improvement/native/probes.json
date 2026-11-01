@@ -60,10 +60,10 @@
     },
     {
       "id": "ejecutable",
-      "capacidad": "páginas ejecutables y W+X (escribir código máquina y llamarlo)",
+      "capacidad": "páginas ejecutables con W^X (escribir código máquina, pasar a R|X y llamarlo)",
       "por_que": "La decisiva de T32: Bun trae JavaScriptCore, que compila en tiempo de ejecución. Sin esto, el resto del inventario es teórico.",
       "estado": "medida",
-      "resultado": "pasa, y por un motivo que conviene mirar de cerca",
+      "resultado": "pasa: el baile W^X de un JIT funciona",
       "modulo": "user/soso-agent-probe/src/sondas/ejecutable.rs",
       "casos": [
         {
@@ -74,43 +74,43 @@
           "resultado": "pasa"
         },
         {
-          "id": "exec/prot-exec-existe",
-          "que": "¿se puede pedir permiso de ejecución?",
-          "esperado": "EINVAL: no hay PROT_EXEC",
-          "observado": "EINVAL: no hay PROT_EXEC",
+          "id": "exec/w-mas-x",
+          "que": "pedir WRITE|EXEC a la vez",
+          "esperado": "EINVAL: W^X rechaza WRITE|EXEC",
+          "observado": "EINVAL: W^X rechaza WRITE|EXEC",
           "resultado": "pasa"
         },
         {
-          "id": "exec/w-mas-x",
-          "que": "código escrito en una página escribible, ejecutado",
+          "id": "exec/prot-exec-existe",
+          "que": "pasar la página con el código a READ|EXEC",
+          "esperado": "mprotect(READ|EXEC) acepta",
+          "observado": "mprotect(READ|EXEC) acepta",
+          "resultado": "pasa"
+        },
+        {
+          "id": "exec/rx-ejecuta",
+          "que": "código escrito con RW y ejecutado en R|X",
           "esperado": "42 y 101",
           "observado": "42 y 101",
           "resultado": "pasa"
         },
         {
-          "id": "exec/tras-quitar-escritura",
-          "que": "sigue ejecutándose con la página de sólo lectura",
-          "esperado": "43",
-          "observado": "43",
-          "resultado": "pasa"
-        },
-        {
           "id": "exec/volver-a-escribir",
-          "que": "volver a hacerla escribible y recompilar",
+          "que": "volver a RW, reescribir y volver a R|X",
           "esperado": "51",
           "observado": "51",
           "resultado": "pasa"
         },
         {
           "id": "exec/monton",
-          "que": "código escrito en el heap, ejecutado",
+          "que": "código escrito en una página alineada del heap, pasada a R|X",
           "esperado": "8",
           "observado": "8",
           "resultado": "pasa"
         }
       ],
-      "hallazgo": "No existe PROT_EXEC **porque todo es ejecutable**. `mprotect` sólo acepta READ y WRITE y rechaza el resto con EINVAL; las páginas de usuario se mapean sin el bit NX, así que cualquier página de datos —incluido el montón— se puede ejecutar. Para un JIT es permiso de sobra. Como propiedad del sistema es lo contrario de W^X: no hay forma de marcar una página como no ejecutable, ni siquiera queriendo.",
-      "consecuencia": "El requisito de JavaScriptCore queda cubierto. Endurecerlo (añadir NX y un PROT_EXEC de verdad) **rompería** este requisito, así que no es un arreglo pendiente sino una decisión de diseño que alguien tiene que tomar a la vista de las dos cosas.",
+      "hallazgo": "Desde el 2026-10-30 las páginas de datos son NX y existe PROT_EXEC con política W^X: mprotect rechaza WRITE|EXEC con EINVAL. Lo que un JIT necesita sigue funcionando: escribir con RW, pasar a R|X, ejecutar, volver a RW, reescribir y volver a R|X, también sobre una página alineada del montón. La medida original (2026-09-24) era de un soso donde todo era ejecutable; esa lectura ya no vale.",
+      "consecuencia": "El requisito de JavaScriptCore se cubre con el baile W^X, sin W+X. Un JIT que asuma páginas RWX no funcionará: tiene que alternar permisos.",
       "evidencia": "target/self-improvement/tasks/T33/wx.txt"
     },
     {
