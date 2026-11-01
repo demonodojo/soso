@@ -39,7 +39,7 @@ pub fn begin(name_ptr: u64, name_len: u64) -> Result<(), i64> {
     let session = ImportSession::begin(
         *guard.superblock(),
         guard.catalog_ref().clone(),
-        name,
+        &name,
     )
     .map_err(import_err)?;
     let owner_as = crate::task::current_space_id().ok_or(-soso_abi::EINVAL)?;
@@ -57,7 +57,7 @@ pub fn put(rel_ptr: u64, rel_len: u64, buf_ptr: u64, buf_len: u64) -> Result<(),
     let mut guard = mfs.lock();
     active
         .session
-        .put_file(guard.cache.volume_mut().inner_mut(), rel, data)
+        .put_file(guard.cache.volume_mut().inner_mut(), &rel, &data)
         .map_err(import_err)
 }
 
@@ -105,7 +105,7 @@ pub fn scratch_write(start_lba: u64, offset: u64, buf_ptr: u64, buf_len: u64) ->
         guard.cache.volume_mut().inner_mut(),
         region,
         offset,
-        data,
+        &data,
     )
     .map_err(import_err)
 }

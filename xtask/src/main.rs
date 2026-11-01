@@ -2196,9 +2196,19 @@ pub(crate) fn run_qemu(img: &Path, gdb: bool) {
         }
         println!("xtask: QEMU -display {display}");
     }
-    // mon:stdio multiplexa monitor y serie: Ctrl-A X sale, Ctrl-A C monitor
-    qemu.args(["-serial", "mon:stdio"])
-        .args(["-display", &display])
+    // `SOSO_QEMU_MONITOR=<socket>`: monitor en un socket UNIX y serie a
+    // `<socket>.serial.log`, para manejar el guest desde fuera (screendump,
+    // sendkey). Sin él, mon:stdio multiplexa monitor y serie: Ctrl-A X sale,
+    // Ctrl-A C monitor.
+    if let Some(sock) = std::env::var_os("SOSO_QEMU_MONITOR") {
+        let sock = PathBuf::from(sock);
+        let serie = format!("{}.serial.log", sock.display());
+        qemu.args(["-monitor", &format!("unix:{},server,nowait", sock.display())])
+            .args(["-serial", &format!("file:{serie}")]);
+    } else {
+        qemu.args(["-serial", "mon:stdio"]);
+    }
+    qemu.args(["-display", &display])
         // Dispositivo de salida para tests: out 0xf4 -> exit((valor << 1) | 1)
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
         .arg("-no-reboot");

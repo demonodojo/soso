@@ -516,16 +516,19 @@ fn user_range_ok_bulk(ptr: u64, len: u64, need_write: bool) -> bool {
     user_range_materialize(ptr, len, need_write, MAX_BULK_BUF)
 }
 
-pub(crate) fn user_slice(ptr: u64, len: u64) -> Result<&'static [u8], i64> {
+/// Copia de un búfer de usuario. Se suelta al salir de la syscall: antes se
+/// `leak`eaba cada copia y el WM, con miles de syscalls por segundo, llenaba la
+/// tabla de centinelas del heap en segundos.
+pub(crate) fn user_slice(ptr: u64, len: u64) -> Result<alloc::boxed::Box<[u8]>, i64> {
     if len == 0 {
-        return Ok(&[]);
+        return Ok(alloc::boxed::Box::default());
     }
     if !user_range_ok(ptr, len, false) {
         return Err(-abi::EFAULT);
     }
     let mut v = alloc::vec![0u8; len as usize];
     super::uaccess::copy_from_user(ptr, &mut v)?;
-    Ok(alloc::boxed::Box::leak(v.into_boxed_slice()))
+    Ok(v.into_boxed_slice())
 }
 
 pub(crate) fn user_slice_mut(ptr: u64, len: u64) -> Result<UserBufMut, i64> {
@@ -533,7 +536,7 @@ pub(crate) fn user_slice_mut(ptr: u64, len: u64) -> Result<UserBufMut, i64> {
     if len == 0 {
         return Ok(UserBufMut {
             ptr,
-            data: &mut [],
+            data: alloc::boxed::Box::default(),
             space,
         });
     }
@@ -544,14 +547,14 @@ pub(crate) fn user_slice_mut(ptr: u64, len: u64) -> Result<UserBufMut, i64> {
     super::uaccess::copy_from_user(ptr, &mut v)?;
     Ok(UserBufMut {
         ptr,
-        data: alloc::boxed::Box::leak(v.into_boxed_slice()),
+        data: v.into_boxed_slice(),
         space,
     })
 }
 
 pub struct UserBufMut {
     ptr: u64,
-    data: &'static mut [u8],
+    data: alloc::boxed::Box<[u8]>,
     /// Espacio del proceso, capturado al entrar en la syscall.
     ///
     /// `flush` corre dentro de `with_fd`, que ya tiene `PROCS` cogido (`sys_read`
@@ -563,38 +566,38 @@ pub struct UserBufMut {
 
 impl UserBufMut {
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        self.data
+        &mut self.data
     }
 
     pub fn flush(self) -> Result<(), i64> {
-        super::uaccess::copy_to_space(&self.space, self.ptr, self.data)
+        super::uaccess::copy_to_space(&self.space, self.ptr, &self.data)
     }
 }
 
 impl core::ops::Deref for UserBufMut {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
-        self.data
+        &self.data
     }
 }
 
 impl core::ops::DerefMut for UserBufMut {
     fn deref_mut(&mut self) -> &mut [u8] {
-        self.data
+        &mut self.data
     }
 }
 
-pub(crate) fn user_str(ptr: u64, len: u64) -> Result<&'static str, i64> {
+pub(crate) fn user_str(ptr: u64, len: u64) -> Result<String, i64> {
     user_str_max(ptr, len, 4096)
 }
 
 /// Como `user_str` con otro tope: un argumento de `rustc` puede pasar de 4 KiB
 /// (el `--check-cfg` de `smoltcp` lista todas sus features) sin ser una ruta.
-pub(crate) fn user_str_max(ptr: u64, len: u64, max: u64) -> Result<&'static str, i64> {
+pub(crate) fn user_str_max(ptr: u64, len: u64, max: u64) -> Result<String, i64> {
     if len > max {
         return Err(-abi::ENAMETOOLONG);
     }
-    core::str::from_utf8(user_slice(ptr, len)?).map_err(|_| -abi::EINVAL)
+    String::from_utf8(user_slice(ptr, len)?.into_vec()).map_err(|_| -abi::EINVAL)
 }
 
 // ---- helpers de VFS ----
@@ -624,7 +627,7 @@ fn resolve_user_path(path_ptr: u64, path_len: u64) -> Result<String, i64> {
     // cuesta ~243 000 ciclos porque el asignador audita su tabla entera
     // (N-013). Sólo lee `p.cwd`, así que no alarga la sección crítica más que
     // lo que ya duraba el clon.
-    super::with_current(|p| super::path::abs_path(&p.cwd, raw))
+    super::with_current(|p| super::path::abs_path(&p.cwd, &raw))
 }
 
 /// Separa una ruta absoluta en (inode del padre, nombre final).
@@ -1077,7 +1080,7 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
         }
         let data = user_slice(buf, len)?;
         let (pid, name) = super::with_current(|p| (p.pid, p.name.clone()));
-        crate::drivers::applog::append_record(pid, &name, data);
+        crate::drivers::applog::append_record(pid, &name, &data);
         return Ok(len);
     }
     let data = user_slice(buf, len)?;
@@ -1088,14 +1091,14 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
         })
     })?;
     if let Some(slot) = pty_slot {
-        super::pty::master_write(slot, data);
+        super::pty::master_write(slot, &data);
         return Ok(len);
     }
     // La consola se lee fuera de with_fd (que ya tiene tomado PROCS).
     let console = super::with_current(|p| p.console);
     with_fd(fd, |f| match f {
         Fd::Tty => {
-            console.write_bytes(data);
+            console.write_bytes(&data);
             Ok(len)
         }
         Fd::WriteBuf { inode, pos, .. } => {
@@ -1106,10 +1109,10 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
             // `/var/models` no pasan por aquí (ver `sys_open`).
             const THRESH: usize = 256 * 1024 * 1024;
             if *pos + data.len() > THRESH {
-                convert_writebuf_to_stream(f, data)?;
+                convert_writebuf_to_stream(f, &data)?;
                 return Ok(len);
             }
-            super::fcache::escribir(*inode, *pos, data).ok_or(-abi::EIO)?;
+            super::fcache::escribir(*inode, *pos, &data).ok_or(-abi::EIO)?;
             *pos += data.len();
             Ok(len)
         }
@@ -1126,7 +1129,7 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
             // actualización, este contenido ya no puede llegar al disco.
             sigue_pudiendo_publicar(*protegida)?;
             *pos += data.len();
-            buf.extend_from_slice(data);
+            buf.extend_from_slice(&data);
             while buf.len() >= STREAM_FLUSH {
                 let chunk: Vec<u8> = buf.drain(..STREAM_FLUSH).collect();
                 let mtime = crate::time::wall_secs();
@@ -1644,11 +1647,11 @@ fn sys_getcwd(buf_ptr: u64, len: u64) -> Result<u64, i64> {
 
 fn sys_spawn(path_ptr: u64, path_len: u64, args_ptr: u64, args_len: u64) -> Result<u64, i64> {
     let path = user_str(path_ptr, path_len)?;
-    let args = if args_len == 0 { "" } else { user_str(args_ptr, args_len)? };
+    let args = if args_len == 0 { "" } else { &user_str(args_ptr, args_len)? };
     // El hijo hereda la consola del padre: si la shell corre por SSH, sus
     // coreutils deben escribir al canal SSH, no al puerto serie.
     let console = super::with_current(|p| p.console);
-    super::spawn_console(path, args, super::current_pid(), console)
+    super::spawn_console(&path, args, super::current_pid(), console)
 }
 
 fn sys_spawn_io(opts_ptr: u64) -> Result<u64, i64> {
@@ -1656,7 +1659,7 @@ fn sys_spawn_io(opts_ptr: u64) -> Result<u64, i64> {
     let opts = unsafe { *(opts.as_ptr() as *const abi::SpawnIo) };
     let path = user_str(opts.path_ptr, opts.path_len)?;
     let args = read_spawn_args(
-        path,
+        &path,
         opts.argv_ptr,
         opts.argv_count,
         opts.args_ptr,
@@ -1691,7 +1694,7 @@ fn sys_spawn_io(opts_ptr: u64) -> Result<u64, i64> {
         super::with_current(|p| p.console)
     };
     super::spawn_console_io_cwd(
-        path,
+        &path,
         &args,
         super::current_pid(),
         console,
@@ -1786,7 +1789,7 @@ fn read_spawn_args(
 
 fn user_read_u64(addr: u64) -> Result<u64, i64> {
     let s = user_slice(addr, 8)?;
-    Ok(u64::from_le_bytes(s.try_into().unwrap()))
+    Ok(u64::from_le_bytes((&*s).try_into().unwrap()))
 }
 
 fn sys_pipe() -> Result<u64, i64> {
@@ -2038,7 +2041,7 @@ fn sys_netcfg(op: u64, ptr: u64, len: u64) -> Result<u64, i64> {
         }
         abi::NETCFG_ESTATICA => {
             let texto = user_str(ptr, len)?;
-            crate::net::configurar_estatica(texto)?;
+            crate::net::configurar_estatica(&texto)?;
             Ok(0)
         }
         abi::NETCFG_DHCP => {
@@ -2509,7 +2512,7 @@ fn sys_gpu_read(gpu_handle: u64, user_ptr: u64, len: u64) -> Result<u64, i64> {
 #[cfg(feature = "drv-gpu-nvidia")]
 fn sys_gpu_submit(cmd_ptr: u64, cmd_len: u64) -> Result<u64, i64> {
     let cmd = user_slice(cmd_ptr, cmd_len)?;
-    crate::drivers::gpu::submit(cmd).map_err(|e| -e)
+    crate::drivers::gpu::submit(&cmd).map_err(|e| -e)
 }
 
 fn sys_thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> Result<u64, i64> {
@@ -2767,7 +2770,7 @@ fn sys_dns_resolve(host_ptr: u64, host_len: u64, out_ptr: u64) -> Result<u64, i6
     if !user_range_ok(out_ptr, 4, true) {
         return Err(-abi::EFAULT);
     }
-    let sa = crate::net::dns::resolve_hostname(host)?;
+    let sa = crate::net::dns::resolve_hostname(&host)?;
     let mut out = user_slice_mut(out_ptr, 4)?;
     out.copy_from_slice(&sa.addr);
     out.flush()?;
@@ -3698,7 +3701,7 @@ fn sys_pwrite(fd: u64, buf: u64, len: u64, offset: u64) -> Result<u64, i64> {
     let data = user_slice(buf, len)?;
     with_fd(fd, |f| match f {
         Fd::WriteBuf { inode, .. } => {
-            super::fcache::escribir(*inode, offset as usize, data).ok_or(-abi::EIO)?;
+            super::fcache::escribir(*inode, offset as usize, &data).ok_or(-abi::EIO)?;
             Ok(len)
         }
         Fd::StreamWrite { buf: out, .. } => {
@@ -3708,11 +3711,11 @@ fn sys_pwrite(fd: u64, buf: u64, len: u64, offset: u64) -> Result<u64, i64> {
             if end > out.len() {
                 out.resize(end, 0);
             }
-            out[offset as usize..end].copy_from_slice(data);
+            out[offset as usize..end].copy_from_slice(&data);
             Ok(len)
         }
         Fd::File { inode, .. } => {
-            super::fcache::escribir(*inode, offset as usize, data).ok_or(-abi::EIO)?;
+            super::fcache::escribir(*inode, offset as usize, &data).ok_or(-abi::EIO)?;
             Ok(len)
         }
         _ => Err(-abi::EBADF),
