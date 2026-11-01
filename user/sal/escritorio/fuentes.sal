@@ -51,17 +51,31 @@ fn fuente_tab_bytes() -> Int
 fn fuente_tab_ptr(tab: Int, nivel: Int, field: Int) -> Int
     tab + nivel * 16 + field
 
-fn fuente_tab_get_ptr(tab: Int, nivel: Int) -> Int ! alloc
-    b = bytes_view_mem(tab, fuente_tab_bytes())
-    bytes_get_i64(b, nivel * 16)
-
-fn fuente_tab_get_len(tab: Int, nivel: Int) -> Int ! alloc
-    b = bytes_view_mem(tab, fuente_tab_bytes())
-    v = bytes_get_i64(b, nivel * 16 + 8)
-    if v < 0
+fn fuente_nivel_ok(nivel: Int) -> Int
+    if nivel < 0
+        0
+    elsif nivel >= fuente_niveles()
         0
     else
-        v
+        1
+
+fn fuente_tab_get_ptr(tab: Int, nivel: Int) -> Int ! alloc
+    if fuente_nivel_ok(nivel) == 0
+        0
+    else
+        b = bytes_view_mem(tab, fuente_tab_bytes())
+        bytes_get_i64(b, nivel * 16)
+
+fn fuente_tab_get_len(tab: Int, nivel: Int) -> Int ! alloc
+    if fuente_nivel_ok(nivel) == 0
+        0
+    else
+        b = bytes_view_mem(tab, fuente_tab_bytes())
+        v = bytes_get_i64(b, nivel * 16 + 8)
+        if v < 0
+            0
+        else
+            v
 
 fn fuente_tab_set(tab: Int, nivel: Int, ptr: Int, len: Int) -> Int ! alloc
     b = bytes_view_mem(tab, fuente_tab_bytes())
@@ -73,7 +87,9 @@ fn fuente_tab_nuevo() -> Int ! alloc
     bytes_ptr(bytes_new(fuente_tab_bytes()))
 
 fn fuente_cargar(tab: Int, nivel: Int) -> Int ! io, alloc
-    if fuente_tab_get_len(tab, nivel) > 0
+    if fuente_nivel_ok(nivel) == 0
+        -1
+    elsif fuente_tab_get_len(tab, nivel) > 0
         0
     else
         s = read_file(fuente_ruta(nivel))

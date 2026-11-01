@@ -2,7 +2,7 @@ import "soso.sal"
 import "proto.sal"
 import "superficie.sal"
 
-fn main() -> Int ! io, alloc
+fn demo_principal() -> Int ! io, alloc
     sock = tcp_connect(7430, 5000)
     if sock < 0
         1
@@ -34,6 +34,25 @@ fn main() -> Int ! io, alloc
                     md = msg_nuevo()
                     _d = msg_encode_danio(md, 0, 0, cw, ch)
                     _w3 = write_fd(sock, md, msg_len())
-                    _s = sleep_ms(50)
+                    # La ventana tiene que seguir viva hasta que el WM la componga:
+                    # desconectarse a los 50 ms la retiraba antes de que una VM
+                    # lenta llegara a pintarla.
+                    t0 = uptime_ms()
+                    fin = 0
+                    while fin == 0
+                        rn = read_timeout_fd(sock, rep, msg_len(), 100)
+                        if rn > 0
+                            if msg_get_op(rep) == op_cerrar_wm()
+                                fin = 1
+                        if uptime_ms() - t0 > 15000
+                            fin = 1
+                        if fin == 0
+                            _s = sleep_ms(10)
                     _x = close_fd(sock)
                     0
+
+fn main() -> Int ! io, alloc
+    rc = demo_principal()
+    if rc != 0
+        _p = print_str("demo-cliente: fallo en la etapa " + int_to_str(rc) + "\n")
+    rc

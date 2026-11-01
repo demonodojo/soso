@@ -79,7 +79,7 @@ impl Superficie {
     fn abrir_wm_titulo(w: u32, h: u32, titulo: &str) -> Result<Self, i64> {
         let addr = SockAddr {
             addr: [127, 0, 0, 1],
-            port: WM_PORT.to_be(),
+            port: WM_PORT,
             _pad: 0,
         };
         let sock = sys::tcp_connect(&addr, 500);

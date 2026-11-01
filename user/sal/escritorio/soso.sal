@@ -133,6 +133,9 @@ fn fb_mode_graficos() -> Int
 fn input_key() -> Int
     2
 
+fn fd_tty_heredado() -> Int
+    -1
+
 fn fd_kernel_log() -> Int
     -3
 

@@ -1,6 +1,18 @@
 import "../../../user/sal/escritorio/superficie.sal"
 
-fn main() -> Int ! alloc
+# rellenar_rect (camino rápido) y pixel_leer tienen que coincidir en los dos formatos.
+fn ida_y_vuelta(fmt: Int) -> Int ! alloc
     buf = bytes_ptr(bytes_new(64))
-    rellenar_rect(buf, 64, 2, 2, 2, 4, 0, 0, 0, 2, 2, 16711680)
-    0
+    _r = rellenar_rect(buf, 64, 2, 2, 2, 4, fmt, 0, 0, 2, 2, color_rgb(40, 80, 200))
+    if pixel_leer(buf, 64, 2, 4, fmt, 1, 1) == color_rgb(40, 80, 200)
+        0
+    else
+        1
+
+fn main() -> Int ! alloc
+    if ida_y_vuelta(fmt_rgb()) != 0
+        1
+    elsif ida_y_vuelta(fmt_bgr()) != 0
+        2
+    else
+        0

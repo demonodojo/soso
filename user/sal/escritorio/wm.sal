@@ -563,7 +563,7 @@ fn wm_ss_iniciar(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int,
         if ok == 0
             0
         else
-            pid = spawn_io_full(d"/bin/soso-mono", 0, 0, 0, fd_kernel_log())
+            pid = spawn_io_full(d"/bin/soso-mono", fd_tty_heredado(), fd_tty_heredado(), fd_tty_heredado(), fd_kernel_log())
             if pid < 0
                 _r = st_set(st, st_ss_cap(), 0)
                 _t = st_set(st, st_ss_last(), uptime_ms())
@@ -803,10 +803,43 @@ fn wm_term_rows(wh: Int, gh: Int, bar_h: Int) -> Int
         r
 
 fn wm_lanzar_web() -> Int ! io, alloc
-    spawn_io_4(d"/var/paquetes/soso-web/bin/soso-web", d"--grafico", d"--local", d"/var/paquetes/soso-web/share/ejemplo/web-prueba.html", 0, 0, 0, fd_kernel_log())
+    spawn_io_4(d"/var/paquetes/soso-web/bin/soso-web", d"--grafico", d"--local", d"/var/paquetes/soso-web/share/ejemplo/web-prueba.html", fd_tty_heredado(), fd_tty_heredado(), fd_tty_heredado(), fd_kernel_log())
 
 fn wm_lanzar_ficheros() -> Int ! io, alloc
-    spawn_io_full(d"/bin/soso-files", 0, 0, 0, fd_kernel_log())
+    spawn_io_full(d"/bin/soso-files", fd_tty_heredado(), fd_tty_heredado(), fd_tty_heredado(), fd_kernel_log())
+
+# Colores del chrome de soso-web (tema oscuro y claro): shell, fila de pestañas y botón.
+fn prueba_web_color(b0: Int, b1: Int, b2: Int, r: Int, g: Int, b: Int) -> Int
+    if b1 != g
+        0
+    elsif b0 == b
+        if b2 == r
+            1
+        else
+            0
+    elsif b0 == r
+        if b2 == b
+            1
+        else
+            0
+    else
+        0
+
+fn prueba_web_color_chrome(b0: Int, b1: Int, b2: Int) -> Int
+    if prueba_web_color(b0, b1, b2, 40, 44, 56) != 0
+        1
+    elsif prueba_web_color(b0, b1, b2, 32, 34, 40) != 0
+        1
+    elsif prueba_web_color(b0, b1, b2, 64, 72, 88) != 0
+        1
+    elsif prueba_web_color(b0, b1, b2, 243, 244, 246) != 0
+        1
+    elsif prueba_web_color(b0, b1, b2, 232, 234, 239) != 0
+        1
+    elsif prueba_web_color(b0, b1, b2, 216, 220, 228) != 0
+        1
+    else
+        0
 
 fn prueba_web_pixel_ok(tab: Int, i: Int) -> Int ! alloc
     if tab_get(tab, i, tab_fase()) != 2
@@ -817,32 +850,13 @@ fn prueba_web_pixel_ok(tab: Int, i: Int) -> Int ! alloc
         shm = tab_get(tab, i, tab_shm_ptr())
         if cw < 20
             0
+        elsif ch < 20
+            0
         else
-            if ch < 20
-                0
-            else
-                slen = cw * ch * 4
-                b = bytes_view_mem(shm, slen)
-                off = (10 + 10 * cw) * 4
-                b0 = bytes_get_u8(b, off)
-                b1 = bytes_get_u8(b, off + 1)
-                b2 = bytes_get_u8(b, off + 2)
-                if b1 == 18
-                    if b0 == 16
-                        if b2 == 24
-                            1
-                        else
-                            if b0 == 24
-                                if b2 == 16
-                                    1
-                                else
-                                    0
-                            else
-                                0
-                    else
-                        0
-                else
-                    0
+            slen = cw * ch * 4
+            b = bytes_view_mem(shm, slen)
+            off = (10 + 10 * cw) * 4
+            prueba_web_color_chrome(bytes_get_u8(b, off), bytes_get_u8(b, off + 1), bytes_get_u8(b, off + 2))
 
 fn wm_color_texto_barra(st: Int) -> Int ! alloc
     tema_texto(wm_tema_id(st))
@@ -1542,7 +1556,7 @@ fn wm_comp_ensure(st: Int, sw: Int, sh: Int, stride: Int, sin_comp: Int) -> Int 
             _i = wm_comp_gpu_init(st, fd, sw, sh, stride)
             ptr
         else
-            _sp = spawn_io_full(d"/bin/soso-comp", 0, 0, 0, fd_kernel_log())
+            _sp = spawn_io_full(d"/bin/soso-comp", fd_tty_heredado(), fd_tty_heredado(), fd_tty_heredado(), fd_kernel_log())
             t0 = uptime_ms()
             res = -1
             done = 0

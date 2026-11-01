@@ -117,6 +117,32 @@ pub fn alloc_slot() -> Result<u8, i64> {
     Err(-soso_abi::EMFILE)
 }
 
+/// Maestros cuyo cierre se aplazó: un bit por ranura.
+///
+/// `close_master` pide `PROCS` (mata a quien cuelga de esa consola), y
+/// `close_all_fds` se llama con `PROCS` ya cogido (salida, `kill`, planificador).
+/// Cerrarlo ahí era un autobloqueo con las interrupciones apagadas: al salir
+/// `soso-wm` con terminales abiertas la máquina entera se congelaba.
+static CIERRES_PENDIENTES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Anota el cierre de un maestro para hacerlo sin candados (`drenar_cierres`).
+pub fn cerrar_master_diferido(slot: u8) {
+    CIERRES_PENDIENTES.fetch_or(1 << slot, core::sync::atomic::Ordering::AcqRel);
+}
+
+/// Aplica los cierres aplazados. Hay que llamarla **sin** `PROCS` cogido.
+pub fn drenar_cierres() {
+    if CIERRES_PENDIENTES.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+        return;
+    }
+    let mask = CIERRES_PENDIENTES.swap(0, core::sync::atomic::Ordering::AcqRel);
+    for slot in 0..PTY_MAX as u8 {
+        if mask & (1 << slot) != 0 {
+            close_master(slot);
+        }
+    }
+}
+
 pub fn close_master(slot: u8) {
     let Some(c) = colas(slot as usize) else {
         return;

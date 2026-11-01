@@ -17,13 +17,15 @@ fn mono_cliente_crear(sock: Int, w: Int, h: Int, once: Int) -> Int ! io, alloc
     limite = 60000
     if once != 0
         limite = 3000
-    while n != msg_len()
+    fin = 0
+    while fin == 0
         if espera >= limite
-            n = -1
-        if n != msg_len()
-            if n != -1
-                n = read_timeout_fd(sock, rep, msg_len(), 100)
-            if n != msg_len()
+            fin = 1
+        if fin == 0
+            n = read_timeout_fd(sock, rep, msg_len(), 100)
+            if n == msg_len()
+                fin = 1
+            else
                 _s = sleep_ms(10)
                 espera = espera + 110
     if n != msg_len()

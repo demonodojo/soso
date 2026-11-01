@@ -966,6 +966,11 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 ssh_soso_wm_prueba_mono(key, port)
             });
         });
+        filter.if_step(sid, "soso-wm: prueba-lanzar", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "soso-wm: prueba-lanzar", || {
+                ssh_soso_wm_prueba_lanzar(key, port)
+            });
+        });
         filter.if_step(sid, "soso-wm: prueba", || {
             report.paso_ssh_sys(&mut qemu, slot, sid, "soso-wm: prueba", || {
                 ssh_soso_wm_prueba(key, port)
@@ -2950,6 +2955,21 @@ fn ssh_soso_wm_prueba_mono(key: &Path, ssh_port: u16) -> Result<(), String> {
     Ok(())
 }
 
+fn ssh_soso_wm_prueba_lanzar(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let texto = ssh_guion_inner(
+        key,
+        ssh_port,
+        "soso-wm --prueba-lanzar && echo LANZAR_OK\nexit\n",
+        Duration::from_secs(120),
+        true,
+        None,
+    )?;
+    if !texto.contains("soso-wm: prueba-lanzar OK") || !texto.contains("LANZAR_OK") {
+        return Err(format!("soso-wm --prueba-lanzar falló: {texto:?}"));
+    }
+    Ok(())
+}
+
 fn ssh_soso_wm_prueba(key: &Path, ssh_port: u16) -> Result<(), String> {
     let texto = ssh_guion_inner(
         key,
@@ -2990,12 +3010,12 @@ fn ssh_soso_wm_demo_cliente(key: &Path, ssh_port: u16) -> Result<(), String> {
     let texto = ssh_guion_inner(
         key,
         ssh_port,
-        "soso-wm --prueba; echo DEMO=$?\nexit\n",
+        "soso-wm --prueba && echo DEMO_OK\nexit\n",
         Duration::from_secs(180),
         true,
         None,
     )?;
-    if !texto.contains("DEMO=0") {
+    if !texto.contains("soso-wm: prueba OK") || !texto.contains("DEMO_OK") {
         return Err(format!("soso-wm --prueba (demo) falló: {texto:?}"));
     }
     Ok(())
@@ -3005,7 +3025,7 @@ fn ssh_soso_wm_soso_web(key: &Path, ssh_port: u16) -> Result<(), String> {
     let texto = ssh_guion_inner(
         key,
         ssh_port,
-        "soso-wm --prueba-web; echo WEB=$?\nexit\n",
+        "soso-wm --prueba-web && echo WEB_OK\nexit\n",
         Duration::from_secs(240),
         true,
         None,
@@ -3016,7 +3036,7 @@ fn ssh_soso_wm_soso_web(key: &Path, ssh_port: u16) -> Result<(), String> {
     if !texto.contains("soso-wm: prueba-web OK") {
         return Err(format!("soso-wm --prueba-web sin línea OK: {texto:?}"));
     }
-    if !texto.contains("WEB=0") {
+    if !texto.contains("WEB_OK") {
         return Err(format!("soso-wm --prueba-web falló: {texto:?}"));
     }
     Ok(())

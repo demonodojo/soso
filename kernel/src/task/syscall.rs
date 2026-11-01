@@ -216,6 +216,7 @@ fn ctx_from_frame(f: &SyscallFrame) -> Context {
 }
 
 extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
+    super::pty::drenar_cierres();
     // ¿Entra alguien con DF puesto? `f.rflags` es el r11 que guardó `syscall`,
     // o sea las banderas **de ring 3**, que el `cld` de la entrada no altera.
     // Aquí es donde se vería un proceso que dejó DF=1: por el temporizador casi
@@ -949,6 +950,12 @@ pub fn drop_fd(fd: Fd) -> Result<(), i64> {
 pub fn close_all_fds(fds: &mut Vec<Option<Fd>>) {
     for slot in fds.iter_mut() {
         if let Some(fd) = slot.take() {
+            // Los llamadores tienen `PROCS` cogido: el maestro de un pty lo
+            // volvería a pedir. Se cierra luego, en `pty::drenar_cierres`.
+            if let Fd::PtyMaster(pty) = fd {
+                super::pty::cerrar_master_diferido(pty);
+                continue;
+            }
             let _ = drop_fd(fd);
         }
     }

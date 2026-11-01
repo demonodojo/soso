@@ -1417,6 +1417,7 @@ pub fn exit_current(code: u8) -> ! {
         }
         crate::arch::percpu::set_current_pid(0);
     }
+    pty::drenar_cierres();
     // Las páginas de este espacio que sigan en la cola de reclaim ya no sirven
     // (la cola guarda referencias débiles, pero cada entrada muerta ocupa memoria
     // del kernel hasta que alguien la purgue).

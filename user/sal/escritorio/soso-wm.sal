@@ -77,7 +77,7 @@ fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, 
         if t1i >= 0
             fd1 = tab_get(tab, t1i, tab_fd())
             _w1 = write_str_fd(fd1, d"echo dos\n")
-        _p = spawn_io_full(d"/bin/demo-cliente", 0, 0, 0, fd_kernel_log())
+        _p = spawn_io_full(d"/bin/demo-cliente", fd_tty_heredado(), fd_tty_heredado(), fd_tty_heredado(), fd_kernel_log())
         t0 = uptime_ms()
         ok = 0
         demo = 0
@@ -111,6 +111,15 @@ fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, 
                         if demo != 0
                             ok = 1
         close_fd(listener)
+        if ok == 2
+            _d1 = print_str(d"soso-wm: prueba plazo agotado; faltan:")
+            if uno == 0
+                _d2 = print_str(d" eco-uno")
+            if dos == 0
+                _d3 = print_str(d" eco-dos")
+            if demo == 0
+                _d4 = print_str(d" pixel-demo")
+            _d5 = print_str(d"\n")
         if ok == 1
             _pr = print_str(d"soso-wm: prueba OK\n")
             ok = 0
@@ -161,7 +170,7 @@ fn prueba_mono_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: 
         if _ss == 0
             ok = 4
         if _ss != 0
-            mono_pid = spawn_io_argv(d"/bin/soso-mono", d"--once", d"", d"", d"", d"", 2, 0, 0, 0, fd_kernel_log())
+            mono_pid = spawn_io_argv(d"/bin/soso-mono", d"--once", d"", d"", d"", d"", 2, fd_tty_heredado(), fd_tty_heredado(), fd_tty_heredado(), fd_kernel_log())
             if mono_pid < 0
                 ok = 4
             if mono_pid >= 0
@@ -200,6 +209,23 @@ fn prueba_mono_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: 
         if ok == 1
             _pr = print_str(d"soso-wm: prueba-mono OK\n")
             ok = 0
+    ok
+
+fn prueba_lanzar_uno() -> Int ! io, alloc
+    pid = spawn_io_full(d"/bin/demo-cliente", fd_tty_heredado(), fd_tty_heredado(), fd_tty_heredado(), fd_kernel_log())
+    if pid > 0
+        _k = kill_pid(pid, 9)
+    pid
+
+fn prueba_lanzar_modo() -> Int ! io, alloc
+    ok = 0
+    i = 0
+    while i < 3
+        if prueba_lanzar_uno() < 0
+            ok = 1
+        i = i + 1
+    if ok == 0
+        _pr = print_str(d"soso-wm: prueba-lanzar OK\n")
     ok
 
 fn bucle_grafico(ejecutar: String) -> Int ! io, alloc
@@ -294,9 +320,9 @@ fn lanzar_ejecutar() -> Int ! io, alloc
                     n = n + 1
                     ai = ai + 1
             if n == 1
-                spawn_io_full(path, 0, 0, 0, fd_kernel_log())
+                spawn_io_full(path, fd_tty_heredado(), fd_tty_heredado(), fd_tty_heredado(), fd_kernel_log())
             else
-                spawn_io_argv(path, a1, a2, a3, a4, a5, n, 0, 0, 0, fd_kernel_log())
+                spawn_io_argv(path, a1, a2, a3, a4, a5, n, fd_tty_heredado(), fd_tty_heredado(), fd_tty_heredado(), fd_kernel_log())
 
 fn prueba_web_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     listener = tcp_listen(puerto_wm())
@@ -306,11 +332,11 @@ fn prueba_web_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: I
         msg = bytes_ptr(bytes_new(msg_len()))
         st = st_nuevo(evt, msg)
         _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo(st))
-        _p = spawn_io_4(d"/var/paquetes/soso-web/bin/soso-web", d"--grafico", d"--local", d"/var/paquetes/soso-web/share/ejemplo/web-prueba.html", 0, 0, 0, fd_kernel_log())
+        _p = spawn_io_4(d"/var/paquetes/soso-web/bin/soso-web", d"--grafico", d"--local", d"/var/paquetes/soso-web/share/ejemplo/web-prueba.html", fd_tty_heredado(), fd_tty_heredado(), fd_tty_heredado(), fd_kernel_log())
         t0 = uptime_ms()
         ok = 0
         while ok == 0
-            if uptime_ms() - t0 > 20000
+            if uptime_ms() - t0 > 30000
                 ok = 2
             if ok == 0
                 _t = wm_tick(st, listener, compos, clen, sw, sh, stride, bpp, fmt)
@@ -440,14 +466,15 @@ fn prueba_layout_float(st: Int, sw: Int, sh: Int) -> Int ! alloc
                 rc = 302
     rc
 
-fn prueba_layout_preparar(st: Int, sw: Int, sh: Int) -> Int ! alloc
+fn prueba_layout_preparar(st: Int, sw: Int, sh: Int) -> Int ! io, alloc
+    _esc = wm_init_escala(st, sw)
     n = 0
     while n < 4
         _t = wm_prueba_anadir_terminal(st, sw, sh)
         n = n + 1
     0
 
-fn prueba_layout_mosaic_only(sw: Int, sh: Int) -> Int ! alloc
+fn prueba_layout_mosaic_only(sw: Int, sh: Int) -> Int ! io, alloc
     evt = bytes_ptr(bytes_new(24 * 8))
     msg = bytes_ptr(bytes_new(msg_len()))
     st = st_nuevo(evt, msg)
@@ -566,8 +593,11 @@ fn main() -> Int ! io, alloc
                     compos = compos_ram(640, 480, 640, 4)
                     rc = prueba_mono_modo(compos, compos_len(640, 480, 4), 640, 480, 640, 4, fmt_bgr())
                 if arg_flag(d"--prueba-mono") == 0
-                    if arg_flag(d"--fotograma") != 0
-                        rc = fotograma()
-                    if arg_flag(d"--fotograma") == 0
-                        rc = bucle_grafico(d"")
+                    if arg_flag(d"--prueba-lanzar") != 0
+                        rc = prueba_lanzar_modo()
+                    if arg_flag(d"--prueba-lanzar") == 0
+                        if arg_flag(d"--fotograma") != 0
+                            rc = fotograma()
+                        if arg_flag(d"--fotograma") == 0
+                            rc = bucle_grafico(d"")
     rc

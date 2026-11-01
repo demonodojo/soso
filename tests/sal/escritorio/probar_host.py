@@ -26,11 +26,24 @@ OUT = REPO / "target" / "sal" / "escritorio-host"
 SKIP = {"bytes_type.sal", "str_type.sal"}
 
 
+def comprobar_spawn_sin_fds_literales() -> int:
+    """Un 0 en stdin/stdout/stderr de spawn_io_* le quita al WM su propio fd."""
+    mal = 0
+    for f in sorted((REPO / "user/sal/escritorio").glob("*.sal")):
+        for n, linea in enumerate(f.read_text().splitlines(), 1):
+            if "spawn_io" in linea and "0, 0, 0, fd_kernel_log()" in linea and "fn spawn_io" not in linea:
+                print(f"FALLO {f.name}:{n}: spawn con stdio 0,0,0 (usa fd_tty_heredado())", file=sys.stderr)
+                mal = 1
+    return mal
+
+
 def main() -> int:
     SAL = sal_bin()
     if not SAL.is_file() or not SDK.is_dir():
         print("falta SDK o compilador Sal; ejecuta cargo xtask sal-build", file=sys.stderr)
         return 2
+    if comprobar_spawn_sin_fds_literales():
+        return 1
     OUT.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["SAL_SDK"] = str(SDK)

@@ -77,11 +77,13 @@ fn pixel_escribir(ptr: Int, len: Int, stride: Int, bpp: Int, fmt: Int, x: Int, y
         bytes_set_u8(b, o + 3, 255)
         0
 
+# Palabra de 32 bits (little-endian) con los bytes en el orden de memoria que
+# usan `pixel_leer`/`pixel_escribir`: BGR guarda [b, g, r, 255]; RGB, [r, g, b, 255].
 fn pixel_u32_le(rgb: Int, fmt: Int) -> Int
     if fmt == fmt_bgr()
-        (255 << 24) + (u32_b0(rgb) << 16) + (u32_b1(rgb) << 8) + u32_b2(rgb)
-    else
         (255 << 24) + (u32_b2(rgb) << 16) + (u32_b1(rgb) << 8) + u32_b0(rgb)
+    else
+        (255 << 24) + (u32_b0(rgb) << 16) + (u32_b1(rgb) << 8) + u32_b2(rgb)
 
 fn rellenar_rect(ptr: Int, len: Int, ancho: Int, alto: Int, stride_px: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, rgb: Int) -> Int ! alloc
     ya = max(0, y0)
