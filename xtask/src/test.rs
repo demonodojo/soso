@@ -2734,19 +2734,20 @@ fn ssh_voz_wav(key: &Path, ssh_port: u16) -> Result<(), String> {
 fn ssh_soso_pkg(key: &Path, ssh_port: u16) -> Result<(), String> {
     let guion = "\
 soso-pkg instalar /share/paquetes-prueba/v1
-pkg-demo
-echo PKG=$?
+pkg-demo && echo PKG_OK
 soso-pkg instalar /share/paquetes-prueba/v2 --forzar
 soso-pkg listar
-soso-pkg borrar demo
-echo BORRADO=$?
+soso-pkg borrar demo && echo BORRADO_OK
 exit
 ";
     let texto = ssh_guion(key, ssh_port, guion, Duration::from_secs(120))?;
     if !texto.contains("pkg-demo: ok") {
         return Err(format!("pkg-demo no ejecutó; stdout: {texto:?}"));
     }
-    if !texto.contains("PKG=0") {
+    // sosh no expande `$?`: se mira que la marca salga **sola en su línea**, no
+    // dentro del eco de la orden tecleada.
+    let marca = |m: &str| texto.lines().any(|l| l.trim() == m);
+    if !marca("PKG_OK") {
         return Err(format!("pkg-demo salió mal; stdout: {texto:?}"));
     }
     if !texto.contains("1.1.0") {
@@ -2755,7 +2756,7 @@ exit
     if !texto.contains("1.1.0") {
         return Err(format!("listar sin v2; stdout: {texto:?}"));
     }
-    if !texto.contains("BORRADO=0") {
+    if !marca("BORRADO_OK") {
         return Err(format!("borrar demo falló; stdout: {texto:?}"));
     }
     Ok(())

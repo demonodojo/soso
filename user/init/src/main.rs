@@ -2058,7 +2058,14 @@ fn suite() -> u8 {
         };
         let tty = sys::fd_pty_stdio(slot);
         let fds = [tty, tty, tty, abi::FD_KERNEL_LOG];
-        let pid = sys::spawn_io_full("/bin/sosh", &["-c", "echo pty-eco"], &[], fds);
+        // sosh no tiene `-c`: ejecuta el guion que se le nombre. Antes el test
+        // pasaba por casualidad (el «no existe» de sosh contiene «pty-eco») y
+        // sosh salía con 1.
+        let guion = sys::open("/tmp/pty-eco.sh", abi::O_WRONLY | abi::O_CREAT | abi::O_TRUNC);
+        check!(guion >= 0, "open guion pty");
+        check!(sys::write(guion as u64, b"echo pty-eco\n") == 13, "escribir guion pty");
+        let _ = sys::close(guion as u64);
+        let pid = sys::spawn_io_full("/bin/sosh", &["/bin/sosh", "/tmp/pty-eco.sh"], &[], fds);
         check!(pid > 0, "spawn sosh en pty (pid {pid})");
         let mut out = [0u8; 64];
         let mut got = 0usize;
@@ -2079,15 +2086,29 @@ fn suite() -> u8 {
             core::str::from_utf8(&out[..got])
                 .ok()
                 .is_some_and(|s| s.contains("pty-eco")),
-            "eco por pty"
+            "eco por pty (leí {got} B: {:?})",
+            core::str::from_utf8(&out[..got]).unwrap_or("?")
         );
-        check!(sys::wait() == Ok((pid as u64, 0)), "sosh eco en pty termina");
-        let sleeper = sys::spawn_io_full("/bin/sosh", &["-c", "sleep 600"], &[], fds);
-        check!(sleeper > 0, "spawn sleep en pty");
+        let w = sys::wait();
+        let _ = sys::unlink("/tmp/pty-eco.sh");
+        check!(w == Ok((pid as u64, 0)), "sosh eco en pty termina (pid {pid}, wait {w:?})");
+        // Un guion con `cat` (lee la pty hasta el fin de los tiempos) hace de
+        // proceso largo: sosh no tiene `-c` ni `sleep`.
+        let guion = sys::open("/tmp/pty-cat.sh", abi::O_WRONLY | abi::O_CREAT | abi::O_TRUNC);
+        check!(guion >= 0, "open guion pty cat");
+        check!(sys::write(guion as u64, b"cat\n") == 4, "escribir guion pty cat");
+        let _ = sys::close(guion as u64);
+        let sleeper = sys::spawn_io_full("/bin/sosh", &["/bin/sosh", "/tmp/pty-cat.sh"], &[], fds);
+        check!(sleeper > 0, "spawn cat en pty");
+        let _ = sys::sleep_ms(1500);
         let _ = sys::write(master, &[0x03]);
+        let w = sys::wait();
+        let _ = sys::unlink("/tmp/pty-cat.sh");
+        // Murió `cat` por el SIGINT y sosh, que es una shell, sobrevive y sale
+        // con el fallo de su hijo. Si el Ctrl-C no llegara, `wait` no volvería.
         check!(
-            sys::wait() == Ok((sleeper as u64, abi::exit_by_signal(abi::SIGINT as u8))),
-            "Ctrl-C vía maestro pty"
+            matches!(w, Ok((p, c)) if p == sleeper as u64 && c != 0),
+            "Ctrl-C vía maestro pty (wait {w:?})"
         );
         check!(sys::close(master) == 0, "close maestro pty");
 

@@ -37,7 +37,19 @@ pub fn wait_or_resume(
     {
         let mut waiters = WAITERS.lock();
         let mut procs = PROCS.lock();
-        let actual = super::uaccess::read_u32_user(uaddr).unwrap_or(expected.wrapping_add(1));
+        // `PROCS` ya está cogido: `read_u32_user` lo pediría otra vez (por
+        // `with_current`) y esta CPU se quedaría girando consigo misma con las
+        // interrupciones apagadas. Se lee con el espacio que ya tenemos.
+        let actual = procs
+            .iter()
+            .find(|p| p.pid == pid)
+            .and_then(|p| p.space.as_ref())
+            .and_then(|space| {
+                let mut b = [0u8; 4];
+                super::uaccess::copy_from_space(space, uaddr, &mut b).ok()?;
+                Some(u32::from_le_bytes(b))
+            })
+            .unwrap_or(expected.wrapping_add(1));
         if actual != expected {
             if let Some(p) = procs.iter_mut().find(|p| p.pid == pid) {
                 p.ctx = ctx;
