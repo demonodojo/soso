@@ -770,6 +770,9 @@ pub struct ChildStdio {
     fds: alloc::vec::Vec<Option<Fd>>,
     /// (índice en el padre, slot 0–3 del hijo)
     taken: alloc::vec::Vec<(usize, usize)>,
+    /// Slots del hijo que son duplicados (`2>&1`): si el spawn se aborta hay
+    /// que soltarlos para devolver las referencias de pipes.
+    dups: alloc::vec::Vec<usize>,
     committed: bool,
 }
 
@@ -778,6 +781,7 @@ impl ChildStdio {
         Self {
             fds,
             taken: alloc::vec::Vec::new(),
+            dups: alloc::vec::Vec::new(),
             committed: false,
         }
     }
@@ -785,6 +789,7 @@ impl ChildStdio {
     pub fn into_fds(mut self) -> alloc::vec::Vec<Option<Fd>> {
         self.committed = true;
         self.taken.clear();
+        self.dups.clear();
         core::mem::take(&mut self.fds)
     }
 }
@@ -795,7 +800,13 @@ impl Drop for ChildStdio {
             return;
         }
         let taken = core::mem::take(&mut self.taken);
+        let dups = core::mem::take(&mut self.dups);
         let fds = &mut self.fds;
+        for slot in dups {
+            if let Some(fd) = fds.get_mut(slot).and_then(|s| s.take()) {
+                let _ = drop_fd(fd);
+            }
+        }
         super::with_current(|p| {
             for (parent_slot, child_slot) in taken {
                 let Some(fd) = fds.get_mut(child_slot).and_then(|s| s.take()) else {
@@ -854,7 +865,8 @@ pub fn build_child_fds(stdio: [u64; 4]) -> Result<ChildStdio, i64> {
             Some(Fd::Tty),
             Some(Fd::Log),
         ];
-        let mut taken = alloc::vec::Vec::new();
+        let mut taken: alloc::vec::Vec<(usize, usize)> = alloc::vec::Vec::new();
+        let mut dups = alloc::vec::Vec::new();
         for (slot, spec) in stdio.into_iter().enumerate() {
             if abi::stdio_es_tty(spec) {
                 continue;
@@ -868,6 +880,16 @@ pub fn build_child_fds(stdio: [u64; 4]) -> Result<ChildStdio, i64> {
                 continue;
             }
             let parent_slot = spec as usize;
+            // Mismo fd del padre en dos ranuras (`2>&1`): el original se
+            // mueve a la primera y las demás reciben un duplicado. Con un
+            // `take()` más, la segunda se quedaba cerrada.
+            if let Some(&(_, first)) = taken.iter().find(|&&(ps, _)| ps == parent_slot) {
+                out[slot] = out[first].as_ref().map(clone_fd);
+                if out[slot].is_some() {
+                    dups.push(slot);
+                }
+                continue;
+            }
             out[slot] = p.fds.get_mut(parent_slot).and_then(|s| s.take());
             if out[slot].is_some() {
                 taken.push((parent_slot, slot));
@@ -876,6 +898,7 @@ pub fn build_child_fds(stdio: [u64; 4]) -> Result<ChildStdio, i64> {
         Ok(ChildStdio {
             fds: out,
             taken,
+            dups,
             committed: false,
         })
     })
