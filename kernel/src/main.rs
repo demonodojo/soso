@@ -31,6 +31,9 @@ use core::panic::PanicInfo;
 static BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
     config.mappings.physical_memory = Some(Mapping::Dynamic);
+    // La pila de arranque (la de `kshell::run` sin disco) por defecto es de
+    // 80 KiB y la cripto de dev pide marcos de cientos de KiB.
+    config.kernel_stack_size = 512 * 1024;
     config
 };
 

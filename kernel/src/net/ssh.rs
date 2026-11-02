@@ -166,11 +166,43 @@ pub fn init() {
     AUTHORIZED_MLDSA.call_once(|| auth_mldsa);
 }
 
+/// Ejecuta `f` sobre una pila de montón de 1 MiB. `SigningKey::from_seed`
+/// (ML-DSA-65) pide un marco de 264 KiB en dev: no cabe en la pila de arranque
+/// (la shell del kernel sin disco) ni en `KSTACK` (256 KiB, y el exceso caía
+/// sobre `IST_STACKS` sin avisar).
+fn con_pila_propia<F: FnOnce() -> R, R>(f: F) -> R {
+    const PILA: usize = 1024 * 1024;
+    extern "C" fn trampolin<F: FnOnce() -> R, R>(dato: *mut (Option<F>, Option<R>)) {
+        let (f, r) = unsafe { &mut *dato };
+        *r = Some((f.take().expect("pila propia: cierre ya consumido"))());
+    }
+    let pila = alloc::vec![0u8; PILA].into_boxed_slice();
+    // Alineada a 16: el `call` deja rsp%16==8 en la entrada, como exige el ABI.
+    let tope = (pila.as_ptr() as usize + PILA) & !15;
+    let mut dato: (Option<F>, Option<R>) = (Some(f), None);
+    unsafe {
+        core::arch::asm!(
+            "mov r12, rsp",
+            "mov rsp, {tope}",
+            "call {entrada}",
+            "mov rsp, r12",
+            tope = in(reg) tope,
+            entrada = in(reg) trampolin::<F, R> as *const () as usize,
+            in("rdi") &raw mut dato,
+            out("r12") _,
+            clobber_abi("C"),
+        );
+    }
+    drop(pila);
+    dato.1.expect("pila propia: el cierre no terminó")
+}
+
 /// `MlDsaSigningKey::from_seed` usa mucha pila; en `net::init` aún estamos en
-/// la pila de arranque y provoca double fault. Se carga en el primer `poll`.
+/// la pila de arranque y provoca double fault. Se carga en el primer `poll`,
+/// sobre una pila propia (`con_pila_propia`).
 fn ensure_mldsa_host_key() {
     HOST_KEY_MLDSA.call_once(|| {
-        let mldsa = match leer_fichero("/etc/ssh_host_mldsa") {
+        let mldsa = con_pila_propia(|| match leer_fichero("/etc/ssh_host_mldsa") {
             Some(seed) if seed.len() >= 32 => {
                 let mut s = [0u8; 32];
                 s.copy_from_slice(&seed[..32]);
@@ -181,7 +213,7 @@ fn ensure_mldsa_host_key() {
                 SignKey::generate(sunset::KeyType::Mldsa65, None)
                     .expect("no se pudo generar la host key ML-DSA-65")
             }
-        };
+        });
         crate::klogln!("ssh: host key ssh-mldsa-65 cargada");
         mldsa
     });
