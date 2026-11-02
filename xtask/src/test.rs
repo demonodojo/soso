@@ -1805,7 +1805,7 @@ fn ssh_improve_receta(key: &Path, ssh_port: u16) -> Result<(), String> {
         Duration::from_secs(120),
     )?;
     for esperado in [
-        "receta: 27 pasos",
+        "receta: 36 pasos",
         "ROTO  PAL: os/soso",
         "ROTO  build.rs: target soso",
     ] {
