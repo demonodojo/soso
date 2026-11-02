@@ -2994,9 +2994,10 @@ fn sys_wifi_connect(ssid_ptr: u64, ssid_len: u64, psk_ptr: u64, psk_len: u64) ->
             }
             Some(user_str(psk_ptr, psk_len)?)
         };
+        let psk = psk.as_deref();
         let rc = match psk {
-            None => crate::net::wifi_wpa::connect_open(ssid),
-            Some(pass) => crate::net::wifi_wpa::connect_wpa2(ssid, pass),
+            None => crate::net::wifi_wpa::connect_open(&ssid),
+            Some(pass) => crate::net::wifi_wpa::connect_wpa2(&ssid, pass),
         };
         if rc != 0 {
             return Err(-abi::EIO);
@@ -3004,7 +3005,7 @@ fn sys_wifi_connect(ssid_ptr: u64, ssid_len: u64, psk_ptr: u64, psk_len: u64) ->
         if let Some(ref pass) = psk {
             crate::drivers::logbuf::tachar(pass.as_bytes());
         }
-        crate::net::wifi_wpa::persist_credentials(ssid, psk);
+        crate::net::wifi_wpa::persist_credentials(&ssid, psk);
         crate::net::on_wifi_connected_explicito();
         Ok(0)
     }
