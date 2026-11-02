@@ -630,6 +630,10 @@ fn lanzar(code: &Path, vars: &Path, serial: &Path, discos: Discos) -> Result<Chi
         Some(&MAC.to_string()),
         None,
     );
+    // `SOSO_QEMU_MONITOR=<socket>`: monitor de QEMU para `info registers` si algo se cuelga.
+    if let Ok(sock) = std::env::var("SOSO_QEMU_MONITOR") {
+        qemu.args(["-monitor", &format!("unix:{sock},server,nowait")]);
+    }
     qemu.args(["-serial", &format!("file:{}", serial.display())])
         .args(["-display", "none"])
         .arg("-no-reboot")

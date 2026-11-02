@@ -720,10 +720,14 @@ pub unsafe fn alloc_dma_buffer(size: usize) -> (*mut u8, u64) {
 
 /// Read bytes from a DMA buffer.
 pub unsafe fn read_dma_buffer(va: *const u8, len: usize) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(len);
-    for i in 0..len {
-        buf.push(ptr::read_volatile(va.add(i)));
-    }
+    // Una copia en bloque: el bucle byte a byte con `read_volatile` + `push` costaba
+    // tanto en el kernel de dev (comprobaciones de UB por byte) que un clon de
+    // gigabytes por USB no terminaba (`test-install`). La barrera hace que lo que
+    // el dispositivo escribió por DMA se lea después de ella.
+    let mut buf: Vec<u8> = Vec::with_capacity(len);
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    ptr::copy_nonoverlapping(va, buf.as_mut_ptr(), len);
+    buf.set_len(len);
     buf
 }
 
