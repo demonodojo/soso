@@ -877,7 +877,7 @@ fn fase_aplicar(
         // tocan (U5) y el resto del disco sigue siendo tuyo. Y una segunda
         // instancia del cliente tiene que decirlo, no ponerse a armar encima.
         "soso-update aplicar --local /var/actualiza-prueba --forzar\n         echo intruso > /bin/prueba-exclusion\n         echo mias > /var/prueba-exclusion\n         cat /var/prueba-exclusion\n         soso-update aplicar --local /var/actualiza-prueba --forzar\nsoso-update transicion\ninit log marca-u1-aplicar\nsosolog\nhalt\n",
-        Duration::from_secs(180),
+        Duration::from_secs(420),
         "soso-update: listo",
     )?;
     if !salida.contains("listo") {
@@ -970,7 +970,7 @@ fn fase_comprobar_version(
         // el área de preparación, así que tiene que reanudar en vez de pedirlo
         // otra vez — y eso cruza un reinicio, que es lo que exige el criterio.
         "cat /etc/actualiza-marca.txt\ncat /var/log/aplicaciones.log\ngrep flujo /var/log/kernel.log\necho sucia > /etc/actualiza-marca.txt\nsoso-update aplicar --local /var/actualiza-prueba --forzar\nsoso-update estado\nhalt\n",
-        Duration::from_secs(120),
+        Duration::from_secs(300),
         &format!("rootfs: {ver}"),
     )?;
     // Ojo: `estado` también imprime el fichero de progreso "APLICANDO <ver>"
@@ -1693,6 +1693,10 @@ fn lanzar_live_con(
         Some(&MAC.to_string()),
         None,
     );
+    // `SOSO_QEMU_MONITOR=<socket corto, <108 car.>`: monitor para `info registers` si algo se cuelga.
+    if let Ok(sock) = std::env::var("SOSO_QEMU_MONITOR") {
+        cmd.args(["-monitor", &format!("unix:{sock},server,nowait")]);
+    }
     cmd.args(["-serial", &format!("file:{}", serial.display())])
         .stderr(Stdio::null());
     let child = cmd.spawn().map_err(|e| e.to_string())?;

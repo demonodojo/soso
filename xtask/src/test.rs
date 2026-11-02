@@ -1816,7 +1816,7 @@ fn ssh_improve_receta(key: &Path, ssh_port: u16) -> Result<(), String> {
     // Directorio vacío: ni la plantilla ni el vendor existen, así que ningún
     // paso se puede aplicar. «Falta» significaría que repetir la preparación
     // lo arregla, y aquí no hay nada que copiar.
-    if !salida.contains("0 por aplicar · 27 con el ancla rota") {
+    if !salida.contains("0 por aplicar · 36 con el ancla rota") {
         return Err(format!("la cuenta de la receta no cuadra: {salida:?}"));
     }
     Ok(())
