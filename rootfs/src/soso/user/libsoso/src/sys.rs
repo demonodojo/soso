@@ -163,6 +163,22 @@ pub fn spawn_io_ex(
 
 /// Spawn con control explícito de los cuatro descriptores estándar (0–3).
 pub fn spawn_io_full(path: &str, argv: &[&str], env: &[&str], fds: [u64; 4]) -> i64 {
+    spawn_io_cwd(path, argv, env, fds, "")
+}
+
+/// Como [`spawn_io_full`], lanzando al hijo **en** `cwd` (N-003).
+///
+/// `cwd` vacío hereda el del padre. Existe porque el `chdir` es del **proceso**
+/// y no de la llamada: sin esto, lanzar dos herramientas a la vez en
+/// directorios distintos obligaba a serializarlas o a que un hilo viera el
+/// directorio cambiado por debajo.
+pub fn spawn_io_cwd(
+    path: &str,
+    argv: &[&str],
+    env: &[&str],
+    fds: [u64; 4],
+    cwd: &str,
+) -> i64 {
     use alloc::string::String;
     use alloc::vec::Vec;
 
@@ -206,6 +222,8 @@ pub fn spawn_io_full(path: &str, argv: &[&str], env: &[&str], fds: [u64; 4]) -> 
             env_table.as_ptr() as u64
         },
         envp_count: env.len() as u64,
+        cwd_ptr: cwd.as_ptr() as u64,
+        cwd_len: cwd.len() as u64,
     };
     syscall4(
         abi::SYS_SPAWN_IO,
@@ -261,7 +279,11 @@ pub fn sleep_ms(ms: u64) -> i64 {
 }
 
 pub fn halt() -> i64 {
-    syscall1(abi::SYS_HALT, 0)
+    syscall1(abi::SYS_HALT, abi::HALT_APAGAR)
+}
+
+pub fn reboot() -> i64 {
+    syscall1(abi::SYS_HALT, abi::HALT_REINICIAR)
 }
 
 /// Mapea un fichero o región anónima. `fd == u64::MAX` para anónimo.
@@ -315,12 +337,22 @@ pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> i6
 }
 
 pub fn futex_wait(addr: *const u32, expected: u32) -> i64 {
+    futex_wait_timeout(addr, expected, 0)
+}
+
+/// Como `futex_wait`, con plazo **relativo** en ms; `0` = sin plazo.
+///
+/// Devuelve `0` si despertó (por `futex_wake` o porque el valor ya había
+/// cambiado) y `-ETIMEDOUT` si venció el plazo. Distinguir las dos cosas es el
+/// motivo de T73: sin ello, quien pone un plazo no puede saber si comprobar la
+/// condición o rendirse.
+pub fn futex_wait_timeout(addr: *const u32, expected: u32, timeout_ms: u64) -> i64 {
     syscall4(
         abi::SYS_FUTEX,
         abi::FUTEX_WAIT,
         addr as u64,
         expected as u64,
-        0,
+        timeout_ms,
     )
 }
 
@@ -354,6 +386,38 @@ pub fn netinfo(out: &mut abi::NetInfo) -> i64 {
         0,
         0,
     )
+}
+
+/// Estado ampliado de la red: motivo de la dirección, lease, DNS.
+pub fn net_detalle(out: &mut abi::NetDetalle) -> i64 {
+    syscall4(
+        abi::SYS_NETCFG,
+        abi::NETCFG_ESTADO,
+        out as *mut abi::NetDetalle as u64,
+        0,
+        0,
+    )
+}
+
+/// `ip estatica`: `texto` es `<a.b.c.d/p> [gw <ip>] [dns <ip>]`.
+pub fn net_estatica(texto: &str) -> i64 {
+    syscall4(
+        abi::SYS_NETCFG,
+        abi::NETCFG_ESTATICA,
+        texto.as_ptr() as u64,
+        texto.len() as u64,
+        0,
+    )
+}
+
+/// `ip dhcp`.
+pub fn net_dhcp() -> i64 {
+    syscall4(abi::SYS_NETCFG, abi::NETCFG_DHCP, 0, 0, 0)
+}
+
+/// `ip medio auto`.
+pub fn net_medio_auto() -> i64 {
+    syscall4(abi::SYS_NETCFG, abi::NETCFG_MEDIO_AUTO, 0, 0, 0)
 }
 
 /// ICMP Echo a `addr`. `timeout_ms == 0` → 1000 ms. Devuelve RTT en ms o -errno.
@@ -701,6 +765,54 @@ pub fn fb_present(ptr: u64, len: u64) -> Result<(), i64> {
     if r < 0 { Err(r) } else { Ok(()) }
 }
 
+pub fn fb_present_rect(buf: u64, len: u64, x: u32, y: u32, w: u32, h: u32) -> Result<(), i64> {
+    let xy = (x as u64) | ((y as u64) << 16);
+    let wh = (w as u64) | ((h as u64) << 16);
+    let r = syscall4(abi::SYS_FB_PRESENT_RECT, buf, len, xy, wh);
+    if r < 0 { Err(r) } else { Ok(()) }
+}
+
+/// Abre un pseudo-terminal. Devuelve `(fd_maestro, ranura_pty)`.
+pub fn pty_open() -> Result<(u64, u8), i64> {
+    let r = syscall1(abi::SYS_PTY_OPEN, 0);
+    if r < 0 {
+        return Err(r);
+    }
+    let fd = (r >> 32) as u64;
+    let slot = (r & 0xff) as u8;
+    Ok((fd, slot))
+}
+
+pub fn shm_create(len: u64) -> Result<u64, i64> {
+    let r = syscall1(abi::SYS_SHM_CREATE, len);
+    if r < 0 { Err(r) } else { Ok(r as u64) }
+}
+
+pub fn shm_map(id: u64) -> Result<u64, i64> {
+    let r = syscall1(abi::SYS_SHM_MAP, id);
+    if r < 0 { Err(r) } else { Ok(r as u64) }
+}
+
+pub fn shm_grant(id: u64, pid: u64) -> Result<(), i64> {
+    let r = syscall4(abi::SYS_SHM_GRANT, id, pid, 0, 0);
+    if r < 0 { Err(r) } else { Ok(()) }
+}
+
+pub fn tcp_peer_pid(fd: u64) -> Result<u64, i64> {
+    let r = syscall1(abi::SYS_TCP_PEER_PID, fd);
+    if r < 0 { Err(r) } else { Ok(r as u64) }
+}
+
+pub fn shm_free(id: u64) -> Result<(), i64> {
+    let r = syscall1(abi::SYS_SHM_FREE, id);
+    if r < 0 { Err(r) } else { Ok(()) }
+}
+
+/// Stdio atado a `Console::Pty(slot)` para `spawn_io_full`.
+pub fn fd_pty_stdio(slot: u8) -> u64 {
+    abi::FD_PTY_TTY_BASE - slot as u64
+}
+
 pub fn input_poll(out: &mut [abi::InputEvent]) -> i64 {
     syscall4(
         abi::SYS_INPUT_POLL,
@@ -818,6 +930,17 @@ pub fn getrandom(buf: &mut [u8]) -> i64 {
 
 pub fn set_tls(base: u64) -> i64 {
     syscall1(abi::SYS_SET_TLS, base)
+}
+
+/// Cerrojo consultivo sobre un fichero abierto (N-004).
+///
+/// `op` es `LOCK_SH` o `LOCK_EX`, **siempre** con `LOCK_NB`: esperar no está
+/// implementado y sin esa bandera devuelve `ENOSYS`. `LOCK_UN` suelta.
+///
+/// Consultivo: no impide leer ni escribir a quien no lo pide. Coordina a los
+/// que colaboran, que es lo que necesita una base de datos.
+pub fn flock(fd: u64, op: u64) -> i64 {
+    syscall4(abi::SYS_FLOCK, fd, op, 0, 0)
 }
 
 pub fn mprotect(addr: u64, len: u64, prot: u64) -> i64 {

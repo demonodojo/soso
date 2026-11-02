@@ -89,6 +89,11 @@ fn page_overlap_wx(loads: &[Load]) -> Option<(u64, u32, u32)> {
 
 fn scan_file(path: &Path) -> Result<(), String> {
     let data = fs::read(path).map_err(|e| e.to_string())?;
+    // Firmware de otras arquitecturas (p. ej. `gsp-*.bin`, del procesador GSP de
+    // NVIDIA) viaja en forma de ELF, pero el kernel nunca lo carga como programa.
+    if data.starts_with(b"\x7fELF") && u16_at(&data, 18).is_some_and(|m| m != 62) {
+        return Ok(());
+    }
     let loads = loads_from_elf(&data)?;
     if let Some((page, fa, fb)) = page_overlap_wx(&loads) {
         return Err(format!(
@@ -143,6 +148,19 @@ pub fn verificar_rootfs(root: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ignora_elf_de_otra_arquitectura() {
+        let dir = std::env::temp_dir().join(format!("elf-wx-otra-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("fw.bin");
+        let mut b = vec![0u8; 128];
+        b[0..4].copy_from_slice(b"\x7fELF");
+        b[18..20].copy_from_slice(&243u16.to_le_bytes()); // EM_RISCV
+        fs::write(&f, &b).unwrap();
+        assert!(scan_file(&f).is_ok());
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn rechaza_wx_mismo_segmento() {

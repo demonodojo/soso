@@ -41,6 +41,13 @@ pub struct Lector {
     prefijo_i: usize,
     /// Push-to-talk: F4 → transcripción insertada en la línea.
     hook_ptt: Option<fn() -> Option<String>>,
+    /// Última línea no vacía aceptada con Enter.
+    ultimo: Option<String>,
+    /// Lo que había escrito antes de pulsar flecha arriba.
+    borrador: Option<String>,
+    en_historial: bool,
+    /// 0 nada, 1 se vio ESC, 2 se vio `ESC [`.
+    esc: u8,
 }
 
 impl Default for Lector {
@@ -59,6 +66,10 @@ impl Lector {
             prefijo: None,
             prefijo_i: 0,
             hook_ptt: None,
+            ultimo: None,
+            borrador: None,
+            en_historial: false,
+            esc: 0,
         }
     }
 
@@ -128,6 +139,9 @@ impl Lector {
                 continue;
             }
             let c = byte[0];
+            if self.comer_esc(c) {
+                continue;
+            }
             let cr = core::mem::replace(&mut self.cr_previo, c == b'\r');
             match c {
                 b'\n' if cr => {}
@@ -135,8 +149,15 @@ impl Lector {
                     self.eco_str("\n");
                     let len = self.len;
                     self.len = 0;
+                    self.en_historial = false;
+                    self.borrador = None;
                     match core::str::from_utf8(&self.linea[..len]) {
-                        Ok(s) => return Ok(Some(String::from(s))),
+                        Ok(s) => {
+                            if !s.is_empty() {
+                                self.ultimo = Some(String::from(s));
+                            }
+                            return Ok(Some(String::from(s)));
+                        }
                         Err(_) => crate::println!("entrada descartada: no es UTF-8 válido"),
                     }
                 }
@@ -196,6 +217,78 @@ impl Lector {
         self.len -= n;
         // Una celda en pantalla por carácter, aunque ocupe varios bytes.
         self.eco_str("\x08 \x08");
+    }
+
+    /// `true` si el byte formaba parte de `ESC [` (flecha) y no hay que insertarlo.
+    fn comer_esc(&mut self, c: u8) -> bool {
+        match self.esc {
+            0 if c == 0x1b => {
+                self.esc = 1;
+                true
+            }
+            1 if c == b'[' => {
+                self.esc = 2;
+                true
+            }
+            2 => {
+                self.esc = 0;
+                match c {
+                    b'A' => self.traer_ultimo(),
+                    b'B' => self.soltar_ultimo(),
+                    _ => {}
+                }
+                true
+            }
+            0 => false,
+            _ => {
+                self.esc = 0;
+                false
+            }
+        }
+    }
+
+    fn traer_ultimo(&mut self) {
+        let Some(texto) = self.ultimo.clone() else {
+            return;
+        };
+        if !self.en_historial {
+            self.borrador = Some(self.texto_actual());
+            self.en_historial = true;
+        }
+        self.reemplazar(&texto);
+    }
+
+    fn soltar_ultimo(&mut self) {
+        if !self.en_historial {
+            return;
+        }
+        self.en_historial = false;
+        let texto = self.borrador.take().unwrap_or_default();
+        self.reemplazar(&texto);
+    }
+
+    fn texto_actual(&self) -> String {
+        core::str::from_utf8(&self.linea[..self.len])
+            .map(String::from)
+            .unwrap_or_default()
+    }
+
+    fn reemplazar(&mut self, texto: &str) {
+        let chars = core::str::from_utf8(&self.linea[..self.len])
+            .map(|s| s.chars().count())
+            .unwrap_or(self.len);
+        for _ in 0..chars {
+            self.eco_str("\x08 \x08");
+        }
+        self.len = 0;
+        for b in texto.bytes() {
+            if self.len >= self.linea.len() {
+                break;
+            }
+            self.linea[self.len] = b;
+            self.len += 1;
+        }
+        self.eco_str(core::str::from_utf8(&self.linea[..self.len]).unwrap_or(""));
     }
 
     fn eco_str(&self, s: &str) {

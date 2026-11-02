@@ -5,6 +5,10 @@ edition = "2024"
 publish = false
 description = "Wrapper del enlazador wild para soso (Hito 3d)"
 
+# El nombre lo fija `targets/x86_64-unknown-soso.json` (`"linker": "wild-soso"`).
+# Se llamaba `wild`, así que ni el target ni el bootstrap lo encontraban nunca
+# — y como el envoltorio invoca `wild`, poner su directorio en el PATH hacía
+# que se llamara a sí mismo. Ver T68.
 [[bin]]
-name = "wild"
+name = "wild-soso"
 path = "src/main.rs"

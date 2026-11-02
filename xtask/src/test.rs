@@ -37,7 +37,12 @@ const HALT_EXIT: i32 = 33;
 /// 96M deja 31. **Con 72M la inferencia muere a media generación** —pasó una
 /// vez y falló a la siguiente, así que es inestable, no marginal— y un gate que
 /// falla a veces no vale para nada. 96M es el valor que aguanta.
-const RECLAIM_MEM: &str = "96M";
+///
+/// Con el kernel de 2026-11-02 (44 MB en dev) ni 96M ni 128M arrancan: el
+/// bootloader UEFI muere en `allocate_pages` al cargar el kernel
+/// (`OUT_OF_RESOURCES`, sin llegar a imprimir nada del kernel). 160M arranca y
+/// deja 51 MiB libres tras el heap (192M deja 67, 256M deja 99).
+const RECLAIM_MEM: &str = "160M";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ShardId {

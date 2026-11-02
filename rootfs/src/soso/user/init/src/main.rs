@@ -94,6 +94,21 @@ fn main(args: &[String]) -> u8 {
     if cmd == "env-check" {
         return env_check();
     }
+    if cmd == "shm-check" {
+        return shm_check(op);
+    }
+    if cmd == "shm-deny-check" {
+        return shm_deny_check(op);
+    }
+    if cmd == "nx-exec-test" {
+        return nx_exec_test();
+    }
+    if cmd == "mprotect-exec-ok" {
+        return mprotect_exec_ok();
+    }
+    if cmd == "text-ro-test" {
+        return text_ro_test();
+    }
     if cmd == "log" {
         libsoso::logln!("{}", args[1..].join(" "));
         return 0;
@@ -122,6 +137,74 @@ fn env_check() -> u8 {
         return 1;
     }
     0
+}
+
+fn shm_check(id_str: &str) -> u8 {
+    let _ = sys::sleep_ms(200);
+    let id: u64 = id_str.bytes().fold(0u64, |acc, b| {
+        acc.saturating_mul(10).saturating_add((b - b'0') as u64)
+    });
+    let va = match sys::shm_map(id) {
+        Ok(v) => v,
+        Err(_) => return 1,
+    };
+    let magic = unsafe { core::ptr::read_volatile(va as *const u64) };
+    if magic != 0x1122_3344_5566_7788 {
+        return 2;
+    }
+    let _ = sys::munmap(va, 4096);
+    0
+}
+
+fn shm_deny_check(id_str: &str) -> u8 {
+    let id: u64 = id_str.bytes().fold(0u64, |acc, b| {
+        acc.saturating_mul(10).saturating_add((b - b'0') as u64)
+    });
+    match sys::shm_map(id) {
+        Err(e) if e == -abi::EPERM => 0,
+        Ok(_) => 1,
+        Err(_) => 2,
+    }
+}
+
+fn nx_exec_test() -> u8 {
+    let base = sys::mmap(0, 4096, u64::MAX, 0);
+    if base < 0 {
+        return 1;
+    }
+    unsafe {
+        *(base as *mut u8) = 0xC3;
+    }
+    type RetFn = extern "C" fn();
+    let f: RetFn = unsafe { core::mem::transmute(base as usize) };
+    f();
+    3
+}
+
+fn mprotect_exec_ok() -> u8 {
+    let base = sys::mmap(0, 4096, u64::MAX, 0);
+    if base < 0 {
+        return 1;
+    }
+    unsafe {
+        *(base as *mut u8) = 0xC3;
+    }
+    if sys::mprotect(base as u64, 4096, abi::PROT_READ | abi::PROT_EXEC) != 0 {
+        return 2;
+    }
+    type RetFn = extern "C" fn();
+    let f: RetFn = unsafe { core::mem::transmute(base as usize) };
+    f();
+    0
+}
+
+fn text_ro_test() -> u8 {
+    extern "C" fn marcador_ro() {}
+    let p = marcador_ro as *const () as *mut u8;
+    unsafe {
+        core::ptr::write_volatile(p, 0);
+    }
+    4
 }
 
 fn modo_mprotect_test() -> u8 {
@@ -562,7 +645,8 @@ fn suite() -> u8 {
     check!(sys::kill(sleeper, abi::SIGPROBE) > 0, "kill(0) sondea sleeper vivo");
     check!(sys::kill(1, abi::SIGPROBE) > 0, "kill(0) a PID 1 existe");
     check!(sys::kill(99_999, abi::SIGPROBE) < 0, "kill(0) ESRCH si no existe");
-    check!(sys::kill(sleeper, abi::SIGINT) > 0, "kill SIGINT al sleeper");
+    let _ = sys::sleep_ms(200);
+    check!(sys::kill(sleeper, abi::SIGINT) > 0, "kill SIGINT al sleeper dormido");
     check!(
         sys::wait() == Ok((sleeper as u64, abi::exit_by_signal(abi::SIGINT as u8))),
         "wait sleeper interrumpido (130)"
@@ -575,7 +659,8 @@ fn suite() -> u8 {
     check!(g1 > 0 && g2 > 0, "spawn par para kill de grupo");
     check!(sys::setpgid(g1 as u64, g1 as u64) == 0, "setpgid líder");
     check!(sys::setpgid(g2 as u64, g1 as u64) == 0, "setpgid segundo al grupo");
-    check!(sys::kill(-(g1 as i64), abi::SIGINT) >= 2, "kill(-pgid) al par");
+    let _ = sys::sleep_ms(200);
+    check!(sys::kill(-(g1 as i64), abi::SIGINT) >= 2, "kill(-pgid) al par dormido");
     let mut interrumpidos = 0u8;
     for _ in 0..2 {
         if let Ok((_, code)) = sys::wait() {
@@ -635,11 +720,23 @@ fn suite() -> u8 {
             return 1;
         }
     };
-    check!(sys::write(w, b"abc") == 3, "pipe write");
+    check!(sys::dup2(r, 21) == 21, "dup2 del lector de pipe");
+    sys::close(r);
+    let r = 21;
+    check!(sys::write(w, b"abc") == 3, "pipe write tras cerrar lector original");
     let mut pbuf = [0u8; 8];
     let pn = sys::read(r, &mut pbuf);
     check!(pn == 3 && &pbuf[..3] == b"abc", "pipe read ({pn} bytes)");
+    // dup2 mantiene vivo el escritor: cerrar el original no puede dar EOF.
+    check!(sys::dup2(w, 20) == 20, "dup2 del escritor de pipe");
     sys::close(w);
+    let pending = sys::read_timeout(r, &mut pbuf, 10);
+    check!(pending < 0, "pipe duplicado espera datos, no EOF ({pending})");
+    check!(sys::write(20, b"dup") == 3, "escribir por pipe duplicado");
+    let pn = sys::read(r, &mut pbuf);
+    check!(pn == 3 && &pbuf[..3] == b"dup", "leer pipe duplicado");
+    sys::close(20);
+    check!(sys::read(r, &mut pbuf) == 0, "EOF al cerrar último escritor");
     sys::close(r);
 
     // O_APPEND: segunda escritura concatena.
@@ -701,6 +798,55 @@ fn suite() -> u8 {
         check!(
             sys::wait() == Ok((pid as u64, 255)),
             "mprotect interior (fault+presente) RO mata al write"
+        );
+        let pid = sys::spawn_io_ex(
+            "/bin/init",
+            &["init", "nx-exec-test"],
+            &[],
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+        );
+        check!(pid > 0, "spawn nx-exec-test");
+        check!(
+            sys::wait() == Ok((pid as u64, 255)),
+            "ejecución en mmap NX mata al hijo"
+        );
+        let pid = sys::spawn_io_ex(
+            "/bin/init",
+            &["init", "text-ro-test"],
+            &[],
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+        );
+        check!(pid > 0, "spawn text-ro-test");
+        check!(
+            sys::wait() == Ok((pid as u64, 255)),
+            "escritura en .text mata al hijo"
+        );
+        let pid = sys::spawn_io_ex(
+            "/bin/init",
+            &["init", "mprotect-exec-ok"],
+            &[],
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+            abi::FD_INHERIT_TTY,
+        );
+        check!(pid > 0, "spawn mprotect-exec-ok");
+        check!(
+            sys::wait() == Ok((pid as u64, 0)),
+            "mprotect R|X tras escribir ret funciona"
+        );
+        let wx_base = sys::mmap(0, 4096, u64::MAX, 0);
+        check!(wx_base > 0, "mmap para mprotect W|X");
+        check!(
+            sys::mprotect(
+                wx_base as u64,
+                4096,
+                abi::PROT_READ | abi::PROT_WRITE | abi::PROT_EXEC
+            ) < 0,
+            "mprotect W|X devuelve error"
         );
         let base = sys::mmap(0, 4096, u64::MAX, 0);
         check!(base > 0, "mmap anónimo para mremap");
@@ -1902,6 +2048,107 @@ fn suite() -> u8 {
         let _ = sys::close(9);
         let _ = sys::close(fd2 as u64);
         let _ = sys::unlink("/tmp/sh-test/b");
+    }
+
+    // Escritorio: pseudo-terminal y memoria compartida.
+    {
+        let Ok((master, slot)) = sys::pty_open() else {
+            check!(false, "SYS_PTY_OPEN");
+            return 1;
+        };
+        let tty = sys::fd_pty_stdio(slot);
+        let fds = [tty, tty, tty, abi::FD_KERNEL_LOG];
+        // sosh no tiene `-c`: ejecuta el guion que se le nombre. Antes el test
+        // pasaba por casualidad (el «no existe» de sosh contiene «pty-eco») y
+        // sosh salía con 1.
+        let guion = sys::open("/tmp/pty-eco.sh", abi::O_WRONLY | abi::O_CREAT | abi::O_TRUNC);
+        check!(guion >= 0, "open guion pty");
+        check!(sys::write(guion as u64, b"echo pty-eco\n") == 13, "escribir guion pty");
+        let _ = sys::close(guion as u64);
+        let pid = sys::spawn_io_full("/bin/sosh", &["/bin/sosh", "/tmp/pty-eco.sh"], &[], fds);
+        check!(pid > 0, "spawn sosh en pty (pid {pid})");
+        let mut out = [0u8; 64];
+        let mut got = 0usize;
+        for _ in 0..200 {
+            let n = sys::read(master, &mut out[got..]);
+            if n > 0 {
+                got += n as usize;
+                if core::str::from_utf8(&out[..got])
+                    .ok()
+                    .is_some_and(|s| s.contains("pty-eco"))
+                {
+                    break;
+                }
+            }
+            let _ = sys::sleep_ms(10);
+        }
+        check!(
+            core::str::from_utf8(&out[..got])
+                .ok()
+                .is_some_and(|s| s.contains("pty-eco")),
+            "eco por pty (leí {got} B: {:?})",
+            core::str::from_utf8(&out[..got]).unwrap_or("?")
+        );
+        let w = sys::wait();
+        let _ = sys::unlink("/tmp/pty-eco.sh");
+        check!(w == Ok((pid as u64, 0)), "sosh eco en pty termina (pid {pid}, wait {w:?})");
+        // Un guion con `cat` (lee la pty hasta el fin de los tiempos) hace de
+        // proceso largo: sosh no tiene `-c` ni `sleep`.
+        let guion = sys::open("/tmp/pty-cat.sh", abi::O_WRONLY | abi::O_CREAT | abi::O_TRUNC);
+        check!(guion >= 0, "open guion pty cat");
+        check!(sys::write(guion as u64, b"cat\n") == 4, "escribir guion pty cat");
+        let _ = sys::close(guion as u64);
+        let sleeper = sys::spawn_io_full("/bin/sosh", &["/bin/sosh", "/tmp/pty-cat.sh"], &[], fds);
+        check!(sleeper > 0, "spawn cat en pty");
+        let _ = sys::sleep_ms(1500);
+        let _ = sys::write(master, &[0x03]);
+        let w = sys::wait();
+        let _ = sys::unlink("/tmp/pty-cat.sh");
+        // Murió `cat` por el SIGINT y sosh, que es una shell, sobrevive y sale
+        // con el fallo de su hijo. Si el Ctrl-C no llegara, `wait` no volvería.
+        check!(
+            matches!(w, Ok((p, c)) if p == sleeper as u64 && c != 0),
+            "Ctrl-C vía maestro pty (wait {w:?})"
+        );
+        check!(sys::close(master) == 0, "close maestro pty");
+
+        let id = match sys::shm_create(4096) {
+            Ok(i) => i,
+            Err(e) => {
+                check!(false, "shm_create ({e})");
+                return 1;
+            }
+        };
+        let va = match sys::shm_map(id) {
+            Ok(v) => v,
+            Err(e) => {
+                check!(false, "shm_map ({e})");
+                return 1;
+            }
+        };
+        unsafe {
+            core::ptr::write_volatile(va as *mut u64, 0x1122_3344_5566_7788);
+        }
+        let deny_arg = alloc::format!("shm-deny-check {id}");
+        let deny_child = sys::spawn("/bin/init", &deny_arg);
+        check!(deny_child > 0, "spawn shm-deny-check");
+        check!(
+            sys::wait() == Ok((deny_child as u64, 0)),
+            "shm_map sin concesión devuelve EPERM"
+        );
+        let arg = alloc::format!("shm-check {id}");
+        let child = sys::spawn("/bin/init", &arg);
+        check!(child > 0, "spawn shm-check");
+        check!(sys::shm_grant(id, child as u64).is_ok(), "shm_grant al hijo");
+        check!(sys::wait() == Ok((child as u64, 0)), "shm-check ok");
+        unsafe {
+            check!(
+                core::ptr::read_volatile(va as *const u64) == 0x1122_3344_5566_7788,
+                "shm sigue visible tras hijo"
+            );
+        }
+        check!(sys::munmap(va, 4096) == 0, "munmap shm");
+        check!(sys::shm_free(id).is_ok(), "shm_free");
     }
 
     // Hito 2: humo soso-std en guest.

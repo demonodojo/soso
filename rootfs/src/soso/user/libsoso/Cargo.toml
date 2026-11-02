@@ -3,11 +3,9 @@ name = "libsoso"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-2.0-only"
-build = "build.rs"
-
 [dependencies]
 soso-abi = { workspace = true }
+soso-alloc = { path = "../../crates/soso-alloc" }
 talc = { version = "4", default-features = false, features = ["lock_api"] }
 spin = { version = "0.9", features = ["lock_api"] }
 getrandom = { workspace = true }
-linked_list_allocator = "0.10"

@@ -32,7 +32,10 @@ pub const SYS_SPAWN: u64 = 10;
 pub const SYS_WAIT: u64 = 11;
 pub const SYS_SBRK: u64 = 12;
 pub const SYS_SLEEP_MS: u64 = 13;
+/// Apaga (`HALT_APAGAR`) o reinicia (`HALT_REINICIAR`). No vuelve si funciona.
 pub const SYS_HALT: u64 = 14;
+pub const HALT_APAGAR: u64 = 0;
+pub const HALT_REINICIAR: u64 = 1;
 pub const SYS_MMAP: u64 = 15;
 pub const SYS_MUNMAP: u64 = 16;
 pub const SYS_GPU_INFO: u64 = 17;
@@ -94,6 +97,20 @@ pub const SYS_FB_SET_MODE: u64 = 63;
 pub const SYS_FB_PRESENT: u64 = 64;
 /// Lee eventos de ratón/teclado pendientes.
 pub const SYS_INPUT_POLL: u64 = 65;
+/// Copia un rectángulo del búfer lógico al GOP. `(buf, len, x|y<<16, w|h<<16)`.
+pub const SYS_FB_PRESENT_RECT: u64 = 97;
+/// Abre un pseudo-terminal: devuelve `(fd_maestro << 32) | ranura`.
+pub const SYS_PTY_OPEN: u64 = 98;
+/// Reserva memoria compartida (`len` alineado); devuelve `id`.
+pub const SYS_SHM_CREATE: u64 = 99;
+/// Mapea un segmento compartido; devuelve la dirección virtual.
+pub const SYS_SHM_MAP: u64 = 100;
+/// Libera la referencia del creador sobre `id`.
+pub const SYS_SHM_FREE: u64 = 101;
+/// Concede a `pid` el derecho de mapear el segmento `id` (sólo el creador).
+pub const SYS_SHM_GRANT: u64 = 102;
+/// Devuelve el pid del otro extremo en un socket loopback conectado.
+pub const SYS_TCP_PEER_PID: u64 = 103;
 /// Espera a que termine un QMD encolado con `GPU_SUBMIT_ASYNC` (arg1 = fence).
 pub const SYS_GPU_WAIT: u64 = 66;
 /// Copia la versión del kernel a un buffer de usuario (`buf`, `len`). Devuelve bytes escritos.
@@ -313,6 +330,24 @@ pub struct InputEvent {
     pub _pad: [u8; 3],
 }
 
+/// `InputEvent.button` en `INPUT_MOUSE_MOVE` y `INPUT_MOUSE_BTN` es la máscara
+/// de botones (bit0 izquierdo, bit1 derecho, bit2 central), también mientras
+/// el puntero solo se desplaza. En `INPUT_KEY` son modificadores.
+pub const INPUT_MOD_SHIFT: u32 = 1 << 0;
+pub const INPUT_MOD_CTRL: u32 = 1 << 1;
+pub const INPUT_MOD_ALT: u32 = 1 << 2;
+pub const INPUT_MOD_ALTGR: u32 = 1 << 3;
+pub const INPUT_MOD_SUPER: u32 = 1 << 4;
+
+const _: () = {
+    use core::mem::{offset_of, size_of};
+    assert!(size_of::<FbInfo>() == 24);
+    assert!(size_of::<InputEvent>() == 24);
+    assert!(offset_of!(FbInfo, width) == 4);
+    assert!(offset_of!(InputEvent, kind) == 0);
+    assert!(offset_of!(InputEvent, key) == 16);
+};
+
 /// Formato de captura para `SYS_AUDIO_OPEN`.
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
@@ -353,6 +388,53 @@ pub const SYS_READ_TIMEOUT: u64 = 32;
 pub const FUTEX_WAIT: u64 = 0;
 pub const FUTEX_WAKE: u64 = 1;
 
+/// Cerrojo consultivo sobre un fichero abierto: `(fd, op)` (N-004).
+///
+/// Es un syscall **nuevo**, no un cambio de uno existente: añadir no obliga a
+/// tocar `ABI_VERSION`, que se compara por igualdad exacta y dejaría fuera a
+/// todas las máquinas instaladas.
+pub const SYS_FLOCK: u64 = 93;
+
+/// `ftruncate(fd, len)`: `File::set_len`. Syscall nuevo (no sube `ABI_VERSION`).
+pub const SYS_FTRUNCATE: u64 = 94;
+
+/// `exit_group(code)`: termina todos los hilos del proceso y sale con `code`.
+/// `SYS_EXIT` desde un hilo sólo termina ese hilo (es lo que usa `thread_start`);
+/// `process::exit` y `abort` desde un hilo tienen que acabar con el proceso, o
+/// el resto queda esperando para siempre a quien murió con un candado cogido.
+/// Syscall nuevo (no sube `ABI_VERSION`).
+pub const SYS_EXIT_GROUP: u64 = 95;
+
+/// Configuración de red: `(op, ptr, len)`. Syscall nuevo (no sube
+/// `ABI_VERSION`); `NetInfo` no cambia de tamaño, así que un `ip` viejo del
+/// rootfs sigue funcionando con un kernel nuevo.
+///
+/// - [`NETCFG_ESTADO`]: `ptr` = `*mut NetDetalle`.
+/// - [`NETCFG_ESTATICA`]: `ptr`/`len` = texto `<a.b.c.d/p> [gw <ip>] [dns <ip>]`.
+/// - [`NETCFG_DHCP`], [`NETCFG_MEDIO_AUTO`]: sin argumentos.
+pub const SYS_NETCFG: u64 = 96;
+/// Rellena un [`NetDetalle`].
+pub const NETCFG_ESTADO: u64 = 0;
+/// Fija una IPv4 estática y la guarda en `/etc/red.conf`.
+pub const NETCFG_ESTATICA: u64 = 1;
+/// Vuelve a DHCP y deja `/etc/red.conf` en `modo=dhcp`.
+pub const NETCFG_DHCP: u64 = 2;
+/// Suelta la preferencia por WiFi: el cable con enlace vuelve a mandar.
+pub const NETCFG_MEDIO_AUTO: u64 = 3;
+
+/// Cerrojo compartido: varios lectores a la vez, ningún escritor.
+pub const LOCK_SH: u64 = 1;
+/// Cerrojo exclusivo: un solo titular.
+pub const LOCK_EX: u64 = 2;
+/// Suelta el cerrojo de este proceso sobre el fichero.
+pub const LOCK_UN: u64 = 8;
+/// Con `LOCK_SH` o `LOCK_EX`: no esperar; devolver `EAGAIN` si no se puede.
+///
+/// **Hoy es obligatorio**, porque esperar no está implementado: sin él,
+/// `flock` devuelve `ENOSYS`. Prometer una espera que no existe sería peor que
+/// no tenerla.
+pub const LOCK_NB: u64 = 4;
+
 // ---- señales (modelo mínimo) ----
 
 /// `kill(pid, 0)`: sondeo. El proceso existe y no es zombi; no entrega señal.
@@ -370,6 +452,7 @@ pub const fn exit_by_signal(sig: u8) -> u8 {
 
 pub const PROT_READ: u64 = 1;
 pub const PROT_WRITE: u64 = 2;
+pub const PROT_EXEC: u64 = 4;
 pub const MAP_PRIVATE: u64 = 1;
 pub const MAP_SHARED: u64 = 2;
 pub const MAP_ANONYMOUS: u64 = 4;
@@ -404,6 +487,22 @@ pub const GPU_ALLOC_VRAM: u64 = 1;
 ///
 /// Negativo es siempre `-errno`.
 
+/// Índice en `GpuInfo::_pad` para `gpu_gfx3d_ready` / Sal `gpu_off_gfx3d()`.
+pub const GPU_PAD_GFX3D: usize = 0;
+/// 1 = backend NVDisplay listo (`GNVD`, auto con HDMI).
+pub const GPU_PAD_SCANOUT_NVDISP: usize = 1;
+/// 1 = backend GOP (`GPRES`, shadow + `fb_present`).
+pub const GPU_PAD_SCANOUT_GOP: usize = 2;
+/// Backend tras `SOSO_SCANOUT` + capacidades (`scanout::effective_backend`).
+pub const GPU_PAD_SCANOUT_EFFECTIVE: usize = 3;
+
+pub const GPU_SCANOUT_EFFECTIVE_NONE: u8 = 0;
+pub const GPU_SCANOUT_EFFECTIVE_NVDISP: u8 = 1;
+pub const GPU_SCANOUT_EFFECTIVE_GOP: u8 = 2;
+
+/// Longitud de `GPRES` / `GNVD` en `SYS_GPU_SUBMIT` (tag 5 B + rt u64 + w/h/pitch u32).
+pub const GPU_CMD_PRES_LEN: usize = 25;
+
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
 pub struct GpuInfo {
@@ -428,6 +527,12 @@ pub struct GpuInfo {
     ///
     /// Sale del hueco de `_pad`, así que el layout no cambia.
     pub vram_bufs: u8,
+    /// Capacidades de scanout y 3D (layout fijo; ver [PLAN-NVDISPLAY.md] en el repo).
+    ///
+    /// - `_pad[0]` (`GPU_PAD_GFX3D`): motor 3D (`CLEAR_SURFACE`) listo (H1).
+    /// - `_pad[1]` (`GPU_PAD_SCANOUT_NVDISP`): head HDMI/DP operativo (F8).
+    /// - `_pad[2]` (`GPU_PAD_SCANOUT_GOP`): shadow GOP fijado (F1).
+    /// - `_pad[3]` (`GPU_PAD_SCANOUT_EFFECTIVE`): `GPU_SCANOUT_EFFECTIVE_*`.
     pub _pad: [u8; 4],
     pub vram_total: u64,
     pub vram_free: u64,
@@ -502,6 +607,45 @@ pub struct NetInfo {
     pub gateway: [u8; 4],
     pub mac: [u8; 6],
     pub _pad2: [u8; 2],
+}
+
+/// El medio activo tiene enlace: cable con carrier o WiFi autorizada.
+pub const NETDET_ENLACE: u32 = 1;
+/// La dirección es la de `/etc/red.conf`.
+pub const NETDET_ESTATICA: u32 = 2;
+/// El usuario eligió WiFi con `wifi connect`: el cable no la sustituye.
+pub const NETDET_PREF_WIFI: u32 = 4;
+/// `lease_secs` es válido (la dirección viene de un lease DHCP).
+pub const NETDET_LEASE: u32 = 8;
+
+/// Por qué la máquina tiene o no dirección (`NetDetalle.motivo`).
+pub const NET_MOTIVO_SIN_ADAPTADOR: u8 = 0;
+/// Cable sin enlace.
+pub const NET_MOTIVO_SIN_ENLACE: u8 = 1;
+/// WiFi asociada o caída, sin claves.
+pub const NET_MOTIVO_WIFI_SIN_AUTORIZAR: u8 = 2;
+/// Enlace arriba, sin lease todavía.
+pub const NET_MOTIVO_ESPERANDO_DHCP: u8 = 3;
+/// Dirección de un lease DHCP.
+pub const NET_MOTIVO_DHCP: u8 = 4;
+/// Dirección de `/etc/red.conf`.
+pub const NET_MOTIVO_ESTATICA: u8 = 5;
+/// Dirección de respaldo de QEMU: no hubo DHCP.
+pub const NET_MOTIVO_RESPALDO: u8 = 6;
+
+/// Respuesta de `SYS_NETCFG` / `NETCFG_ESTADO`: lo que `NetInfo` no cuenta.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+pub struct NetDetalle {
+    pub flags: u32,
+    pub motivo: u8,
+    /// Servidores de `dns` que valen.
+    pub dns_n: u8,
+    pub _pad: [u8; 2],
+    /// Segundos que quedan de lease (con `NETDET_LEASE`).
+    pub lease_secs: u32,
+    /// Los servidores a los que de verdad se pregunta, en orden.
+    pub dns: [[u8; 4]; 3],
 }
 
 /// Valores de `ProcInfo.state` (syscall `SYS_PSLIST`).
@@ -593,6 +737,7 @@ pub struct DiskInfo {
 
 // ---- errnos (el kernel devuelve -errno) ----
 
+pub const EPERM: i64 = 1;
 pub const ENOENT: i64 = 2;
 pub const ESRCH: i64 = 3;
 pub const EINTR: i64 = 4;
@@ -657,10 +802,12 @@ pub const FD_INHERIT_TTY: u64 = u64::MAX;
 /// acaba en el puerto serie, no mezclado con la sesión remota. El diagnóstico
 /// de askd va por fd 3 (`logln!`), no por estos fds.
 pub const FD_SERIAL_TTY: u64 = u64::MAX - 1;
+/// Stdio atado a `Console::Pty(slot)`: `FD_PTY_TTY_BASE - slot` (slot 0..7).
+pub const FD_PTY_TTY_BASE: u64 = u64::MAX - 3;
 /// Canal de registro del kernel (fd 3 por defecto); sólo válido en el slot `log_fd`.
 pub const FD_KERNEL_LOG: u64 = u64::MAX - 2;
-/// Deja el slot vacío (`write` devuelve `EBADF`).
-pub const FD_CLOSED: u64 = u64::MAX - 3;
+/// Deja el slot vacío (`write` devuelve `EBADF`). Fuera del rango pty (`MAX-3`..=`MAX-10`).
+pub const FD_CLOSED: u64 = u64::MAX - 11;
 
 /// Descriptor estándar de registro de eventos de aplicación.
 pub const LOG_FD: u64 = 3;
@@ -675,7 +822,16 @@ pub const LOG_MSG_MAX: usize = 1024;
 
 /// ¿`spec` de stdio es un centinela (no un fd del padre)?
 pub fn stdio_es_tty(spec: u64) -> bool {
-    spec == FD_INHERIT_TTY || spec == FD_SERIAL_TTY
+    spec == FD_INHERIT_TTY || spec == FD_SERIAL_TTY || pty_stdio_slot(spec).is_some()
+}
+
+/// Si `spec` es un centinela de pty, devuelve la ranura 0..7.
+pub fn pty_stdio_slot(spec: u64) -> Option<u8> {
+    if spec > FD_PTY_TTY_BASE || spec < FD_PTY_TTY_BASE - 7 {
+        None
+    } else {
+        Some((FD_PTY_TTY_BASE - spec) as u8)
+    }
 }
 
 /// ¿`spec` es un centinela de spawn (tty, log del kernel o cerrado)?
@@ -771,6 +927,39 @@ pub struct SpawnIo {
     /// y el extra en pila suele ser cero — interpretarlo como stdin vaciaba
     /// la tty de sosh al fallar un spawn.
     pub log_fd: u64,
+    /// Directorio de trabajo del hijo (N-003). `cwd_len == 0` **hereda el del
+    /// padre**, que es lo que se hacía antes de existir este campo.
+    ///
+    /// Que el cero signifique «como siempre» no es casualidad: es la lección
+    /// que dejó `log_fd` justo aquí arriba. Un cliente anterior a este campo
+    /// escribe una estructura más corta, el kernel lee el resto como ceros, y
+    /// lo único seguro es que ese cero sea la conducta de antes. Con `log_fd`
+    /// hubo que redefinirlo porque el 0 ya significaba otra cosa; aquí sale
+    /// gratis.
+    pub cwd_ptr: u64,
+    pub cwd_len: u64,
+}
+
+#[cfg(test)]
+mod gpu_info_pad_tests {
+    use super::*;
+    use core::mem::{offset_of, size_of};
+
+    #[test]
+    fn pad_field_offsets() {
+        assert_eq!(offset_of!(GpuInfo, present), 0);
+        assert_eq!(offset_of!(GpuInfo, vendor), 1);
+        assert_eq!(offset_of!(GpuInfo, compute), 2);
+        assert_eq!(offset_of!(GpuInfo, vram_bufs), 3);
+        assert_eq!(offset_of!(GpuInfo, _pad), 4);
+        assert_eq!(size_of::<GpuInfo>(), 104);
+        assert_eq!(GPU_PAD_GFX3D, 0);
+        assert_eq!(GPU_PAD_SCANOUT_NVDISP, 1);
+        assert_eq!(GPU_PAD_SCANOUT_GOP, 2);
+        assert_eq!(GPU_PAD_SCANOUT_EFFECTIVE, 3);
+        assert_eq!(GPU_SCANOUT_EFFECTIVE_NVDISP, 1);
+        assert_eq!(GPU_CMD_PRES_LEN, 25);
+    }
 }
 
 #[cfg(test)]

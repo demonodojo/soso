@@ -307,8 +307,12 @@ fn sync_src() {
         "user/soso-std-test",
         "user/soso-test-sosofs",
         "crates/soso-abi",
+        // `libsoso` depende de `soso-alloc` (T74) y éste del `linked_list_allocator`
+        // vendorizado: sin ellos el build de Forja no resuelve el workspace.
+        "crates/soso-alloc",
         "crates/soso-std",
         "crates/soso-update-core",
+        "vendor/linked_list_allocator",
         "config/rust-soso",
         "tools/sosoas",
         "tools/wild-soso",

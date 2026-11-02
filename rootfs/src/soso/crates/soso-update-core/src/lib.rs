@@ -30,6 +30,8 @@ pub mod mailbox;
 #[cfg(feature = "full")]
 pub mod manifest;
 #[cfg(feature = "full")]
+pub mod oferta;
+#[cfg(feature = "full")]
 pub mod pack;
 #[cfg(feature = "full")]
 pub mod plan;
@@ -131,7 +133,14 @@ pub const PACK_SKIP_DIRS: &[(&str, Excluido)] = &[
     ("var/forja-cache/", Excluido::Cache),
     ("var/forja-out/", Excluido::Cache),
     ("var/cache/", Excluido::Cache),
+    ("var/paquetes/", Excluido::ConfigLocal),
     ("var/self-improvement/", Excluido::Cache),
+    // Bancos de las tareas de automejora (`tests/self-improvement/native/*/
+    // preparar.sh`). El de T42 eran 350 MB de fuentes vendidas que la 0.3.8
+    // publicó.
+    ("var/t41/", Excluido::Cache),
+    ("var/t42/", Excluido::Cache),
+    ("var/t80/", Excluido::Cache),
     ("tmp/", Excluido::Temporal),
     ("src/soso/", Excluido::Fuente),
     // `/models` es el volumen sosomfs, de sólo lectura: `create_file` devuelve
@@ -144,11 +153,15 @@ pub const PACK_SKIP_DIRS: &[(&str, Excluido)] = &[
 /// Ficheros sueltos que no van en el pack: claves y configuración de la máquina.
 pub const PACK_SKIP: &[(&str, Excluido)] = &[
     ("etc/ssh_host_key", Excluido::ConfigLocal),
+    ("etc/ssh_host_mldsa", Excluido::ConfigLocal),
     ("etc/authorized_key", Excluido::ConfigLocal),
+    ("etc/authorized_mldsa", Excluido::ConfigLocal),
     ("etc/wifi.conf", Excluido::ConfigLocal),
     ("etc/llm.conf", Excluido::ConfigLocal),
     ("etc/voz.conf", Excluido::ConfigLocal),
     ("etc/actualiza.conf", Excluido::ConfigLocal),
+    ("etc/paquetes.conf", Excluido::ConfigLocal),
+    ("etc/notifybug.conf", Excluido::ConfigLocal),
     ("etc/soso-live.bytes", Excluido::ConfigLocal),
     ("etc/grub-linux.txt", Excluido::ConfigLocal),
     ("etc/soso-release", Excluido::ConfigLocal),
