@@ -5,7 +5,7 @@
 use soso_llm_core::tokenizer::Tokenizer;
 
 fn tokenizer() -> Tokenizer {
-    let ruta = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/qwen2.5-coder-7b-model/tokenizer.som");
+    let ruta = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/self-improvement/reference/tokenizer.som");
     let datos = std::fs::read(ruta).unwrap_or_else(|e| panic!("falta {ruta}: {e}"));
     Tokenizer::parse(&datos).expect("tokenizer.som")
 }

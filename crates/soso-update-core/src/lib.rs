@@ -153,7 +153,9 @@ pub const PACK_SKIP_DIRS: &[(&str, Excluido)] = &[
 /// Ficheros sueltos que no van en el pack: claves y configuración de la máquina.
 pub const PACK_SKIP: &[(&str, Excluido)] = &[
     ("etc/ssh_host_key", Excluido::ConfigLocal),
+    ("etc/ssh_host_mldsa", Excluido::ConfigLocal),
     ("etc/authorized_key", Excluido::ConfigLocal),
+    ("etc/authorized_mldsa", Excluido::ConfigLocal),
     ("etc/wifi.conf", Excluido::ConfigLocal),
     ("etc/llm.conf", Excluido::ConfigLocal),
     ("etc/voz.conf", Excluido::ConfigLocal),

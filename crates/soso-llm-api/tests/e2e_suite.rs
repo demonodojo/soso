@@ -18,13 +18,11 @@ use soso_llm_core::tokenizer::Tokenizer;
 const TOKEN: &str = "e2e-token";
 
 fn tok() -> Tokenizer {
+    // El tokenizer de referencia va versionado: `target/` no, y el render exige vocabulario.
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/qwen2.5-coder-3b-model/tokenizer.som");
-    if let Ok(data) = std::fs::read(&path) {
-        Tokenizer::parse(&data).expect("tokenizer T03")
-    } else {
-        Tokenizer::byte_level()
-    }
+        .join("../../tests/self-improvement/reference/tokenizer.som");
+    let data = std::fs::read(&path).unwrap_or_else(|e| panic!("falta {}: {e}", path.display()));
+    Tokenizer::parse(&data).expect("tokenizer de referencia")
 }
 
 fn profile() -> ModelProfile {

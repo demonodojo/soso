@@ -68,6 +68,7 @@ pub mod evaluacion;
 pub mod pruebas;
 pub mod runner;
 pub mod receta;
+mod receta_libstd;
 pub mod report;
 pub mod recovery;
 #[cfg(feature = "std")]

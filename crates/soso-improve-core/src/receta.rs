@@ -61,6 +61,10 @@ pub enum Accion {
     /// Como [`Accion::Sustituir`], pero si ni la marca ni `busca` están no
     /// había un estado viejo que reparar: no es un ancla rota.
     Reparar { busca: String, reemplazo: String },
+    /// Varias sustituciones en orden (la primera aparición de cada `busca`).
+    /// Es el diff neto de un parche largo del script; la marca del paso dice
+    /// si ya está aplicado entero.
+    Cambios { cambios: Vec<(String, String)> },
     /// Quita las líneas cuyo texto es exactamente `linea`. Que no estén es
     /// el estado aplicado: la marca no se busca como presencia.
     QuitarLinea { linea: String },
@@ -234,6 +238,22 @@ fn comprobar_uno<A: Archivos>(fs: &A, raiz: &str, paso: &Paso) -> Resultado {
                 }
             }
         },
+        Accion::Cambios { cambios } => match leer_texto(fs, &destino) {
+            Err(r) => r,
+            Ok(texto) => {
+                if texto.contains(&paso.marca) {
+                    Resultado::YaEstaba
+                } else if let Some((busca, _)) = cambios.iter().find(|(b, _)| !texto.contains(b)) {
+                    Resultado::Fallo(format!(
+                        "no encontré el fragmento {:?} en {}",
+                        busca.lines().next().unwrap_or(""),
+                        paso.fichero
+                    ))
+                } else {
+                    Resultado::Falta
+                }
+            }
+        },
         _ => {
             let Ok(bytes) = fs.leer(&destino) else {
                 return Resultado::Fallo(format!("no pude leer {destino}"));
@@ -395,6 +415,22 @@ fn aplicar_uno<A: Archivos>(fs: &mut A, raiz: &str, paso: &Paso) -> Resultado {
             Some(s) => s,
             None => return Resultado::YaEstaba,
         },
+        Accion::Cambios { cambios } => {
+            let mut s = texto.clone();
+            for (busca, reemplazo) in cambios {
+                match sustituir_primera(&s, busca, reemplazo) {
+                    Some(n) => s = n,
+                    None => {
+                        return Resultado::Fallo(format!(
+                            "no encontré el fragmento {:?} en {}",
+                            busca.lines().next().unwrap_or(""),
+                            paso.fichero
+                        ));
+                    }
+                }
+            }
+            s
+        }
         Accion::QuitarLinea { linea } => match quitar_linea(&texto, linea) {
             Some(s) => s,
             None => return Resultado::YaEstaba,
@@ -772,6 +808,7 @@ fn accion_canon(a: &Accion) -> String {
         Accion::Anadir { texto } => format!("anadir {texto:?}"),
         Accion::Sustituir { busca, reemplazo } => format!("sustituir {busca:?} {reemplazo:?}"),
         Accion::Reparar { busca, reemplazo } => format!("reparar {busca:?} {reemplazo:?}"),
+        Accion::Cambios { cambios } => format!("cambios {cambios:?}"),
         Accion::QuitarLinea { linea } => format!("quitar {linea:?}"),
         Accion::AsegurarLinea {
             presente,
@@ -856,7 +893,7 @@ pub fn pasos_libstd(plantillas: &str, soso_rt: &str) -> Vec<Paso> {
         "library/std/src/os/soso".into(),
         "library/std/src/sys/pal/soso".into(),
     ];
-    alloc::vec![
+    let mut pasos = alloc::vec![
         paso(
             "PAL: os/soso",
             "library/std/src/os/soso",
@@ -933,10 +970,30 @@ pub fn pasos_libstd(plantillas: &str, soso_rt: &str) -> Vec<Paso> {
         paso(
             "sys/exit.rs: salida por soso_rt",
             "library/std/src/sys/exit.rs",
-            "soso_rt::exit",
+            "soso_rt::exit_group",
             Accion::InsertarTrasLinea {
                 ancla: "hermit_abi::exit(code)".into(),
-                texto: "        target_os = \"soso\" => soso_rt::exit(code),".into(),
+                texto: "        target_os = \"soso\" => soso_rt::exit_group(code),".into(),
+            },
+        ),
+        // C-048: leer un fichero en soso es SYS_OPEN + SYS_READ, no unsupported.
+        paso(
+            "sys/fs: rama soso",
+            "library/std/src/sys/fs/mod.rs",
+            "target_os = \"soso\"",
+            Accion::Reparar {
+                busca: "    _ => {\n        mod unsupported;\n        use unsupported as imp;\n    }\n}".into(),
+                reemplazo: "    target_os = \"soso\" => {\n        mod soso;\n        use soso as imp;\n    }\n    _ => {\n        mod unsupported;\n        use unsupported as imp;\n    }\n}".into(),
+            },
+        ),
+        // C-050: memmap2 necesita el fd del `File` de std; `inner` es privado.
+        paso(
+            "fs.rs: as_raw_fd_soso",
+            "library/std/src/fs.rs",
+            "as_raw_fd_soso",
+            Accion::Reparar {
+                busca: "        self.inner.file_attr().map(Metadata)\n    }\n".into(),
+                reemplazo: "        self.inner.file_attr().map(Metadata)\n    }\n\n    /// Descriptor de soso. Lo usa memmap2 para `SYS_MMAP`.\n    #[cfg(target_os = \"soso\")]\n    #[stable(feature = \"rust1\", since = \"1.0.0\")]\n    pub fn as_raw_fd_soso(&self) -> u64 {\n        self.inner.as_raw_fd()\n    }\n".into(),
             },
         ),
         paso(
@@ -1106,7 +1163,9 @@ pub fn pasos_libstd(plantillas: &str, soso_rt: &str) -> Vec<Paso> {
                 "    target_os = \"soso\" => {\n        mod soso;\n        pub use soso::*;\n    }\n",
             ),
         ),
-    ]
+    ];
+    pasos.extend(super::receta_libstd::pasos());
+    pasos
 }
 
 /// Fixture de T75: un directorio poseído con un resto y contenido viejo, y un

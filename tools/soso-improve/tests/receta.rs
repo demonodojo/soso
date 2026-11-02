@@ -265,8 +265,12 @@ fn la_receta_iguala_al_script_sobre_la_revision_fijada() {
     let mal: Vec<_> = inf.iter().filter(|i| !i.ok()).collect();
     assert!(mal.is_empty(), "la receta falló: {mal:?}");
     assert_mismos(&script, &rust);
-    assert!(!script.join("library/std/src/sys/pal/soso/dl.rs").exists());
-    assert!(!rust.join("library/std/src/sys/pal/soso/dl.rs").exists());
+    // `plantar` deja `resto.rs`: el espejo tiene que retirarlo. `dl.rs`, en cambio, es de la plantilla.
+    for raiz in [&script, &rust] {
+        assert!(!raiz.join("library/std/src/sys/pal/soso/resto.rs").exists());
+        assert!(!raiz.join("library/std/src/os/soso/resto.rs").exists());
+        assert!(raiz.join("library/std/src/sys/pal/soso/dl.rs").exists());
+    }
 
     let antes = huellas(&rust);
     let segunda = aplicar_receta(&rust);
@@ -336,7 +340,8 @@ fn converge_desde_el_parche_viejo() {
     let mal: Vec<_> = inf.iter().filter(|i| !i.ok()).collect();
     assert!(mal.is_empty(), "no convergió: {mal:?}");
     assert_mismos(&script, &rust);
-    assert!(!rust.join("library/std/src/sys/pal/soso/dl.rs").exists());
+    assert!(!rust.join("library/std/src/sys/pal/soso/resto.rs").exists());
+    assert!(rust.join("library/std/src/sys/pal/soso/dl.rs").exists());
     let ffi = std::fs::read_to_string(rust.join("library/std/src/os/soso/ffi.rs")).unwrap();
     assert!(!ffi.contains("contenido viejo"));
 }
