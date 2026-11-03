@@ -44,6 +44,8 @@ fn demo_principal() -> Int ! io, alloc
                         if rn > 0
                             if msg_get_op(rep) == op_cerrar_wm()
                                 fin = 1
+                            if msg_get_op(rep) == op_visible()
+                                _pv = print_str("demo-cliente: VISIBLE " + int_to_str(msg_get_u32(rep, 4)) + "\n")
                         if uptime_ms() - t0 > 15000
                             fin = 1
                         if fin == 0

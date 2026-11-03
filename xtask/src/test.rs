@@ -3032,6 +3032,10 @@ fn ssh_soso_wm_demo_cliente(key: &Path, ssh_port: u16) -> Result<(), String> {
     if !texto.contains("soso-wm: prueba OK") || !texto.contains("DEMO_OK") {
         return Err(format!("soso-wm --prueba (demo) falló: {texto:?}"));
     }
+    // T3: el cliente real recibió el aviso al taparse y al destaparse su panel.
+    if !texto.contains("demo-cliente: VISIBLE 0") || !texto.contains("demo-cliente: VISIBLE 1") {
+        return Err(format!("demo-cliente no recibió VISIBLE 0 y 1: {texto:?}"));
+    }
     Ok(())
 }
 

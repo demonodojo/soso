@@ -83,6 +83,8 @@ fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, 
         demo = 0
         uno = 0
         dos = 0
+        demo_i = -1
+        vstage = 0
         while ok == 0
             if uptime_ms() - t0 > 20000
                 ok = 2
@@ -106,10 +108,24 @@ fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, 
                             wy = tab_get(tab, fi, tab_wy())
                             if prueba_pixel_ok(compos, clen, stride, bpp, fmt, wx + 10, wy + wm_bar_h(st) + 10, 40, 80, 200) != 0
                                 demo = 1
+                                demo_i = fi
+                # T3 de extremo a extremo con un cliente real (demo-cliente ignora
+                # VISIBLE): al tapar su panel con otra pestaña el WM le avisa (vis=2),
+                # al destaparlo también (vis=1) y la conexión sigue viva.
                 if uno != 0
                     if dos != 0
                         if demo != 0
-                            ok = 1
+                            if vstage == 0
+                                _ig = wm_integrar(st, t1i, demo_i)
+                                _ac = grupo_activar(tab, t1i)
+                                vstage = 1
+                            elsif vstage == 1
+                                if tab_get(tab, demo_i, tab_vis()) == 2
+                                    _ac2 = grupo_activar(tab, demo_i)
+                                    vstage = 2
+                            elsif vstage == 2
+                                if tab_get(tab, demo_i, tab_vis()) == 1
+                                    ok = 1
         close_fd(listener)
         if ok == 2
             _d1 = print_str(d"soso-wm: prueba plazo agotado; faltan:")
@@ -119,6 +135,11 @@ fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, 
                 _d3 = print_str(d" eco-dos")
             if demo == 0
                 _d4 = print_str(d" pixel-demo")
+            if demo != 0
+                if vstage != 2
+                    _d6 = print_str(d" visible-oculto")
+                else
+                    _d7 = print_str(d" visible-reaparece")
             _d5 = print_str(d"\n")
         if ok == 1
             _pr = print_str(d"soso-wm: prueba OK\n")
