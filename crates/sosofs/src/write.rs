@@ -31,7 +31,7 @@ struct Cow {
 impl<D: BlockDevice> Sosofs<D> {
     // ---- asignador (bitmap dual) ----
 
-    fn bit(map: &[u8], b: u64) -> bool {
+    pub(crate) fn bit(map: &[u8], b: u64) -> bool {
         map[(b / 8) as usize] & (1 << (b % 8)) != 0
     }
 
@@ -375,8 +375,9 @@ impl<D: BlockDevice> Sosofs<D> {
         }
         // Bitmap CoW: liberar los bloques del bitmap viejo y asignar nuevos.
         let old_start = self.sb.bitmap_start.get();
-        let nblocks = self.sb.bitmap_blocks.get() as u64;
-        for i in 0..nblocks {
+        let old_blocks = self.sb.bitmap_blocks.get() as u64;
+        let nblocks = (self.bitmap.len() / BLOCK_SIZE) as u64;
+        for i in 0..old_blocks {
             self.free_block(old_start + i);
         }
         let new_start = self.alloc_run(nblocks)?;
@@ -442,8 +443,9 @@ impl<D: BlockDevice> Sosofs<D> {
         self.bitmap.resize(new_bitmap_bytes, 0);
         self.frozen.resize(new_bitmap_bytes, 0);
 
+        // `sb.bitmap_blocks` se queda con la cuenta VIEJA hasta publicar: el commit libera
+        // con ella el bitmap viejo; la tirada nueva se dimensiona con la longitud del mapa.
         self.sb.block_count = new_block_count.into();
-        self.sb.bitmap_blocks = (new_bitmap_blocks as u32).into();
         self.dirty = true;
         self.commit()
     }

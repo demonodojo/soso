@@ -28,7 +28,10 @@ const MAC: &str = "52:54:00:12:34:42";
 /// para que se note que `relayout` estira la última partición sin necesitar
 /// un tamaño fijo — el live crece con los modelos que se empaqueten
 /// (`SOSO_LIVE_MODELS`), y una constante fija queda obsoleta en cuanto crece.
-const TARGET_MARGIN_BYTES: u64 = 512 * 1024 * 1024;
+/// Sitio de sobra en el destino: el instalador reparte el rootfs a un cuarto del disco
+/// y la prueba comprueba que lo hace: el rootfs del live ya son ~2,6 GiB, así que
+/// hace falta un destino de más de ~10 GiB para que un cuarto sea mayor que eso.
+const TARGET_MARGIN_BYTES: u64 = 12 * 1024 * 1024 * 1024;
 
 pub fn run() {
     let root = crate::project_root();
@@ -89,7 +92,7 @@ pub fn run() {
     }
 
     // --- 2. la GPT del destino --------------------------------------------
-    for (nombre, r) in comprobar_gpt(&target, &guids_antes) {
+    for (nombre, r) in comprobar_gpt(&target, &live, &guids_antes) {
         let ok = r.is_ok();
         marca(
             &match r {
@@ -423,6 +426,11 @@ fn fase_arranque_solo(
     if !log.contains("fs: sosofs") {
         return Err("arrancó pero no montó el rootfs instalado".into());
     }
+    // El rootfs se instaló más grande que el del live: el montaje tiene que haberlo
+    // estirado hasta llenar su partición.
+    if !log.contains("fs: sosofs grow") {
+        return Err("el rootfs instalado no creció hasta su partición (falta «fs: sosofs grow»)".into());
+    }
     if !log.contains("hwscan: inventario sin cambios") {
         return Err(format!(
             "arranque nativo debería omitir hwscan (falta «inventario sin cambios»); \
@@ -656,7 +664,7 @@ impl Drop for Matar {
 
 // ------------------------------------------------------- comprobaciones
 
-fn comprobar_gpt(target: &Path, guids_usb: &[String]) -> Vec<(String, Result<(), String>)> {
+fn comprobar_gpt(target: &Path, live: &Path, guids_usb: &[String]) -> Vec<(String, Result<(), String>)> {
     let mut out = Vec::new();
 
     out.push((
@@ -691,7 +699,55 @@ fn comprobar_gpt(target: &Path, guids_usb: &[String]) -> Vec<(String, Result<(),
     ));
 
     out.push(("magic sosofs en la partición 2".to_string(), sosofs_en_p2(target)));
+    out.push((
+        "el rootfs crece con el disco y el resto sigue contiguo".to_string(),
+        rootfs_crecido(&tabla, &sgdisk_print(live).unwrap_or_default(), total),
+    ));
     out
+}
+
+fn particiones(tabla: &str) -> Vec<(u32, u64, u64)> {
+    let mut parts = Vec::new();
+    for line in tabla.lines() {
+        let c: Vec<&str> = line.split_whitespace().collect();
+        if c.len() < 3 {
+            continue;
+        }
+        if let (Ok(n), Ok(a), Ok(b)) = (c[0].parse::<u32>(), c[1].parse::<u64>(), c[2].parse::<u64>()) {
+            parts.push((n, a, b));
+        }
+    }
+    parts
+}
+
+/// En un destino mayor, el rootfs tiene que ser más grande que el del live, y las
+/// particiones de detrás (SOSOINSTALL y modelos) tienen que seguir pegadas a él, sin
+/// huecos ni solapes.
+fn rootfs_crecido(tabla: &str, tabla_live: &str, total_sectores: u64) -> Result<(), String> {
+    let parts = particiones(tabla);
+    let p = |n: u32| parts.iter().find(|x| x.0 == n).copied();
+    let (Some(p2), Some(p3), Some(p4)) = (p(2), p(3), p(4)) else {
+        return Err("faltan particiones 2, 3 o 4".into());
+    };
+    let live_p2 = particiones(tabla_live)
+        .into_iter()
+        .find(|x| x.0 == 2)
+        .ok_or("el live no tiene partición 2")?;
+    let antes = (live_p2.2 - live_p2.1 + 1) / 2048;
+    let mib = (p2.2 - p2.1 + 1) / 2048;
+    if mib <= antes {
+        return Err(format!(
+            "el rootfs sigue en {mib} MiB, como el del live (disco de {} MiB)",
+            total_sectores / 2048
+        ));
+    }
+    if p4.1 != p2.2 + 1 {
+        return Err(format!("SOSOINSTALL empieza en {} y el rootfs acaba en {}", p4.1, p2.2));
+    }
+    if p3.1 != p4.2 + 1 {
+        return Err(format!("modelos empiezan en {} y SOSOINSTALL acaba en {}", p3.1, p4.2));
+    }
+    Ok(())
 }
 
 fn sgdisk_verify(img: &Path) -> Result<(), String> {

@@ -557,6 +557,99 @@ fn wr64(b: &mut [u8], off: usize, v: u64) {
     b[off..off + 8].copy_from_slice(&v.to_le_bytes());
 }
 
+// ------------------------------------------------- Rootfs más grande al instalar
+
+/// Tope del rootfs que el instalador reparte por sí solo: 64 GiB.
+pub const MAX_ROOT_SECTORS: u64 = 64 * 1024 * 1024 * 1024 / SECTOR as u64;
+
+/// Los huecos se mueven en múltiplos de 1 MiB.
+pub const GROW_ALIGN: u64 = 2048;
+
+/// Cómo clonar para que el rootfs salga más grande que el del live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrowRoot {
+    /// Sectores desde LBA 0 que se copian donde estaban (hasta el final del rootfs).
+    pub head_sectors: u64,
+    /// Lo que crece el rootfs; lo que va detrás de él se copia `delta` sectores más allá.
+    pub delta: u64,
+}
+
+/// Decide cuánto estirar la partición `root` al instalar en un disco de
+/// `dst_sectors`. El rootfs pasa a un cuarto del disco (con tope de
+/// [`MAX_ROOT_SECTORS`]) y el resto sigue yendo a modelos. `copy_sectors` es el
+/// prefijo del origen que se va a copiar: detrás del rootfs tiene que seguir
+/// cabiendo lo copiado más 1 MiB de margen.
+///
+/// Nunca encoge: sin sitio o sin necesidad devuelve `delta == 0`.
+pub fn plan_grow_root(
+    hdr: &Header,
+    entries: &[u8],
+    root: usize,
+    dst_sectors: u64,
+    copy_sectors: u64,
+) -> GrowRoot {
+    let ninguno = GrowRoot {
+        head_sectors: 0,
+        delta: 0,
+    };
+    let Some(e) = entry(entries, hdr, root) else {
+        return ninguno;
+    };
+    if !entry_used(e) {
+        return ninguno;
+    }
+    let head = entry_last_lba(e) + 1;
+    if copy_sectors < head {
+        return ninguno;
+    }
+    let actual = head - entry_first_lba(e);
+    let deseado = (dst_sectors / 4).min(MAX_ROOT_SECTORS).max(actual);
+    let cabe = dst_sectors.saturating_sub(copy_sectors + GROW_ALIGN);
+    let mut delta = (deseado - actual).min(cabe);
+    delta -= delta % GROW_ALIGN;
+    GrowRoot {
+        head_sectors: head,
+        delta,
+    }
+}
+
+/// Aplica `delta` a la tabla: `root` termina `delta` sectores después y todo lo
+/// que iba detrás de él se desplaza igual (los modelos, que van al final, se
+/// recortan al disco). Hay que llamarla antes de [`relayout`].
+pub fn apply_grow_root(
+    hdr: &Header,
+    entries: &mut [u8],
+    root: usize,
+    delta: u64,
+    disk_sectors: u64,
+) {
+    if delta == 0 {
+        return;
+    }
+    let Some(e) = entry(entries, hdr, root) else {
+        return;
+    };
+    let root_last = entry_last_lba(e);
+    let tope = disk_sectors
+        .saturating_sub(hdr.entries_sectors() + 2);
+    for i in 0..hdr.num_entries as usize {
+        let Some(e) = entry_mut(entries, hdr, i) else {
+            break;
+        };
+        if !entry_used(e) {
+            continue;
+        }
+        if i == root {
+            set_entry_last_lba(e, root_last + delta);
+        } else if entry_first_lba(e) > root_last {
+            let first = entry_first_lba(e) + delta;
+            let last = (entry_last_lba(e) + delta).min(tope).max(first);
+            set_entry_first_lba(e, first);
+            set_entry_last_lba(e, last);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -824,4 +917,81 @@ mod tests {
         assert_eq!(entry_first_lba(p4), 67584);
         assert_eq!(entry_last_lba(p4), 69631);
     }
+    /// Live con SOSOINSTALL (p4) entre rootfs y modelos, como lo graba `package-usb-live`.
+    fn live_con_p4() -> (Header, Vec<u8>) {
+        let hdr = base_header();
+        let mut entries = vec![0u8; (NUM * ESZ) as usize];
+        let parts = [
+            (T_ESP, 2048u64, 2048 + 45055, "EFI"),
+            (T_LINUX, 47104, 47104 + 20479, "sosofs"),
+            (T_LINUX, 69632, USB_SECTORS - 34, "modelos"),
+            (T_MSDATA, 67584, 69631, "SOSOINSTALL"),
+        ];
+        for (i, (ty, first, last, name)) in parts.iter().enumerate() {
+            let off = i * ESZ as usize;
+            let e = &mut entries[off..off + ESZ as usize];
+            e[0..16].copy_from_slice(&Guid::parse(ty).unwrap().0);
+            e[16..32].copy_from_slice(&Guid::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee0").unwrap().0);
+            wr64(e, 32, *first);
+            wr64(e, 40, *last);
+            for (j, c) in name.encode_utf16().enumerate() {
+                e[56 + j * 2..56 + j * 2 + 2].copy_from_slice(&c.to_le_bytes());
+            }
+        }
+        (hdr, entries)
+    }
+
+    #[test]
+    fn el_rootfs_crece_a_un_cuarto_del_disco() {
+        let (mut hdr, mut entries) = live_con_p4();
+        let disco = 256u64 * 1024 * 1024 * 1024 / 512;
+        let copiar = USB_SECTORS - 100;
+        let g = plan_grow_root(&hdr, &entries, 1, disco, copiar);
+        assert_eq!(g.head_sectors, 67584);
+        // 256 GiB / 4 = 64 GiB = el tope.
+        assert_eq!(g.delta % GROW_ALIGN, 0);
+        assert_eq!(67584 - 47104 + g.delta, MAX_ROOT_SECTORS);
+        apply_grow_root(&hdr, &mut entries, 1, g.delta, disco);
+        relayout(&mut hdr, &mut entries, disco).unwrap();
+        let p2 = entry(&entries, &hdr, 1).unwrap();
+        let p4 = entry(&entries, &hdr, 3).unwrap();
+        let p3 = entry(&entries, &hdr, 2).unwrap();
+        assert_eq!(entry_first_lba(p2), 47104);
+        assert_eq!(entry_last_lba(p2), 67583 + g.delta);
+        // Contiguas y en el mismo orden: rootfs, SOSOINSTALL, modelos.
+        assert_eq!(entry_first_lba(p4), entry_last_lba(p2) + 1);
+        assert_eq!(entry_first_lba(p3), entry_last_lba(p4) + 1);
+        assert_eq!(entry_last_lba(p3), disco - 34);
+    }
+
+    #[test]
+    fn en_un_disco_pequeno_el_rootfs_no_crece_de_mas() {
+        let (hdr, _) = live_con_p4();
+        let (_, entries) = live_con_p4();
+        // 8 GiB: un cuarto son 2 GiB.
+        let disco = 8u64 * 1024 * 1024 * 1024 / 512;
+        let g = plan_grow_root(&hdr, &entries, 1, disco, USB_SECTORS - 100);
+        assert_eq!(67584 - 47104 + g.delta, disco / 4);
+    }
+
+    #[test]
+    fn el_rootfs_no_roba_el_sitio_de_lo_copiado() {
+        let (hdr, entries) = live_con_p4();
+        // Disco justo para lo que se copia: no hay nada que repartir.
+        let copiar = USB_SECTORS - 100;
+        let g = plan_grow_root(&hdr, &entries, 1, copiar + GROW_ALIGN + 100, copiar);
+        assert_eq!(g.delta, 0);
+        // Y con el rootfs ya mayor que un cuarto no se encoge.
+        let g = plan_grow_root(&hdr, &entries, 1, 4 * 20480, copiar);
+        assert_eq!(g.delta, 0);
+    }
+
+    #[test]
+    fn sin_particion_de_rootfs_no_hay_plan() {
+        let (hdr, entries) = live_con_p4();
+        let g = plan_grow_root(&hdr, &entries, 50, 1 << 30, USB_SECTORS);
+        assert_eq!(g.delta, 0);
+        assert_eq!(g.head_sectors, 0);
+    }
+
 }

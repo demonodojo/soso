@@ -120,6 +120,21 @@ impl<D: BlockDevice> Sosofs<D> {
         self.dev
     }
 
+    /// Primer bloque del bitmap publicado (diagnóstico y pruebas).
+    pub fn bitmap_start(&self) -> u64 {
+        self.sb.bitmap_start.get()
+    }
+
+    /// ¿Está marcado como en uso en la generación en construcción? (diagnóstico y pruebas).
+    pub fn bloque_en_uso(&self, b: u64) -> bool {
+        b >= 2 && b < self.sb.block_count.get() && Self::bit(&self.bitmap, b)
+    }
+
+    /// Bloques que ocupa el bitmap publicado.
+    pub fn bitmap_blocks(&self) -> u32 {
+        self.sb.bitmap_blocks.get()
+    }
+
     pub fn block_count(&self) -> u64 {
         self.sb.block_count.get()
     }

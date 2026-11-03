@@ -26,7 +26,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use espfat_core::{FatError, Sectores, Volumen};
-use gptdisk::{Guid, Header, Plan};
+use gptdisk::{GrowRoot, Guid, Header, Plan};
 use libsoso::abi::{
     DISK_FLAG_BOOT, DISK_FLAG_EMPTY, DISK_FLAG_SOSO, DISK_KIND_NVME, DISK_KIND_USB, DiskInfo,
     O_RDONLY, UPD_WHICH_MAILBOX,
@@ -41,6 +41,8 @@ libsoso::entry!(main);
 /// dispositivo, ni troceada de más ni partida por el kernel.
 const CHUNK: usize = 512 * 1024;
 const SECTOR: usize = 512;
+/// Índice GPT del rootfs en el live (0 ESP, 1 rootfs, 2 modelos, 3 SOSOINSTALL).
+const GPT_ROOT: usize = 1;
 const SECTORS_PER_MFS_BLOCK: u64 = MFS_BLOCK as u64 / SECTOR as u64;
 const PROGRESS_INTERVAL_MS: u64 = 2000;
 const PROGRESS_STEP_MIB: u64 = 64;
@@ -420,10 +422,19 @@ fn read_gpt(id: u32) -> Option<(Header, Vec<u8>)> {
 /// Adapta la GPT recién clonada al disco destino y devuelve el GUID de su ESP
 /// —que es lo que el shim necesita para localizarla en el siguiente arranque—
 /// y su primera LBA, que hace falta para finalizarla como instalación.
-fn fix_gpt(id: u32, disk_sectors: u64, seed: u64) -> Result<(Guid, u64), &'static str> {
+fn fix_gpt(
+    id: u32,
+    disk_sectors: u64,
+    seed: u64,
+    crecer: GrowRoot,
+) -> Result<(Guid, u64), &'static str> {
     let (mut hdr, mut entries) = read_gpt(id).ok_or("no pude leer la GPT clonada")?;
     let bytes = hdr.entries_bytes();
     entries.resize(bytes.div_ceil(SECTOR) * SECTOR, 0);
+
+    // El clon dejó el rootfs con el tamaño del live y lo de detrás ya copiado
+    // `delta` sectores más allá: la tabla tiene que decir lo mismo.
+    gptdisk::apply_grow_root(&hdr, &mut entries, GPT_ROOT, crecer.delta, disk_sectors);
 
     let plan: Plan =
         gptdisk::relayout(&mut hdr, &mut entries, disk_sectors).map_err(|_| "relayout")?;
@@ -549,6 +560,7 @@ fn cmd_install(dst_id: u32, yes: bool, force: bool) -> u8 {
         return 1;
     }
 
+    let crecer = plan_crecimiento(src.id, dst.sectors, sectors);
     println!(
         "soso-install: {} (id {}) → {} (id {}), {} MiB",
         disk_name(src),
@@ -562,6 +574,14 @@ fn cmd_install(dst_id: u32, yes: bool, force: bool) -> u8 {
             "  imagen live {} MiB — omitiendo {} MiB de cola vacía en modelos",
             live_bytes / (1024 * 1024),
             (live_bytes - copy_bytes) / (1024 * 1024)
+        );
+    }
+    if crecer.delta > 0 {
+        let antes = rootfs_sectores(src.id).unwrap_or(0);
+        println!(
+            "  rootfs: {} MiB → {} MiB (el resto del disco va a modelos)",
+            antes / 2048,
+            (antes + crecer.delta) / 2048
         );
     }
     println!("  destino: {} [{}]", uso_disco(dst), nota_destino(dst));
@@ -590,7 +610,7 @@ fn cmd_install(dst_id: u32, yes: bool, force: bool) -> u8 {
     if !pausado {
         println!("soso-install: aviso: no pude pausar el log; el clon puede salir incoherente");
     }
-    let copiado = clonar(src.id, dst.id, copy_bytes);
+    let copiado = clonar(src.id, dst.id, copy_bytes, crecer);
     if pausado {
         sys::log_quiesce(false);
     }
@@ -604,7 +624,7 @@ fn cmd_install(dst_id: u32, yes: bool, force: bool) -> u8 {
     let seed = (sys::uptime_ms() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
         ^ dst.sectors
         ^ (dst.id as u64) << 32;
-    let (esp, esp_lba) = match fix_gpt(dst.id, dst.sectors, seed) {
+    let (esp, esp_lba) = match fix_gpt(dst.id, dst.sectors, seed, crecer) {
         Ok(v) => v,
         Err(e) => {
             println!("soso-install: no pude reparar la GPT del destino: {e}");
@@ -771,41 +791,106 @@ fn civil_desde_dias(dias: u64) -> (u64, u64, u64) {
     (y as u64, m as u64, d as u64)
 }
 
-fn clonar(src_id: u32, dst_id: u32, bytes: u64) -> bool {
+/// Cuánto estirar el rootfs del destino (ver `gptdisk::plan_grow_root`). Si no se puede
+/// leer la GPT del origen o no hay sitio, el clon sale como siempre.
+fn plan_crecimiento(src_id: u32, dst_sectors: u64, copy_sectors: u64) -> GrowRoot {
+    match read_gpt(src_id) {
+        Some((hdr, entries)) => {
+            gptdisk::plan_grow_root(&hdr, &entries, GPT_ROOT, dst_sectors, copy_sectors)
+        }
+        None => GrowRoot {
+            head_sectors: 0,
+            delta: 0,
+        },
+    }
+}
+
+/// Tamaño actual de la partición del rootfs en el origen, en sectores.
+fn rootfs_sectores(src_id: u32) -> Option<u64> {
+    let (hdr, entries) = read_gpt(src_id)?;
+    let e = gptdisk::entry(&entries, &hdr, GPT_ROOT)?;
+    Some(gptdisk::entry_last_lba(e) - gptdisk::entry_first_lba(e) + 1)
+}
+
+/// Copia `bytes` desde LBA 0. Si hay que estirar el rootfs, lo que va detrás de él
+/// (SOSOINSTALL y modelos) se copia `crecer.delta` sectores más allá.
+fn clonar(src_id: u32, dst_id: u32, bytes: u64, crecer: GrowRoot) -> bool {
     // En el heap, no en la pila: la pila de usuario son 64 KiB.
     let mut buf = vec![0u8; CHUNK];
-    let mut lba = 0u64;
-    let mut left = bytes as usize;
     let start_ms = sys::uptime_ms();
-    let mut last_report_ms = start_ms;
-    let mut last_report_done = 0u64;
+    let mut prog = Progreso {
+        start_ms,
+        last_ms: start_ms,
+        last_done: 0,
+    };
+    let total_sectores = bytes / SECTOR as u64;
+    let (cabeza, desplazar) = if crecer.delta > 0 && crecer.head_sectors <= total_sectores {
+        (crecer.head_sectors, crecer.delta)
+    } else {
+        (total_sectores, 0)
+    };
+    let tramos = [
+        (0u64, 0u64, cabeza),
+        (cabeza, cabeza + desplazar, total_sectores - cabeza),
+    ];
+    let mut hecho = 0u64;
+    for (src_lba, dst_lba, sectores) in tramos {
+        if !copiar_tramo(
+            src_id, dst_id, src_lba, dst_lba, sectores, &mut buf, &mut hecho, bytes, &mut prog,
+        ) {
+            return false;
+        }
+    }
+    imprimir_progreso(bytes, bytes, start_ms);
+    true
+}
+
+struct Progreso {
+    start_ms: i64,
+    last_ms: i64,
+    last_done: u64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copiar_tramo(
+    src_id: u32,
+    dst_id: u32,
+    mut src_lba: u64,
+    mut dst_lba: u64,
+    sectores: u64,
+    buf: &mut [u8],
+    hecho: &mut u64,
+    total: u64,
+    prog: &mut Progreso,
+) -> bool {
+    let mut left = sectores as usize * SECTOR;
     while left > 0 {
         let chunk = left.min(CHUNK) / SECTOR * SECTOR;
         if chunk == 0 {
             break;
         }
-        if sys::disk_read(src_id, lba, &mut buf[..chunk]) < 0 {
-            println!("soso-install: lectura falló en LBA {lba}");
+        if sys::disk_read(src_id, src_lba, &mut buf[..chunk]) < 0 {
+            println!("soso-install: lectura falló en LBA {src_lba}");
             return false;
         }
-        if sys::disk_write(dst_id, lba, &buf[..chunk]) < 0 {
-            println!("soso-install: escritura falló en LBA {lba}");
+        if sys::disk_write(dst_id, dst_lba, &buf[..chunk]) < 0 {
+            println!("soso-install: escritura falló en LBA {dst_lba}");
             return false;
         }
-        lba += (chunk / SECTOR) as u64;
+        src_lba += (chunk / SECTOR) as u64;
+        dst_lba += (chunk / SECTOR) as u64;
         left -= chunk;
-        let done = bytes - left as u64;
+        *hecho += chunk as u64;
         let now = sys::uptime_ms();
         let step_bytes = PROGRESS_STEP_MIB * 1024 * 1024;
-        if now.saturating_sub(last_report_ms) >= PROGRESS_INTERVAL_MS as i64
-            || done.saturating_sub(last_report_done) >= step_bytes
+        if now.saturating_sub(prog.last_ms) >= PROGRESS_INTERVAL_MS as i64
+            || hecho.saturating_sub(prog.last_done) >= step_bytes
         {
-            imprimir_progreso(done, bytes, start_ms);
-            last_report_ms = now;
-            last_report_done = done;
+            imprimir_progreso(*hecho, total, prog.start_ms);
+            prog.last_ms = now;
+            prog.last_done = *hecho;
         }
     }
-    imprimir_progreso(bytes, bytes, start_ms);
     true
 }
 

@@ -777,9 +777,10 @@ Para montarlo hay que saber dos cosas que no estaban escritas:
 - **En el live no se puede aplicar**, y no es un fallo: la transacción exige
   sitio para el respaldo que permite deshacerla, y el rootfs del live (384 MiB)
   va lleno. Hace falta un soso **instalado**.
-- `soso-install` deja el rootfs en **384 MiB fijos** aunque el disco sea de
-  8 GB; el resto va a la partición de modelos. Para tener sitio hay que
-  `soso-resize rootfs +N`, que mueve los datos de modelos y **no imprime
+- (Histórico) `soso-install` dejaba el rootfs en **384 MiB fijos** aunque el disco
+  fuera de 8 GB. Desde 2026-11-04 el instalador hace crecer el rootfs (un cuarto
+  del disco, con tope) y sosofs se amplía solo en el primer arranque. Para
+  cambiarlo después sigue `soso-resize rootfs +N`, que mueve los datos de modelos y **no imprime
   progreso**: mover 1 GB parece un cuelgue y no lo es (si se corta, reanuda solo
   — se ve `fs-resize: recuperando fase 2` en el arranque siguiente).
 
