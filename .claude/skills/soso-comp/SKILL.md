@@ -50,8 +50,11 @@ escritorio en [`docs/PLAN-ESCRITORIO.md`](../../docs/PLAN-ESCRITORIO.md).
 | `GUPRC` | SHM → textura VRAM (rect) |
 | `GSCEN` | Quads texturizados + present dañado (hot path) |
 | `GFRAM` | Blit CPU legacy hacia RT / shadow |
+| `GPRIM` | Escena de primitivas 2D (GSCEN v2): sólido, degradado, rrect, anillo, rejilla de texto. Kernel SASS `gprim` por el canal de cómputo; layout en `soso_wm_proto::gprim` / `comp_gprim_layout.sal`; ≤32 prims, cabecera 48 B + prims + PSF + celdas |
 | `GCLR3` | Clear RT (flag commit) |
 | `GPRES` / `GNVD` | Present explícito (demo; WM usa router vía `GSCEN`) |
+
+**PRIMS (op 37, WM→comp, :7432):** mensaje de 32 B (`len`@4, rect de present @8..24, flags@24) seguido de `len` bytes con un comando `GPRIM`. `soso-comp` rellena RT/dimensiones/pitch, lo lanza y contesta `PRIMS_ACK` (op 38, u32@4: 1 pintado, 0 = pinta tú en CPU); el primer rechazo del kernel se recuerda (`comp_st_gprim`). **El WM aún no lo emite** (el cromo se pinta en CPU). Prueba en la placa: cliente `gprim-prueba` y `docs/GPRIM-PRUEBA-HW.md`. En Sal el condicional es `elsif`, no `elif`.
 
 Longitudes y offsets: módulos `comp_*_layout.sal` y submódulos en `soso-wm-proto`.
 

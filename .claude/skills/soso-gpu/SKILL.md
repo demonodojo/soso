@@ -1126,6 +1126,7 @@ cargo xtask g1-check              # host: IOMMU/VFIO/firmware/BAR0
 cargo xtask g3-check              # bring-up GSP: firmware, módulos, fases
 ./scripts/l6-pack-firmware.sh     # empaqueta firmware GSP
 ./scripts/l6-g3-gsp-hostcheck.sh  # pasos 3-6 + G4d–G4f (chan/CE/compute) sin GPU ni sudo
+./scripts/gprim-hw-check.sh        # GPRIM: kernel gprim.cu vs oráculo Sal en la GPU del host + blobs SASS al día
 ./scripts/l6-g3-nvkm-inventory.sh nvkm_ola2.list   # inventario símbolos
 ./scripts/l6-kdump-setup.sh --status   # ¿el host capturaría el próximo cuelgue?
 # Ciclo VFIO (G5): sudo ./scripts/l6-g1-vfio-test.sh  (cap Gen3 automático)
@@ -1138,6 +1139,18 @@ cargo xtask g3-check              # bring-up GSP: firmware, módulos, fases
 passthrough a mano en vez de con `l6-g1-vfio-test.sh`, apaga con `halt` desde
 soso —no con Ctrl-C ni matando QEMU—, que es lo que dispara `gsp_fini`. En el
 log tiene que aparecer `GSP-RM apagado (… dma=off)` antes de que QEMU salga.
+
+## GPRIM (escena 2D en GPU, 2026-11-03)
+
+Kernel de cómputo `lxdde/ports/nouveau/gprim.cu` (un hilo por píxel, bloque 256x1, 9 parámetros,
+param_base 352 sm_86 / 896 sm_120). Se compila sin Docker: `python3 tools/gpu-prim/cubin.py`
+(NVRTC 12.8 → cubin → `l6-g4f-emit-sass.py`) y genera `sass_gprim_sm86|sm120.{c,json}`
+(sets `gsp_sass_set_gprim_*`, `sass_gprim.h`). VA `G12_SASS_VA` = `GSP_VA_BASE + 0x60000`.
+Cadena: comando `GPRIM` (`drivers/gpu.rs`) → `lxdde::submit_gprim` → `lx_nouveau_compute_gprim` →
+`gsp_compute_gprim` (prims y PSF en X, celdas en Y de `G6_RES`, ≤32 prims, PSF ≤0x1F000, celdas
+≤128 KiB). Registro no fatal: el log dice `compute — gprim (escena 2D) disponible` o `NO disponible`.
+Validación: `python3 tools/gpu-prim/validar.py` (host, oráculo Sal, 0 píxeles distintos) y en el guest
+`gprim-prueba`. **Sin probar aún en GPU dentro de soso**: guía en `docs/GPRIM-PRUEBA-HW.md`.
 
 ## Camino alternativo L6-H (CUDA en host) — **GO 2026-07-27**
 
