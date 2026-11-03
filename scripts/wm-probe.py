@@ -12,6 +12,8 @@ Pasos (se ejecutan en orden):
     type:texto         teclea texto (teclado español del guest)
     move:X,Y           puntero absoluto en píxeles de pantalla (QMP)
     click:X,Y          mueve y pulsa el botón izquierdo
+    rclick:X,Y         mueve y pulsa el botón derecho
+    dclick:X,Y         doble clic rápido (<400 ms entre pulsaciones)
     down:X,Y / up      pulsa / suelta el izquierdo (arrastrar: down, move, up)
     wait:SEGUNDOS
     shot:nombre        captura a DIR/nombre.png
@@ -82,8 +84,8 @@ class Qmp:
         self.ev([{"type": "abs", "data": {"axis": "x", "value": int(x * 32767 / (W - 1))}},
                  {"type": "abs", "data": {"axis": "y", "value": int(y * 32767 / (H - 1))}}])
 
-    def boton(self, abajo):
-        self.ev([{"type": "btn", "data": {"button": "left", "down": abajo}}])
+    def boton(self, abajo, cual="left"):
+        self.ev([{"type": "btn", "data": {"button": cual, "down": abajo}}])
 
 
 def main():
@@ -129,12 +131,17 @@ def main():
                 mon.cmd("sendkey " + v, 0.3)
             elif k == "type":
                 teclear(v.replace("\\n", "\n"))
-            elif k in ("move", "click", "down"):
+            elif k in ("move", "click", "down", "dclick", "rclick"):
                 x, y = (int(n) for n in v.split(","))
                 qmp.mover(x, y)
                 time.sleep(0.4)
                 if k == "click":
                     qmp.boton(True); time.sleep(0.2); qmp.boton(False)
+                elif k == "rclick":
+                    qmp.boton(True, "right"); time.sleep(0.2); qmp.boton(False, "right")
+                elif k == "dclick":
+                    for _ in range(2):
+                        qmp.boton(True); time.sleep(0.08); qmp.boton(False); time.sleep(0.08)
                 elif k == "down":
                     qmp.boton(True)
             elif k == "up":

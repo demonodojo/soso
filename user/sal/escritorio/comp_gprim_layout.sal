@@ -1,0 +1,59 @@
+import "mate.sal"
+import "escena.sal"
+
+# Layout de `GPRIM` (GSCEN v2): ver crates/soso-wm-proto/src/gprim.rs. Las primitivas son
+# las de `escena.sal`, byte a byte, así que el backend GPU interpreta la misma lista.
+
+fn comp_gprim_hdr_len() -> Int
+    32
+
+fn comp_gprim_max() -> Int
+    24
+
+fn comp_gprim_buf_len() -> Int
+    comp_gprim_hdr_len() + comp_gprim_max() * esc_prim_bytes()
+
+fn comp_gprim_flag_clear() -> Int
+    1
+
+fn comp_gprim_patch_hdr(buf: Int, rt_h: Int, fb_w: Int, fb_h: Int, pitch: Int, flags: Int, n: Int) -> Int ! alloc
+    b = bytes_view_mem(buf, comp_gprim_buf_len())
+    _t = bytes_set_u8(b, 0, 71)
+    _t2 = bytes_set_u8(b, 1, 80)
+    _t3 = bytes_set_u8(b, 2, 82)
+    _t4 = bytes_set_u8(b, 3, 73)
+    _t5 = bytes_set_u8(b, 4, 77)
+    _r = bytes_set_i64(b, 5, rt_h)
+    _w = bytes_set_u32(b, 13, fb_w)
+    _h = bytes_set_u32(b, 17, fb_h)
+    _p = bytes_set_u32(b, 21, pitch)
+    _f = bytes_set_u32(b, 25, flags)
+    _n0 = bytes_set_u8(b, 29, n % 256)
+    _n1 = bytes_set_u8(b, 30, n / 256)
+    _n2 = bytes_set_u8(b, 31, 0)
+    0
+
+# Copia la primitiva `k` de la escena `e` a la ranura `qi` del comando; devuelve 1 si cabía.
+fn comp_gprim_copiar(buf: Int, qi: Int, e: Int, cap: Int, k: Int) -> Int ! alloc
+    if qi >= comp_gprim_max()
+        0
+    elsif k >= cap
+        0
+    else
+        b = bytes_view_mem(buf, comp_gprim_buf_len())
+        src = bytes_view_mem(e, cap * esc_prim_bytes())
+        o = 0
+        while o < esc_prim_bytes()
+            _c = bytes_set_u32(b, comp_gprim_hdr_len() + qi * esc_prim_bytes() + o, bytes_get_u32(src, k * esc_prim_bytes() + o))
+            o = o + 4
+        1
+
+# Vuelca las primitivas 0..n-1 (n <= max) y deja el contador en la cabecera.
+fn comp_gprim_volcar(buf: Int, rt_h: Int, fb_w: Int, fb_h: Int, pitch: Int, flags: Int, e: Int, cap: Int, n: Int) -> Int ! alloc
+    m = min(n, comp_gprim_max())
+    i = 0
+    while i < m
+        _c = comp_gprim_copiar(buf, i, e, cap, i)
+        i = i + 1
+    _h = comp_gprim_patch_hdr(buf, rt_h, fb_w, fb_h, pitch, flags, m)
+    m

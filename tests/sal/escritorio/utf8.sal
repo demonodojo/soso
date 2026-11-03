@@ -21,4 +21,22 @@ fn main() -> Int ! alloc
                 if bad != 65533
                     4
                 else
-                    0
+                    e = utf8_feed(utf8_inicio(), 226)
+                    e = utf8_feed(e, 128)
+                    e = utf8_feed(e, 148)
+                    if e != 8212
+                        5
+                    else
+                        f = utf8_feed(utf8_inicio(), 240)
+                        f = utf8_feed(f, 159)
+                        f = utf8_feed(f, 146)
+                        f = utf8_feed(f, 169)
+                        if f != 128169
+                            6
+                        else
+                            g = utf8_feed(utf8_inicio(), 196)
+                            g = utf8_feed(g, 129)
+                            if g != 257
+                                7
+                            else
+                                0

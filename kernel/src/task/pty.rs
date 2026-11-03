@@ -3,7 +3,7 @@
 use alloc::collections::VecDeque;
 use spin::Mutex;
 
-use super::{Console, State, PROCS};
+use super::Console;
 use crate::task;
 
 pub const PTY_MAX: usize = 8;
@@ -182,14 +182,11 @@ pub fn master_write(slot: u8, data: &[u8]) {
     wake_tty_waiters(console);
 }
 
-fn wake_tty_waiters(console: Console) {
-    let mut procs = PROCS.lock();
-    for p in procs.iter_mut() {
-        if p.console == console && matches!(p.state, State::WaitingTty { .. }) && console.has_input()
-        {
-            p.state = State::Runnable;
-        }
-    }
-    drop(procs);
+/// Avisa al planificador de que hay entrada. **No** se pasa al lector a `Runnable`
+/// aquí: el lector de tty bloqueado necesita que alguien le copie los bytes y le
+/// ponga `rax`, y eso lo hace el bucle de `WaitingTty` del planificador. Despertarlo
+/// a mano lo reanudaba con `rax` sin tocar y nada copiado: `sosh` en un PTY leía EOF
+/// con la primera tecla y salía.
+fn wake_tty_waiters(_console: Console) {
     task::kick_if_tty_waiting();
 }

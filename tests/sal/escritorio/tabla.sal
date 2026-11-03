@@ -1,0 +1,75 @@
+import "../../../user/sal/escritorio/tabla.sal"
+
+fn nuevo(tab: Int, i: Int, x: Int) -> Int ! alloc
+    _t = tab_set_raw(tab, i, tab_tipo(), tab_tipo_term())
+    _x = tab_set(tab, i, tab_wx(), x)
+    _w = tab_set(tab, i, tab_ww(), 300 + x)
+    0
+
+fn main() -> Int ! alloc
+    tab = bytes_ptr(bytes_new(tab_cap() * tab_slot_bytes()))
+    _a = nuevo(tab, 0, 10)
+    _b = nuevo(tab, 1, 20)
+    _c = nuevo(tab, 2, 30)
+    if grupo_cab(tab, 1) != 1
+        1
+    elsif tab_get(tab, 1, tab_wx()) != 20
+        2
+    else
+        # integrar 1 y 2 en el grupo de 0: la geometría pasa a ser la de 0
+        _i = grupo_integrar(tab, 1, 0)
+        _j = grupo_integrar(tab, 2, 0)
+        if grupo_n(tab, 0) != 3
+            3
+        elsif tab_get(tab, 2, tab_wx()) != 10
+            4
+        else
+            _m = tab_set(tab, 1, tab_wx(), 77)
+            if tab_get(tab, 0, tab_wx()) != 77
+                5
+            elsif tab_get(tab, 1, tab_cw()) != 0
+                6
+            else
+                _v = grupo_activar(tab, 2)
+                if grupo_panel_activo(tab, 0) != 2
+                    7
+                else
+                    # separar el panel 1: ventana propia con la geometría del grupo
+                    _s = grupo_separar(tab, 1)
+                    if grupo_cab(tab, 1) != 1
+                        8
+                    elsif tab_get(tab, 1, tab_wx()) != 77
+                        9
+                    elsif grupo_n(tab, 0) != 2
+                        10
+                    elsif grupo_panel_activo(tab, 0) != 2
+                        11
+                    else
+                        # separar la cabecera: el grupo sigue con otra cabecera y su geometría
+                        _t = grupo_separar(tab, 0)
+                        if grupo_cab(tab, 2) != 2
+                            12
+                        elsif tab_get(tab, 2, tab_wx()) != 77
+                            13
+                        elsif grupo_cab(tab, 0) != 0
+                            14
+                        else
+                            ord_ok(tab)
+
+# Orden de pestañas: 0 (cabecera) y luego 2 y 1 por integración; reintegrar 1 lo deja al final.
+fn ord_ok(tab: Int) -> Int ! alloc
+    _a = tab_set_raw(tab, 1, tab_tipo(), tab_tipo_term())
+    _c = grupo_integrar(tab, 2, 0)
+    _b = grupo_integrar(tab, 1, 0)
+    if grupo_n(tab, 0) != 3
+        20
+    elsif grupo_miembro(tab, 0, 0) != 0
+        21
+    elsif grupo_miembro(tab, 0, 1) != 2
+        22
+    elsif grupo_miembro(tab, 0, 2) != 1
+        23
+    elsif grupo_pos(tab, 1) != 2
+        24
+    else
+        0

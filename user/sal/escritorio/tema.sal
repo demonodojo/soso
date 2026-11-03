@@ -169,3 +169,30 @@ fn tema_term_rgb(t: Int, i: Int) -> Int
 
 fn tema_luma(rgb: Int) -> Int
     u8(u32_b2(rgb)) * 299 + u8(u32_b1(rgb)) * 587 + u8(u32_b0(rgb)) * 114
+
+fn tema_borde(t: Int, foco: Int) -> Int
+    if foco != 0
+        if t == tema_claro()
+            color_rgb(140, 160, 214)
+        else
+            color_rgb(78, 90, 130)
+    else
+        if t == tema_claro()
+            color_rgb(206, 210, 222)
+        else
+            color_rgb(48, 52, 70)
+
+fn tema_boton_max(t: Int) -> Int
+    color_rgb(80, 190, 110)
+
+fn tema_boton_min(t: Int) -> Int
+    color_rgb(236, 190, 70)
+
+fn tema_boton_inactivo(t: Int) -> Int
+    if t == tema_claro()
+        color_rgb(200, 204, 214)
+    else
+        color_rgb(66, 70, 88)
+
+fn tema_glifo_boton(t: Int) -> Int
+    color_rgb(50, 30, 34)

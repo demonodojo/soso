@@ -40,7 +40,7 @@ skill **`soso-comp`**.
 - Mensajes **32 bytes** little-endian (`MSG_LEN` en `soso-wm-proto`).
 - Ops principales: `HOLA`, `CREAR`, `DANIO`, `TITULO`, `CERRAR_CLI`; WM→cliente:
   `VENTANA`, `TECLA`, `RATON`, `FOCO`, `REDIM`, `CERRAR_WM`, `FOTOGRAMA`, `TEMA` (23),
-  `ESCALA` (24). `VENTANA`: tema u32 @24, escala inicial @28.
+  `ESCALA` (24), `VISIBLE` (25: u32 @4 = 1 se ve / 0 oculto). `HOLA` lleva `app_id` @8 (1 web, 2 archivos). `VENTANA`: tema u32 @24, escala inicial @28.
 - Tras `CREAR`, el WM asigna SHM; el cliente pinta y notifica daño con `DANIO(x,y,w,h)`.
 - **Versión** en `HOLA` (offset 4): mantener alineado Sal/Rust tests.
 
@@ -58,7 +58,11 @@ Tests layout Rust: `cargo test -p soso-wm-proto`.
 |-------|--------|
 | Alt+Intro | Terminal nueva |
 | Alt+Tab | Siguiente ventana |
-| Alt+Q | Cerrar ventana |
+| Alt+Q | Cerrar pestaña activa (la ventana si es la última) |
+| Alt+Mayús+Q | Cerrar ventana con todas sus pestañas |
+| Ctrl+Mayús+T | Nueva pestaña con la misma aplicación |
+| Ctrl+Tab / Ctrl+Mayús+Tab | Pestaña siguiente / anterior |
+| Alt+1…9 | Ir a la pestaña n |
 | Alt+T | Flotante / mosaico |
 | Alt+W | `soso-web --grafico` (página de prueba empaquetada) |
 | Alt+M | Salvapantallas (mono) |
@@ -67,6 +71,22 @@ Tests layout Rust: `cargo test -p soso-wm-proto`.
 | Ctrl+Mayús+/- | Escala **solo WM** (barra/títulos; `REDIM` a clientes si cambia barra) |
 | Menú Aplicaciones → Archivos | `spawn` de `/bin/soso-files` (listado `open`/`getdents`, clic o j/k+Intro) |
 | Alt+Mayús+E | Salir a consola |
+
+**Ratón sobre ventanas:** barra de título = arrastrar (clamp para que no se pierda bajo la barra
+superior); doble clic = maximizar/restaurar; botones (derecha→izquierda) cerrar, maximizar,
+minimizar (`ventana_hit_boton`); bordes derecho/inferior/izquierdo y esquinas inferiores
+redimensionan (`ventana_hit_borde`, 5 px; 14 px en esquinas). Una maximizada no se arrastra ni
+redimensiona. Las minimizadas siguen en la lista de ventanas de la barra superior: clic =
+restaurar (o minimizar si ya tiene el foco). Estado por ventana en `tab_estado()` + geometría
+guardada `tab_sx/sy/sw/sh`; la ranura mide 272 B.
+
+## Pestañas (grupo/panel)
+
+Una ventana es un **grupo** (`tabla.sal`: `grupo_cab`, `grupo_integrar`, `grupo_separar`,
+`grupo_panel_activo`); cada pestaña es un **panel** (slot). La geometría y el estado
+(`tab_wx…tab_sh`, `tab_estado`) viven en la cabecera del grupo y `tab_get/tab_set` los
+redirigen. El z-order y el foco sólo contienen cabeceras; el contenido (teclas, ratón,
+blit) es el del panel activo. Arrastre de pestañas: `wm_pest_arrastrar` / `wm_pest_despegar` / `wm_destino_soltar`; menú contextual (clic derecho): `ctx_*`, `wm_ctx_*`. Atajos: Ctrl+Mayús+T nueva, Alt+Mayús+D sacar, Alt+Mayús+H/L mover. El cromo se pinta con la escena de primitivas (`escena.sal`); GPU: `tools/gpu-prim/validar.py`. Plan y estado: [`docs/PLAN-PESTANAS.md`](../../docs/PLAN-PESTANAS.md).
 
 ## Build y pruebas
 
@@ -109,6 +129,9 @@ Ojo: los PNG se leen con la herramienta Read; GTK/Wayland no hace falta para nad
 ## Errores frecuentes
 
 - Olvidar `cargo xtask sal-build` tras editar `.sal` → rootfs desactualizado en QEMU.
+- `wm_drenar_input` NO debe volcar `st` a la tabla tras procesar la entrada: deshacía cada arrastre.
+- El repintado completo es caro: `fuente_dibujar` relleno por celda y rectángulos redondeados por filas
+  (de ~750 ms a ~80 ms por fotograma); no vuelvas a píxel-a-píxel en rutas calientes.
 - Romper alineación de offsets en mensajes de 32 B entre Sal y Rust.
 - Pruebas guest que ejecutan `soso-wm` en background (`&`) → timeouts en xtask.
 - Asumir GPU: en QEMU el compositor puede caer a blit CPU/SHM; path VRAM requiere lxdde

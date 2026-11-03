@@ -6,77 +6,72 @@ fn utf8_reempl() -> Int
 fn utf8_inicio() -> Int
     0
 
+# Estados pendientes: todos >= utf8_pend() (2^30); un resultado menor es un punto
+# de código terminado (o U+FFFD). Así un cp >= 256 no se confunde con un estado.
+fn utf8_pend() -> Int
+    1073741824
+
+fn utf8_pendiente(x: Int) -> Int
+    if x >= utf8_pend()
+        1
+    else
+        0
+
+# Estado: pend + (restantes << 24) + (primero << 23) + dato (lead, o cp parcial).
 fn utf8_feed(st: Int, c: Int) -> Int
     b = u8(c)
-    if st == 0
+    if st < utf8_pend()
         if b < 128
             b
+        elsif b < 194
+            utf8_reempl()
+        elsif b <= 223
+            utf8_pend() + (1 << 24) + (1 << 23) + (b & 31)
+        elsif b <= 239
+            utf8_pend() + (2 << 24) + (1 << 23) + b
+        elsif b <= 244
+            utf8_pend() + (3 << 24) + (1 << 23) + b
         else
-            if b >= 194
-                if b <= 223
-                    256 + b
-                else
-                    if b <= 239
-                        65536 + b
-                    else
-                        if b <= 244
-                            16777216 + b
-                        else
-                            utf8_reempl()
-            else
-                utf8_reempl()
+            utf8_reempl()
     else
-        if st >= 16777216
-            lead = st - 16777216
+        rest = (st >> 24) & 7
+        primero = (st >> 23) & 1
+        dato = st & 8388607
+        if b < 128
+            utf8_reempl()
+        elsif b > 191
+            utf8_reempl()
+        else
             bad = 0
-            if lead == 244
-                if b > 143
-                    bad = 1
-            if lead == 240
-                if b < 144
-                    bad = 1
+            if primero != 0
+                if dato == 224
+                    if b < 160
+                        bad = 1
+                if dato == 237
+                    if b >= 160
+                        bad = 1
+                if dato == 240
+                    if b < 144
+                        bad = 1
+                if dato == 244
+                    if b > 143
+                        bad = 1
             if bad != 0
                 utf8_reempl()
             else
-                if b >= 128
-                    if b <= 191
-                        lead * 65536 + b
+                acc = (dato << 6) | (b & 63)
+                if primero != 0
+                    if rest == 1
+                        acc = (dato << 6) | (b & 63)
                     else
-                        utf8_reempl()
-                else
-                    utf8_reempl()
-        else
-            if st >= 65536
-                lead = st - 65536
-                bad = 0
-                if lead == 224
-                    if b < 160
-                        bad = 1
-                if lead == 237
-                    if b >= 160
-                        bad = 1
-                if bad != 0
-                    utf8_reempl()
-                else
-                    if b >= 128
-                        if b <= 191
-                            lead * 256 + b
+                        if dato >= 240
+                            acc = ((dato & 7) << 6) | (b & 63)
                         else
-                            utf8_reempl()
-                    else
-                        utf8_reempl()
-            else
-                if st >= 256
-                    lead = st - 256
-                    if b >= 128
-                        if b <= 191
-                            (lead - 192) * 64 + (b - 128)
-                        else
-                            utf8_reempl()
-                    else
-                        utf8_reempl()
+                            acc = ((dato & 15) << 6) | (b & 63)
+                if rest == 1
+                    acc
                 else
-                    utf8_reempl()
+                    utf8_pend() + ((rest - 1) << 24) + acc
 
 fn utf8_final(st: Int) -> Int
     if st < 0

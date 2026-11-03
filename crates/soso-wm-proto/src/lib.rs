@@ -1,6 +1,7 @@
 //! Mensajes de 32 bytes en little-endian (mismo layout que `proto.sal`).
 
 pub mod gfram;
+pub mod gprim;
 pub mod gpres;
 pub mod gscen;
 pub mod guprc;
@@ -24,6 +25,7 @@ pub mod op {
     pub const FOTOGRAMA: u32 = 22;
     pub const TEMA: u32 = 23;
     pub const ESCALA: u32 = 24;
+    pub const VISIBLE: u32 = 25;
 }
 
 pub mod escala {
@@ -81,6 +83,21 @@ impl Msg {
         let mut m = Self::zero();
         m.set_op(op::HOLA);
         m.set_u32(4, version);
+        m
+    }
+
+    /// HOLA con identificador de aplicación (0 ninguna, 1 web, 2 ficheros) en el offset 8.
+    pub fn encode_hola_app(version: u32, app: u32) -> Self {
+        let mut m = Self::encode_hola(version);
+        m.set_u32(8, app);
+        m
+    }
+
+    /// WM -> cliente: el panel pasa a verse (1) u ocultarse (0).
+    pub fn encode_visible(visible: bool) -> Self {
+        let mut m = Self::zero();
+        m.set_op(op::VISIBLE);
+        m.set_u32(4, visible as u32);
         m
     }
 
@@ -296,5 +313,19 @@ mod tests {
         assert_eq!(e.u32(8), 12);
         assert_eq!(e.u32(12), 24);
         assert_eq!(escala::NIVELES, 5);
+    }
+
+    #[test]
+    fn visible_y_hola_app() {
+        let h = Msg::encode_hola_app(1, 2);
+        assert_eq!(h.op(), op::HOLA);
+        assert_eq!(h.u32(4), 1);
+        assert_eq!(h.u32(8), 2);
+        // El HOLA sin aplicación sigue siendo byte a byte el de siempre.
+        assert_eq!(Msg::encode_hola_app(1, 0), Msg::encode_hola(1));
+        let v = Msg::encode_visible(false);
+        assert_eq!(v.op(), op::VISIBLE);
+        assert_eq!(v.u32(4), 0);
+        assert_eq!(Msg::encode_visible(true).u32(4), 1);
     }
 }

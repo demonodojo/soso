@@ -1,0 +1,65 @@
+import "../../../user/sal/escritorio/escena.sal"
+
+# Compara dos buffers de w*h píxeles; devuelve 0 si son iguales.
+fn iguales(a: Int, b: Int, w: Int, h: Int) -> Int ! alloc
+    r = 0
+    x = 0
+    while x < w
+        y = 0
+        while y < h
+            if pixel_leer(a, w * h * 4, w, 4, 0, x, y) != pixel_leer(b, w * h * 4, w, 4, 0, x, y)
+                r = 1
+            y = y + 1
+        x = x + 1
+    r
+
+fn main() -> Int ! alloc
+    w = 64
+    h = 48
+    a = bytes_ptr(bytes_new(w * h * 4))
+    b = bytes_ptr(bytes_new(w * h * 4))
+    len = w * h * 4
+    fondo = color_rgb(10, 20, 30)
+    _fa = rellenar_rect(a, len, w, h, w, 4, 0, 0, 0, w, h, fondo)
+    _fb = rellenar_rect(b, len, w, h, w, 4, 0, 0, 0, w, h, fondo)
+    # Directo, con las funciones sueltas.
+    _d1 = degradado_vertical(a, len, w, h, w, 4, 0, 2, 2, 60, 20, color_rgb(200, 0, 0), color_rgb(0, 0, 200))
+    _d2 = rellenar_rect_redondeado4(a, len, w, h, w, 4, 0, 4, 22, 40, 44, 6, color_rgb(0, 200, 0))
+    _d3 = rellenar_rect_redondeado(a, len, w, h, w, 4, 0, 30, 24, 62, 46, 5, color_rgb(200, 200, 0))
+    _d4 = rellenar_rect_alfa(a, len, w, h, w, 4, 0, 10, 10, 50, 30, color_rgb(255, 255, 255), 90)
+    _d5 = sombra_anillo(a, len, w, h, w, 4, 0, 0, 0, 64, 48, 8, 6, 56, 40, color_rgb(0, 0, 0), 40)
+    # Por la escena.
+    cap = 16
+    e = esc_nueva(cap)
+    n = 0
+    n = esc_degradado(e, cap, n, 2, 2, 60, 20, color_rgb(200, 0, 0), color_rgb(0, 0, 200))
+    n = esc_rrect(e, cap, n, 4, 22, 40, 44, esc_radios(6, 6, 6, 6), color_rgb(0, 200, 0), 255, 0, 0)
+    n = esc_rrect(e, cap, n, 30, 24, 62, 46, esc_radios(5, 5, 0, 0), color_rgb(200, 200, 0), 255, 0, 0)
+    n = esc_solido(e, cap, n, 10, 10, 50, 30, color_rgb(255, 255, 255), 90)
+    n = esc_anillo(e, cap, n, 0, 0, 64, 48, 8, 6, 56, 40, color_rgb(0, 0, 0), 40)
+    _x = esc_cpu_ejecutar(b, len, w, h, w, 4, 0, e, cap, n)
+    if n != 5
+        1
+    elsif iguales(a, b, w, h) != 0
+        2
+    elsif esc_get(e, cap, 1, esc_o_x0()) != 4
+        3
+    else
+        # Coordenadas negativas: ida y vuelta por el formato de 32 bits.
+        _s = esc_set(e, cap, 0, esc_o_x0(), -7)
+        if esc_get(e, cap, 0, esc_o_x0()) != -7
+            4
+        else
+            # Borde: el contorno de 1 px sale del color de borde y el interior, del relleno.
+            c = bytes_ptr(bytes_new(w * h * 4))
+            _fc = rellenar_rect(c, len, w, h, w, 4, 0, 0, 0, w, h, fondo)
+            m = esc_rrect(e, cap, 0, 10, 10, 30, 30, esc_radios(4, 4, 4, 4), color_rgb(0, 255, 0), 255, color_rgb(255, 0, 0), 1)
+            _y = esc_cpu_ejecutar(c, len, w, h, w, 4, 0, e, cap, m)
+            if pixel_leer(c, len, w, 4, 0, 20, 10) != color_rgb(255, 0, 0)
+                5
+            elsif pixel_leer(c, len, w, 4, 0, 20, 20) != color_rgb(0, 255, 0)
+                6
+            elsif pixel_leer(c, len, w, 4, 0, 10, 10) != fondo
+                7
+            else
+                0

@@ -182,48 +182,58 @@ fn rect_esquina_redonda_ok(x: Int, y: Int, x0: Int, y0: Int, x1: Int, y1: Int, r
                         ok = 0
         ok
 
-fn rellenar_rect_redondeado(ptr: Int, len: Int, ancho: Int, alto: Int, stride_px: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, radio: Int, rgb: Int) -> Int ! alloc
-    ya = max(0, y0)
-    yb = min(alto, y1)
-    xa = max(0, x0)
-    xb = min(ancho, x1)
-    if xb <= xa
-        0
-    else
-        y = ya
-        while y < yb
-            x = xa
-            while x < xb
-                if rect_esquina_redonda_ok(x, y, xa, ya, xb, yb, radio, 0) != 0
-                    if rect_esquina_redonda_ok(x, y, xa, ya, xb, yb, radio, 1) != 0
-                        _p = pixel_escribir(ptr, len, stride_px, bpp, fmt, x, y, rgb)
-                x = x + 1
-            y = y + 1
-        0
+# Píxeles que se saltan por lado en la fila `d` (0 = la del borde) de una esquina de radio `radio`.
+fn rr_inset(radio: Int, d: Int) -> Int
+    k = 0
+    if d < radio
+        dy = radio - d
+        seguir = 1
+        while seguir != 0
+            if k >= radio
+                seguir = 0
+            else
+                dx = radio - k
+                if dx * dx + dy * dy > radio * radio
+                    k = k + 1
+                else
+                    seguir = 0
+    k
 
-fn rellenar_rect_redondeado4(ptr: Int, len: Int, ancho: Int, alto: Int, stride_px: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, radio: Int, rgb: Int) -> Int ! alloc
-    ya = max(0, y0)
-    yb = min(alto, y1)
-    xa = max(0, x0)
-    xb = min(ancho, x1)
-    if xb <= xa
-        0
+# Rectángulo con las esquinas de arriba redondeadas. Por filas: sólo las `radio`
+# filas de la esquina necesitan cálculo; el resto es un único relleno.
+fn rellenar_rect_redondeado(ptr: Int, len: Int, ancho: Int, alto: Int, stride_px: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, radio: Int, rgb: Int) -> Int ! alloc
+    r = min(radio, min((x1 - x0) / 2, y1 - y0))
+    if r <= 0
+        rellenar_rect(ptr, len, ancho, alto, stride_px, bpp, fmt, x0, y0, x1, y1, rgb)
     else
-        y = ya
-        while y < yb
-            x = xa
-            while x < xb
-                ok = 1
-                e = 0
-                while e < 4
-                    if rect_esquina_redonda_ok(x, y, x0, y0, x1, y1, radio, e) == 0
-                        ok = 0
-                    e = e + 1
-                if ok != 0
-                    _p = pixel_escribir(ptr, len, stride_px, bpp, fmt, x, y, rgb)
-                x = x + 1
-            y = y + 1
-        0
+        d = 0
+        while d < r
+            k = rr_inset(r, d)
+            _f = rellenar_rect(ptr, len, ancho, alto, stride_px, bpp, fmt, x0 + k, y0 + d, x1 - k, y0 + d + 1, rgb)
+            d = d + 1
+        rellenar_rect(ptr, len, ancho, alto, stride_px, bpp, fmt, x0, y0 + r, x1, y1, rgb)
+
+# Igual con las cuatro esquinas redondeadas.
+fn rellenar_rect_redondeado4(ptr: Int, len: Int, ancho: Int, alto: Int, stride_px: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, radio: Int, rgb: Int) -> Int ! alloc
+    r = min(radio, min((x1 - x0) / 2, (y1 - y0) / 2))
+    if r <= 0
+        rellenar_rect(ptr, len, ancho, alto, stride_px, bpp, fmt, x0, y0, x1, y1, rgb)
+    else
+        d = 0
+        while d < r
+            k = rr_inset(r, d)
+            _a = rellenar_rect(ptr, len, ancho, alto, stride_px, bpp, fmt, x0 + k, y0 + d, x1 - k, y0 + d + 1, rgb)
+            _b = rellenar_rect(ptr, len, ancho, alto, stride_px, bpp, fmt, x0 + k, y1 - 1 - d, x1 - k, y1 - d, rgb)
+            d = d + 1
+        rellenar_rect(ptr, len, ancho, alto, stride_px, bpp, fmt, x0, y0 + r, x1, y1 - r, rgb)
+
+# Capa de sombra: el rectángulo expandido (ex0..ey1) menos la ventana (wx0..wy1), en cuatro tiras.
+fn sombra_anillo(ptr: Int, len: Int, ancho: Int, alto: Int, stride_px: Int, bpp: Int, fmt: Int, ex0: Int, ey0: Int, ex1: Int, ey1: Int, wx0: Int, wy0: Int, wx1: Int, wy1: Int, rgb: Int, alfa: Int) -> Int ! alloc
+    _a = rellenar_rect_alfa(ptr, len, ancho, alto, stride_px, bpp, fmt, ex0, ey0, ex1, wy0, rgb, alfa)
+    _b = rellenar_rect_alfa(ptr, len, ancho, alto, stride_px, bpp, fmt, ex0, wy1, ex1, ey1, rgb, alfa)
+    _c = rellenar_rect_alfa(ptr, len, ancho, alto, stride_px, bpp, fmt, ex0, wy0, wx0, wy1, rgb, alfa)
+    _d = rellenar_rect_alfa(ptr, len, ancho, alto, stride_px, bpp, fmt, wx1, wy0, ex1, wy1, rgb, alfa)
+    0
 
 fn copiar_rect(dptr: Int, dlen: Int, dstride_px: Int, sptr: Int, slen: Int, sstride_px: Int, bpp: Int, fmt: Int, dx: Int, dy: Int, sx: Int, sy: Int, w: Int, h: Int) -> Int ! alloc
     if w <= 0

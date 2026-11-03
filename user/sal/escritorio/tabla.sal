@@ -6,7 +6,7 @@ fn tab_cap() -> Int
     16
 
 fn tab_slot_bytes() -> Int
-    224
+    312
 
 fn tab_tipo() -> Int
     0
@@ -74,17 +74,122 @@ fn tab_fwh() -> Int
 fn tab_escala() -> Int
     216
 
+fn tab_estado() -> Int
+    224
+
+fn tab_sx() -> Int
+    232
+
+fn tab_sy() -> Int
+    240
+
+fn tab_sw() -> Int
+    248
+
+fn tab_sh() -> Int
+    256
+
+# Grupo = ventana visible con N paneles (pestañas). La cabecera del grupo es uno de
+# sus slots y guarda la geometría y el estado de la ventana. `tab_cab`: cabecera + 1
+# (0 = el propio slot, así un slot a ceros es un grupo de un solo panel).
+# `tab_activo` (sólo en la cabecera): panel activo + 1 (0 = la propia cabecera).
+fn tab_cab() -> Int
+    264
+
+fn tab_activo() -> Int
+    272
+
+# Orden de la pestaña dentro de su grupo, y aplicación con la que se lanzó el cliente
+# (app_*), para poder abrir otra pestaña igual.
+fn tab_orden() -> Int
+    280
+
+fn tab_app() -> Int
+    288
+
+# Último estado de visibilidad enviado al cliente (0 sin enviar, 1 visible, 2 oculto) y
+# «actividad pendiente» (salida nueva mientras el panel no era el activo).
+fn tab_vis() -> Int
+    296
+
+fn tab_pend() -> Int
+    304
+
+fn app_ninguna() -> Int
+    0
+
+fn app_web() -> Int
+    1
+
+fn app_ficheros() -> Int
+    2
+
+fn estado_max() -> Int
+    1
+
+fn estado_min() -> Int
+    2
+
 fn tab_slot_off(i: Int) -> Int
     i * tab_slot_bytes()
 
-fn tab_get(tab: Int, i: Int, off: Int) -> Int ! alloc
+fn tab_get_raw(tab: Int, i: Int, off: Int) -> Int ! alloc
     b = bytes_view_mem(tab + tab_slot_off(i), tab_slot_bytes())
     bytes_get_i64(b, off)
 
-fn tab_set(tab: Int, i: Int, off: Int, v: Int) -> Int ! alloc
+fn tab_set_raw(tab: Int, i: Int, off: Int, v: Int) -> Int ! alloc
     b = bytes_view_mem(tab + tab_slot_off(i), tab_slot_bytes())
     bytes_set_i64(b, off, v)
     0
+
+# 1 si el campo es de la ventana (grupo) y no del panel.
+fn tab_off_es_grupo(off: Int) -> Int
+    if off >= tab_wx()
+        if off <= tab_wh()
+            1
+        else
+            tab_off_es_grupo_b(off)
+    else
+        0
+
+fn tab_off_es_grupo_b(off: Int) -> Int
+    if off == tab_fwx()
+        1
+    elsif off == tab_fwy()
+        1
+    elsif off == tab_fww()
+        1
+    elsif off == tab_fwh()
+        1
+    elsif off == tab_estado()
+        1
+    elsif off >= tab_sx()
+        if off <= tab_sh()
+            1
+        else
+            0
+    else
+        0
+
+fn grupo_cab(tab: Int, i: Int) -> Int ! alloc
+    c = tab_get_raw(tab, i, tab_cab())
+    if c == 0
+        i
+    else
+        c - 1
+
+# Los campos de ventana se leen/escriben en la cabecera del grupo; el resto, en el slot.
+fn tab_get(tab: Int, i: Int, off: Int) -> Int ! alloc
+    if tab_off_es_grupo(off) != 0
+        tab_get_raw(tab, grupo_cab(tab, i), off)
+    else
+        tab_get_raw(tab, i, off)
+
+fn tab_set(tab: Int, i: Int, off: Int, v: Int) -> Int ! alloc
+    if tab_off_es_grupo(off) != 0
+        tab_set_raw(tab, grupo_cab(tab, i), off, v)
+    else
+        tab_set_raw(tab, i, off, v)
 
 fn tab_tipo_libre() -> Int
     0
@@ -194,6 +299,205 @@ fn tab_contar_tipo(tab: Int, tipo: Int) -> Int ! alloc
         i = i + 1
     n
 
+fn grupo_copiar_geom(tab: Int, de: Int, a: Int) -> Int ! alloc
+    _a = tab_set_raw(tab, a, tab_wx(), tab_get_raw(tab, de, tab_wx()))
+    _b = tab_set_raw(tab, a, tab_wy(), tab_get_raw(tab, de, tab_wy()))
+    _c = tab_set_raw(tab, a, tab_ww(), tab_get_raw(tab, de, tab_ww()))
+    _d = tab_set_raw(tab, a, tab_wh(), tab_get_raw(tab, de, tab_wh()))
+    _e = tab_set_raw(tab, a, tab_fwx(), tab_get_raw(tab, de, tab_fwx()))
+    _f = tab_set_raw(tab, a, tab_fwy(), tab_get_raw(tab, de, tab_fwy()))
+    _g = tab_set_raw(tab, a, tab_fww(), tab_get_raw(tab, de, tab_fww()))
+    _h = tab_set_raw(tab, a, tab_fwh(), tab_get_raw(tab, de, tab_fwh()))
+    _i = tab_set_raw(tab, a, tab_estado(), tab_get_raw(tab, de, tab_estado()))
+    _j = tab_set_raw(tab, a, tab_sx(), tab_get_raw(tab, de, tab_sx()))
+    _k = tab_set_raw(tab, a, tab_sy(), tab_get_raw(tab, de, tab_sy()))
+    _l = tab_set_raw(tab, a, tab_sw(), tab_get_raw(tab, de, tab_sw()))
+    _m = tab_set_raw(tab, a, tab_sh(), tab_get_raw(tab, de, tab_sh()))
+    0
+
+# Paneles del grupo cuya cabecera es `cab`.
+fn grupo_n(tab: Int, cab: Int) -> Int ! alloc
+    n = 0
+    i = 0
+    while i < tab_cap()
+        if tab_get_raw(tab, i, tab_tipo()) != tab_tipo_libre()
+            if grupo_cab(tab, i) == cab
+                n = n + 1
+        i = i + 1
+    n
+
+# k-ésimo panel del grupo en orden de pestañas (orden, y a igualdad el índice de slot), o -1.
+fn grupo_miembro(tab: Int, cab: Int, k: Int) -> Int ! alloc
+    r = -1
+    i = 0
+    while i < tab_cap()
+        if tab_get_raw(tab, i, tab_tipo()) != tab_tipo_libre()
+            if grupo_cab(tab, i) == cab
+                menores = 0
+                j = 0
+                while j < tab_cap()
+                    if tab_get_raw(tab, j, tab_tipo()) != tab_tipo_libre()
+                        if grupo_cab(tab, j) == cab
+                            if j != i
+                                oj = tab_get_raw(tab, j, tab_orden())
+                                oi = tab_get_raw(tab, i, tab_orden())
+                                if oj < oi
+                                    menores = menores + 1
+                                elsif oj == oi
+                                    if j < i
+                                        menores = menores + 1
+                    j = j + 1
+                if menores == k
+                    r = i
+        i = i + 1
+    r
+
+# Posición (0..n-1) del panel `i` en la tira de su grupo.
+fn grupo_pos(tab: Int, i: Int) -> Int ! alloc
+    cab = grupo_cab(tab, i)
+    n = grupo_n(tab, cab)
+    r = -1
+    k = 0
+    while k < n
+        if grupo_miembro(tab, cab, k) == i
+            r = k
+        k = k + 1
+    r
+
+fn grupo_orden_max(tab: Int, cab: Int) -> Int ! alloc
+    m = -1
+    i = 0
+    while i < tab_cap()
+        if tab_get_raw(tab, i, tab_tipo()) != tab_tipo_libre()
+            if grupo_cab(tab, i) == cab
+                m = max(m, tab_get_raw(tab, i, tab_orden()))
+        i = i + 1
+    m
+
+# Panel activo del grupo al que pertenece `i`.
+fn grupo_panel_activo(tab: Int, i: Int) -> Int ! alloc
+    h = grupo_cab(tab, i)
+    a = tab_get_raw(tab, h, tab_activo())
+    if a == 0
+        h
+    else
+        if grupo_cab(tab, a - 1) == h
+            a - 1
+        else
+            h
+
+fn grupo_activar(tab: Int, i: Int) -> Int ! alloc
+    h = grupo_cab(tab, i)
+    if i == h
+        tab_set_raw(tab, h, tab_activo(), 0)
+    else
+        tab_set_raw(tab, h, tab_activo(), i + 1)
+
+# Saca el panel `i` de su grupo y lo deja como ventana propia con la misma geometría.
+# Devuelve 1 si había algo que separar.
+fn grupo_separar(tab: Int, i: Int) -> Int ! alloc
+    h = grupo_cab(tab, i)
+    if grupo_n(tab, h) <= 1
+        0
+    else
+        act = grupo_panel_activo(tab, i)
+        if h == i
+            nh = -1
+            k = 0
+            while k < tab_cap()
+                if nh < 0
+                    if k != i
+                        if tab_get_raw(tab, k, tab_tipo()) != tab_tipo_libre()
+                            if grupo_cab(tab, k) == h
+                                nh = k
+                k = k + 1
+            _g = grupo_copiar_geom(tab, h, nh)
+            k = 0
+            while k < tab_cap()
+                if k != i
+                    if tab_get_raw(tab, k, tab_tipo()) != tab_tipo_libre()
+                        if grupo_cab(tab, k) == h
+                            if k == nh
+                                _a = tab_set_raw(tab, k, tab_cab(), 0)
+                            else
+                                _b = tab_set_raw(tab, k, tab_cab(), nh + 1)
+                k = k + 1
+            if act == i
+                _c = tab_set_raw(tab, nh, tab_activo(), 0)
+            else
+                _d = tab_set_raw(tab, nh, tab_activo(), act + 1)
+            _e = tab_set_raw(tab, i, tab_activo(), 0)
+        else
+            _g = grupo_copiar_geom(tab, h, i)
+            _c = tab_set_raw(tab, i, tab_cab(), 0)
+            _v = tab_set_raw(tab, i, tab_activo(), 0)
+            if act == i
+                _x = tab_set_raw(tab, h, tab_activo(), 0)
+        1
+
+# Integra el panel `i` (y, si es cabecera de un grupo, todo su grupo) al final del grupo
+# de `dest`, conservando su orden relativo; el integrado pasa a ser el activo.
+fn grupo_integrar(tab: Int, i: Int, dest: Int) -> Int ! alloc
+    h0 = grupo_cab(tab, i)
+    d = grupo_cab(tab, dest)
+    if h0 == d
+        0
+    else
+        if h0 != i
+            _sp = grupo_separar(tab, i)
+        h = grupo_cab(tab, i)
+        n = grupo_n(tab, h)
+        base = grupo_orden_max(tab, d) + 1
+        j = 0
+        while j < n
+            m = grupo_miembro(tab, h, 0)
+            _a = tab_set_raw(tab, m, tab_cab(), d + 1)
+            _b = tab_set_raw(tab, m, tab_activo(), 0)
+            _c = tab_set_raw(tab, m, tab_orden(), base + j)
+            j = j + 1
+        _e = tab_set_raw(tab, d, tab_activo(), grupo_activar_idx(i))
+        1
+
+# Mueve el panel `i` a la posición `kpos` (0..n-1) de la tira de su grupo; renumera el orden.
+fn grupo_mover(tab: Int, i: Int, kpos: Int) -> Int ! alloc
+    cab = grupo_cab(tab, i)
+    n = grupo_n(tab, cab)
+    pos = grupo_pos(tab, i)
+    kp = kpos
+    if kp < 0
+        kp = 0
+    if kp > n - 1
+        kp = n - 1
+    if n <= 1
+        0
+    elsif pos == kp
+        0
+    else
+        # Órdenes finales: los demás conservan su sitio relativo y `i` se coloca en kp.
+        # Se calculan primero en un vector auxiliar (índices de slot por posición nueva).
+        ord = bytes_new(n * 8)
+        j = 0
+        d = 0
+        while j < n
+            if j == kp
+                _s1 = bytes_set_i64(ord, j * 8, i)
+            else
+                m = grupo_miembro(tab, cab, d)
+                if m == i
+                    d = d + 1
+                    m = grupo_miembro(tab, cab, d)
+                _s2 = bytes_set_i64(ord, j * 8, m)
+                d = d + 1
+            j = j + 1
+        j = 0
+        while j < n
+            _o = tab_set_raw(tab, bytes_get_i64(ord, j * 8), tab_orden(), j)
+            j = j + 1
+        1
+
+fn grupo_activar_idx(i: Int) -> Int
+    i + 1
+
 fn tab_cerrar_slot(tab: Int, i: Int) -> Int ! io, alloc
     if tab_slot_activo(tab, i) == 0
         0
@@ -204,12 +508,20 @@ fn tab_cerrar_slot(tab: Int, i: Int) -> Int ! io, alloc
         sid = tab_get(tab, i, tab_shm_id())
         if sid > 0
             _f = shm_free(sid)
+        _g = grupo_separar(tab, i)
         _z = tab_set(tab, i, tab_tipo(), tab_tipo_libre())
         _a = tab_set(tab, i, tab_fd(), 0)
         _p = tab_set(tab, i, tab_pid(), 0)
         _s = tab_set(tab, i, tab_shm_id(), 0)
         _m = tab_set(tab, i, tab_fase(), 0)
         _l = tab_set(tab, i, tab_acc_len(), 0)
+        _e = tab_set(tab, i, tab_estado(), 0)
+        _c = tab_set_raw(tab, i, tab_cab(), 0)
+        _v = tab_set_raw(tab, i, tab_activo(), 0)
+        _o = tab_set_raw(tab, i, tab_orden(), 0)
+        _ap = tab_set_raw(tab, i, tab_app(), 0)
+        _vv = tab_set_raw(tab, i, tab_vis(), 0)
+        _pp = tab_set_raw(tab, i, tab_pend(), 0)
         1
 
 fn tab_zorder_size() -> Int
@@ -250,6 +562,15 @@ fn z_quitar(z: Int, n: Int, idx: Int) -> Int ! alloc
             n = n - 1
         else
             k = k + 1
+    n
+
+# Sustituye `viejo` por `nuevo` en el mismo lugar del orden.
+fn z_reemplazar(z: Int, n: Int, viejo: Int, nuevo: Int) -> Int ! alloc
+    k = 0
+    while k < n
+        if z_get(z, k) == viejo
+            _s = z_set(z, k, nuevo)
+        k = k + 1
     n
 
 fn z_anadir(z: Int, n: Int, idx: Int) -> Int ! alloc

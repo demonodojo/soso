@@ -466,6 +466,43 @@ fn prueba_layout_float(st: Int, sw: Int, sh: Int) -> Int ! alloc
                 rc = 302
     rc
 
+# Pestañas (T1/T2): integrar, reordenar arrastrando, despegar y volver a integrar.
+fn prueba_layout_pestanas(st: Int, sw: Int, sh: Int) -> Int ! io, alloc
+    tab = st_get(st, st_tab())
+    _a = wm_integrar(st, 1, 0)
+    _b = wm_integrar(st, 2, 0)
+    rc = 0
+    if grupo_n(tab, 0) != 3
+        rc = 400
+    if rc == 0
+        wx = tab_get(tab, 0, tab_wx())
+        wy = tab_get(tab, 0, tab_wy())
+        # Arrastra la 3.ª pestaña hasta el sitio de la 1.ª: queda la primera.
+        _ra = wm_pest_arrastrar(st, 2, pest_x0(wx) + 5, wy + wm_bar_h(st) / 2, sh)
+        if grupo_pos(tab, 2) != 0
+            rc = 401
+    if rc == 0
+        # Fuera de la barra se despega: ventana propia y arrastre de ventana.
+        _rd = wm_pest_arrastrar(st, 2, tab_get(tab, 0, tab_wx()) + 60, tab_get(tab, 0, tab_wy()) + 200, sh)
+        if grupo_n(tab, 0) != 2
+            rc = 402
+        elsif grupo_cab(tab, 2) != 2
+            rc = 403
+        elsif st_get(st, st_drag_kind()) != 1
+            rc = 404
+    if rc == 0
+        # Soltarla sobre la barra de la ventana que queda la integra otra vez.
+        dst = wm_destino_soltar(st, pest_x0(tab_get(tab, 0, tab_wx())) + 20, tab_get(tab, 0, tab_wy()) + 5, 2)
+        if dst != 0
+            rc = 405
+        else
+            _ig = wm_integrar(st, 2, dst)
+            if grupo_n(tab, 0) != 3
+                rc = 406
+    _d = st_set(st, st_drag_ix(), -1)
+    _k = st_set(st, st_drag_kind(), 0)
+    rc
+
 fn prueba_layout_preparar(st: Int, sw: Int, sh: Int) -> Int ! io, alloc
     _esc = wm_init_escala(st, sw)
     n = 0
@@ -492,6 +529,8 @@ fn prueba_layout_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp
         ok = prueba_layout_drag(st, sw, sh, compos, clen, stride, bpp, fmt)
     if ok == 0
         ok = prueba_layout_float(st, sw, sh)
+    if ok == 0
+        ok = prueba_layout_pestanas(st, sw, sh)
     if ok == 0
         _pr = print_str(d"soso-wm: prueba-layout OK\n")
         ok = 0

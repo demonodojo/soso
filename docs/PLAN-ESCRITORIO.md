@@ -20,6 +20,8 @@ Gestor de ventanas gráfico en Sal con terminales sobre PTY, clientes vía TCP
 | W8 | Hecho | Navegador de lectura: motor CSS (flex/grid/float/position, @media), PNG, formularios, 4 pestañas, marcadores, cromo URL, Alt+W / `--prueba-web` |
 | W9 | Hecho | Lanzador (`lanzador.sal`): menú Aplicaciones (Terminal, Web, Archivos, Salir), accesos directos Terminal/Web; cliente `soso-files` (`getdents`, SHM, DANIO) |
 | W10 | Hecho | Tema oscuro/claro (`tema.sal`), barra y menú translúcidos, marcos redondeados, 5 fuentes Spleen (`fuentes.sal`); menú «Modo claro/oscuro» y **Alt+D**; **Ctrl+/-** escala app con foco, **Ctrl+Mayús+/-** escala WM; protocolo `op TEMA`/`op ESCALA`, offsets VENTANA 24/28 |
+| W11 | Hecho | Marcos redondeados, arrastre, redimensionado por bordes, maximizar/minimizar, doble clic, lista de ventanas en la barra, resaltado, Alt+F / Alt+N, `scripts/wm-probe.py` |
+| W12 | T0–T1 hechas | Pestañas, integrar/sacar ventanas, nueva pestaña de la misma app y escritorio sobre GPU: [`PLAN-PESTANAS.md`](PLAN-PESTANAS.md) |
 
 ## Atajos (`soso-wm`)
 
@@ -28,6 +30,8 @@ Gestor de ventanas gráfico en Sal con terminales sobre PTY, clientes vía TCP
 - Alt+Q — cerrar ventana  
 - Alt+T — flotante / mosaico  
 - Alt+W — abrir `soso-web --grafico --local /var/paquetes/soso-web/share/ejemplo/web-prueba.html`  
+- Ctrl+Mayús+T — nueva pestaña de la misma aplicación; Ctrl+Tab / Ctrl+Mayús+Tab — pestaña siguiente/anterior; Alt+1…9 — ir a la pestaña; Alt+Q — cerrar pestaña; Alt+Mayús+Q — cerrar ventana  
+- Alt+F — maximizar/restaurar; Alt+N — minimizar  
 - Alt+D — alternar tema claro/oscuro (WM, terminal, clientes)  
 - Ctrl+**+** / Ctrl+**-** — tamaño de letra de la ventana con foco (5 niveles; en teclado US usar Ctrl+**=** para subir la app)  
 - Ctrl+Mayús+**+** / Ctrl+Mayús+**-** — tamaño de letra del WM (barra, menú, títulos)  

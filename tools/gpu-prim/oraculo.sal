@@ -1,0 +1,68 @@
+import "../../user/sal/escritorio/soso.sal"
+import "../../user/sal/escritorio/escena.sal"
+import "../../user/sal/escritorio/fuente.sal"
+
+# Oráculo CPU de la escena de primitivas: escribe en stdout las N primitivas (64 B cada una)
+# y después el buffer de píxeles resultante (128 x 96, BGR, 4 B por píxel).
+# Lo usa tools/gpu-prim/validar.py para comprobar el kernel de GPU contra este backend.
+
+# Fuente PSF2 sintética: 8 glifos de 8x8 (la misma en el lado de GPU, que la recibe de stdout).
+fn psf_sintetica() -> Int ! alloc
+    p = bytes_ptr(bytes_new(32 + 8 * 8))
+    b = bytes_view_mem(p, 96)
+    _m = bytes_set_u32(b, 0, psf2_magic())
+    _h = bytes_set_u32(b, 8, 32)
+    _a = bytes_set_u32(b, 16, 8)
+    _c = bytes_set_u32(b, 20, 8)
+    _d = bytes_set_u32(b, 24, 8)
+    _e = bytes_set_u32(b, 28, 8)
+    g = 0
+    while g < 8
+        r = 0
+        while r < 8
+            _v = bytes_set_u8(b, 32 + g * 8 + r, (g * 37 + r * 91 + 17) & 255)
+            r = r + 1
+        g = g + 1
+    p
+
+fn main() -> Int ! io, alloc
+    w = 128
+    h = 96
+    cap = 24
+    e = esc_nueva(cap)
+    n = 0
+    n = esc_degradado(e, cap, n, 0, 0, w, h, color_rgb(30, 34, 54), color_rgb(70, 40, 90))
+    n = esc_anillo(e, cap, n, 4, 8, 100, 80, 8, 8, 96, 76, color_rgb(0, 0, 0), 40)
+    n = esc_anillo(e, cap, n, 2, 8, 102, 85, 8, 8, 96, 76, color_rgb(0, 0, 0), 40)
+    n = esc_rrect(e, cap, n, 8, 8, 96, 76, esc_radios(8, 8, 8, 8), color_rgb(90, 100, 140), 255, 0, 0)
+    n = esc_rrect(e, cap, n, 9, 9, 95, 75, esc_radios(7, 7, 7, 7), color_rgb(24, 26, 36), 255, 0, 0)
+    n = esc_rrect(e, cap, n, 9, 9, 95, 26, esc_radios(7, 7, 0, 0), color_rgb(40, 44, 66), 255, 0, 0)
+    n = esc_solido(e, cap, n, 9, 25, 95, 26, color_rgb(120, 160, 255), 255)
+    n = esc_rrect(e, cap, n, 14, 12, 30, 24, esc_radios(5, 5, 0, 0), color_rgb(60, 66, 90), 255, 0, 0)
+    n = esc_rrect(e, cap, n, 80, 12, 92, 24, esc_radios(6, 6, 6, 6), color_rgb(220, 70, 70), 255, 0, 0)
+    n = esc_rrect(e, cap, n, 20, 32, 70, 60, esc_radios(10, 3, 6, 0), color_rgb(0, 200, 120), 180, color_rgb(255, 255, 255), 2)
+    n = esc_solido(e, cap, n, 40, 40, 120, 90, color_rgb(255, 255, 255), 90)
+    n = esc_solido(e, cap, n, -10, -10, 6, 4, color_rgb(255, 0, 0), 255)
+    n = esc_degradado(e, cap, n, 100, 30, 140, 50, color_rgb(255, 255, 0), color_rgb(0, 0, 255))
+    n = esc_rrect(e, cap, n, 110, 60, 127, 95, esc_radios(30, 30, 30, 30), color_rgb(200, 200, 40), 255, 0, 0)
+    psf = psf_sintetica()
+    cel = bytes_ptr(bytes_new(36 * 12))
+    cb = bytes_view_mem(cel, 36 * 12)
+    k = 0
+    while k < 36
+        g = k % 8
+        if k % 7 == 6
+            g = 4294967295
+        _w0 = bytes_set_u32(cb, k * 12, g)
+        _w1 = bytes_set_u32(cb, k * 12 + 4, color_rgb(255 - k * 5, 200, 40 + k * 4))
+        _w2 = bytes_set_u32(cb, k * 12 + 8, color_rgb(10 + k, 12, 40))
+        k = k + 1
+    n = esc_rejilla(e, cap, n, 6, 66, 12, 3, 8, 8, 32, 8, 0)
+    pix = bytes_ptr(bytes_new(w * h * 4))
+    _x = esc_cpu_ejecutar_r(pix, w * h * 4, w, h, w, 4, 1, e, cap, n, cel, psf, 96)
+    sc = bytes_ptr(bytes_new(cap * esc_prim_bytes()))
+    _w1 = write_fd(1, e, n * esc_prim_bytes())
+    _w2 = write_fd(1, pix, w * h * 4)
+    _w3 = write_fd(1, psf, 96)
+    _w4 = write_fd(1, cel, 36 * 12)
+    0

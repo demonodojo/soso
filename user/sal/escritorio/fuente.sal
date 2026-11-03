@@ -39,28 +39,63 @@ fn psf2_headersize(ptr: Int, len: Int) -> Int ! alloc
 fn psf2_tabla_off() -> Int
     32
 
+# Puntuación tipográfica que la fuente no trae -> su equivalente ASCII.
+fn fuente_cp_ascii(cp: Int) -> Int
+    if cp == 8211
+        45
+    elsif cp == 8212
+        45
+    elsif cp == 8722
+        45
+    elsif cp == 8216
+        39
+    elsif cp == 8217
+        39
+    elsif cp == 8220
+        34
+    elsif cp == 8221
+        34
+    elsif cp == 8230
+        46
+    elsif cp == 8226
+        42
+    elsif cp == 160
+        32
+    else
+        cp
+
+# Índice de `cp` en la tabla Unicode de la fuente, o -1.
+fn psf2_buscar(ptr: Int, len: Int, cp: Int) -> Int ! alloc
+    b = bytes_view_mem(ptr, len)
+    n = psf2_num(ptr, len)
+    base = psf2_tabla_off()
+    ix = -1
+    # Camino rápido: en las fuentes habituales los 128 primeros glifos son ASCII en orden.
+    if cp >= 0
+        if cp < n
+            if bytes_get_u32(b, base + cp * 4) == cp
+                ix = cp
+    if ix < 0
+        i = 0
+        while i < n
+            if bytes_get_u32(b, base + i * 4) == cp
+                ix = i
+                i = n
+            i = i + 1
+    ix
+
 fn psf2_glyph_index(ptr: Int, len: Int, cp: Int) -> Int ! alloc
     fl = psf2_flags(ptr, len)
     if (fl & 1) == 0
         cp
     else
-        b = bytes_view_mem(ptr, len)
-        n = psf2_num(ptr, len)
-        base = psf2_tabla_off()
-        i = 0
-        ix = -1
-        while i < n
-            c = bytes_get_u32(b, base + i * 4)
-            if c == cp
-                ix = i
-            i = i + 1
+        ix = psf2_buscar(ptr, len, cp)
         if ix < 0
-            j = 0
-            while j < n
-                c2 = bytes_get_u32(b, base + j * 4)
-                if c2 == 63
-                    ix = j
-                j = j + 1
+            alt = fuente_cp_ascii(cp)
+            if alt != cp
+                ix = psf2_buscar(ptr, len, alt)
+        if ix < 0
+            ix = psf2_buscar(ptr, len, 63)
         if ix < 0
             0
         else
@@ -127,14 +162,28 @@ fn fuente_dibujar(psf_ptr: Int, psf_len: Int, pix_ptr: Int, pix_len: Int, stride
     else
         gw = psf2_ancho(psf_ptr, psf_len)
         gh = psf2_alto(psf_ptr, psf_len)
-        row = 0
-        while row < gh
-            col = 0
-            while col < gw
-                rgb = bg
-                if psf2_glifo_byte(psf_ptr, psf_len, cp, row, col) != 0
-                    rgb = fg
-                _p = pixel_escribir(pix_ptr, pix_len, stride, bpp, fmt, cx + col, cy + row, rgb)
-                col = col + 1
-            row = row + 1
+        alto = pix_len / (stride * bpp)
+        # Fondo de la celda de una vez; después sólo los píxeles de tinta.
+        _f = rellenar_rect(pix_ptr, pix_len, stride, alto, stride, bpp, fmt, cx, cy, cx + gw, cy + gh, bg)
+        if cp != 32
+            if cp != 0
+                off = psf2_offset_glifo(psf_ptr, psf_len, cp)
+                if off >= 0
+                    psf = bytes_view_mem(psf_ptr, psf_len)
+                    bpr = (gw + 7) / 8
+                    row = 0
+                    while row < gh
+                        py = cy + row
+                        if py >= 0
+                            if py < alto
+                                col = 0
+                                while col < gw
+                                    px = cx + col
+                                    if px >= 0
+                                        if px < stride
+                                            v = bytes_get_u8(psf, off + row * bpr + col / 8)
+                                            if ((v >> (7 - (col & 7))) & 1) != 0
+                                                _p = pixel_escribir(pix_ptr, pix_len, stride, bpp, fmt, px, py, fg)
+                                    col = col + 1
+                        row = row + 1
         0

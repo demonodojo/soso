@@ -1,0 +1,341 @@
+import "mate.sal"
+import "superficie.sal"
+
+# Escena de primitivas del escritorio (B1 de PLAN-PESTANAS).
+#
+# El WM describe lo que quiere ver como una lista de primitivas de 64 bytes y un
+# *backend* la ejecuta en orden. Hoy el único backend es la CPU (`escena_cpu_*`,
+# mismo resultado que las funciones sueltas de `superficie.sal`); el de GPU
+# interpretará el mismo formato (GSCEN v2) y se valida comparándolo con este.
+#
+# Cada primitiva son 16 palabras de 32 bits, little-endian. Las coordenadas son
+# enteros con signo (complemento a dos en 32 bits).
+
+fn esc_prim_bytes() -> Int
+    64
+
+fn esc_k_nada() -> Int
+    0
+
+# Relleno de rectángulo (color0, alfa).
+fn esc_k_solido() -> Int
+    1
+
+# Degradado vertical de color0 (arriba) a color1 (abajo).
+fn esc_k_degradado() -> Int
+    2
+
+# Rectángulo redondeado: radios por esquina, relleno color0 + alfa, borde opcional.
+fn esc_k_rrect() -> Int
+    3
+
+# Anillo: el rectángulo exterior menos el interior (ix0..iy1), color0 + alfa.
+# Sustituye a `sombra_anillo` (una capa de sombra).
+fn esc_k_anillo() -> Int
+    4
+
+# Rejilla de celdas de texto (G2/G4): origen x0,y0; columnas = ix0, filas = iy0;
+# ancho/alto de celda = ix1/iy1; bytes por glifo = radios; tamaño de la cabecera de la
+# fuente = borde_c. Las celdas van en un búfer aparte: tres palabras por celda
+# (índice de glifo o esc_celda_vacia(), color de tinta, color de fondo; colores 0xRRGGBB);
+# `flags` = índice de la primera celda de esta rejilla en el búfer.
+fn esc_k_rejilla() -> Int
+    5
+
+fn esc_celda_vacia() -> Int
+    4294967295
+
+fn esc_o_kind() -> Int
+    0
+
+fn esc_o_x0() -> Int
+    4
+
+fn esc_o_y0() -> Int
+    8
+
+fn esc_o_x1() -> Int
+    12
+
+fn esc_o_y1() -> Int
+    16
+
+fn esc_o_c0() -> Int
+    20
+
+fn esc_o_c1() -> Int
+    24
+
+fn esc_o_alfa() -> Int
+    28
+
+# Radios de las esquinas, 8 bits cada uno: arriba-izq | arriba-der << 8 | abajo-der << 16 | abajo-izq << 24.
+fn esc_o_radios() -> Int
+    32
+
+fn esc_o_borde_c() -> Int
+    36
+
+fn esc_o_borde_w() -> Int
+    40
+
+fn esc_o_ix0() -> Int
+    44
+
+fn esc_o_iy0() -> Int
+    48
+
+fn esc_o_ix1() -> Int
+    52
+
+fn esc_o_iy1() -> Int
+    56
+
+fn esc_o_flags() -> Int
+    60
+
+# ---- Lista de primitivas ----------------------------------------------------
+
+fn esc_nueva(cap: Int) -> Int ! alloc
+    bytes_ptr(bytes_new(cap * esc_prim_bytes()))
+
+fn esc_get(e: Int, cap: Int, n: Int, off: Int) -> Int ! alloc
+    v = bytes_get_u32(bytes_view_mem(e, cap * esc_prim_bytes()), n * esc_prim_bytes() + off)
+    if v >= 2147483648
+        v - 4294967296
+    else
+        v
+
+fn esc_set(e: Int, cap: Int, n: Int, off: Int, v: Int) -> Int ! alloc
+    w = v
+    if w < 0
+        w = w + 4294967296
+    bytes_set_u32(bytes_view_mem(e, cap * esc_prim_bytes()), n * esc_prim_bytes() + off, w)
+    0
+
+# Reserva la primitiva `n` (puesta a cero) y devuelve n + 1; si no cabe, n.
+fn esc_abrir(e: Int, cap: Int, n: Int, kind: Int, x0: Int, y0: Int, x1: Int, y1: Int) -> Int ! alloc
+    if n >= cap
+        n
+    else
+        o = 0
+        while o < esc_prim_bytes()
+            _z = esc_set(e, cap, n, o, 0)
+            o = o + 4
+        _k = esc_set(e, cap, n, esc_o_kind(), kind)
+        _a = esc_set(e, cap, n, esc_o_x0(), x0)
+        _b = esc_set(e, cap, n, esc_o_y0(), y0)
+        _c = esc_set(e, cap, n, esc_o_x1(), x1)
+        _d = esc_set(e, cap, n, esc_o_y1(), y1)
+        _f = esc_set(e, cap, n, esc_o_alfa(), 255)
+        n + 1
+
+fn esc_solido(e: Int, cap: Int, n: Int, x0: Int, y0: Int, x1: Int, y1: Int, rgb: Int, alfa: Int) -> Int ! alloc
+    m = esc_abrir(e, cap, n, esc_k_solido(), x0, y0, x1, y1)
+    if m > n
+        _c = esc_set(e, cap, n, esc_o_c0(), rgb)
+        _a = esc_set(e, cap, n, esc_o_alfa(), alfa)
+    m
+
+fn esc_degradado(e: Int, cap: Int, n: Int, x0: Int, y0: Int, x1: Int, y1: Int, arriba: Int, abajo: Int) -> Int ! alloc
+    m = esc_abrir(e, cap, n, esc_k_degradado(), x0, y0, x1, y1)
+    if m > n
+        _c = esc_set(e, cap, n, esc_o_c0(), arriba)
+        _d = esc_set(e, cap, n, esc_o_c1(), abajo)
+    m
+
+fn esc_radios(tl: Int, tr: Int, br: Int, bl: Int) -> Int
+    tl + tr * 256 + br * 65536 + bl * 16777216
+
+fn esc_rrect(e: Int, cap: Int, n: Int, x0: Int, y0: Int, x1: Int, y1: Int, radios: Int, rgb: Int, alfa: Int, borde_c: Int, borde_w: Int) -> Int ! alloc
+    m = esc_abrir(e, cap, n, esc_k_rrect(), x0, y0, x1, y1)
+    if m > n
+        _c = esc_set(e, cap, n, esc_o_c0(), rgb)
+        _a = esc_set(e, cap, n, esc_o_alfa(), alfa)
+        _r = esc_set(e, cap, n, esc_o_radios(), radios)
+        _bc = esc_set(e, cap, n, esc_o_borde_c(), borde_c)
+        _bw = esc_set(e, cap, n, esc_o_borde_w(), borde_w)
+    m
+
+fn esc_anillo(e: Int, cap: Int, n: Int, x0: Int, y0: Int, x1: Int, y1: Int, ix0: Int, iy0: Int, ix1: Int, iy1: Int, rgb: Int, alfa: Int) -> Int ! alloc
+    m = esc_abrir(e, cap, n, esc_k_anillo(), x0, y0, x1, y1)
+    if m > n
+        _c = esc_set(e, cap, n, esc_o_c0(), rgb)
+        _a = esc_set(e, cap, n, esc_o_alfa(), alfa)
+        _i0 = esc_set(e, cap, n, esc_o_ix0(), ix0)
+        _i1 = esc_set(e, cap, n, esc_o_iy0(), iy0)
+        _i2 = esc_set(e, cap, n, esc_o_ix1(), ix1)
+        _i3 = esc_set(e, cap, n, esc_o_iy1(), iy1)
+    m
+
+# ---- Backend CPU -------------------------------------------------------------
+
+fn esc_cpu_relleno(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, rgb: Int, alfa: Int) -> Int ! alloc
+    if alfa >= 255
+        rellenar_rect(ptr, len, ancho, alto, stride, bpp, fmt, x0, y0, x1, y1, rgb)
+    elsif alfa <= 0
+        0
+    else
+        rellenar_rect_alfa(ptr, len, ancho, alto, stride, bpp, fmt, x0, y0, x1, y1, rgb, alfa)
+
+# Radio efectivo de una esquina para un rectángulo de w × h.
+fn esc_radio_ok(r: Int, w: Int, h: Int) -> Int
+    min(r, min(w / 2, h / 2))
+
+# Píxeles que la fila `d` (contada desde arriba) pierde por la izquierda y por la derecha.
+fn esc_inset_izq(d: Int, h: Int, rtl: Int, rbl: Int) -> Int
+    a = 0
+    if d < rtl
+        a = rr_inset(rtl, d)
+    b = 0
+    if h - 1 - d < rbl
+        b = rr_inset(rbl, h - 1 - d)
+    max(a, b)
+
+fn esc_inset_der(d: Int, h: Int, rtr: Int, rbr: Int) -> Int
+    a = 0
+    if d < rtr
+        a = rr_inset(rtr, d)
+    b = 0
+    if h - 1 - d < rbr
+        b = rr_inset(rbr, h - 1 - d)
+    max(a, b)
+
+# Rectángulo con radios por esquina, fila a fila.
+fn esc_cpu_rrect_relleno(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, rtl: Int, rtr: Int, rbr: Int, rbl: Int, rgb: Int, alfa: Int) -> Int ! alloc
+    w = x1 - x0
+    h = y1 - y0
+    if w <= 0
+        0
+    elsif h <= 0
+        0
+    else
+        a = esc_radio_ok(rtl, w, h)
+        b = esc_radio_ok(rtr, w, h)
+        c = esc_radio_ok(rbr, w, h)
+        d = esc_radio_ok(rbl, w, h)
+        y = 0
+        while y < h
+            il = esc_inset_izq(y, h, a, d)
+            ir = esc_inset_der(y, h, b, c)
+            _r = esc_cpu_relleno(ptr, len, ancho, alto, stride, bpp, fmt, x0 + il, y0 + y, x1 - ir, y0 + y + 1, rgb, alfa)
+            y = y + 1
+        0
+
+fn esc_cpu_rrect(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: Int, fmt: Int, e: Int, cap: Int, n: Int) -> Int ! alloc
+    x0 = esc_get(e, cap, n, esc_o_x0())
+    y0 = esc_get(e, cap, n, esc_o_y0())
+    x1 = esc_get(e, cap, n, esc_o_x1())
+    y1 = esc_get(e, cap, n, esc_o_y1())
+    rd = esc_get(e, cap, n, esc_o_radios())
+    if rd < 0
+        rd = rd + 4294967296
+    rtl = rd & 255
+    rtr = (rd >> 8) & 255
+    rbr = (rd >> 16) & 255
+    rbl = (rd >> 24) & 255
+    alfa = esc_get(e, cap, n, esc_o_alfa())
+    bw = esc_get(e, cap, n, esc_o_borde_w())
+    if bw > 0
+        _b = esc_cpu_rrect_relleno(ptr, len, ancho, alto, stride, bpp, fmt, x0, y0, x1, y1, rtl, rtr, rbr, rbl, esc_get(e, cap, n, esc_o_borde_c()), 255)
+        _i = esc_cpu_rrect_relleno(ptr, len, ancho, alto, stride, bpp, fmt, x0 + bw, y0 + bw, x1 - bw, y1 - bw, max(0, rtl - bw), max(0, rtr - bw), max(0, rbr - bw), max(0, rbl - bw), esc_get(e, cap, n, esc_o_c0()), alfa)
+    else
+        _f = esc_cpu_rrect_relleno(ptr, len, ancho, alto, stride, bpp, fmt, x0, y0, x1, y1, rtl, rtr, rbr, rbl, esc_get(e, cap, n, esc_o_c0()), alfa)
+    0
+
+
+# Una celda de la rejilla: fondo opaco y, si hay glifo, los píxeles de tinta (como fuente_dibujar).
+fn esc_cpu_celda(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: Int, fmt: Int, cx: Int, cy: Int, gw: Int, gh: Int, psf: Int, psf_len: Int, hdr: Int, bpg: Int, glifo: Int, fg: Int, bg: Int) -> Int ! alloc
+    _f = rellenar_rect(ptr, len, ancho, alto, stride, bpp, fmt, cx, cy, cx + gw, cy + gh, bg)
+    if glifo >= 0
+        f = bytes_view_mem(psf, psf_len)
+        bpr = (gw + 7) / 8
+        off = hdr + glifo * bpg
+        row = 0
+        while row < gh
+            py = cy + row
+            if py >= 0
+                if py < alto
+                    col = 0
+                    while col < gw
+                        px = cx + col
+                        if px >= 0
+                            if px < ancho
+                                v = bytes_get_u8(f, off + row * bpr + col / 8)
+                                if ((v >> (7 - (col & 7))) & 1) != 0
+                                    _p = pixel_escribir(ptr, len, stride, bpp, fmt, px, py, fg)
+                        col = col + 1
+            row = row + 1
+    0
+
+fn esc_cpu_rejilla(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: Int, fmt: Int, e: Int, cap: Int, n: Int, celdas: Int, psf: Int, psf_len: Int) -> Int ! alloc
+    x0 = esc_get(e, cap, n, esc_o_x0())
+    y0 = esc_get(e, cap, n, esc_o_y0())
+    cols = esc_get(e, cap, n, esc_o_ix0())
+    filas = esc_get(e, cap, n, esc_o_iy0())
+    gw = esc_get(e, cap, n, esc_o_ix1())
+    gh = esc_get(e, cap, n, esc_o_iy1())
+    bpg = esc_get(e, cap, n, esc_o_radios())
+    hdr = esc_get(e, cap, n, esc_o_borde_c())
+    c0 = esc_get(e, cap, n, esc_o_flags())
+    cb = bytes_view_mem(celdas, (c0 + cols * filas) * 12)
+    r = 0
+    while r < filas
+        c = 0
+        while c < cols
+            k = (c0 + r * cols + c) * 12
+            g = bytes_get_u32(cb, k)
+            gi = -1
+            if g != esc_celda_vacia()
+                gi = g
+            _c = esc_cpu_celda(ptr, len, ancho, alto, stride, bpp, fmt, x0 + c * gw, y0 + r * gh, gw, gh, psf, psf_len, hdr, bpg, gi, bytes_get_u32(cb, k + 4), bytes_get_u32(cb, k + 8))
+            c = c + 1
+        r = r + 1
+    0
+
+fn esc_rejilla(e: Int, cap: Int, n: Int, x0: Int, y0: Int, cols: Int, filas: Int, gw: Int, gh: Int, hdr: Int, bpg: Int, celda0: Int) -> Int ! alloc
+    m = esc_abrir(e, cap, n, esc_k_rejilla(), x0, y0, x0 + cols * gw, y0 + filas * gh)
+    if m > n
+        _a = esc_set(e, cap, n, esc_o_ix0(), cols)
+        _b = esc_set(e, cap, n, esc_o_iy0(), filas)
+        _c = esc_set(e, cap, n, esc_o_ix1(), gw)
+        _d = esc_set(e, cap, n, esc_o_iy1(), gh)
+        _r = esc_set(e, cap, n, esc_o_radios(), bpg)
+        _h = esc_set(e, cap, n, esc_o_borde_c(), hdr)
+        _o = esc_set(e, cap, n, esc_o_flags(), celda0)
+    m
+
+# Ejecuta las primitivas 0..n-1 sobre el buffer, en orden.
+fn esc_cpu_ejecutar(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: Int, fmt: Int, e: Int, cap: Int, n: Int) -> Int ! alloc
+    esc_cpu_ejecutar_r(ptr, len, ancho, alto, stride, bpp, fmt, e, cap, n, 0, 0, 0)
+
+# Igual, con las celdas de las rejillas y la fuente PSF2 (que las primitivas de rejilla leen).
+fn esc_cpu_ejecutar_r(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: Int, fmt: Int, e: Int, cap: Int, n: Int, celdas: Int, psf: Int, psf_len: Int) -> Int ! alloc
+    i = 0
+    while i < n
+        k = esc_get(e, cap, i, esc_o_kind())
+        x0 = esc_get(e, cap, i, esc_o_x0())
+        y0 = esc_get(e, cap, i, esc_o_y0())
+        x1 = esc_get(e, cap, i, esc_o_x1())
+        y1 = esc_get(e, cap, i, esc_o_y1())
+        if k == esc_k_solido()
+            _s = esc_cpu_relleno(ptr, len, ancho, alto, stride, bpp, fmt, x0, y0, x1, y1, esc_get(e, cap, i, esc_o_c0()), esc_get(e, cap, i, esc_o_alfa()))
+        if k == esc_k_degradado()
+            _g = degradado_vertical(ptr, len, ancho, alto, stride, bpp, fmt, x0, y0, x1, y1, esc_get(e, cap, i, esc_o_c0()), esc_get(e, cap, i, esc_o_c1()))
+        if k == esc_k_rrect()
+            _r = esc_cpu_rrect(ptr, len, ancho, alto, stride, bpp, fmt, e, cap, i)
+        if k == esc_k_rejilla()
+            _j = esc_cpu_rejilla(ptr, len, ancho, alto, stride, bpp, fmt, e, cap, i, celdas, psf, psf_len)
+        if k == esc_k_anillo()
+            al = esc_get(e, cap, i, esc_o_alfa())
+            c0 = esc_get(e, cap, i, esc_o_c0())
+            ix0 = esc_get(e, cap, i, esc_o_ix0())
+            iy0 = esc_get(e, cap, i, esc_o_iy0())
+            ix1 = esc_get(e, cap, i, esc_o_ix1())
+            iy1 = esc_get(e, cap, i, esc_o_iy1())
+            _a1 = esc_cpu_relleno(ptr, len, ancho, alto, stride, bpp, fmt, x0, y0, x1, iy0, c0, al)
+            _a2 = esc_cpu_relleno(ptr, len, ancho, alto, stride, bpp, fmt, x0, iy1, x1, y1, c0, al)
+            _a3 = esc_cpu_relleno(ptr, len, ancho, alto, stride, bpp, fmt, x0, iy0, ix0, iy1, c0, al)
+            _a4 = esc_cpu_relleno(ptr, len, ancho, alto, stride, bpp, fmt, ix1, iy0, x1, iy1, c0, al)
+        i = i + 1
+    0

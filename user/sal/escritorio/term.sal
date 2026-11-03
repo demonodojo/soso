@@ -482,7 +482,7 @@ fn term_feed_byte(st: Int, ptr: Int, len: Int, w: Int, h: Int, byte: Int) -> Int
                     _p = term_put_cp(st, ptr, len, w, h, byte)
                 else
                     cp = utf8_feed(0, byte)
-                    if cp >= 256
+                    if utf8_pendiente(cp) != 0
                         _u = term_st_set(st, st_utf8(), cp)
                     else
                         _p = term_put_cp(st, ptr, len, w, h, cp)
@@ -491,8 +491,10 @@ fn term_feed_byte(st: Int, ptr: Int, len: Int, w: Int, h: Int, byte: Int) -> Int
                 if cp == utf8_reempl()
                     _p = term_put_cp(st, ptr, len, w, h, cp)
                     _u = term_st_set(st, st_utf8(), utf8_inicio())
+                    if byte < 128
+                        _q = term_put_cp(st, ptr, len, w, h, byte)
                 else
-                    if cp >= 256
+                    if utf8_pendiente(cp) != 0
                         _u = term_st_set(st, st_utf8(), cp)
                     else
                         _p = term_put_cp(st, ptr, len, w, h, cp)

@@ -1,0 +1,47 @@
+import "../../../user/sal/escritorio/tabla.sal"
+
+fn nuevo(tab: Int, i: Int) -> Int ! alloc
+    _t = tab_set_raw(tab, i, tab_tipo(), tab_tipo_term())
+    0
+
+fn main() -> Int ! alloc
+    tab = bytes_ptr(bytes_new(tab_cap() * tab_slot_bytes()))
+    _a = nuevo(tab, 0)
+    _b = nuevo(tab, 1)
+    _c = nuevo(tab, 2)
+    _d = nuevo(tab, 3)
+    _i1 = grupo_integrar(tab, 1, 0)
+    _i2 = grupo_integrar(tab, 2, 0)
+    _i3 = grupo_integrar(tab, 3, 0)
+    # orden inicial 0 1 2 3
+    if grupo_miembro(tab, 0, 3) != 3
+        1
+    else
+        _m = grupo_mover(tab, 3, 0)
+        # 3 0 1 2
+        if grupo_miembro(tab, 0, 0) != 3
+            2
+        elsif grupo_miembro(tab, 0, 1) != 0
+            3
+        elsif grupo_miembro(tab, 0, 3) != 2
+            4
+        else
+            _m2 = grupo_mover(tab, 3, 2)
+            # 0 1 3 2
+            if grupo_miembro(tab, 0, 2) != 3
+                5
+            elsif grupo_miembro(tab, 0, 0) != 0
+                6
+            elsif grupo_miembro(tab, 0, 3) != 2
+                7
+            elsif grupo_mover(tab, 3, 2) != 0
+                8
+            else
+                _m3 = grupo_mover(tab, 0, 99)
+                # 1 3 2 0
+                if grupo_miembro(tab, 0, 3) != 0
+                    9
+                elsif grupo_miembro(tab, 0, 0) != 1
+                    10
+                else
+                    0

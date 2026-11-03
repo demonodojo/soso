@@ -1,0 +1,42 @@
+import "../../../user/sal/escritorio/comp_gprim_layout.sal"
+
+fn main() -> Int ! alloc
+    if comp_gprim_hdr_len() != 32
+        1
+    elsif comp_gprim_buf_len() != 32 + 24 * 64
+        2
+    elsif esc_o_flags() + 4 != esc_prim_bytes()
+        3
+    else
+        cap = 8
+        e = esc_nueva(cap)
+        n = 0
+        n = esc_rrect(e, cap, n, -7, 4, 40, 44, esc_radios(6, 6, 0, 0), 12345, 255, 0, 0)
+        n = esc_solido(e, cap, n, 1, 2, 3, 4, 99, 90)
+        buf = bytes_ptr(bytes_new(comp_gprim_buf_len()))
+        m = comp_gprim_volcar(buf, 7, 640, 480, 2560, 1, e, cap, n)
+        b = bytes_view_mem(buf, comp_gprim_buf_len())
+        if m != 2
+            4
+        elsif bytes_get_u8(b, 0) != 71
+            5
+        elsif bytes_get_u8(b, 4) != 77
+            6
+        elsif bytes_get_i64(b, 5) != 7
+            7
+        elsif bytes_get_u32(b, 25) != 1
+            8
+        elsif bytes_get_u8(b, 29) != 2
+            9
+        elsif bytes_get_u32(b, 32) != esc_k_rrect()
+            10
+        elsif bytes_get_u32(b, 32 + 4) != 4294967289
+            11
+        elsif bytes_get_u32(b, 32 + esc_o_radios()) != esc_radios(6, 6, 0, 0)
+            12
+        elsif bytes_get_u32(b, 32 + 64 + esc_o_alfa()) != 90
+            13
+        elsif bytes_get_u32(b, 32 + 64 + esc_o_kind()) != esc_k_solido()
+            14
+        else
+            0

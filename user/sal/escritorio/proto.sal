@@ -45,6 +45,10 @@ fn op_tema() -> Int
 fn op_escala() -> Int
     24
 
+# WM -> cliente: el panel pasa a verse (1) u ocultarse (0); un panel oculto no necesita repintar.
+fn op_visible() -> Int
+    25
+
 fn msg_nuevo() -> Int ! alloc
     bytes_ptr(bytes_new(msg_len()))
 
@@ -66,6 +70,18 @@ fn msg_get_op(ptr: Int) -> Int ! alloc
 fn msg_encode_hola(ptr: Int, version: Int) -> Int ! alloc
     msg_set_op(ptr, op_hola())
     msg_set_u32(ptr, 4, version)
+    0
+
+# HOLA con identificador de aplicación (0 ninguna, 1 web, 2 ficheros) en el offset 8.
+fn msg_encode_hola_app(ptr: Int, version: Int, app: Int) -> Int ! alloc
+    msg_set_op(ptr, op_hola())
+    msg_set_u32(ptr, 4, version)
+    msg_set_u32(ptr, 8, app)
+    0
+
+fn msg_encode_visible(ptr: Int, visible: Int) -> Int ! alloc
+    msg_set_op(ptr, op_visible())
+    msg_set_u32(ptr, 4, visible)
     0
 
 fn msg_encode_crear(ptr: Int, w: Int, h: Int, titulo_off: Int) -> Int ! alloc

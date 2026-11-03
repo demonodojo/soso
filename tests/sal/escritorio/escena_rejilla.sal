@@ -1,0 +1,73 @@
+import "../../../user/sal/escritorio/escena.sal"
+import "../../../user/sal/escritorio/fuente.sal"
+
+# Fuente PSF2 sintética de 4 glifos 8x8 (flags 0: el índice es el código).
+fn psf_sintetica() -> Int ! alloc
+    p = bytes_ptr(bytes_new(32 + 4 * 8))
+    b = bytes_view_mem(p, 64)
+    _m = bytes_set_u32(b, 0, psf2_magic())
+    _h = bytes_set_u32(b, 8, 32)
+    _a = bytes_set_u32(b, 16, 8)
+    _c = bytes_set_u32(b, 20, 8)
+    _d = bytes_set_u32(b, 24, 8)
+    _e = bytes_set_u32(b, 28, 4)
+    g = 0
+    while g < 4
+        r = 0
+        while r < 8
+            _v = bytes_set_u8(b, 32 + g * 8 + r, (g * 37 + r * 91 + 17) & 255)
+            r = r + 1
+        g = g + 1
+    p
+
+fn main() -> Int ! alloc
+    w = 40
+    h = 24
+    len = w * h * 4
+    psf = psf_sintetica()
+    a = bytes_ptr(bytes_new(len))
+    b = bytes_ptr(bytes_new(len))
+    cel = bytes_ptr(bytes_new(4 * 3 * 12))
+    cb = bytes_view_mem(cel, 4 * 3 * 12)
+    k = 0
+    while k < 12
+        g = 1 + k % 3
+        if k % 4 == 3
+            g = 4294967295
+        _w0 = bytes_set_u32(cb, k * 12, g)
+        _w1 = bytes_set_u32(cb, k * 12 + 4, color_rgb(200 - k * 10, 100 + k * 5, 30 * (k % 4)))
+        _w2 = bytes_set_u32(cb, k * 12 + 8, color_rgb(k * 3, 20, 60 + k))
+        k = k + 1
+    # Directo con fuente_dibujar.
+    r = 0
+    while r < 3
+        c = 0
+        while c < 4
+            i = r * 4 + c
+            g = bytes_get_u32(cb, i * 12)
+            cp = 32
+            if g != esc_celda_vacia()
+                cp = g
+            # fuente_dibujar no pinta tinta con el código 0 ni el 32: los glifos del test son 1..3.
+            _d = fuente_dibujar(psf, 64, a, len, w, 4, 0, cp, bytes_get_u32(cb, i * 12 + 4), bytes_get_u32(cb, i * 12 + 8), 4 + c * 8, 2 + r * 8)
+            c = c + 1
+        r = r + 1
+    # Por la escena.
+    e = esc_nueva(4)
+    n = esc_rejilla(e, 4, 0, 4, 2, 4, 3, 8, 8, 32, 8, 0)
+    _x = esc_cpu_ejecutar_r(b, len, w, h, w, 4, 0, e, 4, n, cel, psf, 64)
+    d = 0
+    y = 0
+    while y < h
+        x = 0
+        while x < w
+            if pixel_leer(a, len, w, 4, 0, x, y) != pixel_leer(b, len, w, 4, 0, x, y)
+                d = d + 1
+            x = x + 1
+        y = y + 1
+    if n != 1
+        1
+    elsif d != 0
+        2
+    else
+        0

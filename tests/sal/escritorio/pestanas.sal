@@ -1,0 +1,29 @@
+import "../../../user/sal/escritorio/ventanas.sal"
+
+fn main() -> Int
+    wx = 100
+    wy = 50
+    ww = 640
+    gh = 16
+    bh = barra_alto(gh)
+    mx = pest_mas_x(wx, ww, gh)
+    if mx + ventana_btn_d(gh) >= ventana_btn_cx(wx, ww, gh, 2)
+        1
+    elsif pest_x1(wx, ww, gh) >= mx
+        2
+    elsif pest_ancho(wx, ww, gh, 1) != pest_ancho_max()
+        3
+    elsif pest_ancho(wx, ww, gh, 3) * 3 > pest_x1(wx, ww, gh) - pest_x0(wx)
+        4
+    elsif pest_hit(mx + 2, wy + 5, wx, wy, ww, gh, 3) != 200
+        5
+    elsif pest_hit(pest_pos_x(wx, ww, gh, 3, 1) + 10, wy + 8, wx, wy, ww, gh, 3) != 2
+        6
+    elsif pest_hit(pest_pos_x(wx, ww, gh, 3, 2) + pest_ancho(wx, ww, gh, 3) - 5, wy + 8, wx, wy, ww, gh, 3) != 103
+        7
+    elsif pest_hit(pest_pos_x(wx, ww, gh, 1, 0) + 10, wy + 8, wx, wy, ww, gh, 1) != 0
+        8
+    elsif pest_hit(pest_pos_x(wx, ww, gh, 3, 0) + 10, wy + bh + 2, wx, wy, ww, gh, 3) != 0
+        9
+    else
+        0

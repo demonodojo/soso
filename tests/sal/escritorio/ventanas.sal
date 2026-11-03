@@ -37,6 +37,40 @@ fn mosaico_ok_4(sw: Int, sh: Int, bar_h: Int, gh: Int) -> Int ! alloc
         i = i + 1
     ok
 
+# Botones de la barra de título y bordes de redimensión.
+fn geometria_ok(wx: Int, wy: Int, ww: Int, wh: Int, gh: Int) -> Int ! alloc
+    d = ventana_btn_d(gh)
+    r = 0
+    k = 0
+    while k < 3
+        cx = ventana_btn_cx(wx, ww, gh, k) + d / 2
+        cy = ventana_btn_cy(wy, gh) + d / 2
+        if ventana_hit_boton(cx, cy, wx, wy, ww, gh) != k + 1
+            r = 100 + k
+        k = k + 1
+    if r == 0
+        if ventana_hit_boton(wx + 20, wy + 4, wx, wy, ww, gh) != 0
+            r = 110
+    if r == 0
+        if ventana_hit_borde(wx + ww - 2, wy + wh / 2, wx, wy, ww, wh, gh) != 3
+            r = 111
+    if r == 0
+        if ventana_hit_borde(wx + 1, wy + wh / 2, wx, wy, ww, wh, gh) != 5
+            r = 112
+    if r == 0
+        if ventana_hit_borde(wx + ww / 2, wy + wh - 2, wx, wy, ww, wh, gh) != 4
+            r = 113
+    if r == 0
+        if ventana_hit_borde(wx + 3, wy + wh - 3, wx, wy, ww, wh, gh) != 6
+            r = 114
+    if r == 0
+        if ventana_hit_borde(wx + ww - 3, wy + wh - 3, wx, wy, ww, wh, gh) != 2
+            r = 115
+    if r == 0
+        if ventana_hit_borde(wx + ww / 2, wy + wh / 2, wx, wy, ww, wh, gh) != 0
+            r = 116
+    r
+
 fn main() -> Int ! alloc
     sw = 1920
     sh = 1080
@@ -81,4 +115,4 @@ fn main() -> Int ! alloc
                                         if ventana_hit_titulo(wx + 10, wy + 2, wx, wy, ww, gh) == 0
                                             11
                                         else
-                                            0
+                                            geometria_ok(wx, wy, ww, 300, gh)

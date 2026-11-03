@@ -131,6 +131,11 @@ pub fn poll_input_from_wm(st: &mut InputState, fb: &mut super::fb::Framebuffer) 
             st.layout_dirty = true;
         }
         Evento::Foco => {}
+        Evento::Visible { visible } => {
+            if visible {
+                st.layout_dirty = true;
+            }
+        }
         Evento::Tema { claro } => {
             st.tema_claro = claro;
             st.layout_dirty = true;

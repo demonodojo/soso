@@ -1,4 +1,4 @@
 SOSOPKG v1
 nombre=demo
 version=1.0.0
-f ba454cbfde643b4ceef49869fdd712bb1e05ea45b4b7ca3ebb04f2b677439001 34144 bin/pkg-demo
+f b91b57c7486415ea61f6136d069f1d8b98945a8eafe58317d34d2dacce8d71d5 34144 bin/pkg-demo

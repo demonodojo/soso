@@ -10,10 +10,11 @@ import "comp_proto.sal"
 import "tema.sal"
 import "fuentes.sal"
 import "zoom.sal"
+import "escena.sal"
 import "mono.sal"
 
 fn st_size() -> Int
-    400
+    496
 
 fn st_alloc_bytes() -> Int
     st_size()
@@ -167,6 +168,53 @@ fn st_ss_cap() -> Int
 
 fn st_cursor_bak() -> Int
     392
+
+fn st_clic_t() -> Int
+    400
+
+fn st_clic_i() -> Int
+    408
+
+# Botón bajo el puntero: ranura * 8 + botón (1 cerrar, 2 maximizar, 3 minimizar); 0 = ninguno.
+fn st_hover() -> Int
+    416
+
+# Lanzamiento pendiente: el próximo cliente cuyo pid coincida con `st_pend_pid` es de la
+# aplicación `st_pend_app` y, si `st_pend_grupo` > 0, entra como pestaña de la ventana
+# (cabecera + 1) en vez de abrir ventana propia.
+fn st_pend_pid() -> Int
+    424
+
+fn st_pend_app() -> Int
+    432
+
+fn st_pend_grupo() -> Int
+    440
+
+# Pestaña bajo el puntero (resultado de pest_hit) y ventana a la que pertenece.
+fn st_hover_pest() -> Int
+    448
+
+# Escena de primitivas reutilizable (ver escena.sal), con capacidad `wm_escena_cap()`.
+fn st_escena() -> Int
+    456
+
+# Ventana sobre cuya tira se soltaría lo que se arrastra (-1 ninguna).
+fn st_drop() -> Int
+    464
+
+# Menú contextual de una pestaña: panel (-1 cerrado) y esquina superior izquierda.
+fn st_ctx() -> Int
+    472
+
+fn st_ctx_x() -> Int
+    480
+
+fn st_ctx_y() -> Int
+    488
+
+fn wm_escena_cap() -> Int
+    160
 
 fn comp_puerto() -> Int
     7432
@@ -484,6 +532,13 @@ fn st_nuevo(evt_buf: Int, msg_buf: Int) -> Int ! alloc
     _sp = st_set(p, st_ss_pid(), -1)
     _ss = st_set(p, st_ss_slot(), -1)
     _sc = st_set(p, st_ss_cap(), 0)
+    _es = st_set(p, st_escena(), esc_nueva(wm_escena_cap()))
+    _pp = st_set(p, st_pend_pid(), -1)
+    _pa = st_set(p, st_pend_app(), 0)
+    _pg = st_set(p, st_pend_grupo(), 0)
+    _hp = st_set(p, st_hover_pest(), 0)
+    _dp = st_set(p, st_drop(), -1)
+    _cx0 = st_set(p, st_ctx(), -1)
     _cb = bytes_ptr(bytes_new(wm_cursor_bak_len()))
     _cp = st_set(p, st_cursor_bak(), _cb)
     p
@@ -895,6 +950,13 @@ fn wm_texto(st: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int, s:
             j = j + 1
     0
 
+# Un rectángulo redondeado suelto, como escena de una primitiva (barra, menú, lista de ventanas).
+fn wm_esc_rr(st: Int, compos: Int, clen: Int, w: Int, h: Int, stride: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, rs: Int, rgb: Int) -> Int ! alloc
+    e = st_get(st, st_escena())
+    cap = wm_escena_cap()
+    n = esc_rrect(e, cap, 0, x0, y0, x1, y1, rs, rgb, 255, 0, 0)
+    esc_cpu_ejecutar(compos, clen, w, h, stride, bpp, fmt, e, cap, n)
+
 fn wm_pintar_barra(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     gw = wm_gw_wm(st)
     gh = wm_gh_wm(st)
@@ -920,18 +982,19 @@ fn wm_pintar_barra(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: In
         ty = (bh - gh) / 2
         if ty < 2
             ty = 2
-        _b = rellenar_rect_redondeado(compos, clen, sw, sh, stride, bpp, fmt, x0, ty, x0 + bw, ty + gh + 4, radio, bg)
+        _b = wm_esc_rr(st, compos, clen, sw, sh, stride, bpp, fmt, x0, ty, x0 + bw, ty + gh + 4, esc_radios(radio, radio, 0, 0), bg)
         if gmode != 0
             ly = 0
             while ly < gh + 4
                 col = wm_barra_rgb_fila(st, ty + ly, sh)
                 _m = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, x0, ty + ly, x0 + bw, ty + ly + 1, col)
                 ly = ly + 1
-            _b2 = rellenar_rect_redondeado(compos, clen, sw, sh, stride, bpp, fmt, x0, ty, x0 + bw, ty + gh + 4, radio, bg)
+            _b2 = wm_esc_rr(st, compos, clen, sw, sh, stride, bpp, fmt, x0, ty, x0 + bw, ty + gh + 4, esc_radios(radio, radio, 0, 0), bg)
         txt = lanz_boton_texto(i)
         tx = x0 + lanz_margen(gw)
         _t = wm_texto(st, compos, clen, stride, bpp, fmt, txt, tx, ty + 2, wm_color_texto_barra(st), bg)
         i = i + 1
+    _lv = wm_pintar_lista_ventanas(st, compos, clen, sw, sh, stride, bpp, fmt)
     _d = wm_marcar_dirty(st, 0, 0, sw, bh)
     0
 
@@ -951,7 +1014,7 @@ fn wm_pintar_menu_cuerpo(st: Int, compos: Int, clen: Int, buf_w: Int, buf_h: Int
             col = wm_menu_rgb_fila(st, y, sh, oy)
         _f = rellenar_rect(compos, clen, buf_w, buf_h, stride, bpp, fmt, ox, oy + y, ox + mw, oy + y + 1, col)
         y = y + 1
-    _r = rellenar_rect_redondeado(compos, clen, buf_w, buf_h, stride, bpp, fmt, ox, oy, ox + mw, oy + mh, radio, wm_color_menu(st))
+    _r = wm_esc_rr(st, compos, clen, buf_w, buf_h, stride, bpp, fmt, ox, oy, ox + mw, oy + mh, esc_radios(radio, radio, 0, 0), wm_color_menu(st))
     k = 0
     while k < lanz_menu_n()
         iy = oy + k * alto + 2
@@ -961,7 +1024,7 @@ fn wm_pintar_menu_cuerpo(st: Int, compos: Int, clen: Int, buf_w: Int, buf_h: Int
             cap_x1 = ox + mw - lanz_margen(gw) / 2
             cap_y0 = iy
             cap_y1 = iy + alto - 4
-            _c = rellenar_rect_redondeado4(compos, clen, buf_w, buf_h, stride, bpp, fmt, cap_x0, cap_y0, cap_x1, cap_y1, radio, wm_color_menu_sel(st))
+            _c = wm_esc_rr(st, compos, clen, buf_w, buf_h, stride, bpp, fmt, cap_x0, cap_y0, cap_x1, cap_y1, esc_radios(radio, radio, radio, radio), wm_color_menu_sel(st))
             bg = wm_color_menu_sel(st)
         _t = wm_texto(st, compos, clen, stride, bpp, fmt, lanz_menu_texto(k, tema), ox + lanz_margen(gw), iy + 2, wm_color_texto_barra(st), bg)
         k = k + 1
@@ -1012,9 +1075,9 @@ fn wm_ejecutar(st: Int, accion: Int, sw: Int, sh: Int) -> Int ! io, alloc
         if accion == lanz_terminal()
             _t = wm_abrir_terminal(st, sw, sh)
         if accion == lanz_web()
-            _w = wm_lanzar_web()
+            _w = wm_abrir_app(st, app_web(), 0)
         if accion == lanz_ficheros()
-            _f = wm_lanzar_ficheros()
+            _f = wm_abrir_app(st, app_ficheros(), 0)
         if accion == lanz_tema()
             _tm = wm_cambiar_tema(st)
         if accion == lanz_salir()
@@ -1031,12 +1094,13 @@ fn wm_hit_test(st: Int, x: Int, y: Int) -> Int ! alloc
         if found < 0
             i = z_get(z, k)
             if tab_slot_activo(tab, i) != 0
-                wx = tab_get(tab, i, tab_wx())
-                wy = tab_get(tab, i, tab_wy())
-                ww = tab_get(tab, i, tab_ww())
-                wh = tab_get(tab, i, tab_wh())
-                if ventana_contiene(x, y, wx, wy, ww, wh) != 0
-                    found = i
+                if wm_oculta(tab, i) == 0
+                    wx = tab_get(tab, i, tab_wx())
+                    wy = tab_get(tab, i, tab_wy())
+                    ww = tab_get(tab, i, tab_ww())
+                    wh = tab_get(tab, i, tab_wh())
+                    if ventana_contiene(x, y, wx, wy, ww, wh) != 0
+                        found = i
         k = k - 1
     found
 
@@ -1045,9 +1109,27 @@ fn wm_foco_a(st: Int, i: Int) -> Int ! alloc
     z = st_get(st, st_z())
     nz = st_get(st, st_nz())
     if tab_slot_activo(tab, i) != 0
+        _q = wm_quitar_min(tab, i)
         _f = st_set(st, st_focus(), i)
         _u = z_subir(z, nz, i)
         _rp = wm_pedir_repintar(st)
+    0
+
+fn wm_oculta(tab: Int, i: Int) -> Int ! alloc
+    if (tab_get(tab, i, tab_estado()) & estado_min()) != 0
+        1
+    else
+        0
+
+fn wm_maximizada(tab: Int, i: Int) -> Int ! alloc
+    if (tab_get(tab, i, tab_estado()) & estado_max()) != 0
+        1
+    else
+        0
+
+fn wm_quitar_min(tab: Int, i: Int) -> Int ! alloc
+    if wm_oculta(tab, i) != 0
+        _e = tab_set(tab, i, tab_estado(), tab_get(tab, i, tab_estado()) - estado_min())
     0
 
 fn wm_cerrar_indice(st: Int, i: Int) -> Int ! io, alloc
@@ -1055,6 +1137,20 @@ fn wm_cerrar_indice(st: Int, i: Int) -> Int ! io, alloc
     z = st_get(st, st_z())
     nz = st_get(st, st_nz())
     fi = st_get(st, st_focus())
+    # Si cierra la cabecera de una ventana con más pestañas, otra pasa a ser la cabecera
+    # y ocupa su sitio en el orden de ventanas.
+    h = grupo_cab(tab, i)
+    if h == i
+        if grupo_n(tab, h) > 1
+            m0 = grupo_miembro(tab, h, 0)
+            if m0 == i
+                m0 = grupo_miembro(tab, h, 1)
+            _sp = grupo_separar(tab, i)
+            nh = grupo_cab(tab, m0)
+            _rz = z_reemplazar(z, nz, i, nh)
+            if fi == i
+                _nf = st_set(st, st_focus(), nh)
+                fi = nh
     if tab_cerrar_slot(tab, i) != 0
         nn = z_quitar(z, nz, i)
         _n = st_set(st, st_nz(), nn)
@@ -1070,35 +1166,90 @@ fn wm_cerrar_indice(st: Int, i: Int) -> Int ! io, alloc
             _tl = st_set(st, st_ss_last(), uptime_ms())
     0
 
+# Cierra una pestaña: avisa al cliente y libera el panel.
+fn wm_cerrar_pestana(st: Int, tab: Int, m: Int) -> Int ! io, alloc
+    if tab_get(tab, m, tab_tipo()) == tab_tipo_cli()
+        fd = tab_get(tab, m, tab_fd())
+        msg = st_get(st, st_msg_buf())
+        _e = msg_set_op(msg, op_cerrar_wm())
+        _w = write_fd(fd, msg, msg_len())
+    wm_cerrar_indice(st, m)
+
+# Cierra la ventana entera: primero las pestañas no cabecera, al final la cabecera.
+fn wm_cerrar_grupo(st: Int, h: Int) -> Int ! io, alloc
+    tab = st_get(st, st_tab())
+    cab = grupo_cab(tab, h)
+    while grupo_n(tab, cab) > 1
+        m = grupo_miembro(tab, cab, 0)
+        if m == cab
+            m = grupo_miembro(tab, cab, 1)
+        _c = wm_cerrar_pestana(st, tab, m)
+    wm_cerrar_pestana(st, tab, cab)
+
+# Integra el panel `i` (o su ventana entera) como pestaña de la ventana de `dest`.
+fn wm_integrar(st: Int, i: Int, dest: Int) -> Int ! alloc
+    tab = st_get(st, st_tab())
+    z = st_get(st, st_z())
+    nz = st_get(st, st_nz())
+    d = grupo_cab(tab, dest)
+    if grupo_cab(tab, i) == grupo_cab(tab, dest)
+        0
+    else
+        h = grupo_cab(tab, i)
+        fi = st_get(st, st_focus())
+        _g = grupo_integrar(tab, i, dest)
+        nn = z_quitar(z, nz, h)
+        if grupo_cab(tab, i) == d
+            nn = z_quitar(z, nn, i)
+        _n = st_set(st, st_nz(), nn)
+        _f = st_set(st, st_focus(), d)
+        _rp = wm_pedir_repintar(st)
+        1
+
 fn wm_aplicar_mosaic(st: Int, sw: Int, sh: Int) -> Int ! alloc
     tab = st_get(st, st_tab())
     z = st_get(st, st_z())
     nz = st_get(st, st_nz())
     mos = st_get(st, st_mosaic())
+    # Las minimizadas no ocupan hueco.
+    nv = 0
+    c = 0
+    while c < nz
+        ic = z_get(z, c)
+        if tab_slot_activo(tab, ic) != 0
+            if wm_oculta(tab, ic) == 0
+                nv = nv + 1
+        c = c + 1
+    vis = 0
     k = 0
     while k < nz
         i = z_get(z, k)
         if tab_slot_activo(tab, i) != 0
+            # Una ventana maximizada deja de estarlo: la geometría la decide el mosaico.
+            if wm_maximizada(tab, i) != 0
+                _qm = tab_set(tab, i, tab_estado(), tab_get(tab, i, tab_estado()) - estado_max())
             if mos == 0
                 _r = tab_restaurar_float(tab, i)
                 _tr = wm_term_redimensionar_si(st, tab, i)
             if mos != 0
-                _g = tab_guardar_float(tab, i)
-                bh = wm_bar_h(st)
-                gh = wm_gh_wm(st)
-                wx = ventana_mosaico_wx(k, nz, sw, sh)
-                wy = ventana_mosaico_wy(k, nz, sw, sh, bh)
-                ww = ventana_mosaico_ww(k, nz, sw, sh)
-                wh = ventana_mosaico_wh(k, nz, sw, sh, bh)
-                nx = ventana_recortar_nx(wx)
-                ny = ventana_recortar_ny(wy, bh)
-                nw = ventana_recortar_nw(wx, ww, sw, nx)
-                nh = ventana_recortar_nh(wh, sh, ny, gh)
-                _x = tab_set(tab, i, tab_wx(), nx)
-                _y = tab_set(tab, i, tab_wy(), ny)
-                _w = tab_set(tab, i, tab_ww(), nw)
-                _h = tab_set(tab, i, tab_wh(), nh)
-                _tr2 = wm_term_redimensionar_si(st, tab, i)
+                if wm_oculta(tab, i) == 0
+                    _g = tab_guardar_float(tab, i)
+                    bh = wm_bar_h(st)
+                    gh = wm_gh_wm(st)
+                    wx = ventana_mosaico_wx(vis, nv, sw, sh)
+                    wy = ventana_mosaico_wy(vis, nv, sw, sh, bh)
+                    ww = ventana_mosaico_ww(vis, nv, sw, sh)
+                    wh = ventana_mosaico_wh(vis, nv, sw, sh, bh)
+                    nx = ventana_recortar_nx(wx)
+                    ny = ventana_recortar_ny(wy, bh)
+                    nw = ventana_recortar_nw(wx, ww, sw, nx)
+                    nh = ventana_recortar_nh(wh, sh, ny, gh)
+                    _x = tab_set(tab, i, tab_wx(), nx)
+                    _y = tab_set(tab, i, tab_wy(), ny)
+                    _w = tab_set(tab, i, tab_ww(), nw)
+                    _h = tab_set(tab, i, tab_wh(), nh)
+                    _tr2 = wm_term_redimensionar_si(st, tab, i)
+                    vis = vis + 1
         k = k + 1
     _d = wm_marcar_dirty(st, 0, wm_bar_h(st), sw, sh)
     _rp = wm_pedir_repintar(st)
@@ -1106,6 +1257,18 @@ fn wm_aplicar_mosaic(st: Int, sw: Int, sh: Int) -> Int ! alloc
 
 fn wm_repintar_slot(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, completo: Int, zix: Int) -> Int ! io, alloc
     if tab_slot_activo(tab, i) != 0
+        if wm_oculta(tab, i) != 0
+            if wm_comp_gpu_mode(st) != 0
+                _oc = wm_comp_send_geom(st, st_get(st, st_comp_fd()), wm_surf_win(i), 0, 0, 0, 0, comp_geom_hidden(), 50)
+            0
+        else
+            wm_repintar_slot_vis(st, tab, i, compos, clen, sw, sh, stride, bpp, fmt, completo, zix)
+    else
+        0
+
+fn wm_repintar_slot_vis(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, completo: Int, zix: Int) -> Int ! io, alloc
+    if tab_slot_activo(tab, i) != 0
+        a = grupo_panel_activo(tab, i)
         wx = tab_get(tab, i, tab_wx())
         wy = tab_get(tab, i, tab_wy())
         ww = tab_get(tab, i, tab_ww())
@@ -1126,17 +1289,17 @@ fn wm_repintar_slot(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, 
         if completo != 0
             if wm_es_ss(st, i) == 0
                 _m = wm_pintar_marco(c, cl, sw, sh, stride, bpp, fmt, px, py, ww, wh, st, tab, i)
-        if tab_get(tab, i, tab_tipo()) == tab_tipo_term()
-            nv = wm_tab_escala(tab, i)
+        if tab_get(tab, a, tab_tipo()) == tab_tipo_term()
+            nv = wm_tab_escala(tab, a)
             psf = wm_psf_slot(st, nv)
             plen = wm_psf_len_slot(st, nv)
-            gw = wm_tab_gw(tab, i)
-            gh = wm_tab_gh(tab, i)
+            gw = wm_tab_gw(tab, a)
+            gh = wm_tab_gh(tab, a)
             bh = wm_bar_h(st)
             tema = wm_tema_id(st)
             if psf > 0
-                grid = tab_get(tab, i, tab_shm_ptr())
-                tst = tab_get(tab, i, tab_term_st())
+                grid = tab_get(tab, a, tab_shm_ptr())
+                tst = tab_get(tab, a, tab_term_st())
                 if completo != 0
                     _df = term_st_set(tst, st_dirty(), -1)
                 dr = term_st_get(tst, st_dirty())
@@ -1153,12 +1316,12 @@ fn wm_repintar_slot(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, 
                     if gmode != 0
                         lry = bh + 4 + dr * gh
                         _dm2 = wm_comp_dmap_surf(st, fd, wm_surf_win(i), 0, lry, ww, lry + gh, wx, wy)
-        if tab_get(tab, i, tab_tipo()) == tab_tipo_cli()
+        if tab_get(tab, a, tab_tipo()) == tab_tipo_cli()
             if completo != 0
-                if tab_get(tab, i, tab_fase()) == 2
-                    cw = tab_get(tab, i, tab_cw())
-                    ch = tab_get(tab, i, tab_ch())
-                    shm = tab_get(tab, i, tab_shm_ptr())
+                if tab_get(tab, a, tab_fase()) == 2
+                    cw = tab_get(tab, a, tab_cw())
+                    ch = tab_get(tab, a, tab_ch())
+                    shm = tab_get(tab, a, tab_shm_ptr())
                     slen = cw * ch * 4
                     if wm_es_ss(st, i) == 0
                         _b = wm_blit_cliente(st, c, cl, stride, bpp, fmt, px, py, cw, ch, shm, slen, 0, 0, cw, ch)
@@ -1168,8 +1331,8 @@ fn wm_repintar_slot(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, 
                     if gmode != 0
                         _dm3 = wm_comp_dmap_surf(st, fd, wm_surf_win(i), 0, 0, ww, wh, wx, wy)
         if completo != 0
-            if tab_get(tab, i, tab_tipo()) != tab_tipo_term()
-                if tab_get(tab, i, tab_tipo()) != tab_tipo_cli()
+            if tab_get(tab, a, tab_tipo()) != tab_tipo_term()
+                if tab_get(tab, a, tab_tipo()) != tab_tipo_cli()
                     _d4 = wm_marcar_dirty(st, wx, wy, wx + ww, wy + wh)
     0
 
@@ -1251,6 +1414,8 @@ fn wm_compose(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bp
                 _mg2 = wm_comp_send_geom(st, fd, wm_surf_menu(), mx02, my02, mw2, mh2, comp_geom_opaque(), 50)
                 _md2 = wm_comp_dmap_surf(st, fd, wm_surf_menu(), 0, 0, mw2, mh2, mx02, my02)
     if gmode == 0
+        _cxm = wm_pintar_ctx(st, compos, clen, sw, sh, stride, bpp, fmt)
+    if gmode == 0
         _cap = wm_cursor_capturar(st, compos, clen, stride, bpp, fmt)
         _cur = wm_pintar_cursor(st, compos, clen, sw, sh, stride, bpp, fmt)
     else
@@ -1290,7 +1455,19 @@ fn wm_color_barra(st: Int) -> Int ! alloc
 fn wm_color_barra_foco(st: Int) -> Int ! alloc
     tema_acento(wm_tema_id(st))
 
+# Redimensiona los terminales de todos los paneles de la ventana de `i`.
 fn wm_term_redimensionar_si(st: Int, tab: Int, i: Int) -> Int ! alloc
+    cab = grupo_cab(tab, i)
+    n = grupo_n(tab, cab)
+    r = 0
+    k = 0
+    while k < n
+        m = grupo_miembro(tab, cab, k)
+        r = r + wm_term_redimensionar_uno(st, tab, m)
+        k = k + 1
+    r
+
+fn wm_term_redimensionar_uno(st: Int, tab: Int, i: Int) -> Int ! alloc
     if tab_get(tab, i, tab_tipo()) != tab_tipo_term()
         0
     else
@@ -1326,6 +1503,12 @@ fn wm_term_redimensionar_si(st: Int, tab: Int, i: Int) -> Int ! alloc
             1
 
 fn wm_repintar_ventana(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc, io
+    if grupo_panel_activo(tab, i) == i
+        wm_repintar_ventana_vis(st, tab, i, compos, clen, sw, sh, stride, bpp, fmt)
+    else
+        wm_pedir_repintar(st)
+
+fn wm_repintar_ventana_vis(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc, io
     wx = st_get(st, st_wx())
     wy = st_get(st, st_wy())
     ww = st_get(st, st_ww())
@@ -1342,53 +1525,302 @@ fn wm_repintar_ventana(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: In
     _d = wm_marcar_dirty(st, wx, wy, wx + ww, wy + wh)
     0
 
-fn wm_pintar_marco_titulo(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, wx: Int, wy: Int, bg: Int, gw: Int, gh: Int, bh: Int) -> Int ! io, alloc
+fn wm_titulo_largo(tab: Int, i: Int) -> Int ! alloc
+    tit = bytes_view_mem(tab + tab_slot_off(i) + tab_titulo_off(), 32)
+    n = 0
+    j = 0
+    while j < 16
+        c = bytes_get_u8(tit, j)
+        if c == 0
+            j = 16
+        else
+            if c != 32
+                n = j + 1
+            j = j + 1
+    n
+
+# Título del panel `m` en (x, y), como mucho `maxc` caracteres; si no cabe, termina en «...».
+fn wm_texto_titulo(st: Int, tab: Int, m: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int, x: Int, y: Int, maxc: Int, col: Int, bg: Int) -> Int ! io, alloc
     psf = wm_psf_wm(st)
     plen = wm_psf_len_wm(st)
+    gw = wm_gw_wm(st)
     if psf > 0
-        tit = bytes_view_mem(tab + tab_slot_off(i) + tab_titulo_off(), 32)
-        cx = wx + metrica_margen(gw)
-        cy = wy + (bh - gh) / 2
+        tit = bytes_view_mem(tab + tab_slot_off(m) + tab_titulo_off(), 32)
+        n = wm_titulo_largo(tab, m)
+        corta = 0
+        if n > maxc
+            corta = 1
+            n = maxc
         j = 0
-        while j < 16
+        while j < n
             ch = bytes_get_u8(tit, j)
-            if ch == 0
-                j = 16
-            else
-                if ch != 32
-                    _d = fuente_dibujar(psf, plen, compos, clen, stride, bpp, fmt, ch, tema_texto(wm_tema_id(st)), bg, cx, cy)
-                    cx = cx + gw
-                j = j + 1
+            if corta != 0
+                if j >= n - 3
+                    ch = 46
+            if ch != 32
+                _d = fuente_dibujar(psf, plen, compos, clen, stride, bpp, fmt, ch, col, bg, x + j * gw, y)
+            j = j + 1
     0
 
-fn wm_pintar_marco(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, wx: Int, wy: Int, ww: Int, wh: Int, st: Int, tab: Int, i: Int) -> Int ! io, alloc
+# Botón «+» de la barra de título.
+# "+" de la tira de pestañas, como primitivas.
+fn wm_esc_mas(st: Int, e: Int, cap: Int, n0: Int, wx: Int, wy: Int, ww: Int, gh: Int, foco: Int, i: Int) -> Int ! alloc
+    tema = wm_tema_id(st)
+    d = ventana_btn_d(gh)
+    cx = pest_mas_x(wx, ww, gh)
+    cy = ventana_btn_cy(wy, gh)
+    col = tema_boton_inactivo(tema)
+    if st_get(st, st_hover_pest()) == i * 1000 + 200
+        col = mezclar_rgb(color_rgb(255, 255, 255), col, 56)
+    n = esc_rrect(e, cap, n0, cx, cy, cx + d, cy + d, esc_radios(d / 2, d / 2, d / 2, d / 2), col, 255, 0, 0)
+    m = d / 4
+    mid = d / 2
+    gl = tema_glifo_boton(tema)
+    n = esc_solido(e, cap, n, cx + m, cy + mid, cx + d - m, cy + mid + 1, gl, 255)
+    n = esc_solido(e, cap, n, cx + mid, cy + m, cx + mid + 1, cy + d - m, gl, 255)
+    n
+
+# 1 si el puntero está sobre la pestaña `k` (o su aspa) del grupo `i`.
+fn wm_pest_hov(st: Int, i: Int, k: Int) -> Int ! alloc
+    h = st_get(st, st_hover_pest())
+    if h == i * 1000 + k + 1
+        1
+    elsif h == i * 1000 + 100 + k + 1
+        1
+    else
+        0
+
+fn wm_pest_bgt(st: Int, m: Int, act: Int, k: Int, i: Int, bg: Int) -> Int ! alloc
+    tema = wm_tema_id(st)
+    if m == act
+        tema_cliente_bg(tema)
+    else
+        bgt = mezclar_rgb(bg, color_rgb(0, 0, 0), 190)
+        if wm_pest_hov(st, i, k) != 0
+            bgt = mezclar_rgb(color_rgb(255, 255, 255), bgt, 24)
+        bgt
+
+fn wm_pest_col(st: Int, m: Int, act: Int, k: Int, i: Int, foco: Int) -> Int ! alloc
+    tema = wm_tema_id(st)
+    col = tema_texto_tenue(tema)
+    if wm_pest_hov(st, i, k) != 0
+        col = tema_texto(tema)
+    if m == act
+        col = tema_texto(tema)
+        if foco == 0
+            col = tema_texto_tenue(tema)
+    col
+
+# Glifo de un botón como primitivas: 0 cerrar (aspa), 1 maximizar (cuadrado), 2 minimizar (raya).
+fn wm_esc_glifo(e: Int, cap: Int, n0: Int, cx: Int, cy: Int, d: Int, k: Int, col: Int) -> Int ! alloc
+    m = d / 4
+    a = d - 2 * m
+    n = n0
+    if k == 0
+        j = 0
+        while j < a
+            n = esc_solido(e, cap, n, cx + m + j, cy + m + j, cx + m + j + 1, cy + m + j + 1, col, 255)
+            n = esc_solido(e, cap, n, cx + d - m - 1 - j, cy + m + j, cx + d - m - j, cy + m + j + 1, col, 255)
+            j = j + 1
+    if k == 1
+        n = esc_solido(e, cap, n, cx + m, cy + m, cx + m + a, cy + m + 1, col, 255)
+        n = esc_solido(e, cap, n, cx + m, cy + m + a - 1, cx + m + a, cy + m + a, col, 255)
+        n = esc_solido(e, cap, n, cx + m, cy + m, cx + m + 1, cy + m + a, col, 255)
+        n = esc_solido(e, cap, n, cx + m + a - 1, cy + m, cx + m + a, cy + m + a, col, 255)
+    if k == 2
+        n = esc_solido(e, cap, n, cx + m, cy + d / 2, cx + m + a, cy + d / 2 + 1, col, 255)
+    n
+
+# Icono de 10 px por tipo de aplicación (terminal, web, archivos) como primitivas.
+fn wm_esc_icono(st: Int, tab: Int, m: Int, e: Int, cap: Int, n0: Int, x: Int, y: Int, col: Int, bgt: Int) -> Int ! alloc
+    n = n0
+    app = tab_get(tab, m, tab_app())
+    if tab_get(tab, m, tab_tipo()) == tab_tipo_term()
+        n = esc_rrect(e, cap, n, x, y + 1, x + 10, y + 9, esc_radios(2, 2, 2, 2), col, 255, 0, 0)
+        n = esc_solido(e, cap, n, x + 1, y + 2, x + 9, y + 8, bgt, 255)
+        n = esc_solido(e, cap, n, x + 2, y + 3, x + 4, y + 4, col, 255)
+        n = esc_solido(e, cap, n, x + 3, y + 4, x + 5, y + 5, col, 255)
+        n = esc_solido(e, cap, n, x + 2, y + 5, x + 4, y + 6, col, 255)
+        n = esc_solido(e, cap, n, x + 6, y + 6, x + 8, y + 7, col, 255)
+    elsif app == app_ficheros()
+        n = esc_solido(e, cap, n, x, y + 1, x + 4, y + 3, col, 255)
+        n = esc_rrect(e, cap, n, x, y + 2, x + 10, y + 9, esc_radios(1, 1, 1, 1), col, 255, 0, 0)
+        n = esc_solido(e, cap, n, x + 1, y + 4, x + 9, y + 8, bgt, 255)
+    else
+        n = esc_rrect(e, cap, n, x, y, x + 10, y + 10, esc_radios(5, 5, 5, 5), col, 255, 0, 0)
+        n = esc_rrect(e, cap, n, x + 1, y + 1, x + 9, y + 9, esc_radios(4, 4, 4, 4), bgt, 255, 0, 0)
+        n = esc_solido(e, cap, n, x + 1, y + 5, x + 9, y + 6, col, 255)
+        n = esc_solido(e, cap, n, x + 5, y + 1, x + 6, y + 9, col, 255)
+    n
+
+# Fondos de la tira de pestañas (2 o más paneles); el texto va después, encima.
+fn wm_esc_pestanas(st: Int, tab: Int, i: Int, e: Int, cap: Int, n0: Int, wx: Int, wy: Int, ww: Int, bg: Int, gw: Int, gh: Int, bh: Int, foco: Int) -> Int ! alloc
+    tema = wm_tema_id(st)
+    n = n0
+    cnt = grupo_n(tab, i)
+    if cnt > 1
+        act = grupo_panel_activo(tab, i)
+        tw = pest_ancho(wx, ww, gh, cnt)
+        radio = 6
+        k = 0
+        while k < cnt
+            m = grupo_miembro(tab, i, k)
+            tx = pest_pos_x(wx, ww, gh, cnt, k)
+            x1 = tx + tw - 2
+            y0 = wy + 4
+            y1 = wy + bh - 1
+            esact = 0
+            if m == act
+                esact = 1
+                y1 = wy + bh
+            bgt = wm_pest_bgt(st, m, act, k, i, bg)
+            col = wm_pest_col(st, m, act, k, i, foco)
+            n = esc_rrect(e, cap, n, tx, y0, x1, y1, esc_radios(radio, radio, 0, 0), bgt, 255, 0, 0)
+            if esact != 0
+                if foco != 0
+                    n = esc_solido(e, cap, n, tx + radio, y0, x1 - radio, y0 + 2, tema_acento(tema), 255)
+            n = wm_esc_icono(st, tab, m, e, cap, n, tx + 9, wy + (bh - 10) / 2 + 1, col, bgt)
+            if esact == 0
+                if tab_get(tab, m, tab_pend()) != 0
+                    # Actividad pendiente: punto de acento en la pestaña.
+                    n = esc_rrect(e, cap, n, x1 - 14, wy + bh / 2 - 3, x1 - 8, wy + bh / 2 + 3, esc_radios(3, 3, 3, 3), tema_acento(tema), 255, 0, 0)
+            if esact != 0
+                n = wm_esc_glifo(e, cap, n, x1 - 18, wy + (bh - 10) / 2 + 1, 10, 0, col)
+            elsif wm_pest_hov(st, i, k) != 0
+                n = wm_esc_glifo(e, cap, n, x1 - 18, wy + (bh - 10) / 2 + 1, 10, 0, col)
+            k = k + 1
+    n
+
+# Texto de las pestañas (o título centrado con un solo panel), sobre los fondos ya pintados.
+fn wm_pintar_marco_titulo(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, wx: Int, wy: Int, ww: Int, bg: Int, gw: Int, gh: Int, bh: Int, foco: Int) -> Int ! io, alloc
+    tema = wm_tema_id(st)
+    cnt = grupo_n(tab, i)
+    act = grupo_panel_activo(tab, i)
+    if cnt <= 1
+        nn = wm_titulo_largo(tab, act)
+        cx = wx + (ww - nn * gw) / 2
+        izq = wx + 14
+        if cx < izq
+            cx = izq
+        cy = wy + (bh - gh) / 2
+        col = tema_texto(tema)
+        if foco == 0
+            col = tema_texto_tenue(tema)
+        _t = wm_texto_titulo(st, tab, act, compos, clen, stride, bpp, fmt, cx, cy, 16, col, bg)
+    else
+        tw = pest_ancho(wx, ww, gh, cnt)
+        k = 0
+        while k < cnt
+            m = grupo_miembro(tab, i, k)
+            tx = pest_pos_x(wx, ww, gh, cnt, k)
+            bgt = wm_pest_bgt(st, m, act, k, i, bg)
+            col = wm_pest_col(st, m, act, k, i, foco)
+            maxc = (tw - 2 - 26 - pest_cierre_ancho()) / gw
+            _tt = wm_texto_titulo(st, tab, m, compos, clen, stride, bpp, fmt, tx + 24, wy + (bh - gh) / 2 + 1, maxc, col, bgt)
+            k = k + 1
+    0
+
+# Botones de la ventana (cerrar, maximizar, minimizar) como primitivas.
+fn wm_esc_botones(st: Int, e: Int, cap: Int, n0: Int, wx: Int, wy: Int, ww: Int, gh: Int, foco: Int, i: Int) -> Int ! alloc
+    tema = wm_tema_id(st)
+    d = ventana_btn_d(gh)
+    cy = ventana_btn_cy(wy, gh)
+    hov = st_get(st, st_hover())
+    n = n0
+    k = 0
+    while k < 3
+        cx = ventana_btn_cx(wx, ww, gh, k)
+        sobre = 0
+        if hov == i * 8 + k + 1
+            sobre = 1
+        col = tema_boton_inactivo(tema)
+        if foco != 0
+            if k == 0
+                col = tema_boton_cerrar(tema)
+            if k == 1
+                col = tema_boton_max(tema)
+            if k == 2
+                col = tema_boton_min(tema)
+        if sobre != 0
+            # Con el puntero encima, el botón se enciende aunque la ventana no tenga el foco.
+            if k == 0
+                col = tema_boton_cerrar(tema)
+            if k == 1
+                col = tema_boton_max(tema)
+            if k == 2
+                col = tema_boton_min(tema)
+            col = mezclar_rgb(color_rgb(255, 255, 255), col, 56)
+        n = esc_rrect(e, cap, n, cx, cy, cx + d, cy + d, esc_radios(d / 2, d / 2, d / 2, d / 2), col, 255, 0, 0)
+        if foco != 0
+            n = wm_esc_glifo(e, cap, n, cx, cy, d, k, tema_glifo_boton(tema))
+        if foco == 0
+            if sobre != 0
+                n = wm_esc_glifo(e, cap, n, cx, cy, d, k, tema_glifo_boton(tema))
+        k = k + 1
+    n
+
+fn wm_pintar_marco(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, wx: Int, wy: Int, ww: Int, wh: Int, st: Int, tab: Int, i0: Int) -> Int ! io, alloc
+    i = grupo_cab(tab, i0)
     gw = wm_gw_wm(st)
     gh = wm_gh_wm(st)
     bh = wm_bar_h(st)
+    tema = wm_tema_id(st)
     radio = metrica_radio(gh)
     foco = 0
     if st_get(st, st_focus()) == i
         foco = 1
-    col_m = tema_marco(wm_tema_id(st), foco)
+    col_m = tema_marco(tema, foco)
+    col_b = tema_borde(tema, foco)
     gmode = wm_comp_gpu_mode(st)
-    sombra = metrica_radio(gh)
+    maxim = wm_maximizada(tab, i)
+    # El marco se describe como escena de primitivas y se ejecuta con el backend CPU.
+    e = st_get(st, st_escena())
+    cap = wm_escena_cap()
+    n = 0
     if gmode == 0
-        sa = tema_sombra_alfa(wm_tema_id(st))
-        _s1 = rellenar_rect_alfa(compos, clen, sw, sh, stride, bpp, fmt, wx + sombra, wy + sombra, wx + ww + sombra, wy + wh + sombra, color_rgb(0, 0, 0), sa)
-    _mar = rellenar_rect_redondeado(compos, clen, sw, sh, stride, bpp, fmt, wx, wy, wx + ww, wy + bh, radio, col_m)
+        # Sombra suave: tres capas cada vez más anchas y tenues, algo desplazadas hacia abajo.
+        if maxim == 0
+            sa = tema_sombra_alfa(tema) / 3
+            neg = color_rgb(0, 0, 0)
+            n = esc_anillo(e, cap, n, wx - 1, wy + 1, wx + ww + 1, wy + wh + 5, wx, wy, wx + ww, wy + wh, neg, sa)
+            n = esc_anillo(e, cap, n, wx - 3, wy + 1, wx + ww + 3, wy + wh + 8, wx, wy, wx + ww, wy + wh, neg, sa)
+            n = esc_anillo(e, cap, n, wx - 5, wy + 2, wx + ww + 5, wy + wh + 11, wx, wy, wx + ww, wy + wh, neg, sa)
+            # Bajo las esquinas redondeadas también debe haber sombra.
+            n = esc_solido(e, cap, n, wx, wy + wh - radio, wx + radio, wy + wh, neg, sa * 2)
+            n = esc_solido(e, cap, n, wx + ww - radio, wy + wh - radio, wx + ww, wy + wh, neg, sa * 2)
+        if maxim != 0
+            radio = 0
+        # Borde de 1 px y cuerpo: las cuatro esquinas redondeadas (abajo y a la derecha hay
+        # un margen de 8 px que el contenido nunca pisa).
+        n = esc_rrect(e, cap, n, wx, wy, wx + ww, wy + wh, esc_radios(radio, radio, radio, radio), col_b, 255, 0, 0)
+        ri = max(0, radio - 1)
+        n = esc_rrect(e, cap, n, wx + 1, wy + 1, wx + ww - 1, wy + wh - 1, esc_radios(ri, ri, ri, ri), tema_cliente_bg(tema), 255, 0, 0)
+        n = esc_rrect(e, cap, n, wx + 1, wy + 1, wx + ww - 1, wy + bh, esc_radios(ri, ri, 0, 0), col_m, 255, 0, 0)
+    if gmode != 0
+        n = esc_solido(e, cap, n, wx, wy, wx + ww, wy + wh, col_b, 255)
+        n = esc_solido(e, cap, n, wx + 1, wy + 1, wx + ww - 1, wy + wh - 1, tema_cliente_bg(tema), 255)
+        ri2 = max(0, radio - 1)
+        n = esc_rrect(e, cap, n, wx + 1, wy + 1, wx + ww - 1, wy + bh, esc_radios(ri2, ri2, 0, 0), col_m, 255, 0, 0)
+    # Línea bajo la barra: acento si la ventana tiene el foco.
+    lin = col_b
     if foco != 0
-        _ac = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, wx, wy + bh - 2, wx + ww, wy + bh, tema_acento(wm_tema_id(st)))
-    _t = wm_pintar_marco_titulo(st, tab, i, compos, clen, sw, sh, stride, bpp, fmt, wx, wy, col_m, gw, gh, bh)
-    btn = gh + 4
-    cx = wx + ww - btn - 4
-    cy = wy + (bh - btn) / 2
-    _cl = rellenar_rect_redondeado4(compos, clen, sw, sh, stride, bpp, fmt, cx, cy, cx + btn, cy + btn, btn / 2, tema_boton_cerrar(wm_tema_id(st)))
-    _bg = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, wx, wy + bh, wx + ww, wy + wh, tema_cliente_bg(wm_tema_id(st)))
+        lin = tema_acento(tema)
+    n = esc_solido(e, cap, n, wx + 1, wy + bh - 1, wx + ww - 1, wy + bh, lin, 255)
+    n = wm_esc_pestanas(st, tab, i, e, cap, n, wx, wy, ww, col_m, gw, gh, bh, foco)
+    n = wm_esc_mas(st, e, cap, n, wx, wy, ww, gh, foco, i)
+    n = wm_esc_botones(st, e, cap, n, wx, wy, ww, gh, foco, i)
+    if st_get(st, st_drop()) == i
+        # Destino de un arrastre: barra de inserción tras la última pestaña.
+        cnt = grupo_n(tab, i)
+        ix = pest_pos_x(wx, ww, gh, cnt, cnt) - 2
+        n = esc_solido(e, cap, n, ix, wy + 4, ix + 3, wy + bh, tema_acento(tema), 255)
+    _ej = esc_cpu_ejecutar(compos, clen, sw, sh, stride, bpp, fmt, e, cap, n)
+    _ti = wm_pintar_marco_titulo(st, tab, i, compos, clen, sw, sh, stride, bpp, fmt, wx, wy, ww, col_m, gw, gh, bh, foco)
     0
 
 fn wm_blit_cliente(st: Int, compos: Int, clen: Int, cstride: Int, bpp: Int, fmt: Int, wx: Int, wy: Int, cw: Int, ch: Int, shm: Int, slen: Int, sx: Int, sy: Int, w: Int, h: Int) -> Int ! alloc
     bh = wm_bar_h(st)
-    copiar_rect(compos, clen, cstride, shm, slen, cw, bpp, fmt, wx + sx, wy + bh + sy, sx, sy, w, h)
+    copiar_rect(compos, clen, cstride, shm, slen, cw, bpp, fmt, wx + 4 + sx, wy + bh + sy, sx, sy, w, h)
 
 fn wm_blit_cliente_pantalla(compos: Int, clen: Int, cstride: Int, bpp: Int, fmt: Int, wx: Int, wy: Int, cw: Int, ch: Int, shm: Int, slen: Int, sx: Int, sy: Int, w: Int, h: Int) -> Int ! alloc
     copiar_rect(compos, clen, cstride, shm, slen, cw, bpp, fmt, wx + sx, wy + sy, sx, sy, w, h)
@@ -1655,6 +2087,17 @@ fn wm_cliente_ch(st: Int, wh: Int) -> Int ! alloc
         c
 
 fn wm_redim_slot(st: Int, tab: Int, i: Int, fmt: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int) -> Int ! io, alloc
+    cab = grupo_cab(tab, i)
+    n = grupo_n(tab, cab)
+    r = 0
+    k = 0
+    while k < n
+        m = grupo_miembro(tab, cab, k)
+        r = r + wm_redim_slot_uno(st, tab, m, fmt, compos, clen, sw, sh, stride, bpp)
+        k = k + 1
+    r
+
+fn wm_redim_slot_uno(st: Int, tab: Int, i: Int, fmt: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int) -> Int ! io, alloc
     if tab_get(tab, i, tab_tipo()) != tab_tipo_cli()
         0
     else
@@ -1729,6 +2172,12 @@ fn wm_on_crear_repintar(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: I
     0
 
 fn wm_on_danio(st: Int, tab: Int, i: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int, msg: Int) -> Int ! io, alloc
+    if grupo_panel_activo(tab, i) == i
+        wm_on_danio_vis(st, tab, i, compos, clen, stride, bpp, fmt, msg)
+    else
+        0
+
+fn wm_on_danio_vis(st: Int, tab: Int, i: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int, msg: Int) -> Int ! io, alloc
     if st_get(st, st_fase()) == 2
         dx = msg_get_u32(msg, 4)
         dy = msg_get_u32(msg, 8)
@@ -1761,8 +2210,25 @@ fn wm_dispatch_msg(st: Int, tab: Int, i: Int, compos: Int, clen: Int, stride: In
                 if peer == st_get(st, st_ss_pid())
                     _ss = st_set(st, st_ss_slot(), i)
         _f = tab_set(tab, i, tab_fase(), 1)
+        # app_id: el cliente que se conecta solo dice qué es, para poder repetirlo con «+».
+        aid = msg_get_u32(m, 8)
+        if aid == app_web()
+            _aa = tab_set(tab, i, tab_app(), aid)
+        if aid == app_ficheros()
+            _ab = tab_set(tab, i, tab_app(), aid)
     if op == op_crear()
         if tab_get(tab, i, tab_fase()) == 1
+            tg = -1
+            peer = tcp_peer_pid(fd)
+            if peer >= 0
+                if peer == st_get(st, st_pend_pid())
+                    _pa = tab_set(tab, i, tab_app(), st_get(st, st_pend_app()))
+                    pg = st_get(st, st_pend_grupo())
+                    if pg > 0
+                        if tab_slot_activo(tab, pg - 1) != 0
+                            tg = grupo_cab(tab, pg - 1)
+                    _pp = st_set(st, st_pend_pid(), -1)
+                    _pq = st_set(st, st_pend_grupo(), 0)
             _s = wm_st_desde_tab(st, tab, i)
             ok = 0
             if wm_es_ss(st, i) != 0
@@ -1772,7 +2238,12 @@ fn wm_dispatch_msg(st: Int, tab: Int, i: Int, compos: Int, clen: Int, stride: In
             _t = wm_tab_desde_st(st, tab, i)
             if ok != 0
                 _tt = tab_titulo_desde_msg(tab, i, m)
-                if wm_es_ss(st, i) == 0
+                if tg >= 0
+                    # Entra como pestaña: toma el tamaño de la ventana, no el que pidió.
+                    _ig = wm_integrar(st, i, tg)
+                    _rs = wm_redim_slot_uno(st, tab, i, fmt, compos, clen, sw, sh, stride, bpp)
+                    _fo = wm_enviar_foco(fd)
+                elsif wm_es_ss(st, i) == 0
                     _r = wm_on_crear_repintar(st, tab, i, compos, clen, sw, sh, stride, bpp, fmt)
                 if wm_es_ss(st, i) != 0
                     z = st_get(st, st_z())
@@ -1817,7 +2288,8 @@ fn wm_atender_cliente_tab(st: Int, tab: Int, i: Int, compos: Int, clen: Int, str
                 j = j + 1
     0
 
-fn wm_reenviar_raton_slot(st: Int, tab: Int, i: Int, x: Int, y: Int, botones: Int) -> Int ! io, alloc
+fn wm_reenviar_raton_slot(st: Int, tab: Int, i0: Int, x: Int, y: Int, botones: Int) -> Int ! io, alloc
+    i = grupo_panel_activo(tab, i0)
     if tab_get(tab, i, tab_fase()) == 2
         wx = tab_get(tab, i, tab_wx())
         wy = tab_get(tab, i, tab_wy())
@@ -1826,7 +2298,7 @@ fn wm_reenviar_raton_slot(st: Int, tab: Int, i: Int, x: Int, y: Int, botones: In
         cw = tab_get(tab, i, tab_cw())
         ch = tab_get(tab, i, tab_ch())
         if ventana_contiene(x, y, wx, wy, ww, wh) != 0
-            lx = x - wx
+            lx = x - wx - 4
             ly = y - wy - wm_bar_h(st)
             if lx >= 0
                 if ly >= 0
@@ -1838,9 +2310,416 @@ fn wm_reenviar_raton_slot(st: Int, tab: Int, i: Int, x: Int, y: Int, botones: In
                             _w = write_fd(fd, msg, msg_len())
     0
 
+# Maximiza o restaura. Maximizada ocupa todo salvo la barra superior; la geometría
+# anterior se guarda en la propia ranura para poder volver.
+fn wm_alternar_max(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
+    est = tab_get(tab, i, tab_estado())
+    wx0 = tab_get(tab, i, tab_wx())
+    wy0 = tab_get(tab, i, tab_wy())
+    ww0 = tab_get(tab, i, tab_ww())
+    wh0 = tab_get(tab, i, tab_wh())
+    if (est & estado_max()) != 0
+        _a = tab_set(tab, i, tab_wx(), tab_get(tab, i, tab_sx()))
+        _b = tab_set(tab, i, tab_wy(), tab_get(tab, i, tab_sy()))
+        _c = tab_set(tab, i, tab_ww(), tab_get(tab, i, tab_sw()))
+        _d = tab_set(tab, i, tab_wh(), tab_get(tab, i, tab_sh()))
+        _e = tab_set(tab, i, tab_estado(), est - estado_max())
+    else
+        _sa = tab_set(tab, i, tab_sx(), wx0)
+        _sb = tab_set(tab, i, tab_sy(), wy0)
+        _sc = tab_set(tab, i, tab_sw(), ww0)
+        _sd = tab_set(tab, i, tab_sh(), wh0)
+        _a2 = tab_set(tab, i, tab_wx(), 0)
+        _b2 = tab_set(tab, i, tab_wy(), wm_bar_h(st))
+        _c2 = tab_set(tab, i, tab_ww(), sw)
+        _d2 = tab_set(tab, i, tab_wh(), sh - wm_bar_h(st))
+        _e2 = tab_set(tab, i, tab_estado(), est + estado_max())
+    _r = wm_redim_slot(st, tab, i, fmt, compos, clen, sw, sh, stride, bpp)
+    _tr = wm_term_redimensionar_si(st, tab, i)
+    _dd = wm_marcar_dirty(st, 0, 0, sw, sh)
+    _rp = wm_pedir_repintar(st)
+    0
+
+# La ventana con foco pasa a ser la más alta de las visibles (o ninguna).
+fn wm_foco_visible(st: Int) -> Int ! alloc
+    tab = st_get(st, st_tab())
+    z = st_get(st, st_z())
+    nz = st_get(st, st_nz())
+    k = nz - 1
+    r = -1
+    while k >= 0
+        i = z_get(z, k)
+        if r < 0
+            if tab_slot_activo(tab, i) != 0
+                if wm_oculta(tab, i) == 0
+                    r = i
+        k = k - 1
+    r
+
+fn wm_minimizar(st: Int, tab: Int, i: Int) -> Int ! alloc
+    est = tab_get(tab, i, tab_estado())
+    if (est & estado_min()) == 0
+        _e = tab_set(tab, i, tab_estado(), est + estado_min())
+    if st_get(st, st_focus()) == i
+        _f = st_set(st, st_focus(), wm_foco_visible(st))
+    _rp = wm_pedir_repintar(st)
+    0
+
+# Lista de ventanas en la barra superior, a la derecha de los lanzadores.
+fn wm_barra_lista_x0(st: Int) -> Int ! alloc
+    gw = wm_gw_wm(st)
+    lanz_boton_x0(lanz_n_botones() - 1, gw) + lanz_boton_ancho(lanz_n_botones() - 1, gw) + 24
+
+fn wm_barra_ent_ancho(st: Int) -> Int ! alloc
+    wm_gw_wm(st) * 14 + 2 * lanz_margen(wm_gw_wm(st))
+
+fn wm_barra_ent_x0(st: Int, n: Int) -> Int ! alloc
+    wm_barra_lista_x0(st) + n * (wm_barra_ent_ancho(st) + 4)
+
+# Ranura de la ventana n-ésima de la lista (o -1).
+fn wm_barra_ranura(st: Int, n: Int) -> Int ! alloc
+    tab = st_get(st, st_tab())
+    cuenta = 0
+    r = -1
+    i = 0
+    while i < tab_cap()
+        if tab_slot_activo(tab, i) != 0
+            if grupo_cab(tab, i) == i
+                if cuenta == n
+                    r = i
+                cuenta = cuenta + 1
+        i = i + 1
+    r
+
+fn wm_barra_hit_ventana(st: Int, x: Int, y: Int) -> Int ! alloc
+    gh = wm_gh_wm(st)
+    r = -1
+    if y >= 0
+        if y < barra_alto(gh)
+            n = 0
+            while n < tab_cap()
+                x0 = wm_barra_ent_x0(st, n)
+                if x >= x0
+                    if x < x0 + wm_barra_ent_ancho(st)
+                        r = wm_barra_ranura(st, n)
+                n = n + 1
+    r
+
+# Clic en la lista: minimizada -> restaura; con foco -> minimiza; otra -> da el foco.
+fn wm_barra_alternar(st: Int, tab: Int, i: Int) -> Int ! alloc
+    if wm_oculta(tab, i) != 0
+        _f = wm_foco_a(st, i)
+    else
+        if st_get(st, st_focus()) == i
+            _m = wm_minimizar(st, tab, i)
+        else
+            _f2 = wm_foco_a(st, i)
+    0
+
+fn wm_pintar_lista_ventanas(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
+    tab = st_get(st, st_tab())
+    gw = wm_gw_wm(st)
+    gh = wm_gh_wm(st)
+    bh = wm_bar_h(st)
+    radio = metrica_radio(gh)
+    tema = wm_tema_id(st)
+    ty = (bh - gh) / 2
+    if ty < 2
+        ty = 2
+    n = 0
+    i = 0
+    while i < tab_cap()
+        if tab_slot_activo(tab, i) != 0
+            if grupo_cab(tab, i) == i
+                act = grupo_panel_activo(tab, i)
+                x0 = wm_barra_ent_x0(st, n)
+                ew = wm_barra_ent_ancho(st)
+                if x0 + ew <= sw - 8
+                    bg = wm_color_boton(st)
+                    fg = wm_color_texto_barra(st)
+                    if wm_oculta(tab, i) != 0
+                        fg = tema_texto_tenue(tema)
+                    else
+                        if st_get(st, st_focus()) == i
+                            bg = wm_color_boton_activo(st)
+                    _b = wm_esc_rr(st, compos, clen, sw, sh, stride, bpp, fmt, x0, ty, x0 + ew, ty + gh + 4, esc_radios(radio, radio, radio, radio), bg)
+                    np = grupo_n(tab, i)
+                    maxc = 14
+                    if np > 1
+                        maxc = 11
+                        _cn = wm_texto_num(st, compos, clen, stride, bpp, fmt, x0 + ew - lanz_margen(gw) - 2 * gw, ty + 2, np, fg, bg)
+                    _t = wm_texto_titulo(st, tab, act, compos, clen, stride, bpp, fmt, x0 + lanz_margen(gw), ty + 2, maxc, fg, bg)
+                n = n + 1
+        i = i + 1
+    0
+
+# Número de 1 o 2 cifras (contador de pestañas en la lista de ventanas).
+fn wm_texto_num(st: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int, x: Int, y: Int, v: Int, fg: Int, bg: Int) -> Int ! io, alloc
+    psf = wm_psf_wm(st)
+    plen = wm_psf_len_wm(st)
+    gw = wm_gw_wm(st)
+    if psf > 0
+        d1 = (v / 10) % 10
+        d0 = v % 10
+        if v >= 10
+            _a = fuente_dibujar(psf, plen, compos, clen, stride, bpp, fmt, 48 + d1, fg, bg, x, y)
+        _b = fuente_dibujar(psf, plen, compos, clen, stride, bpp, fmt, 48 + d0, fg, bg, x + gw, y)
+    0
+
+# Pestaña o «+» bajo el puntero: ventana * 1000 + resultado de pest_hit, o 0.
+fn wm_hover_pest(st: Int, x: Int, y: Int) -> Int ! alloc
+    r = 0
+    i = wm_hit_test(st, x, y)
+    if i >= 0
+        tab = st_get(st, st_tab())
+        ph = pest_hit(x, y, tab_get(tab, i, tab_wx()), tab_get(tab, i, tab_wy()), tab_get(tab, i, tab_ww()), wm_gh_wm(st), grupo_n(tab, i))
+        if ph != 0
+            r = i * 1000 + ph
+    r
+
+# Botón de la barra de título bajo el puntero (ranura * 8 + botón), o 0.
+fn wm_hover_boton(st: Int, x: Int, y: Int) -> Int ! alloc
+    r = 0
+    i = wm_hit_test(st, x, y)
+    if i >= 0
+        tab = st_get(st, st_tab())
+        bt = ventana_hit_boton(x, y, tab_get(tab, i, tab_wx()), tab_get(tab, i, tab_wy()), tab_get(tab, i, tab_ww()), wm_gh_wm(st))
+        if bt != 0
+            r = i * 8 + bt
+    r
+
+# Ventana (cabecera) bajo `x,y` ignorando el grupo `excl`, o -1.
+fn wm_hit_excluyendo(st: Int, x: Int, y: Int, excl: Int) -> Int ! alloc
+    tab = st_get(st, st_tab())
+    z = st_get(st, st_z())
+    nz = st_get(st, st_nz())
+    ex = grupo_cab(tab, excl)
+    k = nz - 1
+    found = -1
+    while k >= 0
+        if found < 0
+            i = z_get(z, k)
+            if i != ex
+                if tab_slot_activo(tab, i) != 0
+                    if wm_oculta(tab, i) == 0
+                        if ventana_contiene(x, y, tab_get(tab, i, tab_wx()), tab_get(tab, i, tab_wy()), tab_get(tab, i, tab_ww()), tab_get(tab, i, tab_wh())) != 0
+                            found = i
+        k = k - 1
+    found
+
+# Ventana cuya barra de título está bajo el puntero (sin contar `excl`), o -1: ahí se soltaría.
+fn wm_destino_soltar(st: Int, x: Int, y: Int, excl: Int) -> Int ! alloc
+    tab = st_get(st, st_tab())
+    d = wm_hit_excluyendo(st, x, y, excl)
+    r = -1
+    if d >= 0
+        wx = tab_get(tab, d, tab_wx())
+        wy = tab_get(tab, d, tab_wy())
+        ww = tab_get(tab, d, tab_ww())
+        gh = wm_gh_wm(st)
+        if y < wy + wm_bar_h(st)
+            if x >= pest_x0(wx)
+                if x < pest_x1(wx, ww, gh)
+                    r = d
+    r
+
+fn wm_drop_fijar(st: Int, d: Int) -> Int ! alloc
+    if d != st_get(st, st_drop())
+        _s = st_set(st, st_drop(), d)
+        _r = wm_pedir_repintar(st)
+    0
+
+# Despega el panel `m` a ventana propia, bajo el puntero, y pasa a arrastrarla como ventana.
+fn wm_pest_despegar(st: Int, m: Int, x: Int, y: Int, sh: Int) -> Int ! io, alloc
+    tab = st_get(st, st_tab())
+    z = st_get(st, st_z())
+    nz = st_get(st, st_nz())
+    h = grupo_cab(tab, m)
+    if grupo_n(tab, h) <= 1
+        0
+    else
+        gx = x - tab_get(tab, h, tab_wx())
+        nh = -1
+        if h == m
+            m0 = grupo_miembro(tab, h, 0)
+            if m0 == m
+                m0 = grupo_miembro(tab, h, 1)
+            _sp = grupo_separar(tab, m)
+            nh = grupo_cab(tab, m0)
+            _rz = z_reemplazar(z, nz, m, nh)
+            nn = z_anadir(z, nz, m)
+            _n = st_set(st, st_nz(), nn)
+        else
+            _sp2 = grupo_separar(tab, m)
+            nn2 = z_anadir(z, nz, m)
+            _n2 = st_set(st, st_nz(), nn2)
+        _fo = st_set(st, st_focus(), m)
+        ny = y - wm_bar_h(st) / 2
+        if ny < wm_bar_h(st)
+            ny = wm_bar_h(st)
+        if ny > sh - 24
+            ny = sh - 24
+        _x = tab_set(tab, m, tab_wx(), x - gx)
+        _y = tab_set(tab, m, tab_wy(), ny)
+        _di = st_set(st, st_drag_ix(), m)
+        _dk = st_set(st, st_drag_kind(), 1)
+        _gx = st_set(st, st_grab_x(), gx)
+        _gy = st_set(st, st_grab_y(), y - ny)
+        _rp = wm_pedir_repintar(st)
+        1
+
+# Arrastre de una pestaña: reordena dentro de la tira o despega al salir de la barra.
+fn wm_pest_arrastrar(st: Int, m: Int, x: Int, y: Int, sh: Int) -> Int ! io, alloc
+    tab = st_get(st, st_tab())
+    h = grupo_cab(tab, m)
+    wx = tab_get(tab, h, tab_wx())
+    wy = tab_get(tab, h, tab_wy())
+    ww = tab_get(tab, h, tab_ww())
+    gh = wm_gh_wm(st)
+    bh = wm_bar_h(st)
+    n = grupo_n(tab, h)
+    if y < wy - 6
+        _d = wm_pest_despegar(st, m, x, y, sh)
+    elsif y >= wy + bh + 10
+        _d2 = wm_pest_despegar(st, m, x, y, sh)
+    elsif n >= 2
+        tw = pest_ancho(wx, ww, gh, n)
+        kp = (x - pest_x0(wx)) / tw
+        if x < pest_x0(wx)
+            kp = 0
+        if kp > n - 1
+            kp = n - 1
+        if grupo_mover(tab, m, kp) != 0
+            _rp = wm_pedir_repintar(st)
+    0
+
+# ---- Menú contextual de pestaña ------------------------------------------------
+fn ctx_n() -> Int
+    5
+
+fn ctx_texto(k: Int) -> String ! alloc
+    if k == 0
+        d"Duplicar pestana"
+    elsif k == 1
+        d"Sacar a ventana"
+    elsif k == 2
+        d"Cerrar otras"
+    elsif k == 3
+        d"Cerrar a la derecha"
+    else
+        d"Cerrar"
+
+fn ctx_ancho(st: Int) -> Int ! alloc
+    gw = wm_gw_wm(st)
+    w = 0
+    k = 0
+    while k < ctx_n()
+        w = max(w, str_len(ctx_texto(k)) * gw)
+        k = k + 1
+    w + 2 * lanz_margen(gw)
+
+fn ctx_item_alto(st: Int) -> Int ! alloc
+    lanz_menu_item_alto(wm_gh_wm(st))
+
+fn ctx_alto(st: Int) -> Int ! alloc
+    ctx_n() * ctx_item_alto(st)
+
+# Elemento bajo `x,y`, o -1.
+fn ctx_item(st: Int, x: Int, y: Int) -> Int ! alloc
+    cx = st_get(st, st_ctx_x())
+    cy = st_get(st, st_ctx_y())
+    if ventana_contiene(x, y, cx, cy, ctx_ancho(st), ctx_alto(st)) == 0
+        -1
+    else
+        (y - cy) / ctx_item_alto(st)
+
+fn wm_ctx_cerrar(st: Int) -> Int ! alloc
+    if st_get(st, st_ctx()) >= 0
+        _d = wm_marcar_dirty(st, st_get(st, st_ctx_x()), st_get(st, st_ctx_y()), st_get(st, st_ctx_x()) + ctx_ancho(st), st_get(st, st_ctx_y()) + ctx_alto(st))
+        _s = st_set(st, st_ctx(), -1)
+        _r = wm_pedir_repintar(st)
+    0
+
+fn wm_ctx_abrir(st: Int, m: Int, x: Int, y: Int, sw: Int, sh: Int) -> Int ! alloc
+    cx = x
+    cy = y
+    if cx + ctx_ancho(st) > sw
+        cx = sw - ctx_ancho(st)
+    if cy + ctx_alto(st) > sh
+        cy = sh - ctx_alto(st)
+    _a = st_set(st, st_ctx(), m)
+    _b = st_set(st, st_ctx_x(), cx)
+    _c = st_set(st, st_ctx_y(), cy)
+    _d = wm_marcar_dirty(st, cx, cy, cx + ctx_ancho(st), cy + ctx_alto(st))
+    _r = wm_pedir_repintar(st)
+    0
+
+fn wm_pintar_ctx(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
+    m = st_get(st, st_ctx())
+    if m >= 0
+        gw = wm_gw_wm(st)
+        gh = wm_gh_wm(st)
+        tema = wm_tema_id(st)
+        radio = metrica_radio(gh)
+        cx = st_get(st, st_ctx_x())
+        cy = st_get(st, st_ctx_y())
+        w = ctx_ancho(st)
+        h = ctx_alto(st)
+        ia = ctx_item_alto(st)
+        sel = ctx_item(st, st_get(st, st_mx()), st_get(st, st_my()))
+        _s = wm_esc_rr(st, compos, clen, sw, sh, stride, bpp, fmt, cx - 1, cy - 1, cx + w + 1, cy + h + 1, esc_radios(radio, radio, radio, radio), tema_borde(tema, 0))
+        _f = wm_esc_rr(st, compos, clen, sw, sh, stride, bpp, fmt, cx, cy, cx + w, cy + h, esc_radios(radio, radio, radio, radio), wm_color_menu(st))
+        k = 0
+        while k < ctx_n()
+            iy = cy + k * ia
+            bg = wm_color_menu(st)
+            if k == sel
+                bg = wm_color_menu_sel(st)
+                _c = wm_esc_rr(st, compos, clen, sw, sh, stride, bpp, fmt, cx + lanz_margen(gw) / 2, iy + 2, cx + w - lanz_margen(gw) / 2, iy + ia - 2, esc_radios(radio, radio, radio, radio), bg)
+            _t = wm_texto(st, compos, clen, stride, bpp, fmt, ctx_texto(k), cx + lanz_margen(gw), iy + (ia - gh) / 2, wm_color_texto_barra(st), bg)
+            k = k + 1
+        _d = wm_marcar_dirty(st, cx - 1, cy - 1, cx + w + 1, cy + h + 1)
+    0
+
+# Ejecuta la acción `k` del menú contextual sobre el panel `m`.
+fn wm_ctx_ejecutar(st: Int, m: Int, k: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
+    tab = st_get(st, st_tab())
+    cab = grupo_cab(tab, m)
+    _a = grupo_activar(tab, m)
+    if k == 0
+        _n = wm_nueva_pestana(st, cab, compos, clen, sw, sh, stride, bpp, fmt)
+    if k == 1
+        _s = wm_atajo_sacar(st, sh)
+    if k == 2
+        while grupo_n(tab, grupo_cab(tab, m)) > 1
+            c2 = grupo_cab(tab, m)
+            o = grupo_miembro(tab, c2, 0)
+            if o == m
+                o = grupo_miembro(tab, c2, 1)
+            _co = wm_cerrar_pestana(st, tab, o)
+    if k == 3
+        pos = grupo_pos(tab, m)
+        while grupo_n(tab, grupo_cab(tab, m)) > pos + 1
+            o2 = grupo_miembro(tab, grupo_cab(tab, m), pos + 1)
+            _cd = wm_cerrar_pestana(st, tab, o2)
+    if k == 4
+        _cc = wm_cerrar_pestana(st, tab, m)
+    _rp = wm_pedir_repintar(st)
+    0
+
 fn wm_raton_mover(st: Int, x: Int, y: Int, botones: Int, sw: Int, sh: Int) -> Int ! io, alloc
     _c = wm_cursor_actualizar(st, x, y, sw, sh)
     tab = st_get(st, st_tab())
+    hv = wm_hover_boton(st, st_get(st, st_mx()), st_get(st, st_my()))
+    if hv != st_get(st, st_hover())
+        _hs = st_set(st, st_hover(), hv)
+        _hp = wm_pedir_repintar(st)
+    hp = wm_hover_pest(st, st_get(st, st_mx()), st_get(st, st_my()))
+    if hp != st_get(st, st_hover_pest())
+        _hq = st_set(st, st_hover_pest(), hp)
+        _hr = wm_pedir_repintar(st)
+    if st_get(st, st_ctx()) >= 0
+        _hc = wm_pedir_repintar(st)
     dix = st_get(st, st_drag_ix())
     if dix >= 0
         if botones != 0
@@ -1849,12 +2728,43 @@ fn wm_raton_mover(st: Int, x: Int, y: Int, botones: Int, sw: Int, sh: Int) -> In
             wy = tab_get(tab, dix, tab_wy())
             ww = tab_get(tab, dix, tab_ww())
             wh = tab_get(tab, dix, tab_wh())
+            if dk == 10
+                _pa = wm_pest_arrastrar(st, dix, x, y, sh)
             if dk == 1
-                _x = tab_set(tab, dix, tab_wx(), x - st_get(st, st_grab_x()))
-                _y = tab_set(tab, dix, tab_wy(), y - st_get(st, st_grab_y()))
-            if dk == 2
-                nw = max(ventana_min_ancho(), x - wx)
-                nh = max(ventana_min_alto(wm_gh_wm(st)) + wm_bar_h(st), y - wy)
+                _dr = wm_drop_fijar(st, wm_destino_soltar(st, x, y, dix))
+                nx = x - st_get(st, st_grab_x())
+                ny = y - st_get(st, st_grab_y())
+                if ny < wm_bar_h(st)
+                    ny = wm_bar_h(st)
+                if ny > sh - 24
+                    ny = sh - 24
+                if nx < 60 - ww
+                    nx = 60 - ww
+                if nx > sw - 60
+                    nx = sw - 60
+                _x = tab_set(tab, dix, tab_wx(), nx)
+                _y = tab_set(tab, dix, tab_wy(), ny)
+            if dk >= 2
+                mw = ventana_min_ancho()
+                mh = ventana_min_alto(wm_gh_wm(st)) + wm_bar_h(st)
+                nx2 = wx
+                nw = ww
+                nh = wh
+                if dk == 2
+                    nw = max(mw, x - wx)
+                    nh = max(mh, y - wy)
+                if dk == 3
+                    nw = max(mw, x - wx)
+                if dk == 4
+                    nh = max(mh, y - wy)
+                if dk == 5
+                    nx2 = min(x, wx + ww - mw)
+                    nw = wx + ww - nx2
+                if dk == 6
+                    nx2 = min(x, wx + ww - mw)
+                    nw = wx + ww - nx2
+                    nh = max(mh, y - wy)
+                _xx = tab_set(tab, dix, tab_wx(), nx2)
                 _w = tab_set(tab, dix, tab_ww(), nw)
                 _h = tab_set(tab, dix, tab_wh(), nh)
             _d = wm_marcar_dirty(st, 0, wm_bar_h(st), sw, sh)
@@ -1872,15 +2782,28 @@ fn wm_raton_btn(st: Int, x: Int, y: Int, botones: Int, compos: Int, clen: Int, s
         dix = st_get(st, st_drag_ix())
         dk = st_get(st, st_drag_kind())
         if dix >= 0
-            if dk == 2
+            if dk >= 2
                 _r = wm_redim_slot(st, tab, dix, fmt, compos, clen, sw, sh, stride, bpp)
                 _tr = wm_term_redimensionar_si(st, tab, dix)
+        if dix >= 0
+            if dk == 1
+                dst = wm_destino_soltar(st, x, y, dix)
+                if dst >= 0
+                    _ig = wm_integrar(st, dix, dst)
+        _dd = wm_drop_fijar(st, -1)
         _d = st_set(st, st_drag_ix(), -1)
         _k = st_set(st, st_drag_kind(), 0)
     if botones != 0
         gw = wm_gw_wm(st)
         gh = wm_gh_wm(st)
         tema = wm_tema_id(st)
+        cm = st_get(st, st_ctx())
+        if cm >= 0
+            ik = ctx_item(st, x, y)
+            _cc = wm_ctx_cerrar(st)
+            if ik >= 0
+                _ce = wm_ctx_ejecutar(st, cm, ik, compos, clen, sw, sh, stride, bpp, fmt)
+            return 0
         if st_get(st, st_menu()) != 0
             acc = lanz_hit_menu(x, y, gw, gh, tema)
             if acc == lanz_nada()
@@ -1888,7 +2811,13 @@ fn wm_raton_btn(st: Int, x: Int, y: Int, botones: Int, compos: Int, clen: Int, s
             _em = wm_ejecutar(st, acc, sw, sh)
             return 0
         if y < wm_bar_h(st)
-            _eb = wm_ejecutar(st, lanz_hit_barra(x, y, gw, gh), sw, sh)
+            acc = lanz_hit_barra(x, y, gw, gh)
+            if acc != lanz_nada()
+                _eb = wm_ejecutar(st, acc, sw, sh)
+            else
+                kb = wm_barra_hit_ventana(st, x, y)
+                if kb >= 0
+                    _bw = wm_barra_alternar(st, tab, kb)
             return 0
         i = wm_hit_test(st, x, y)
         if i >= 0
@@ -1897,23 +2826,58 @@ fn wm_raton_btn(st: Int, x: Int, y: Int, botones: Int, compos: Int, clen: Int, s
             wy = tab_get(tab, i, tab_wy())
             ww = tab_get(tab, i, tab_ww())
             wh = tab_get(tab, i, tab_wh())
-            if ventana_hit_cerrar(x, y, wx, wy, ww, gh) != 0
-                if tab_get(tab, i, tab_tipo()) == tab_tipo_cli()
-                    fd = tab_get(tab, i, tab_fd())
-                    msg = st_get(st, st_msg_buf())
-                    _e = msg_set_op(msg, op_cerrar_wm())
-                    _w = write_fd(fd, msg, msg_len())
-                _c = wm_cerrar_indice(st, i)
+            ph = pest_hit(x, y, wx, wy, ww, gh, grupo_n(tab, i))
+            if (botones & 2) != 0
+                if ph != 0
+                    if ph != 200
+                        k0 = ph - 1
+                        if ph > 100
+                            k0 = ph - 101
+                        pm0 = grupo_miembro(tab, i, k0)
+                        if pm0 >= 0
+                            _ca = wm_ctx_abrir(st, pm0, x, y, sw, sh)
+                    return 0
+            if ph != 0
+                _pc = wm_clic_pestana(st, tab, i, ph, compos, clen, sw, sh, stride, bpp, fmt)
+                if ph < 100
+                    pm = grupo_miembro(tab, i, ph - 1)
+                    if pm >= 0
+                        _pd = st_set(st, st_drag_ix(), pm)
+                        _pk = st_set(st, st_drag_kind(), 10)
+                return 0
+            bt = ventana_hit_boton(x, y, wx, wy, ww, gh)
+            if bt == 1
+                _c = wm_cerrar_grupo(st, i)
+            elsif bt == 2
+                _mx = wm_alternar_max(st, tab, i, compos, clen, sw, sh, stride, bpp, fmt)
+            elsif bt == 3
+                _mn = wm_minimizar(st, tab, i)
             else
-                if ventana_hit_resize(x, y, wx, wy, ww, wh) != 0
+                maxim = wm_maximizada(tab, i)
+                borde = 0
+                if maxim == 0
+                    borde = ventana_hit_borde(x, y, wx, wy, ww, wh, gh)
+                if borde != 0
                     _di = st_set(st, st_drag_ix(), i)
-                    _dk = st_set(st, st_drag_kind(), 2)
+                    _dk = st_set(st, st_drag_kind(), borde)
                 else
                     if ventana_hit_titulo(x, y, wx, wy, ww, gh) != 0
-                        _di = st_set(st, st_drag_ix(), i)
-                        _dk = st_set(st, st_drag_kind(), 1)
-                        _x0 = st_set(st, st_grab_x(), x - wx)
-                        _y0 = st_set(st, st_grab_y(), y - wy)
+                        ahora = uptime_ms()
+                        doble = 0
+                        if st_get(st, st_clic_i()) == i
+                            if ahora - st_get(st, st_clic_t()) < 400
+                                doble = 1
+                        if doble != 0
+                            _ct = st_set(st, st_clic_t(), 0)
+                            _mx2 = wm_alternar_max(st, tab, i, compos, clen, sw, sh, stride, bpp, fmt)
+                        else
+                            _ct2 = st_set(st, st_clic_t(), ahora)
+                            _ci = st_set(st, st_clic_i(), i)
+                            if maxim == 0
+                                _di2 = st_set(st, st_drag_ix(), i)
+                                _dk2 = st_set(st, st_drag_kind(), 1)
+                                _x0 = st_set(st, st_grab_x(), x - wx)
+                                _y0 = st_set(st, st_grab_y(), y - wy)
                     else
                         _r = wm_reenviar_raton_slot(st, tab, i, x, y, botones)
     0
@@ -1929,6 +2893,8 @@ fn wm_reenviar_tecla(st: Int, key: Int, mods: Int) -> Int ! io, alloc
 fn wm_tecla_foco(st: Int, key: Int) -> Int ! io, alloc
     tab = st_get(st, st_tab())
     fi = st_get(st, st_focus())
+    if fi >= 0
+        fi = grupo_panel_activo(tab, fi)
     if fi >= 0
         if tab_get(tab, fi, tab_tipo()) == tab_tipo_term()
             fd = tab_get(tab, fi, tab_fd())
@@ -1948,10 +2914,23 @@ fn wm_cerrar_foco(st: Int) -> Int ! io, alloc
     fi = st_get(st, st_focus())
     if fi >= 0
         tab = st_get(st, st_tab())
+        fi = grupo_panel_activo(tab, fi)
         _s = wm_st_desde_tab(st, tab, fi)
         _c = wm_cerrar_cliente(st)
         _t = wm_tab_desde_st(st, tab, fi)
         _x = wm_cerrar_indice(st, fi)
+    0
+
+fn wm_atajo_max(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
+    fi = st_get(st, st_focus())
+    if fi >= 0
+        _m = wm_alternar_max(st, st_get(st, st_tab()), fi, compos, clen, sw, sh, stride, bpp, fmt)
+    0
+
+fn wm_atajo_min(st: Int) -> Int ! alloc
+    fi = st_get(st, st_focus())
+    if fi >= 0
+        _m = wm_minimizar(st, st_get(st, st_tab()), fi)
     0
 
 fn wm_foco_siguiente(st: Int) -> Int ! alloc
@@ -1968,16 +2947,16 @@ fn wm_foco_siguiente(st: Int) -> Int ! alloc
                 if k + 1 < nz
                     nfi = z_get(z, k + 1)
             k = k + 1
+        _q = wm_quitar_min(tab, nfi)
         _f = st_set(st, st_focus(), nfi)
         _u = z_subir(z, nz, nfi)
         _rp = wm_pedir_repintar(st)
     nfi
 
-fn wm_abrir_terminal(st: Int, sw: Int, sh: Int) -> Int ! io, alloc
+# Crea un panel de terminal (PTY + sosh) sin colocarlo todavía en ninguna ventana.
+fn wm_term_slot(st: Int) -> Int ! io, alloc
     tab = st_get(st, st_tab())
-    z = st_get(st, st_z())
     si = tab_buscar_libre(tab)
-    ok = 0
     if tab_contar_tipo(tab, tab_tipo_term()) >= pty_max()
         si = -1
     if si >= 0
@@ -1993,11 +2972,8 @@ fn wm_abrir_terminal(st: Int, sw: Int, sh: Int) -> Int ! io, alloc
             _y = tab_set(tab, si, tab_wy(), 40 + wm_bar_h(st))
             _w = tab_set(tab, si, tab_ww(), 640)
             _h = tab_set(tab, si, tab_wh(), 400 + wm_bar_h(st))
-            nz = st_get(st, st_nz())
-            nn = z_anadir(z, nz, si)
-            _n = st_set(st, st_nz(), nn)
-            _fo = st_set(st, st_focus(), si)
-            _rp = wm_pedir_repintar(st)
+            _co = tab_set_raw(tab, si, tab_cab(), 0)
+            _or = tab_set_raw(tab, si, tab_orden(), 0)
             _sc = tab_set(tab, si, tab_escala(), wm_escala_apps(st))
             gw = fuente_gw(wm_escala_apps(st))
             gh = fuente_gh(wm_escala_apps(st))
@@ -2015,8 +2991,128 @@ fn wm_abrir_terminal(st: Int, sw: Int, sh: Int) -> Int ! io, alloc
             _p = tab_set(tab, si, tab_term_pos(), 0)
             _fw = tab_set(tab, si, tab_fww(), 0)
             _fh = tab_set(tab, si, tab_fwh(), 0)
-            ok = 1
+        else
+            si = -1
+    else
+        si = -1
+    si
+
+fn wm_abrir_terminal(st: Int, sw: Int, sh: Int) -> Int ! io, alloc
+    tab = st_get(st, st_tab())
+    z = st_get(st, st_z())
+    si = wm_term_slot(st)
+    ok = 0
+    if si >= 0
+        nz = st_get(st, st_nz())
+        nn = z_anadir(z, nz, si)
+        _n = st_set(st, st_nz(), nn)
+        _fo = st_set(st, st_focus(), si)
+        _rp = wm_pedir_repintar(st)
+        ok = 1
     ok
+
+# Lanza una aplicación cliente. Si `grupo1` > 0, el cliente entra como pestaña de esa ventana (cabecera + 1).
+fn wm_abrir_app(st: Int, app: Int, grupo1: Int) -> Int ! io, alloc
+    pid = -1
+    if app == app_web()
+        pid = wm_lanzar_web()
+    if app == app_ficheros()
+        pid = wm_lanzar_ficheros()
+    if pid > 0
+        _a = st_set(st, st_pend_pid(), pid)
+        _b = st_set(st, st_pend_app(), app)
+        _c = st_set(st, st_pend_grupo(), grupo1)
+    pid
+
+# Nueva pestaña con la misma aplicación que la activa de la ventana `h`.
+fn wm_nueva_pestana(st: Int, h: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
+    tab = st_get(st, st_tab())
+    cab = grupo_cab(tab, h)
+    act = grupo_panel_activo(tab, cab)
+    ok = 0
+    if tab_get(tab, act, tab_tipo()) == tab_tipo_term()
+        si = wm_term_slot(st)
+        if si >= 0
+            _i = wm_integrar(st, si, cab)
+            _t = wm_term_redimensionar_uno(st, tab, si)
+            ok = 1
+    if tab_get(tab, act, tab_tipo()) == tab_tipo_cli()
+        app = tab_get(tab, act, tab_app())
+        if app != app_ninguna()
+            pid = wm_abrir_app(st, app, cab + 1)
+            if pid > 0
+                ok = 1
+    ok
+
+fn wm_activar_pestana(st: Int, tab: Int, h: Int, k: Int) -> Int ! io, alloc
+    cab = grupo_cab(tab, h)
+    m = grupo_miembro(tab, cab, k)
+    if m >= 0
+        _g = grupo_activar(tab, m)
+        if tab_get(tab, m, tab_tipo()) == tab_tipo_cli()
+            _f = wm_enviar_foco(tab_get(tab, m, tab_fd()))
+        _rp = wm_pedir_repintar(st)
+    0
+
+# Alt+1..9, Ctrl+Tab: pestaña `k` (o relativa) de la ventana con foco.
+fn wm_pestana_relativa(st: Int, delta: Int) -> Int ! io, alloc
+    tab = st_get(st, st_tab())
+    fi = st_get(st, st_focus())
+    if fi >= 0
+        cab = grupo_cab(tab, fi)
+        n = grupo_n(tab, cab)
+        if n > 1
+            pos = grupo_pos(tab, grupo_panel_activo(tab, cab))
+            np = mod_pos(pos + delta + n, n)
+            _a = wm_activar_pestana(st, tab, cab, np)
+    0
+
+fn wm_pestana_n(st: Int, k: Int) -> Int ! io, alloc
+    tab = st_get(st, st_tab())
+    fi = st_get(st, st_focus())
+    if fi >= 0
+        cab = grupo_cab(tab, fi)
+        if k < grupo_n(tab, cab)
+            _a = wm_activar_pestana(st, tab, cab, k)
+    0
+
+# Clic en la tira de pestañas (resultado de pest_hit).
+# Alt+Mayús+D: saca la pestaña activa a ventana propia (algo desplazada para verla).
+fn wm_atajo_sacar(st: Int, sh: Int) -> Int ! io, alloc
+    tab = st_get(st, st_tab())
+    fi = st_get(st, st_focus())
+    if fi >= 0
+        cab = grupo_cab(tab, fi)
+        m = grupo_panel_activo(tab, cab)
+        if grupo_n(tab, cab) > 1
+            x = tab_get(tab, cab, tab_wx()) + 40
+            y = tab_get(tab, cab, tab_wy()) + wm_bar_h(st) / 2 + 30
+            _d = wm_pest_despegar(st, m, x + tab_get(tab, cab, tab_ww()) / 2 - 40, y, sh)
+            _di = st_set(st, st_drag_ix(), -1)
+            _dk = st_set(st, st_drag_kind(), 0)
+    0
+
+# Alt+Mayús+H/L: mueve la pestaña activa una posición a izquierda/derecha.
+fn wm_atajo_mover_pest(st: Int, delta: Int) -> Int ! alloc
+    tab = st_get(st, st_tab())
+    fi = st_get(st, st_focus())
+    if fi >= 0
+        cab = grupo_cab(tab, fi)
+        m = grupo_panel_activo(tab, cab)
+        if grupo_mover(tab, m, grupo_pos(tab, m) + delta) != 0
+            _rp = wm_pedir_repintar(st)
+    0
+
+fn wm_clic_pestana(st: Int, tab: Int, i: Int, ph: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
+    if ph == 200
+        _n = wm_nueva_pestana(st, i, compos, clen, sw, sh, stride, bpp, fmt)
+    elsif ph > 100
+        m = grupo_miembro(tab, i, ph - 101)
+        if m >= 0
+            _c = wm_cerrar_pestana(st, tab, m)
+    else
+        _a = wm_activar_pestana(st, tab, i, ph - 1)
+    0
 
 fn wm_slot_atender_term(st: Int, tab: Int, i: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     fd = tab_get(tab, i, tab_fd())
@@ -2024,7 +3120,7 @@ fn wm_slot_atender_term(st: Int, tab: Int, i: Int, compos: Int, clen: Int, strid
     if pid > 0
         vivo = kill_pid(pid, sig_probe())
         if vivo < 0
-            _c = tab_cerrar_slot(tab, i)
+            _c = wm_cerrar_indice(st, i)
         if vivo >= 0
             buf = st_get(st, st_msg_buf())
             n = read_timeout_fd(fd, buf, msg_len(), 1)
@@ -2047,12 +3143,37 @@ fn wm_slot_atender_term(st: Int, tab: Int, i: Int, compos: Int, clen: Int, strid
                     j = j + 1
                 pos = term_st_get(tst, st_cursor())
                 _p = tab_set(tab, i, tab_term_pos(), pos)
+                if grupo_panel_activo(tab, i) != i
+                    if tab_get(tab, i, tab_pend()) == 0
+                        _pe = tab_set(tab, i, tab_pend(), 1)
+                        _rp = wm_pedir_repintar(st)
                 wx = tab_get(tab, i, tab_wx())
                 wy = tab_get(tab, i, tab_wy())
                 ww = tab_get(tab, i, tab_ww())
                 wh = tab_get(tab, i, tab_wh())
-                _d = wm_marcar_dirty(st, wx, wy, wx + ww, wy + wh)
+                if grupo_panel_activo(tab, i) == i
+                    _d = wm_marcar_dirty(st, wx, wy, wx + ww, wy + wh)
     0
+
+# La «q» llega como 113, o 81 con Mayús.
+fn wm_tecla_es_q(key: Int) -> Int
+    if key == 113
+        1
+    elsif key == 81
+        1
+    else
+        0
+
+# La «t» llega como 116, 84 (con Mayús) o 20 (código de control con Ctrl).
+fn wm_tecla_es_t(key: Int) -> Int
+    if key == 116
+        1
+    elsif key == 84
+        1
+    elsif key == 20
+        1
+    else
+        0
 
 fn wm_input(st: Int, evt: Int, evt_len: Int, n: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     i = 0
@@ -2073,22 +3194,53 @@ fn wm_input(st: Int, evt: Int, evt_len: Int, n: Int, compos: Int, clen: Int, sw:
                     if (mods & mod_shift()) != 0
                         if key == 101
                             _x = st_set(st, st_salir(), 1)
+                        if wm_tecla_es_q(key) != 0
+                            if st_get(st, st_focus()) >= 0
+                                _qg = wm_cerrar_grupo(st, st_get(st, st_focus()))
+                        if key == 100
+                            _sd = wm_atajo_sacar(st, sh)
+                        if key == 68
+                            _sd2 = wm_atajo_sacar(st, sh)
+                        if key == 104
+                            _ml = wm_atajo_mover_pest(st, -1)
+                        if key == 72
+                            _ml2 = wm_atajo_mover_pest(st, -1)
+                        if key == 108
+                            _mr = wm_atajo_mover_pest(st, 1)
+                        if key == 76
+                            _mr2 = wm_atajo_mover_pest(st, 1)
                     if (mods & mod_shift()) == 0
                         if key == 10
                             _term = wm_abrir_terminal(st, 1024, 768)
                         if key == 113
                             _q = wm_cerrar_foco(st)
+                        if key >= 49
+                            if key <= 57
+                                _pn = wm_pestana_n(st, key - 49)
                         if key == 9
                             _f = wm_foco_siguiente(st)
                         if key == 116
                             _m = st_set(st, st_mosaic(), 1 - st_get(st, st_mosaic()))
                             _a = wm_aplicar_mosaic(st, sw, sh)
+                        if key == 102
+                            _fm = wm_atajo_max(st, compos, clen, sw, sh, stride, bpp, fmt)
+                        if key == 110
+                            _fn = wm_atajo_min(st)
                         if key == 119
-                            _lw = wm_lanzar_web()
+                            _lw = wm_abrir_app(st, app_web(), 0)
                         if key == 109
                             _ss = wm_ss_iniciar(st, compos, clen, sw, sh, stride, bpp, fmt)
                 if (mods & mod_alt()) == 0
                     if (mods & mod_ctrl()) != 0
+                        if key == 9
+                            if (mods & mod_shift()) != 0
+                                _pr = wm_pestana_relativa(st, -1)
+                            else
+                                _pr = wm_pestana_relativa(st, 1)
+                        if wm_tecla_es_t(key) != 0
+                            if (mods & mod_shift()) != 0
+                                if st_get(st, st_focus()) >= 0
+                                    _np = wm_nueva_pestana(st, st_get(st, st_focus()), compos, clen, sw, sh, stride, bpp, fmt)
                         zv = zoom_tecla(key, mods)
                         if zoom_sentido(zv) != zoom_sentido_nada()
                             _z = wm_zoom_aplicar(st, zv, compos, clen, sw, sh, stride, bpp, fmt)
@@ -2198,15 +3350,49 @@ fn wm_drenar_input(st: Int, evt: Int, evt_len: Int, compos: Int, clen: Int, sw: 
             _touch = st_set(st, st_ss_last(), uptime_ms())
             fi = st_get(st, st_focus())
             if fi >= 0
-                _ld = wm_st_desde_tab(st, st_get(st, st_tab()), fi)
+                _ld = wm_st_desde_tab(st, st_get(st, st_tab()), grupo_panel_activo(st_get(st, st_tab()), fi))
             _i = wm_input(st, evt, evt_len, en, compos, clen, sw, sh, stride, bpp, fmt)
-            if fi >= 0
-                _sv = wm_tab_desde_st(st, st_get(st, st_tab()), fi)
+            # No se vuelca `st` a la tabla: la entrada (arrastre, redimensión,
+            # cierre) cambia la tabla directamente, y devolver la copia vieja
+            # deshacía cada movimiento y escribía en huecos ya liberados.
             lotes = lotes + 1
             if lotes >= 8
                 en = 0
             else
                 en = input_poll(evt, evt_len, 8)
+    0
+
+# Visibilidad de cada cliente: sólo el panel activo de una ventana no minimizada se ve.
+# Se avisa al cliente cuando cambia (no al conectar si ya se ve); de paso se apaga el punto
+# de actividad del panel que pasa a verse.
+fn wm_sync_visibilidad(st: Int) -> Int ! io, alloc
+    tab = st_get(st, st_tab())
+    i = 0
+    while i < tab_cap()
+        if tab_slot_activo(tab, i) != 0
+            if tab_get(tab, i, tab_tipo()) == tab_tipo_cli()
+                if tab_get(tab, i, tab_fase()) == 2
+                    cab = grupo_cab(tab, i)
+                    vis = 0
+                    if grupo_panel_activo(tab, cab) == i
+                        if wm_oculta(tab, cab) == 0
+                            vis = 1
+                    prev = tab_get(tab, i, tab_vis())
+                    want = 2 - vis
+                    if prev != want
+                        _v = tab_set(tab, i, tab_vis(), want)
+                        enviar = prev
+                        if vis == 0
+                            enviar = 1
+                        if enviar != 0
+                            m = msg_nuevo()
+                            _e = msg_encode_visible(m, vis)
+                            _w = write_fd(tab_get(tab, i, tab_fd()), m, msg_len())
+            if grupo_panel_activo(tab, grupo_cab(tab, i)) == i
+                if tab_get(tab, i, tab_pend()) != 0
+                    _p = tab_set(tab, i, tab_pend(), 0)
+                    _r = wm_pedir_repintar(st)
+        i = i + 1
     0
 
 fn wm_tick(st: Int, listener: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
@@ -2219,6 +3405,7 @@ fn wm_tick(st: Int, listener: Int, compos: Int, clen: Int, sw: Int, sh: Int, str
         if acc != listener
             _ac = wm_aceptar_cliente(st, acc)
     _c = wm_atender_todos(st, compos, clen, stride, bpp, fmt, sw, sh)
+    _sv = wm_sync_visibilidad(st)
     _p = wm_compose(st, compos, clen, sw, sh, stride, bpp, fmt)
     _f = wm_flush_dirty(st, compos, clen)
     sleep_ms(10)

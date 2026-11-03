@@ -35,32 +35,71 @@ fn ventana_hit_titulo(x: Int, y: Int, wx: Int, wy: Int, ww: Int, gh: Int) -> Int
     else
         1
 
-fn ventana_hit_cerrar(x: Int, y: Int, wx: Int, wy: Int, ww: Int, gh: Int) -> Int
+# Botones de la barra de título (de derecha a izquierda): 0 cerrar, 1 maximizar,
+# 2 minimizar. Son círculos de `ventana_btn_d` de diámetro.
+fn ventana_btn_d(gh: Int) -> Int
+    barra_alto(gh) - 10
+
+fn ventana_btn_cx(wx: Int, ww: Int, gh: Int, k: Int) -> Int
+    d = ventana_btn_d(gh)
+    wx + ww - 10 - d - k * (d + 8)
+
+fn ventana_btn_cy(wy: Int, gh: Int) -> Int
+    wy + (barra_alto(gh) - ventana_btn_d(gh)) / 2
+
+# 1 cerrar, 2 maximizar, 3 minimizar, 0 ninguno. La zona de clic es algo mayor que el dibujo.
+fn ventana_hit_boton(x: Int, y: Int, wx: Int, wy: Int, ww: Int, gh: Int) -> Int
     bh = barra_alto(gh)
-    btn = gh + 4
-    cx = wx + ww - btn - 4
-    if x < cx
-        0
-    elsif x >= cx + btn
-        0
-    elsif y < wy
-        0
-    elsif y >= wy + bh
-        0
-    else
+    d = ventana_btn_d(gh)
+    r = 0
+    if y >= wy
+        if y < wy + bh
+            k = 0
+            while k < 3
+                cx = ventana_btn_cx(wx, ww, gh, k)
+                if x >= cx - 3
+                    if x < cx + d + 3
+                        if r == 0
+                            r = k + 1
+                k = k + 1
+    r
+
+fn ventana_hit_cerrar(x: Int, y: Int, wx: Int, wy: Int, ww: Int, gh: Int) -> Int
+    if ventana_hit_boton(x, y, wx, wy, ww, gh) == 1
         1
+    else
+        0
+
+# Borde por el que se redimensiona: 0 ninguno, 2 esquina inferior derecha,
+# 3 borde derecho, 4 borde inferior, 5 borde izquierdo, 6 esquina inferior izquierda.
+fn ventana_hit_borde(x: Int, y: Int, wx: Int, wy: Int, ww: Int, wh: Int, gh: Int) -> Int
+    r = 0
+    if ventana_contiene(x, y, wx, wy, ww, wh) != 0
+        d = 5
+        e = 14
+        dx = x - wx
+        dy = y - wy
+        ex = wx + ww - 1 - x
+        ey = wy + wh - 1 - y
+        if ey < e
+            if ex < e
+                r = 2
+            elsif dx < e
+                r = 6
+            elsif ey < d
+                r = 4
+        elsif y >= wy + barra_alto(gh)
+            if ex < d
+                r = 3
+            elsif dx < d
+                r = 5
+    r
 
 fn ventana_hit_resize(x: Int, y: Int, wx: Int, wy: Int, ww: Int, wh: Int) -> Int
-    if x < wx + ww - 12
-        0
-    elsif y < wy + wh - 12
-        0
-    elsif x >= wx + ww
-        0
-    elsif y >= wy + wh
-        0
-    else
+    if ventana_hit_borde(x, y, wx, wy, ww, wh, 16) != 0
         1
+    else
+        0
 
 fn ventana_mosaico_cols(total: Int) -> Int
     if total <= 1
@@ -136,3 +175,63 @@ fn ventana_recortar_nh(wh: Int, sh: Int, ny: Int, gh: Int) -> Int
     if ny + nh > sh
         nh = max(ventana_min_alto(gh), sh - ny)
     nh
+
+# ---- Pestañas ----------------------------------------------------------------
+# La tira de pestañas ocupa la barra de título entre el margen izquierdo y el botón «+»,
+# que va a la izquierda de los tres botones de ventana.
+fn pest_mas_x(wx: Int, ww: Int, gh: Int) -> Int
+    ventana_btn_cx(wx, ww, gh, 3)
+
+fn pest_x0(wx: Int) -> Int
+    wx + 10
+
+fn pest_x1(wx: Int, ww: Int, gh: Int) -> Int
+    pest_mas_x(wx, ww, gh) - 8
+
+fn pest_ancho_max() -> Int
+    200
+
+fn pest_ancho(wx: Int, ww: Int, gh: Int, n: Int) -> Int
+    if n <= 0
+        0
+    else
+        a = (pest_x1(wx, ww, gh) - pest_x0(wx)) / n
+        if a > pest_ancho_max()
+            pest_ancho_max()
+        elsif a < 28
+            28
+        else
+            a
+
+fn pest_pos_x(wx: Int, ww: Int, gh: Int, n: Int, k: Int) -> Int
+    pest_x0(wx) + k * pest_ancho(wx, ww, gh, n)
+
+# Ancho de la zona de la × al final de cada pestaña.
+fn pest_cierre_ancho() -> Int
+    20
+
+# 0 nada; 1..n pestaña k+1; 101..: × de la pestaña k (100 + k + 1); 200 botón «+».
+fn pest_hit(x: Int, y: Int, wx: Int, wy: Int, ww: Int, gh: Int, n: Int) -> Int
+    bh = barra_alto(gh)
+    r = 0
+    if y >= wy
+        if y < wy + bh
+            d = ventana_btn_d(gh)
+            mx = pest_mas_x(wx, ww, gh)
+            if x >= mx - 3
+                if x < mx + d + 3
+                    r = 200
+            if r == 0
+                if n >= 2
+                    tw = pest_ancho(wx, ww, gh, n)
+                    k = 0
+                    while k < n
+                        tx = pest_pos_x(wx, ww, gh, n, k)
+                        if x >= tx
+                            if x < tx + tw
+                                if y >= wy + 4
+                                    r = k + 1
+                                    if x >= tx + tw - pest_cierre_ancho()
+                                        r = 100 + k + 1
+                        k = k + 1
+    r

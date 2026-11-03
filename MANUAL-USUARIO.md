@@ -842,7 +842,9 @@ el **touchpad** interno entra por **HID-over-I2C** (`PNP0C50` tras el controlado
 
 Atajos habituales: **Alt+Intro** (terminal nueva), **Alt+Tab** (cambiar ventana),
 **Alt+Q** (cerrar), **Alt+T** (flotante / mosaico), **Alt+W** (abrir **soso-web** en ventana),
-**Alt+M** (salvapantallas del mono), **Alt+Mayús+E** (volver a consola). Tras **10 minutos**
+**Alt+M** (salvapantallas del mono), **Alt+Mayús+E** (volver a consola).
+
+**Pestañas:** una ventana puede tener varias pestañas. **Ctrl+Mayús+T** (o el botón «+») abre otra con la misma aplicación; **Ctrl+Tab / Ctrl+Mayús+Tab** y **Alt+1…9** cambian de pestaña; **Alt+Q** cierra la pestaña y **Alt+Mayús+Q** la ventana entera. Arrastra una pestaña para reordenarla; sácala de la barra para convertirla en ventana, y suéltala sobre la barra de otra ventana para unirla. **Alt+Mayús+D** saca la pestaña activa, **Alt+Mayús+H / L** la mueve a izquierda o derecha, y el clic derecho sobre una pestaña abre su menú (duplicar, sacar, cerrar otras, cerrar a la derecha, cerrar). Tras **10 minutos**
 sin tocar teclado ni ratón entra solo el mismo salvapantallas; cualquier entrada lo cierra. La barra superior del escritorio tiene un lanzador:
 el botón **Aplicaciones** despliega un menú con **Terminal**, **Navegador web** y
 **Salir del escritorio**, y los accesos directos **Terminal** y **Web** abren lo mismo de
