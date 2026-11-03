@@ -191,10 +191,32 @@ fn pest_x1(wx: Int, ww: Int, gh: Int) -> Int
 fn pest_ancho_max() -> Int
     200
 
+# Ancho del botón «▾» que abre la lista de pestañas cuando la tira desborda.
+fn pest_lista_ancho() -> Int
+    16
+
+# 1 si las n pestañas no caben a 40 px cada una.
+fn pest_desborda(wx: Int, ww: Int, gh: Int, n: Int) -> Int
+    if n * 40 > pest_x1(wx, ww, gh) - pest_x0(wx)
+        1
+    else
+        0
+
+# Ancho disponible para pestañas: con desbordamiento se reserva el botón de la lista.
+fn pest_disp(wx: Int, ww: Int, gh: Int, n: Int) -> Int
+    a = pest_x1(wx, ww, gh) - pest_x0(wx)
+    if pest_desborda(wx, ww, gh, n) != 0
+        a - pest_lista_ancho()
+    else
+        a
+
+fn pest_lista_x(wx: Int, ww: Int, gh: Int) -> Int
+    pest_x1(wx, ww, gh) - pest_lista_ancho()
+
 # Pestañas que caben a la vez (al menos 40 px cada una); con más, la tira se desplaza para
 # mantener a la vista la activa.
 fn pest_vis(wx: Int, ww: Int, gh: Int, n: Int) -> Int
-    v = (pest_x1(wx, ww, gh) - pest_x0(wx)) / 40
+    v = pest_disp(wx, ww, gh, n) / 40
     if v > n
         v = n
     if v < 1
@@ -206,7 +228,7 @@ fn pest_ancho(wx: Int, ww: Int, gh: Int, n: Int) -> Int
         0
     else
         v = pest_vis(wx, ww, gh, n)
-        a = (pest_x1(wx, ww, gh) - pest_x0(wx)) / v
+        a = pest_disp(wx, ww, gh, n) / v
         if a > pest_ancho_max()
             pest_ancho_max()
         elsif a < 28
@@ -242,7 +264,8 @@ fn pest_pos_x(wx: Int, ww: Int, gh: Int, n: Int, k: Int, act: Int) -> Int
 fn pest_cierre_ancho() -> Int
     20
 
-# 0 nada; 1..n pestaña k+1; 101..: × de la pestaña k (100 + k + 1); 200 botón «+».
+# 0 nada; 1..n pestaña k+1; 101..: × de la pestaña k (100 + k + 1); 200 botón «+»;
+# 201 botón «▾» de la lista de pestañas (sólo si la tira desborda).
 fn pest_hit(x: Int, y: Int, wx: Int, wy: Int, ww: Int, gh: Int, n: Int, act: Int) -> Int
     bh = barra_alto(gh)
     r = 0
@@ -253,6 +276,13 @@ fn pest_hit(x: Int, y: Int, wx: Int, wy: Int, ww: Int, gh: Int, n: Int, act: Int
             if x >= mx - 3
                 if x < mx + d + 3
                     r = 200
+            if r == 0
+                if n >= 2
+                    if pest_desborda(wx, ww, gh, n) != 0
+                        if x >= pest_lista_x(wx, ww, gh)
+                            if x < pest_x1(wx, ww, gh)
+                                if y >= wy + 4
+                                    r = 201
             if r == 0
                 if n >= 2
                     tw = pest_ancho(wx, ww, gh, n)

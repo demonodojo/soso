@@ -520,8 +520,44 @@ fn prueba_layout_pestanas(st: Int, sw: Int, sh: Int) -> Int ! io, alloc
             _ig = wm_integrar(st, 2, dst)
             if grupo_n(tab, 0) != 3
                 rc = 406
+    if rc == 0
+        rc = prueba_layout_lista(st, sw, sh)
     _d = st_set(st, st_drag_ix(), -1)
     _k = st_set(st, st_drag_kind(), 0)
+    rc
+
+# Lista de pestañas (T4): con la tira desbordada aparece «▾», y su menú elige pestaña.
+fn prueba_layout_lista(st: Int, sw: Int, sh: Int) -> Int ! io, alloc
+    tab = st_get(st, st_tab())
+    gh = wm_gh_wm(st)
+    rc = 0
+    _w = tab_set(tab, 0, tab_ww(), 200)
+    wx = tab_get(tab, 0, tab_wx())
+    wy = tab_get(tab, 0, tab_wy())
+    ww = tab_get(tab, 0, tab_ww())
+    n = grupo_n(tab, 0)
+    if pest_desborda(wx, ww, gh, n) == 0
+        rc = 410
+    if rc == 0
+        if pest_hit(pest_lista_x(wx, ww, gh) + 3, wy + 8, wx, wy, ww, gh, n, wm_pest_act(tab, 0)) != 201
+            rc = 411
+    if rc == 0
+        _ab = wm_lista_abrir(st, 0, sw, sh)
+        if st_get(st, st_ctx()) != 0
+            rc = 412
+        elsif ctx_cuenta(st) != n
+            rc = 413
+        else
+            ia = ctx_item_alto(st)
+            it = ctx_item(st, st_get(st, st_ctx_x()) + 4, st_get(st, st_ctx_y()) + ia + ia / 2)
+            if it != 1
+                rc = 414
+            else
+                _la = wm_activar_pestana(st, tab, 0, it)
+                if grupo_panel_activo(tab, 0) != grupo_miembro(tab, 0, 1)
+                    rc = 415
+    _cc = wm_ctx_cerrar(st)
+    _w2 = tab_set(tab, 0, tab_ww(), 500)
     rc
 
 fn prueba_layout_preparar(st: Int, sw: Int, sh: Int) -> Int ! io, alloc

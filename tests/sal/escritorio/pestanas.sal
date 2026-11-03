@@ -35,5 +35,13 @@ fn main() -> Int
         13
     elsif pest_first(wx, ww, gh, 3, 2) != 0
         14
+    elsif pest_desborda(wx, ww, gh, 3) != 0
+        15
+    elsif pest_desborda(wx, 330, gh, 8) == 0
+        16
+    elsif pest_hit(pest_lista_x(wx, 330, gh) + 3, wy + 8, wx, wy, 330, gh, 8, 0) != 201
+        17
+    elsif pest_pos_x(wx, 330, gh, 8, pest_vis(wx, 330, gh, 8) - 1, 8 - pest_vis(wx, 330, gh, 8)) + pest_ancho(wx, 330, gh, 8) > pest_lista_x(wx, 330, gh)
+        18
     else
         0

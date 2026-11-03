@@ -14,7 +14,7 @@ import "escena.sal"
 import "mono.sal"
 
 fn st_size() -> Int
-    496
+    504
 
 fn st_alloc_bytes() -> Int
     st_size()
@@ -212,6 +212,10 @@ fn st_ctx_x() -> Int
 
 fn st_ctx_y() -> Int
     488
+
+# 0 menú contextual de una pestaña (st_ctx = panel); 1 lista de pestañas (st_ctx = cabecera).
+fn st_ctx_modo() -> Int
+    496
 
 fn wm_escena_cap() -> Int
     160
@@ -1686,6 +1690,8 @@ fn wm_esc_pestanas(st: Int, tab: Int, i: Int, e: Int, cap: Int, n0: Int, wx: Int
             k = k + 1
         # Desbordamiento: marcas de acento si hay pestañas fuera de vista a cada lado.
         pf = pest_first(wx, ww, gh, cnt, ap)
+        if pest_desborda(wx, ww, gh, cnt) != 0
+            n = wm_esc_lista(st, e, cap, n, wx, wy, ww, gh, bh, i)
         if pf > 0
             n = esc_solido(e, cap, n, pest_x0(wx) - 6, wy + 8, pest_x0(wx) - 3, wy + bh - 6, tema_acento(tema), 255)
         if pf + pest_vis(wx, ww, gh, cnt) < cnt
@@ -1720,6 +1726,25 @@ fn wm_esc_una_pestana(st: Int, tab: Int, i: Int, e: Int, cap: Int, n0: Int, wx: 
         n = wm_esc_glifo(e, cap, n, x1 - 18, wy + (bh - 10) / 2 + 1, 10, 0, col)
     elsif wm_pest_hov(st, i, k) != 0
         n = wm_esc_glifo(e, cap, n, x1 - 18, wy + (bh - 10) / 2 + 1, 10, 0, col)
+    n
+
+# Botón «▾» de la lista de pestañas (sólo con la tira desbordada).
+fn wm_esc_lista(st: Int, e: Int, cap: Int, n0: Int, wx: Int, wy: Int, ww: Int, gh: Int, bh: Int, i: Int) -> Int ! alloc
+    tema = wm_tema_id(st)
+    x0 = pest_lista_x(wx, ww, gh)
+    w = pest_lista_ancho()
+    col = tema_boton_inactivo(tema)
+    if st_get(st, st_hover_pest()) == i * 1000 + 201
+        col = mezclar_rgb(color_rgb(255, 255, 255), col, 56)
+    y0 = wy + 6
+    n = esc_rrect(e, cap, n0, x0 + 1, y0, x0 + w - 1, wy + bh - 6, esc_radios(4, 4, 4, 4), col, 255, 0, 0)
+    gl = tema_glifo_boton(tema)
+    cx = x0 + w / 2
+    cy = wy + bh / 2 - 2
+    r = 0
+    while r < 4
+        n = esc_solido(e, cap, n, cx - 3 + r, cy + r, cx + 4 - r, cy + r + 1, gl, 255)
+        r = r + 1
     n
 
 # Texto de las pestañas (o título centrado con un solo panel), sobre los fondos ya pintados.
@@ -2631,6 +2656,16 @@ fn wm_pest_arrastrar(st: Int, m: Int, x: Int, y: Int, sh: Int) -> Int ! io, allo
 fn ctx_n() -> Int
     5
 
+# Entradas del menú abierto: las 5 acciones, o una por pestaña en la lista.
+fn ctx_cuenta(st: Int) -> Int ! alloc
+    if st_get(st, st_ctx_modo()) == 1
+        grupo_n(st_get(st, st_tab()), st_get(st, st_ctx()))
+    else
+        ctx_n()
+
+fn ctx_lista_cols() -> Int
+    24
+
 fn ctx_texto(k: Int) -> String ! alloc
     if k == 0
         d"Duplicar pestana"
@@ -2646,17 +2681,20 @@ fn ctx_texto(k: Int) -> String ! alloc
 fn ctx_ancho(st: Int) -> Int ! alloc
     gw = wm_gw_wm(st)
     w = 0
-    k = 0
-    while k < ctx_n()
-        w = max(w, str_len(ctx_texto(k)) * gw)
-        k = k + 1
+    if st_get(st, st_ctx_modo()) == 1
+        w = ctx_lista_cols() * gw
+    else
+        k = 0
+        while k < ctx_n()
+            w = max(w, str_len(ctx_texto(k)) * gw)
+            k = k + 1
     w + 2 * lanz_margen(gw)
 
 fn ctx_item_alto(st: Int) -> Int ! alloc
     lanz_menu_item_alto(wm_gh_wm(st))
 
 fn ctx_alto(st: Int) -> Int ! alloc
-    ctx_n() * ctx_item_alto(st)
+    ctx_cuenta(st) * ctx_item_alto(st)
 
 # Elemento bajo `x,y`, o -1.
 fn ctx_item(st: Int, x: Int, y: Int) -> Int ! alloc
@@ -2674,19 +2712,33 @@ fn wm_ctx_cerrar(st: Int) -> Int ! alloc
         _r = wm_pedir_repintar(st)
     0
 
-fn wm_ctx_abrir(st: Int, m: Int, x: Int, y: Int, sw: Int, sh: Int) -> Int ! alloc
+fn wm_ctx_abrir_modo(st: Int, m: Int, modo: Int, x: Int, y: Int, sw: Int, sh: Int) -> Int ! alloc
+    _mo = st_set(st, st_ctx_modo(), modo)
+    # El tamaño depende del modo y de `m`: se fija antes de calcularlo.
+    _a = st_set(st, st_ctx(), m)
     cx = x
     cy = y
     if cx + ctx_ancho(st) > sw
         cx = sw - ctx_ancho(st)
     if cy + ctx_alto(st) > sh
         cy = sh - ctx_alto(st)
-    _a = st_set(st, st_ctx(), m)
     _b = st_set(st, st_ctx_x(), cx)
     _c = st_set(st, st_ctx_y(), cy)
     _d = wm_marcar_dirty(st, cx, cy, cx + ctx_ancho(st), cy + ctx_alto(st))
     _r = wm_pedir_repintar(st)
     0
+
+fn wm_ctx_abrir(st: Int, m: Int, x: Int, y: Int, sw: Int, sh: Int) -> Int ! alloc
+    wm_ctx_abrir_modo(st, m, 0, x, y, sw, sh)
+
+# Lista de pestañas de la ventana `cab`, colgando de su botón «▾».
+fn wm_lista_abrir(st: Int, cab: Int, sw: Int, sh: Int) -> Int ! alloc
+    tab = st_get(st, st_tab())
+    wx = tab_get(tab, cab, tab_wx())
+    wy = tab_get(tab, cab, tab_wy())
+    ww = tab_get(tab, cab, tab_ww())
+    gh = wm_gh_wm(st)
+    wm_ctx_abrir_modo(st, cab, 1, pest_lista_x(wx, ww, gh), wy + wm_bar_h(st), sw, sh)
 
 fn wm_pintar_ctx(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     m = st_get(st, st_ctx())
@@ -2703,14 +2755,23 @@ fn wm_pintar_ctx(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int,
         sel = ctx_item(st, st_get(st, st_mx()), st_get(st, st_my()))
         _s = wm_esc_rr(st, compos, clen, sw, sh, stride, bpp, fmt, cx - 1, cy - 1, cx + w + 1, cy + h + 1, esc_radios(radio, radio, radio, radio), tema_borde(tema, 0))
         _f = wm_esc_rr(st, compos, clen, sw, sh, stride, bpp, fmt, cx, cy, cx + w, cy + h, esc_radios(radio, radio, radio, radio), wm_color_menu(st))
+        modo = st_get(st, st_ctx_modo())
+        tab = st_get(st, st_tab())
         k = 0
-        while k < ctx_n()
+        while k < ctx_cuenta(st)
             iy = cy + k * ia
             bg = wm_color_menu(st)
             if k == sel
                 bg = wm_color_menu_sel(st)
                 _c = wm_esc_rr(st, compos, clen, sw, sh, stride, bpp, fmt, cx + lanz_margen(gw) / 2, iy + 2, cx + w - lanz_margen(gw) / 2, iy + ia - 2, esc_radios(radio, radio, radio, radio), bg)
-            _t = wm_texto(st, compos, clen, stride, bpp, fmt, ctx_texto(k), cx + lanz_margen(gw), iy + (ia - gh) / 2, wm_color_texto_barra(st), bg)
+            if modo == 1
+                pm = grupo_miembro(tab, st_get(st, st_ctx()), k)
+                col = wm_color_texto_barra(st)
+                if pm == grupo_panel_activo(tab, st_get(st, st_ctx()))
+                    col = tema_acento(tema)
+                _t = wm_texto_titulo(st, tab, pm, compos, clen, stride, bpp, fmt, cx + lanz_margen(gw), iy + (ia - gh) / 2, ctx_lista_cols(), col, bg)
+            else
+                _t = wm_texto(st, compos, clen, stride, bpp, fmt, ctx_texto(k), cx + lanz_margen(gw), iy + (ia - gh) / 2, wm_color_texto_barra(st), bg)
             k = k + 1
         _d = wm_marcar_dirty(st, cx - 1, cy - 1, cx + w + 1, cy + h + 1)
     0
@@ -2834,9 +2895,13 @@ fn wm_raton_btn(st: Int, x: Int, y: Int, botones: Int, compos: Int, clen: Int, s
         cm = st_get(st, st_ctx())
         if cm >= 0
             ik = ctx_item(st, x, y)
+            cmodo = st_get(st, st_ctx_modo())
             _cc = wm_ctx_cerrar(st)
             if ik >= 0
-                _ce = wm_ctx_ejecutar(st, cm, ik, compos, clen, sw, sh, stride, bpp, fmt)
+                if cmodo == 1
+                    _la = wm_activar_pestana(st, tab, cm, ik)
+                else
+                    _ce = wm_ctx_ejecutar(st, cm, ik, compos, clen, sw, sh, stride, bpp, fmt)
             return 0
         if st_get(st, st_menu()) != 0
             acc = lanz_hit_menu(x, y, gw, gh, tema)
@@ -2863,7 +2928,7 @@ fn wm_raton_btn(st: Int, x: Int, y: Int, botones: Int, compos: Int, clen: Int, s
             ph = pest_hit(x, y, wx, wy, ww, gh, grupo_n(tab, i), wm_pest_act(tab, i))
             if (botones & 2) != 0
                 if ph != 0
-                    if ph != 200
+                    if ph < 200
                         k0 = ph - 1
                         if ph > 100
                             k0 = ph - 101
@@ -3140,6 +3205,8 @@ fn wm_atajo_mover_pest(st: Int, delta: Int) -> Int ! alloc
 fn wm_clic_pestana(st: Int, tab: Int, i: Int, ph: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     if ph == 200
         _n = wm_nueva_pestana(st, i, compos, clen, sw, sh, stride, bpp, fmt)
+    elsif ph == 201
+        _l = wm_lista_abrir(st, i, sw, sh)
     elsif ph > 100
         m = grupo_miembro(tab, i, ph - 101)
         if m >= 0
