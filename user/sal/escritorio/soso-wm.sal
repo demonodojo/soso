@@ -406,7 +406,7 @@ fn prueba_layout_mosaic(st: Int, sw: Int, sh: Int) -> Int ! alloc
             _r0 = wm_aplicar_mosaic(st, sw, sh)
         ok
 
-fn prueba_layout_drag(st: Int, sw: Int, sh: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
+fn prueba_layout_drag(st: Int, sw: Int, sh: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc, io
     tab = st_get(st, st_tab())
     fi = st_get(st, st_focus())
     if fi < 0

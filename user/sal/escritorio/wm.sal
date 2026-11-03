@@ -1315,7 +1315,7 @@ fn wm_term_redimensionar_si(st: Int, tab: Int, i: Int) -> Int ! alloc
             _d = term_st_set(tst, st_dirty(), -1)
             1
 
-fn wm_repintar_ventana(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
+fn wm_repintar_ventana(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc, io
     wx = st_get(st, st_wx())
     wy = st_get(st, st_wy())
     ww = st_get(st, st_ww())

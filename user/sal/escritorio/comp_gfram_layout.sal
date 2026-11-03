@@ -4,7 +4,7 @@ fn comp_gfram_len() -> Int
     61
 
 fn comp_st_size() -> Int
-    182
+    190
 
 fn comp_st_gpu_ok() -> Int
     0
@@ -32,6 +32,9 @@ fn comp_st_cmd_guprc() -> Int
 
 fn comp_st_msg() -> Int
     150
+
+fn comp_st_tex_h() -> Int
+    182
 
 fn comp_st_get(st: Int, off: Int) -> Int ! alloc
     bytes_get_i64(bytes_view_mem(st, comp_st_size()), off)

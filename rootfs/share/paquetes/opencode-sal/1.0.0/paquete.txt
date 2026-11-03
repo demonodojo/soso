@@ -3,5 +3,5 @@ nombre=opencode-sal
 version=1.0.0
 abi=1
 f 80b9d20a24baa1047ba9fe9644ed5d08edea4a5ac9722ed036362522778c1a32 123768 bin/opencode
-f 2fb6fe24c22ba7417805f3d87d19749109cbdf9fcd3cf1868a9634388aa33fea 91624 bin/soso-improve-sal
+f cd800474eb92c21c8c90c4540a1514a81c5b494965f7701f669d7d9f30d71584 95720 bin/soso-improve-sal
 f fd2135eacc358ac57846b53ea955f6fb437cf0c8fcc539f17a769bcd770bd430 19 share/opencode/VERSION
