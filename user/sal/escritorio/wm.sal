@@ -7,6 +7,7 @@ import "term.sal"
 import "fuente.sal"
 import "lanzador.sal"
 import "comp_proto.sal"
+import "wm_prims.sal"
 import "tema.sal"
 import "fuentes.sal"
 import "zoom.sal"
@@ -14,7 +15,7 @@ import "escena.sal"
 import "mono.sal"
 
 fn st_size() -> Int
-    504
+    544
 
 fn st_alloc_bytes() -> Int
     st_size()
@@ -216,6 +217,23 @@ fn st_ctx_y() -> Int
 # 0 menú contextual de una pestaña (st_ctx = panel); 1 lista de pestañas (st_ctx = cabecera).
 fn st_ctx_modo() -> Int
     496
+
+# Fondo por PRIMS: 0 por probar, 1 activo (el compositor lo pinta en GPU), 2 no disponible.
+fn st_prims() -> Int
+    504
+
+fn st_prims_buf() -> Int
+    512
+
+# Pantalla y formato, para armar comandos PRIMS desde donde sólo se tiene `st`.
+fn st_pw() -> Int
+    520
+
+fn st_ph() -> Int
+    528
+
+fn st_pfmt() -> Int
+    536
 
 fn wm_escena_cap() -> Int
     160
@@ -529,6 +547,8 @@ fn st_nuevo(evt_buf: Int, msg_buf: Int) -> Int ! alloc
     _cf = st_set(p, st_comp_fd(), -1)
     _gk = st_set(p, st_comp_gpu_ok(), 0)
     _nc = st_set(p, st_comp_need_clear(), 0)
+    _pr0 = st_set(p, st_prims(), 0)
+    _pr1 = st_set(p, st_prims_buf(), bytes_ptr(bytes_new(prims_fondo_buf_len())))
     wtab = bytes_ptr(bytes_new(wm_surf_tab_bytes()))
     _wt = st_set(p, st_wsurf_tab(), wtab)
     _sl = st_set(p, st_ss_last(), 0)
@@ -1341,6 +1361,9 @@ fn wm_repintar_slot_vis(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw: I
     0
 
 fn wm_compose(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
+    _pw = st_set(st, st_pw(), sw)
+    _ph = st_set(st, st_ph(), sh)
+    _pf = st_set(st, st_pfmt(), fmt)
     tab = st_get(st, st_tab())
     z = st_get(st, st_z())
     nz = st_get(st, st_nz())
@@ -1358,12 +1381,13 @@ fn wm_compose(st: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bp
         bh = wm_bar_h(st)
         if gmode != 0
             _nc = st_set(st, st_comp_need_clear(), 1)
-            fondo_tgt = wm_comp_tgt(st, compos, wm_surf_fondo())
-            fondo_cl = sw * sh * 4
-            _fe = wm_surf_ensure(st, fd, wm_surf_fondo(), sw, sh, stride)
-            _pf = wm_pintar_fondo_gpu(st, fondo_tgt, fondo_cl, sw, sh, stride, bpp, fmt)
-            _gf = wm_comp_send_geom(st, fd, wm_surf_fondo(), 0, 0, sw, sh, comp_geom_opaque(), 0)
-            _df = wm_comp_dmap_surf(st, fd, wm_surf_fondo(), 0, 0, sw, sh, 0, 0)
+            if st_get(st, st_prims()) != 1
+                fondo_tgt = wm_comp_tgt(st, compos, wm_surf_fondo())
+                fondo_cl = sw * sh * 4
+                _fe = wm_surf_ensure(st, fd, wm_surf_fondo(), sw, sh, stride)
+                _pf = wm_pintar_fondo_gpu(st, fondo_tgt, fondo_cl, sw, sh, stride, bpp, fmt)
+                _gf = wm_comp_send_geom(st, fd, wm_surf_fondo(), 0, 0, sw, sh, comp_geom_opaque(), 0)
+                _df = wm_comp_dmap_surf(st, fd, wm_surf_fondo(), 0, 0, sw, sh, 0, 0)
             _db = wm_marcar_dirty(st, 0, 0, sw, sh)
         else
             _bg = wm_pintar_fondo(st, compos, clen, sw, sh, stride, bpp, fmt)
@@ -1997,6 +2021,32 @@ fn wm_comp_sync_win_geom(st: Int, fd: Int, tab: Int, i: Int, z: Int) -> Int ! io
     _g = wm_comp_send_geom(st, fd, sid, wx, wy, ww, wh, comp_geom_opaque(), 10 + z)
     0
 
+# Pide al compositor que pinte el fondo de (x0, y0)-(x1, y1) con GPRIM, sin presentar.
+# Devuelve 1 si lo pintó, 0 si no puede (el WM debe pintarlo él) y 2 si no había nada
+# bajo la barra que pintar.
+fn wm_prims_fondo(st: Int, fd: Int, x0: Int, y0: Int, x1: Int, y1: Int) -> Int ! io, alloc
+    bh = wm_bar_h(st)
+    ya = max(y0, bh)
+    if y1 <= ya
+        2
+    else
+        tema = wm_tema_id(st)
+        buf = st_get(st, st_prims_buf())
+        total = prims_fondo_comando(buf, st_get(st, st_pfmt()), x0, ya, x1 - x0, y1 - ya, bh, st_get(st, st_pw()), st_get(st, st_ph()), tema_fondo_arriba(tema), tema_fondo_abajo(tema))
+        m = st_get(st, st_msg_buf())
+        _e = msg_encode_comp_prims(m, total, x0, ya, x1 - x0, y1 - ya, comp_gprim_flag_no_present())
+        w1 = write_fd(fd, m, msg_len())
+        w2 = write_fd(fd, buf, total)
+        r = 0
+        if w1 == msg_len()
+            if w2 == total
+                n = read_timeout_fd(fd, m, msg_len(), 500)
+                if n == msg_len()
+                    if msg_get_op(m) == op_comp_prims_ack()
+                        if msg_get_u32(m, 4) != 0
+                            r = 1
+        r
+
 fn wm_comp_flush_scene(st: Int) -> Int ! io, alloc
     fd = st_get(st, st_comp_fd())
     if wm_comp_gpu_mode(st) == 0
@@ -2012,6 +2062,22 @@ fn wm_comp_flush_scene(st: Int) -> Int ! io, alloc
                 if st_get(st, st_comp_need_clear()) != 0
                     fl = comp_commit_clear_rt()
                     _nc = st_set(st, st_comp_need_clear(), 0)
+                # Fondo por GPRIM antes de los quads. Con el fondo ya en el RT no se borra
+                # (el borrado lo taparía); si el compositor no puede, se vuelve a la textura.
+                if st_get(st, st_prims()) != 2
+                    pr = wm_prims_fondo(st, fd, x0, y0, x1, y1)
+                    if pr == 1
+                        if st_get(st, st_prims()) != 1
+                            _pa = st_set(st, st_prims(), 1)
+                            _ph = wm_comp_send_geom(st, fd, wm_surf_fondo(), 0, 0, 0, 0, comp_geom_hidden(), 0)
+                        fl = 0
+                    elsif pr == 0
+                        _pd = st_set(st, st_prims(), 2)
+                        _pe = st_set(st, st_fondo(), 0)
+                        _pg = wm_comp_send_geom(st, fd, wm_surf_fondo(), 0, 0, st_get(st, st_pw()), st_get(st, st_ph()), comp_geom_opaque(), 0)
+                        _pn = st_set(st, st_comp_need_clear(), 1)
+                    elsif st_get(st, st_prims()) == 1
+                        fl = 0
                 _c = wm_comp_send_commit(st, fd, x0, y0, x1 - x0, y1 - y0, fl)
                 _r = st_set(st, st_dx0(), 0)
                 _s = st_set(st, st_dy0(), 0)

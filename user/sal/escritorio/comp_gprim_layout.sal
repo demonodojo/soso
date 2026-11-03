@@ -16,6 +16,10 @@ fn comp_gprim_buf_len() -> Int
 fn comp_gprim_flag_clear() -> Int
     1
 
+# No presentar: el que llama presenta después (p. ej. el COMMIT de quads).
+fn comp_gprim_flag_no_present() -> Int
+    2
+
 fn comp_gprim_patch_hdr(buf: Int, rt_h: Int, fb_w: Int, fb_h: Int, pitch: Int, flags: Int, n: Int, fmt: Int, px: Int, py: Int, pw: Int, ph: Int) -> Int ! alloc
     b = bytes_view_mem(buf, comp_gprim_buf_len())
     _t = bytes_set_u8(b, 0, 71)

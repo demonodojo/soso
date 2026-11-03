@@ -1,0 +1,59 @@
+import "../../../user/sal/escritorio/wm_prims.sal"
+
+# El fondo por PRIMS (GPRIM) tiene que dar los mismos píxeles que el fondo en CPU, y el
+# comando tiene que llevar lo que el compositor espera (tag, cuenta, flags, rectángulo).
+fn main() -> Int ! alloc
+    w = 64
+    h = 48
+    bar = 8
+    len = w * h * 4
+    arriba = color_rgb(30, 32, 48)
+    abajo = color_rgb(44, 24, 60)
+    a = bytes_ptr(bytes_new(len))
+    b = bytes_ptr(bytes_new(len))
+    _fa = rellenar_rect(a, len, w, h, w, 4, 0, 0, 0, w, h, color_rgb(1, 2, 3))
+    _fb = rellenar_rect(b, len, w, h, w, 4, 0, 0, 0, w, h, color_rgb(1, 2, 3))
+    _d = degradado_vertical(a, len, w, h, w, 4, 0, 0, bar, w, h, arriba, abajo)
+    e = esc_nueva(prims_fondo_cap())
+    n = prims_fondo_escena(e, bar, w, h, arriba, abajo)
+    _x = esc_cpu_ejecutar(b, len, w, h, w, 4, 0, e, prims_fondo_cap(), n)
+    malos = 0
+    y = 0
+    while y < h
+        x = 0
+        while x < w
+            if pixel_leer(a, len, w, 4, 0, x, y) != pixel_leer(b, len, w, 4, 0, x, y)
+                malos = malos + 1
+            x = x + 1
+        y = y + 1
+    buf = bytes_ptr(bytes_new(prims_fondo_buf_len()))
+    total = prims_fondo_comando(buf, 1, 4, 10, 30, 20, bar, w, h, arriba, abajo)
+    v = bytes_view_mem(buf, prims_fondo_buf_len())
+    if n != 1
+        1
+    elsif malos != 0
+        2
+    elsif total != comp_gprim_total(1, 0, 0)
+        3
+    elsif total > prims_fondo_buf_len()
+        4
+    elsif bytes_get_u8(v, 0) != 71
+        5
+    elsif bytes_get_u8(v, 4) != 77
+        6
+    elsif bytes_get_u8(v, 29) != 1
+        7
+    elsif bytes_get_u32(v, 25) != comp_gprim_flag_no_present()
+        8
+    elsif bytes_get_u32(v, 32) != 4
+        9
+    elsif bytes_get_u32(v, 36) != 10
+        10
+    elsif bytes_get_u32(v, 40) != 30
+        11
+    elsif bytes_get_u32(v, 44) != 20
+        12
+    elsif bytes_get_u8(v, 31) != 1
+        13
+    else
+        0

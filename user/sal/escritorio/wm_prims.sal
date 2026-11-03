@@ -1,0 +1,27 @@
+import "escena.sal"
+import "comp_gprim_layout.sal"
+
+# Primitivas que el WM manda al compositor (PRIMS/GPRIM) en vez de pintarlas él en CPU.
+# Orden: PRIMS va antes del COMMIT, así que sólo sirve para lo que queda *debajo* de todas
+# las superficies. Hoy: el fondo (degradado bajo la barra). El cromo de las ventanas, que va
+# intercalado con el contenido de los clientes, necesita superficies procedurales en el
+# compositor y queda para después (docs/PLAN-PESTANAS.md).
+
+fn prims_fondo_cap() -> Int
+    1
+
+# Bytes que hay que reservar para el comando del fondo.
+fn prims_fondo_buf_len() -> Int
+    comp_gprim_total(prims_fondo_cap(), 0, 0) + 64
+
+# El degradado del fondo, igual que `degradado_vertical(0, y_barra, sw, sh, ...)`.
+fn prims_fondo_escena(e: Int, y_barra: Int, sw: Int, sh: Int, arriba: Int, abajo: Int) -> Int ! alloc
+    esc_degradado(e, prims_fondo_cap(), 0, 0, y_barra, sw, sh, arriba, abajo)
+
+# Escribe en `buf` el comando GPRIM del fondo para el rectángulo (px, py, pw, ph) y devuelve
+# su longitud. RT, pitch y pantalla los rellena el compositor; no presenta (lo hace el COMMIT).
+fn prims_fondo_comando(buf: Int, fmt: Int, px: Int, py: Int, pw: Int, ph: Int, y_barra: Int, sw: Int, sh: Int, arriba: Int, abajo: Int) -> Int ! alloc
+    e = esc_nueva(prims_fondo_cap())
+    n = prims_fondo_escena(e, y_barra, sw, sh, arriba, abajo)
+    m = comp_gprim_volcar(buf, 0, sw, sh, 0, comp_gprim_flag_no_present(), fmt, px, py, pw, ph, e, prims_fondo_cap(), n)
+    comp_gprim_blobs(buf, m, buf, 0, buf, 0)
