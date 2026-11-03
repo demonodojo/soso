@@ -143,7 +143,7 @@ Notas:
 
 - **Bug de kernel corregido de paso**: `wake_tty_waiters` (`kernel/src/task/pty.rs`) pasaba al lector de un PTY a `Runnable` sin copiarle los bytes ni poner `rax`; `sosh` en una terminal del WM leía EOF con la primera tecla y salía. Ahora sólo avisa al planificador, que es quien copia.
 - Con teclado simulado por el monitor de QEMU, tras `ctrl-shift-t` el Mayús queda «pegado» y `alt-1` llega como `!` (33); con teclado real llega como 49. Alt+Mayús+letra llega en mayúscula (81), no en minúscula.
-- `soso-files` termina con `sal panic: bytes: out of bounds` al arrancar en este QEMU (también sin tocar `fuente.sal`); queda por investigar, no es de las pestañas.
+- `soso-files` terminaba con `sal panic: bytes: out of bounds` al arrancar. Causa (arreglada 2026-11-03): pasaba punteros crudos a `bytes_copy`, que espera manejadores de Bytes; ahora usa `mem_copy` (vistas). Comprobado con `scripts/wm-probe.py` (menú → Archivos).
 - Pendiente de T1: prueba guest `soso-wm --prueba-pestanas`; indicador de actividad (T3); pestaña «+» deshabilitada para clientes sin aplicación conocida (hoy no hace nada).
 
 ## 10. Estado final de esta ronda (2026-11-03)

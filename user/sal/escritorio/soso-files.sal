@@ -126,6 +126,17 @@ fn st_set_gh(st: Int, v: Int) -> Int ! alloc
     b = bytes_view_mem(st, st_size())
     bytes_set_u32(b, st_off_gh(), v)
 
+# `bytes_copy` quiere manejadores de Bytes, no punteros a memoria: con un puntero crudo
+# lee una cabecera inventada y entra en pánico («bytes: out of bounds»). Aquí las dos
+# puntas son direcciones, así que se envuelven en vistas del tamaño justo.
+fn mem_copy(dst: Int, dst_off: Int, src: Int, src_off: Int, n: Int) -> Int ! alloc
+    if n <= 0
+        0
+    else
+        dv = bytes_view_mem(dst, dst_off + n)
+        sv = bytes_view_mem(src, src_off + n)
+        bytes_copy(dv, dst_off, sv, src_off, n)
+
 fn st_path_set_str(st: Int, s: String) -> Int ! alloc
     n = str_len(s)
     if n > st_path_cap()
@@ -134,7 +145,7 @@ fn st_path_set_str(st: Int, s: String) -> Int ! alloc
     bytes_set_i64(b, 0, n)
     tmp = bytes_new(n + 1)
     str_bytes_copy(tmp, 0, s)
-    _c = bytes_copy(st, st_off_path(), tmp, 0, n)
+    _c = mem_copy(st, st_off_path(), bytes_ptr(tmp), 0, n)
     0
 
 fn st_path_set_bytes(st: Int, src: Int, n: Int) -> Int ! alloc
@@ -142,7 +153,7 @@ fn st_path_set_bytes(st: Int, src: Int, n: Int) -> Int ! alloc
         n = st_path_cap()
     b = bytes_view_mem(st, st_size())
     bytes_set_i64(b, 0, n)
-    _c = bytes_copy(st, st_off_path(), src, 0, n)
+    _c = mem_copy(st, st_off_path(), src, 0, n)
     0
 
 fn st_path_is_root(st: Int) -> Int ! alloc
@@ -193,9 +204,9 @@ fn st_path_join_row(st: Int, row: Int) -> Int ! alloc
             b = bytes_view_mem(st, st_size())
             if st_path_is_root(st) == 0
                 bytes_set_u8(b, st_off_path() + base, 47)
-                _c = bytes_copy(st, st_off_path() + base + 1, st_row_name_off(st, row), 0, nlen)
+                _c = mem_copy(st, st_off_path() + base + 1, st_row_name_off(st, row), 0, nlen)
             else
-                _c = bytes_copy(st, st_off_path() + 1, st_row_name_off(st, row), 0, nlen)
+                _c = mem_copy(st, st_off_path() + 1, st_row_name_off(st, row), 0, nlen)
             bytes_set_i64(b, 0, new_len)
             0
 
@@ -214,7 +225,7 @@ fn st_row_push(st: Int, file_type: Int, name_ptr: Int, name_len: Int) -> Int ! a
         b = bytes_view_mem(st, st_size())
         bytes_set_u8(b, off, u8(file_type))
         bytes_set_u8(b, off + 1, u8(name_len))
-        _c = bytes_copy(st, off + 2, name_ptr, 0, name_len)
+        _c = mem_copy(st, off + 2, name_ptr, 0, name_len)
         st_set_nrows(st, n + 1)
         0
 
@@ -313,7 +324,7 @@ fn files_pintar(st: Int, psf: Int, plen: Int, pix: Int, plen_pix: Int, cw: Int, 
     path_s = d"/"
     if st_path_is_root(st) == 0
         tmp = bytes_new(st_path_len(st) + 1)
-        _c = bytes_copy(bytes_ptr(tmp), 0, st, st_off_path(), st_path_len(st))
+        _c = mem_copy(bytes_ptr(tmp), 0, st, st_off_path(), st_path_len(st))
         _t = files_texto_bytes(st, psf, plen, pix, plen_pix, cw, ch, stride, bpp, fmt, bytes_ptr(tmp), st_path_len(st), gw, 2, fg, bg)
     else
         _t0 = files_texto_psf(st, psf, plen, pix, plen_pix, cw, ch, stride, bpp, fmt, d"/", gw, 2, fg, bg)
