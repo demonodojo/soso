@@ -488,10 +488,20 @@ fn draw_text_ttf(
     g: u8,
     b: u8,
 ) {
+    // `y` es el borde superior de la caja de texto. En fontdue `ymin` es la
+    // distancia del borde inferior del glifo a la línea base (positiva hacia
+    // arriba) y la fila 0 del bitmap es la de arriba: sin la línea base todas las
+    // letras quedaban pegadas al techo de la línea.
+    let ascent = renderer
+        .font
+        .horizontal_line_metrics(size)
+        .map(|m| m.ascent)
+        .unwrap_or(size * 0.8);
+    let baseline = y + ascent;
     for ch in text.chars() {
         let (metrics, bitmap) = renderer.lookup_glyph(ch, size);
         let base_x = x + metrics.xmin as f32;
-        let base_y = y + metrics.ymin as f32;
+        let base_y = baseline - metrics.ymin as f32 - metrics.height as f32;
         let w = metrics.width;
         for row in 0..metrics.height {
             for col in 0..w {

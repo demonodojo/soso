@@ -329,7 +329,7 @@ fn files_pintar(st: Int, psf: Int, plen: Int, pix: Int, plen_pix: Int, cw: Int, 
             if i == sel
                 cap_x0 = gw
                 cap_x1 = cw - gw
-                _c = rellenar_rect_redondeado(pix, plen_pix, cw, ch, stride, bpp, fmt, cap_x0, y + 1, cap_x1, y + row_h - 1, metrica_radio(gh), files_color_sel(st))
+                _c = rellenar_rect_redondeado4(pix, plen_pix, cw, ch, stride, bpp, fmt, cap_x0, y + 1, cap_x1, y + row_h - 1, metrica_radio(gh), files_color_sel(st))
                 row_bg = files_color_sel(st)
             else
                 _r = rellenar_rect(pix, plen_pix, cw, ch, stride, bpp, fmt, 0, y, cw, y + row_h, row_bg)

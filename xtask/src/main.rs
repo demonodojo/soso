@@ -2212,6 +2212,14 @@ pub(crate) fn run_qemu(img: &Path, gdb: bool) {
     } else {
         qemu.args(["-serial", "mon:stdio"]);
     }
+    // `SOSO_QEMU_QMP=<socket>`: canal QMP para inyectar ratón absoluto y clics
+    // (`input-send-event`) sin ventana; lo usa `scripts/wm-probe.py`.
+    if let Some(sock) = std::env::var_os("SOSO_QEMU_QMP") {
+        qemu.args([
+            "-qmp",
+            &format!("unix:{},server,nowait", PathBuf::from(sock).display()),
+        ]);
+    }
     qemu.args(["-display", &display])
         // Dispositivo de salida para tests: out 0xf4 -> exit((valor << 1) | 1)
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])

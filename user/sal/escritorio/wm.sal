@@ -260,12 +260,20 @@ fn wm_cursor_bak(st: Int) -> Int ! alloc
 fn wm_cursor_bak_len() -> Int
     wm_cursor_w() * wm_cursor_h() * 4
 
+fn wm_cursor_ancho_visible(x: Int, stride: Int) -> Int
+    min(wm_cursor_w(), stride - x)
+
+fn wm_cursor_alto_visible(y: Int, stride: Int, bpp: Int, clen: Int) -> Int
+    min(wm_cursor_h(), clen / (stride * bpp) - y)
+
 fn wm_cursor_restaurar(st: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
     if st_get(st, st_bak_ok()) != 0
         ox = st_get(st, st_mx_prev())
         oy = st_get(st, st_my_prev())
         bak = wm_cursor_bak(st)
-        _c = copiar_rect(compos, clen, stride, bak, wm_cursor_bak_len(), wm_cursor_w(), bpp, fmt, ox, oy, 0, 0, wm_cursor_w(), wm_cursor_h())
+        cw = wm_cursor_ancho_visible(ox, stride)
+        ch = wm_cursor_alto_visible(oy, stride, bpp, clen)
+        _c = copiar_rect(compos, clen, stride, bak, wm_cursor_bak_len(), wm_cursor_w(), bpp, fmt, ox, oy, 0, 0, cw, ch)
         _d = wm_cursor_marcar(st, ox, oy)
         _k = st_set(st, st_bak_ok(), 0)
     0
@@ -273,8 +281,12 @@ fn wm_cursor_restaurar(st: Int, compos: Int, clen: Int, stride: Int, bpp: Int, f
 fn wm_cursor_capturar(st: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
     mx = st_get(st, st_mx())
     my = st_get(st, st_my())
+    cw = wm_cursor_ancho_visible(mx, stride)
+    ch = wm_cursor_alto_visible(my, stride, bpp, clen)
+    _g = copiar_rect(wm_cursor_bak(st), wm_cursor_bak_len(), wm_cursor_w(), compos, clen, stride, bpp, fmt, 0, 0, mx, my, cw, ch)
     _a = st_set(st, st_mx_prev(), mx)
     _b = st_set(st, st_my_prev(), my)
+    _k = st_set(st, st_bak_ok(), 1)
     0
 
 fn wm_cursor_marcar(st: Int, mx: Int, my: Int) -> Int ! alloc
@@ -304,8 +316,6 @@ fn wm_cursor_actualizar(st: Int, x: Int, y: Int, sw: Int, sh: Int) -> Int ! allo
         _n = wm_cursor_marcar(st, nx, ny)
     if ny != oy
         _n2 = wm_cursor_marcar(st, nx, ny)
-    _a = st_set(st, st_mx_prev(), ox)
-    _b = st_set(st, st_my_prev(), oy)
     _c = st_set(st, st_mx(), nx)
     _d = st_set(st, st_my(), ny)
     0
@@ -939,21 +949,21 @@ fn wm_pintar_menu_cuerpo(st: Int, compos: Int, clen: Int, buf_w: Int, buf_h: Int
         col = wm_menu_rgb_fila(st, oy + y, sh, oy)
         if gmode != 0
             col = wm_menu_rgb_fila(st, y, sh, oy)
-        _f = rellenar_rect(compos, clen, buf_w, buf_h, stride, bpp, fmt, 0, y, mw, y + 1, col)
+        _f = rellenar_rect(compos, clen, buf_w, buf_h, stride, bpp, fmt, ox, oy + y, ox + mw, oy + y + 1, col)
         y = y + 1
-    _r = rellenar_rect_redondeado(compos, clen, buf_w, buf_h, stride, bpp, fmt, 0, 0, mw, mh, radio, wm_color_menu(st))
+    _r = rellenar_rect_redondeado(compos, clen, buf_w, buf_h, stride, bpp, fmt, ox, oy, ox + mw, oy + mh, radio, wm_color_menu(st))
     k = 0
     while k < lanz_menu_n()
-        iy = k * alto + 2
+        iy = oy + k * alto + 2
         bg = wm_color_menu(st)
         if k == sel
-            cap_x0 = lanz_margen(gw) / 2
-            cap_x1 = mw - cap_x0
+            cap_x0 = ox + lanz_margen(gw) / 2
+            cap_x1 = ox + mw - lanz_margen(gw) / 2
             cap_y0 = iy
             cap_y1 = iy + alto - 4
-            _c = rellenar_rect_redondeado(compos, clen, buf_w, buf_h, stride, bpp, fmt, cap_x0, cap_y0, cap_x1, cap_y1, radio, wm_color_menu_sel(st))
+            _c = rellenar_rect_redondeado4(compos, clen, buf_w, buf_h, stride, bpp, fmt, cap_x0, cap_y0, cap_x1, cap_y1, radio, wm_color_menu_sel(st))
             bg = wm_color_menu_sel(st)
-        _t = wm_texto(st, compos, clen, stride, bpp, fmt, lanz_menu_texto(k, tema), lanz_margen(gw), iy + 2, wm_color_texto_barra(st), bg)
+        _t = wm_texto(st, compos, clen, stride, bpp, fmt, lanz_menu_texto(k, tema), ox + lanz_margen(gw), iy + 2, wm_color_texto_barra(st), bg)
         k = k + 1
     0
 
@@ -1372,7 +1382,7 @@ fn wm_pintar_marco(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: I
     btn = gh + 4
     cx = wx + ww - btn - 4
     cy = wy + (bh - btn) / 2
-    _cl = rellenar_rect_redondeado(compos, clen, sw, sh, stride, bpp, fmt, cx, cy, cx + btn, cy + btn, btn / 2, tema_boton_cerrar(wm_tema_id(st)))
+    _cl = rellenar_rect_redondeado4(compos, clen, sw, sh, stride, bpp, fmt, cx, cy, cx + btn, cy + btn, btn / 2, tema_boton_cerrar(wm_tema_id(st)))
     _bg = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, wx, wy + bh, wx + ww, wy + wh, tema_cliente_bg(wm_tema_id(st)))
     0
 

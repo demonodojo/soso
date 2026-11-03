@@ -162,9 +162,27 @@ fn rect_esquina_redonda_ok(x: Int, y: Int, x0: Int, y0: Int, x1: Int, y1: Int, r
                     dy = cy - y
                     if dx * dx + dy * dy > radio * radio
                         ok = 0
+        if esq == 2
+            cx = x0 + radio
+            cy = y1 - radio
+            if x < x0 + radio
+                if y >= y1 - radio
+                    dx = cx - x
+                    dy = y - cy
+                    if dx * dx + dy * dy > radio * radio
+                        ok = 0
+        if esq == 3
+            cx = x1 - radio
+            cy = y1 - radio
+            if x >= x1 - radio
+                if y >= y1 - radio
+                    dx = x - cx
+                    dy = y - cy
+                    if dx * dx + dy * dy > radio * radio
+                        ok = 0
         ok
 
-fn rellenar_rect_redondeado(ptr: Int, len: Int, ancho: Int, alto: Int, stride_px: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, rgb: Int, radio: Int) -> Int ! alloc
+fn rellenar_rect_redondeado(ptr: Int, len: Int, ancho: Int, alto: Int, stride_px: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, radio: Int, rgb: Int) -> Int ! alloc
     ya = max(0, y0)
     yb = min(alto, y1)
     xa = max(0, x0)
@@ -179,6 +197,30 @@ fn rellenar_rect_redondeado(ptr: Int, len: Int, ancho: Int, alto: Int, stride_px
                 if rect_esquina_redonda_ok(x, y, xa, ya, xb, yb, radio, 0) != 0
                     if rect_esquina_redonda_ok(x, y, xa, ya, xb, yb, radio, 1) != 0
                         _p = pixel_escribir(ptr, len, stride_px, bpp, fmt, x, y, rgb)
+                x = x + 1
+            y = y + 1
+        0
+
+fn rellenar_rect_redondeado4(ptr: Int, len: Int, ancho: Int, alto: Int, stride_px: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, radio: Int, rgb: Int) -> Int ! alloc
+    ya = max(0, y0)
+    yb = min(alto, y1)
+    xa = max(0, x0)
+    xb = min(ancho, x1)
+    if xb <= xa
+        0
+    else
+        y = ya
+        while y < yb
+            x = xa
+            while x < xb
+                ok = 1
+                e = 0
+                while e < 4
+                    if rect_esquina_redonda_ok(x, y, x0, y0, x1, y1, radio, e) == 0
+                        ok = 0
+                    e = e + 1
+                if ok != 0
+                    _p = pixel_escribir(ptr, len, stride_px, bpp, fmt, x, y, rgb)
                 x = x + 1
             y = y + 1
         0

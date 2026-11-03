@@ -89,6 +89,13 @@ cargo xtask test               # guest: init test + WM (SSH)
 
 Visual QEMU: `cargo xtask fb-shot` (skill **soso-dev**).
 
+**Mirar el escritorio sin ventana:** `scripts/wm-probe.py` arranca soso con monitor y QMP
+(`SOSO_QEMU_MONITOR`, `SOSO_QEMU_QMP` en `cargo xtask run`), abre `soso-wm` y ejecuta pasos
+(`key:alt-ret`, `type:`, `move:X,Y`, `click:X,Y`, `down`/`up`, `wait:`, `shot:nombre`, `pix:X,Y`);
+deja PNG en `target/wm-probe/`. Ejemplo: `scripts/wm-probe.py click:50,12 move:60,75 shot:menu`.
+Con él se vio que el cursor estaba bien y que el menú se pintaba en (0,0) en vez de bajo la barra.
+Ojo: los PNG se leen con la herramienta Read; GTK/Wayland no hace falta para nada.
+
 ## Cambios habituales
 
 1. **Nueva ventana / cliente Sal:** extender `proto.sal` + `soso-wm-proto` + handler en
