@@ -997,6 +997,11 @@ fn soft_sqrtf(x: f32) -> f32 {
 /// - `b"GUPRC"` (41 B) — sube un rectángulo de un búfer de usuario a textura VRAM.
 /// - `b"GSCEN"` — rt, fb, rect de present, flags, n×quad (tex, dest, tamaño);
 ///   blitea en orden y presenta el daño (compositor por superficies).
+/// - `b"GPRIM"` — escena de primitivas 2D del escritorio (GSCEN v2; layout en
+///   `soso_wm_proto::gprim`): cabecera de 48 B, n×64 B de primitivas, `u32 psf_len` + fuente PSF2
+///   (relleno a 4) y `u32 ncells` + celdas de 12 B. La ejecuta el kernel SASS `gprim` por el
+///   canal de cómputo sobre el RT de VRAM y presenta el rectángulo dañado (salvo
+///   `FLAG_NO_PRESENT`). Sin GPU capaz devuelve `ENOTSUP`: el compositor dibuja en CPU.
 /// - `b"GFRAM"` — compositor (61 B): rt, tex, src_ptr, fb_w, fb_h, pitch, dx, dy,
 ///   rw, rh, rgba — sube sólo el rectángulo sucio, clear completo sólo si rw×rh
 ///   cubre el framebuffer entero; blit y present parciales en caso contrario.
@@ -1209,6 +1214,100 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
         #[cfg(not(feature = "lxdde"))]
         let _ = (tex_va, src_ptr, pitch, dx, dy, rw, rh);
         return Err(abi::ENOSYS);
+    }
+    if cmd.len() >= 5 && &cmd[..5] == b"GPRIM" && cmd.len() >= 48 {
+        const GPRIM_HDR: usize = 48;
+        const GPRIM_PRIM: usize = 64;
+        const GPRIM_MAX: usize = 32;
+        let u32_at = |o: usize| u32::from_le_bytes(cmd[o..o + 4].try_into().unwrap_or([0; 4]));
+        let rt_h = u64::from_le_bytes(cmd[5..13].try_into().unwrap_or([0; 8]));
+        let fb_w = u32_at(13);
+        let fb_h = u32_at(17);
+        let pitch = u32_at(21);
+        let flags = u32_at(25);
+        let n = u16::from_le_bytes(cmd[29..31].try_into().unwrap_or([0; 2])) as usize;
+        let fmt = cmd[31] as u32;
+        let (pres_x, pres_y, pres_w, pres_h) = (u32_at(32), u32_at(36), u32_at(40), u32_at(44));
+        if n == 0
+            || n > GPRIM_MAX
+            || fb_w == 0
+            || fb_h == 0
+            || pitch < fb_w.saturating_mul(4)
+            || pitch % 4 != 0
+            || fmt > 1
+            || (flags & 2 == 0 && (pres_w == 0 || pres_h == 0))
+        {
+            return Err(abi::EINVAL);
+        }
+        let prims_end = GPRIM_HDR + n * GPRIM_PRIM;
+        if cmd.len() < prims_end + 4 {
+            return Err(abi::EINVAL);
+        }
+        let psf_len = u32_at(prims_end) as usize;
+        let psf_start = prims_end + 4;
+        let cells_hdr = psf_start
+            .checked_add((psf_len + 3) & !3)
+            .ok_or(abi::EINVAL)?;
+        if cmd.len() < cells_hdr + 4 {
+            return Err(abi::EINVAL);
+        }
+        let ncells = u32_at(cells_hdr) as usize;
+        let cells_start = cells_hdr + 4;
+        let cells_end = ncells
+            .checked_mul(12)
+            .and_then(|b| cells_start.checked_add(b))
+            .ok_or(abi::EINVAL)?;
+        if cmd.len() < cells_end {
+            return Err(abi::EINVAL);
+        }
+        let frame_bytes = (pitch as u64)
+            .checked_mul(fb_h as u64)
+            .ok_or(abi::EINVAL)?;
+        let rt = g
+            .buffers
+            .get(rt_h as usize)
+            .and_then(|b| b.as_ref())
+            .ok_or(abi::EINVAL)?;
+        let rt_va = rt.device_va().ok_or(abi::EINVAL)?;
+        if frame_bytes > rt.len() as u64 {
+            return Err(abi::EINVAL);
+        }
+        drop(g);
+        #[cfg(feature = "lxdde")]
+        {
+            let ran = crate::lxdde::submit_gprim(
+                rt_va,
+                pitch / 4,
+                fb_w,
+                fb_h,
+                fmt,
+                &cmd[GPRIM_HDR..prims_end],
+                &cmd[psf_start..psf_start + psf_len],
+                &cmd[cells_start..cells_end],
+            );
+            if ran != Ok(true) {
+                return Err(abi::ENOTSUP);
+            }
+            if flags & 2 != 0 {
+                return Ok(submit_bits(true));
+            }
+            let full_pres = pres_x == 0 && pres_y == 0 && pres_w == fb_w && pres_h == fb_h;
+            return present_compositor_scanout(
+                rt_va,
+                pitch,
+                frame_bytes as usize,
+                pres_x,
+                pres_y,
+                pres_w,
+                pres_h,
+                full_pres,
+            );
+        }
+        #[cfg(not(feature = "lxdde"))]
+        {
+            let _ = (rt_va, frame_bytes, pres_x, pres_y, pres_w, pres_h, fmt, cells_start, psf_start);
+            return Err(abi::ENOSYS);
+        }
     }
     if cmd.len() >= 5 && &cmd[..5] == b"GSCEN" && cmd.len() >= 53 {
         const GSCEN_HDR: usize = 53;

@@ -24,6 +24,9 @@ lxdde/ports/nouveau/gsp_3d.c
 # Un juego de SASS por arquitectura (generados por l6-g4f-build-sass.sh).
 lxdde/ports/nouveau/sass_sm86.c
 lxdde/ports/nouveau/sass_sm120.c
+# Kernel de la escena 2D (GPRIM), generado por tools/gpu-prim/cubin.py.
+lxdde/ports/nouveau/sass_gprim_sm86.c
+lxdde/ports/nouveau/sass_gprim_sm120.c
 lxdde/ports/nouveau/gsp_fini.c
 lxdde/ports/nouveau/gsp_mmio.c
 lxdde/ports/nouveau/gsp_pramin.c

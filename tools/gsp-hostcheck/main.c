@@ -497,6 +497,7 @@ static int gsp_vram_blit_pitch(uint64_t dst_va, uint32_t dst_pitch, uint64_t src
  * juegos de SASS y de las familias se traen aquí (autónomas a propósito). */
 #include "gsp_sass.h"
 #include "sass_sets.h"
+#include "sass_gprim.h"
 #include "gsp_compute_body.inc"
 #include "gsp_3d_body.inc"
 #include "gsp_fini_body.inc"

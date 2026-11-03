@@ -5,10 +5,10 @@ import "escena.sal"
 # las de `escena.sal`, byte a byte, así que el backend GPU interpreta la misma lista.
 
 fn comp_gprim_hdr_len() -> Int
-    32
+    48
 
 fn comp_gprim_max() -> Int
-    24
+    32
 
 fn comp_gprim_buf_len() -> Int
     comp_gprim_hdr_len() + comp_gprim_max() * esc_prim_bytes()
@@ -16,7 +16,7 @@ fn comp_gprim_buf_len() -> Int
 fn comp_gprim_flag_clear() -> Int
     1
 
-fn comp_gprim_patch_hdr(buf: Int, rt_h: Int, fb_w: Int, fb_h: Int, pitch: Int, flags: Int, n: Int) -> Int ! alloc
+fn comp_gprim_patch_hdr(buf: Int, rt_h: Int, fb_w: Int, fb_h: Int, pitch: Int, flags: Int, n: Int, fmt: Int, px: Int, py: Int, pw: Int, ph: Int) -> Int ! alloc
     b = bytes_view_mem(buf, comp_gprim_buf_len())
     _t = bytes_set_u8(b, 0, 71)
     _t2 = bytes_set_u8(b, 1, 80)
@@ -30,7 +30,11 @@ fn comp_gprim_patch_hdr(buf: Int, rt_h: Int, fb_w: Int, fb_h: Int, pitch: Int, f
     _f = bytes_set_u32(b, 25, flags)
     _n0 = bytes_set_u8(b, 29, n % 256)
     _n1 = bytes_set_u8(b, 30, n / 256)
-    _n2 = bytes_set_u8(b, 31, 0)
+    _n2 = bytes_set_u8(b, 31, fmt)
+    _px = bytes_set_u32(b, 32, px)
+    _py = bytes_set_u32(b, 36, py)
+    _pw = bytes_set_u32(b, 40, pw)
+    _ph = bytes_set_u32(b, 44, ph)
     0
 
 # Copia la primitiva `k` de la escena `e` a la ranura `qi` del comando; devuelve 1 si cabía.
@@ -48,12 +52,43 @@ fn comp_gprim_copiar(buf: Int, qi: Int, e: Int, cap: Int, k: Int) -> Int ! alloc
             o = o + 4
         1
 
+# Tras las primitivas van `u32 psf_len` + PSF (relleno a 4) y `u32 ncells` + celdas (ver gprim.rs).
 # Vuelca las primitivas 0..n-1 (n <= max) y deja el contador en la cabecera.
-fn comp_gprim_volcar(buf: Int, rt_h: Int, fb_w: Int, fb_h: Int, pitch: Int, flags: Int, e: Int, cap: Int, n: Int) -> Int ! alloc
+fn comp_gprim_volcar(buf: Int, rt_h: Int, fb_w: Int, fb_h: Int, pitch: Int, flags: Int, fmt: Int, px: Int, py: Int, pw: Int, ph: Int, e: Int, cap: Int, n: Int) -> Int ! alloc
     m = min(n, comp_gprim_max())
     i = 0
     while i < m
         _c = comp_gprim_copiar(buf, i, e, cap, i)
         i = i + 1
-    _h = comp_gprim_patch_hdr(buf, rt_h, fb_w, fb_h, pitch, flags, m)
+    _h = comp_gprim_patch_hdr(buf, rt_h, fb_w, fb_h, pitch, flags, m, fmt, px, py, pw, ph)
     m
+
+# Bytes del comando entero: cabecera + n primitivas + `u32 psf_len` + PSF (a 4) + `u32 ncells` + celdas.
+fn comp_gprim_total(n: Int, psf_len: Int, ncells: Int) -> Int
+    comp_gprim_hdr_len() + n * esc_prim_bytes() + 4 + ((psf_len + 3) / 4) * 4 + 4 + ncells * 12
+
+# Añade tras las `n` primitivas la fuente y las celdas; devuelve la longitud total del comando.
+# `buf` debe tener sitio para comp_gprim_total(n, psf_len, ncells) bytes.
+fn comp_gprim_blobs(buf: Int, n: Int, psf: Int, psf_len: Int, cells: Int, ncells: Int) -> Int ! alloc
+    total = comp_gprim_total(n, psf_len, ncells)
+    b = bytes_view_mem(buf, total)
+    o = comp_gprim_hdr_len() + n * esc_prim_bytes()
+    _l = bytes_set_u32(b, o, psf_len)
+    o = o + 4
+    src = bytes_view_mem(psf, psf_len + 4)
+    i = 0
+    while i < ((psf_len + 3) / 4) * 4
+        v = 0
+        if i < psf_len
+            v = bytes_get_u8(src, i)
+        _p = bytes_set_u8(b, o + i, v)
+        i = i + 1
+    o = o + ((psf_len + 3) / 4) * 4
+    _c = bytes_set_u32(b, o, ncells)
+    o = o + 4
+    cs = bytes_view_mem(cells, ncells * 12)
+    j = 0
+    while j < ncells * 12
+        _q = bytes_set_u8(b, o + j, bytes_get_u8(cs, j))
+        j = j + 1
+    total

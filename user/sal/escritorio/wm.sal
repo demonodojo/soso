@@ -1563,6 +1563,9 @@ fn wm_texto_titulo(st: Int, tab: Int, m: Int, compos: Int, clen: Int, stride: In
     0
 
 # Botón «+» de la barra de título.
+fn tab_de(st: Int) -> Int ! alloc
+    st_get(st, st_tab())
+
 # "+" de la tira de pestañas, como primitivas.
 fn wm_esc_mas(st: Int, e: Int, cap: Int, n0: Int, wx: Int, wy: Int, ww: Int, gh: Int, foco: Int, i: Int) -> Int ! alloc
     tema = wm_tema_id(st)
@@ -1570,12 +1573,21 @@ fn wm_esc_mas(st: Int, e: Int, cap: Int, n0: Int, wx: Int, wy: Int, ww: Int, gh:
     cx = pest_mas_x(wx, ww, gh)
     cy = ventana_btn_cy(wy, gh)
     col = tema_boton_inactivo(tema)
-    if st_get(st, st_hover_pest()) == i * 1000 + 200
-        col = mezclar_rgb(color_rgb(255, 255, 255), col, 56)
+    # Un cliente de aplicación desconocida no se puede duplicar: «+» apagado.
+    act = grupo_panel_activo(tab_de(st), i)
+    apagado = 0
+    if tab_get(tab_de(st), act, tab_tipo()) == tab_tipo_cli()
+        if tab_get(tab_de(st), act, tab_app()) == app_ninguna()
+            apagado = 1
+    if apagado == 0
+        if st_get(st, st_hover_pest()) == i * 1000 + 200
+            col = mezclar_rgb(color_rgb(255, 255, 255), col, 56)
     n = esc_rrect(e, cap, n0, cx, cy, cx + d, cy + d, esc_radios(d / 2, d / 2, d / 2, d / 2), col, 255, 0, 0)
     m = d / 4
     mid = d / 2
     gl = tema_glifo_boton(tema)
+    if apagado != 0
+        gl = mezclar_rgb(gl, col, 90)
     n = esc_solido(e, cap, n, cx + m, cy + mid, cx + d - m, cy + mid + 1, gl, 255)
     n = esc_solido(e, cap, n, cx + mid, cy + m, cx + mid + 1, cy + d - m, gl, 255)
     n
@@ -1654,6 +1666,10 @@ fn wm_esc_icono(st: Int, tab: Int, m: Int, e: Int, cap: Int, n0: Int, x: Int, y:
     n
 
 # Fondos de la tira de pestañas (2 o más paneles); el texto va después, encima.
+# Posición de la pestaña activa en la tira del grupo `i`.
+fn wm_pest_act(tab: Int, i: Int) -> Int ! alloc
+    grupo_pos(tab, grupo_panel_activo(tab, i))
+
 fn wm_esc_pestanas(st: Int, tab: Int, i: Int, e: Int, cap: Int, n0: Int, wx: Int, wy: Int, ww: Int, bg: Int, gw: Int, gh: Int, bh: Int, foco: Int) -> Int ! alloc
     tema = wm_tema_id(st)
     n = n0
@@ -1662,33 +1678,48 @@ fn wm_esc_pestanas(st: Int, tab: Int, i: Int, e: Int, cap: Int, n0: Int, wx: Int
         act = grupo_panel_activo(tab, i)
         tw = pest_ancho(wx, ww, gh, cnt)
         radio = 6
+        ap = wm_pest_act(tab, i)
         k = 0
         while k < cnt
-            m = grupo_miembro(tab, i, k)
-            tx = pest_pos_x(wx, ww, gh, cnt, k)
-            x1 = tx + tw - 2
-            y0 = wy + 4
-            y1 = wy + bh - 1
-            esact = 0
-            if m == act
-                esact = 1
-                y1 = wy + bh
-            bgt = wm_pest_bgt(st, m, act, k, i, bg)
-            col = wm_pest_col(st, m, act, k, i, foco)
-            n = esc_rrect(e, cap, n, tx, y0, x1, y1, esc_radios(radio, radio, 0, 0), bgt, 255, 0, 0)
-            if esact != 0
-                if foco != 0
-                    n = esc_solido(e, cap, n, tx + radio, y0, x1 - radio, y0 + 2, tema_acento(tema), 255)
-            n = wm_esc_icono(st, tab, m, e, cap, n, tx + 9, wy + (bh - 10) / 2 + 1, col, bgt)
-            if esact == 0
-                if tab_get(tab, m, tab_pend()) != 0
-                    # Actividad pendiente: punto de acento en la pestaña.
-                    n = esc_rrect(e, cap, n, x1 - 14, wy + bh / 2 - 3, x1 - 8, wy + bh / 2 + 3, esc_radios(3, 3, 3, 3), tema_acento(tema), 255, 0, 0)
-            if esact != 0
-                n = wm_esc_glifo(e, cap, n, x1 - 18, wy + (bh - 10) / 2 + 1, 10, 0, col)
-            elsif wm_pest_hov(st, i, k) != 0
-                n = wm_esc_glifo(e, cap, n, x1 - 18, wy + (bh - 10) / 2 + 1, 10, 0, col)
+            if pest_en_vista(wx, ww, gh, cnt, k, ap) != 0
+                n = wm_esc_una_pestana(st, tab, i, e, cap, n, wx, wy, ww, bg, gw, gh, bh, foco, k, act, tw, ap)
             k = k + 1
+        # Desbordamiento: marcas de acento si hay pestañas fuera de vista a cada lado.
+        pf = pest_first(wx, ww, gh, cnt, ap)
+        if pf > 0
+            n = esc_solido(e, cap, n, pest_x0(wx) - 6, wy + 8, pest_x0(wx) - 3, wy + bh - 6, tema_acento(tema), 255)
+        if pf + pest_vis(wx, ww, gh, cnt) < cnt
+            n = esc_solido(e, cap, n, pest_x1(wx, ww, gh) + 1, wy + 8, pest_x1(wx, ww, gh) + 4, wy + bh - 6, tema_acento(tema), 255)
+    n
+
+fn wm_esc_una_pestana(st: Int, tab: Int, i: Int, e: Int, cap: Int, n0: Int, wx: Int, wy: Int, ww: Int, bg: Int, gw: Int, gh: Int, bh: Int, foco: Int, k: Int, act: Int, tw: Int, ap: Int) -> Int ! alloc
+    tema = wm_tema_id(st)
+    radio = 6
+    n = n0
+    m = grupo_miembro(tab, i, k)
+    tx = pest_pos_x(wx, ww, gh, grupo_n(tab, i), k, ap)
+    x1 = tx + tw - 2
+    y0 = wy + 4
+    y1 = wy + bh - 1
+    esact = 0
+    if m == act
+        esact = 1
+        y1 = wy + bh
+    bgt = wm_pest_bgt(st, m, act, k, i, bg)
+    col = wm_pest_col(st, m, act, k, i, foco)
+    n = esc_rrect(e, cap, n, tx, y0, x1, y1, esc_radios(radio, radio, 0, 0), bgt, 255, 0, 0)
+    if esact != 0
+        if foco != 0
+            n = esc_solido(e, cap, n, tx + radio, y0, x1 - radio, y0 + 2, tema_acento(tema), 255)
+    n = wm_esc_icono(st, tab, m, e, cap, n, tx + 9, wy + (bh - 10) / 2 + 1, col, bgt)
+    if esact == 0
+        if tab_get(tab, m, tab_pend()) != 0
+            # Actividad pendiente: punto de acento en la pestaña.
+            n = esc_rrect(e, cap, n, x1 - 14, wy + bh / 2 - 3, x1 - 8, wy + bh / 2 + 3, esc_radios(3, 3, 3, 3), tema_acento(tema), 255, 0, 0)
+    if esact != 0
+        n = wm_esc_glifo(e, cap, n, x1 - 18, wy + (bh - 10) / 2 + 1, 10, 0, col)
+    elsif wm_pest_hov(st, i, k) != 0
+        n = wm_esc_glifo(e, cap, n, x1 - 18, wy + (bh - 10) / 2 + 1, 10, 0, col)
     n
 
 # Texto de las pestañas (o título centrado con un solo panel), sobre los fondos ya pintados.
@@ -1709,14 +1740,17 @@ fn wm_pintar_marco_titulo(st: Int, tab: Int, i: Int, compos: Int, clen: Int, sw:
         _t = wm_texto_titulo(st, tab, act, compos, clen, stride, bpp, fmt, cx, cy, 16, col, bg)
     else
         tw = pest_ancho(wx, ww, gh, cnt)
+        ap = wm_pest_act(tab, i)
         k = 0
         while k < cnt
-            m = grupo_miembro(tab, i, k)
-            tx = pest_pos_x(wx, ww, gh, cnt, k)
-            bgt = wm_pest_bgt(st, m, act, k, i, bg)
-            col = wm_pest_col(st, m, act, k, i, foco)
-            maxc = (tw - 2 - 26 - pest_cierre_ancho()) / gw
-            _tt = wm_texto_titulo(st, tab, m, compos, clen, stride, bpp, fmt, tx + 24, wy + (bh - gh) / 2 + 1, maxc, col, bgt)
+            if pest_en_vista(wx, ww, gh, cnt, k, ap) != 0
+                m = grupo_miembro(tab, i, k)
+                tx = pest_pos_x(wx, ww, gh, cnt, k, ap)
+                bgt = wm_pest_bgt(st, m, act, k, i, bg)
+                col = wm_pest_col(st, m, act, k, i, foco)
+                maxc = (tw - 2 - 26 - pest_cierre_ancho()) / gw
+                if maxc > 0
+                    _tt = wm_texto_titulo(st, tab, m, compos, clen, stride, bpp, fmt, tx + 24, wy + (bh - gh) / 2 + 1, maxc, col, bgt)
             k = k + 1
     0
 
@@ -1812,7 +1846,7 @@ fn wm_pintar_marco(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: I
     if st_get(st, st_drop()) == i
         # Destino de un arrastre: barra de inserción tras la última pestaña.
         cnt = grupo_n(tab, i)
-        ix = pest_pos_x(wx, ww, gh, cnt, cnt) - 2
+        ix = pest_pos_x(wx, ww, gh, cnt, cnt, wm_pest_act(tab, i)) - 2
         n = esc_solido(e, cap, n, ix, wy + 4, ix + 3, wy + bh, tema_acento(tema), 255)
     _ej = esc_cpu_ejecutar(compos, clen, sw, sh, stride, bpp, fmt, e, cap, n)
     _ti = wm_pintar_marco_titulo(st, tab, i, compos, clen, sw, sh, stride, bpp, fmt, wx, wy, ww, col_m, gw, gh, bh, foco)
@@ -2472,7 +2506,7 @@ fn wm_hover_pest(st: Int, x: Int, y: Int) -> Int ! alloc
     i = wm_hit_test(st, x, y)
     if i >= 0
         tab = st_get(st, st_tab())
-        ph = pest_hit(x, y, tab_get(tab, i, tab_wx()), tab_get(tab, i, tab_wy()), tab_get(tab, i, tab_ww()), wm_gh_wm(st), grupo_n(tab, i))
+        ph = pest_hit(x, y, tab_get(tab, i, tab_wx()), tab_get(tab, i, tab_wy()), tab_get(tab, i, tab_ww()), wm_gh_wm(st), grupo_n(tab, i), wm_pest_act(tab, i))
         if ph != 0
             r = i * 1000 + ph
     r
@@ -2584,9 +2618,9 @@ fn wm_pest_arrastrar(st: Int, m: Int, x: Int, y: Int, sh: Int) -> Int ! io, allo
         _d2 = wm_pest_despegar(st, m, x, y, sh)
     elsif n >= 2
         tw = pest_ancho(wx, ww, gh, n)
-        kp = (x - pest_x0(wx)) / tw
+        kp = (x - pest_x0(wx)) / tw + pest_first(wx, ww, gh, n, wm_pest_act(tab, h))
         if x < pest_x0(wx)
-            kp = 0
+            kp = pest_first(wx, ww, gh, n, wm_pest_act(tab, h))
         if kp > n - 1
             kp = n - 1
         if grupo_mover(tab, m, kp) != 0
@@ -2826,7 +2860,7 @@ fn wm_raton_btn(st: Int, x: Int, y: Int, botones: Int, compos: Int, clen: Int, s
             wy = tab_get(tab, i, tab_wy())
             ww = tab_get(tab, i, tab_ww())
             wh = tab_get(tab, i, tab_wh())
-            ph = pest_hit(x, y, wx, wy, ww, gh, grupo_n(tab, i))
+            ph = pest_hit(x, y, wx, wy, ww, gh, grupo_n(tab, i), wm_pest_act(tab, i))
             if (botones & 2) != 0
                 if ph != 0
                     if ph != 200

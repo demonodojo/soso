@@ -46,6 +46,7 @@ done
 GSP_SRCS=(
     "$root/tools/gsp-hostcheck/main.c"
     "$src/sass_sm86.c" "$src/sass_sm120.c"
+    "$src/sass_gprim_sm86.c" "$src/sass_gprim_sm120.c"
 )
 GSP_CFLAGS=(-O1 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function
     -I"$out" -I"$src")

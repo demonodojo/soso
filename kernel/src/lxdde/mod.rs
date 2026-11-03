@@ -417,6 +417,19 @@ pub fn submit_matmul_resident(
     gpu::submit_matmul_resident(w_va, rows, cols, n, x, y)
 }
 
+pub fn submit_gprim(
+    rt_va: u64,
+    pitch_px: u32,
+    w: u32,
+    h: u32,
+    fmt: u32,
+    prims: &[u8],
+    psf: &[u8],
+    cells: &[u8],
+) -> Result<bool, ()> {
+    gpu::submit_gprim(rt_va, pitch_px, w, h, fmt, prims, psf, cells)
+}
+
 pub fn submit_softmax_rows(x: &mut [f32], rows: usize, cols: usize) -> Result<bool, ()> {
     gpu::submit_softmax_rows(x, rows, cols)
 }

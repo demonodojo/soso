@@ -36,6 +36,19 @@ unsafe extern "C" {
         x: *const f32,
         y: *mut f32,
     ) -> i32;
+    fn lx_nouveau_compute_gprim(
+        rt_va: u64,
+        pitch_px: u32,
+        w: u32,
+        h: u32,
+        fmt: u32,
+        prims: *const u8,
+        nprims: u32,
+        psf: *const u8,
+        psf_len: u32,
+        cells: *const u8,
+        ncells: u32,
+    ) -> i32;
     fn lx_nouveau_compute_softmax_rows(x: *mut f32, rows: u32, cols: u32) -> i32;
     fn lx_nouveau_compute_layernorm_rows(
         x: *mut f32,
@@ -475,6 +488,39 @@ pub fn submit_matmul_resident(
             n as u32,
             x.as_ptr(),
             y.as_mut_ptr(),
+        )
+    };
+    if rc < 0 { Err(()) } else { Ok(rc > 0) }
+}
+
+/// Escena de primitivas 2D (GPRIM) sobre un render target residente. `Ok(true)` si la ejecutó la
+/// GPU; `Err` si no se pudo (el llamante dibuja en CPU).
+pub fn submit_gprim(
+    rt_va: u64,
+    pitch_px: u32,
+    w: u32,
+    h: u32,
+    fmt: u32,
+    prims: &[u8],
+    psf: &[u8],
+    cells: &[u8],
+) -> Result<bool, ()> {
+    if rt_va == 0 || prims.is_empty() || prims.len() % 64 != 0 || cells.len() % 12 != 0 {
+        return Err(());
+    }
+    let rc = unsafe {
+        lx_nouveau_compute_gprim(
+            rt_va,
+            pitch_px,
+            w,
+            h,
+            fmt,
+            prims.as_ptr(),
+            (prims.len() / 64) as u32,
+            psf.as_ptr(),
+            psf.len() as u32,
+            cells.as_ptr(),
+            (cells.len() / 12) as u32,
         )
     };
     if rc < 0 { Err(()) } else { Ok(rc > 0) }

@@ -1,6 +1,7 @@
 /* G4f/G5: objeto compute Blackwell + QMD en sysmem + SEND_PCAS. Ver gsp_compute.h. */
 #include "gsp_compute.h"
 #include "sass_sets.h"
+#include "sass_gprim.h"
 /* Constantes de bloque de los formatos cuantizados, compartidas con los .cu. */
 #include "q4k_decode.h"
 
@@ -445,6 +446,39 @@ int gsp_compute_init(struct gsp_rm *rm, struct gsp_chan *chan,
         }
         cp->launch_ok = (cp->caps && cp->caps->qmd_version != 0u &&
                          str_igual(cp->sass->arch, cp->caps->sass_arch)) ? 1 : 0;
+    }
+
+    /* GPRIM (opcional): el kernel de la escena 2D. Si falta o no cuadra, el compute sigue
+     * funcionando sin él y el compositor cae a CPU. */
+    {
+        static const struct gsp_sass_set *const gsets[] = GSP_SASS_GPRIM_SETS;
+        const struct gsp_sass_set *gs =
+            gsp_sass_pick(gsets, GSP_SASS_GPRIM_COUNT, cp->family);
+        const struct gsp_sass_variant *v = gs ? gsp_sass_variant_of(gs, "gprim") : 0;
+
+        cp->gprim_ok = 0;
+        if (v && str_igual(gs->arch, cp->sass->arch)) {
+            struct gsp_kernel *k = &cp->gprim;
+
+            k->name = v->name;
+            k->arch = gs->arch;
+            k->sass = v->sass;
+            k->sass_len = v->sass_len;
+            k->regcount = v->regcount;
+            k->param_base = v->param_base;
+            k->param_size = v->param_size;
+            k->cbank_size = v->cbank_size;
+            k->param_off = v->param_off;
+            k->param_count = v->param_count;
+            k->shared_size = v->shared_size;
+            k->barrier_count = v->barrier_count;
+            k->sass_va = G12_SASS_VA;
+            if (kernel_check(k, 9u) == 0 && k->sass_len <= G_SASS_SLOT) {
+                cp->gprim_ok = 1;
+            }
+        }
+        lx_printk("nouveau-lx: compute — gprim (escena 2D) %s\n",
+                  cp->gprim_ok ? "disponible" : "NO disponible en este juego de SASS");
     }
 
     /* Cada blob tiene que caber en el hueco que va hasta la VA del siguiente. */
@@ -1586,6 +1620,77 @@ int gsp_compute_matmul_resident(struct gsp_compute *cp, struct gsp_ce *ce,
         memcpy(y + (unsigned long)batch0 * rows, gy,
                (unsigned long)bn * rows * 4ul);
     }
+    return 0;
+}
+
+/* GPRIM: ver gsp_compute.h. Reparto de la reserva residente (sysmem coherente que la GPU lee
+ * por la VA space): X = primitivas en 0 y fuente PSF2 en 4 KiB; Y = celdas. */
+#define GPRIM_PSF_OFF  0x1000u
+#define GPRIM_MAX_PRIMS 32u
+
+int gsp_compute_gprim(struct gsp_compute *cp, struct gsp_ce *ce, uint64_t rt_va,
+                      unsigned pitch_px, unsigned w, unsigned h, unsigned fmt,
+                      const void *prims, unsigned nprims,
+                      const void *psf, unsigned psf_len,
+                      const void *cells, unsigned ncells,
+                      uint64_t scratch_va, void *scratch_cpu)
+{
+    unsigned char *rx;
+    unsigned char *ry;
+    unsigned grid_x;
+
+    if (!cp || !cp->ready || !cp->gprim_ok || !ce || rt_va == 0u || w == 0u ||
+        h == 0u || pitch_px < w || nprims == 0u || !prims) {
+        return -1;
+    }
+    if (!cp->res_mapped || nprims > GPRIM_MAX_PRIMS || fmt > 1u) {
+        return -1;
+    }
+    if (psf_len > G6_RES_X_BYTES - GPRIM_PSF_OFF ||
+        (unsigned long)ncells * 12ul > G6_RES_Y_BYTES) {
+        return -1;
+    }
+    if ((psf_len != 0u && !psf) || (ncells != 0u && !cells)) {
+        return -1;
+    }
+    if (gsp_compute_stage_sass(cp, ce, &cp->gprim, scratch_va, scratch_cpu,
+                               G4F_STAGE_CHUNK) != 0) {
+        return -1;
+    }
+
+    rx = cp_res(cp, G6_RES_X_OFF);
+    ry = cp_res(cp, G6_RES_Y_OFF);
+    memcpy(rx, prims, (unsigned long)nprims * 64ul);
+    if (psf_len) {
+        memcpy(rx + GPRIM_PSF_OFF, psf, psf_len);
+    }
+    if (ncells) {
+        memcpy(ry, cells, (unsigned long)ncells * 12ul);
+    }
+    *(uint32_t *)cp_data(cp, G4F_SEM_OFF) = 0;
+    __asm__ __volatile__("mfence" ::: "memory");
+
+    {
+        const struct gsp_kernel *k = &cp->gprim;
+        unsigned char *p = cbank_prepare(cp, k);
+
+        *(uint64_t *)(p + k->param_off[0]) = rt_va;
+        *(uint32_t *)(p + k->param_off[1]) = pitch_px;
+        *(uint32_t *)(p + k->param_off[2]) = w;
+        *(uint32_t *)(p + k->param_off[3]) = h;
+        *(uint32_t *)(p + k->param_off[4]) = fmt;
+        *(uint64_t *)(p + k->param_off[5]) = cp->res_va + G6_RES_X_OFF;
+        *(uint32_t *)(p + k->param_off[6]) = nprims;
+        *(uint64_t *)(p + k->param_off[7]) = cp->res_va + G6_RES_Y_OFF;
+        *(uint64_t *)(p + k->param_off[8]) = cp->res_va + G6_RES_X_OFF + GPRIM_PSF_OFF;
+        __asm__ __volatile__("mfence" ::: "memory");
+    }
+
+    grid_x = (w + G4F_CTA_THREADS - 1u) / G4F_CTA_THREADS;
+    if (launch_wait_sem(cp, &cp->gprim, grid_x, h, 0u, "gprim") != 0) {
+        return -1;
+    }
+    __asm__ __volatile__("mfence" ::: "memory");
     return 0;
 }
 

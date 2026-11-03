@@ -1,0 +1,30 @@
+{
+  "arch": "sm_120",
+  "tag": "gprim_sm120",
+  "familia": "GSP_FAM_BLACKWELL",
+  "kernels": [
+    {
+      "kernel": "gprim",
+      "simbolo": "gprim_rt",
+      "arch": "sm_120",
+      "bytes": 13312,
+      "regcount": 34,
+      "param_base": 896,
+      "param_size": 56,
+      "cbank_size": 952,
+      "param_off": [
+        0,
+        8,
+        12,
+        16,
+        20,
+        24,
+        32,
+        40,
+        48
+      ],
+      "shared_size": 0,
+      "barrier_count": 0
+    }
+  ]
+}

@@ -15,15 +15,25 @@ fn main() -> Int
         3
     elsif pest_ancho(wx, ww, gh, 3) * 3 > pest_x1(wx, ww, gh) - pest_x0(wx)
         4
-    elsif pest_hit(mx + 2, wy + 5, wx, wy, ww, gh, 3) != 200
+    elsif pest_hit(mx + 2, wy + 5, wx, wy, ww, gh, 3, 0) != 200
         5
-    elsif pest_hit(pest_pos_x(wx, ww, gh, 3, 1) + 10, wy + 8, wx, wy, ww, gh, 3) != 2
+    elsif pest_hit(pest_pos_x(wx, ww, gh, 3, 1, 0) + 10, wy + 8, wx, wy, ww, gh, 3, 0) != 2
         6
-    elsif pest_hit(pest_pos_x(wx, ww, gh, 3, 2) + pest_ancho(wx, ww, gh, 3) - 5, wy + 8, wx, wy, ww, gh, 3) != 103
+    elsif pest_hit(pest_pos_x(wx, ww, gh, 3, 2, 0) + pest_ancho(wx, ww, gh, 3) - 5, wy + 8, wx, wy, ww, gh, 3, 0) != 103
         7
-    elsif pest_hit(pest_pos_x(wx, ww, gh, 1, 0) + 10, wy + 8, wx, wy, ww, gh, 1) != 0
+    elsif pest_hit(pest_pos_x(wx, ww, gh, 1, 0, 0) + 10, wy + 8, wx, wy, ww, gh, 1, 0) != 0
         8
-    elsif pest_hit(pest_pos_x(wx, ww, gh, 3, 0) + 10, wy + bh + 2, wx, wy, ww, gh, 3) != 0
+    elsif pest_hit(pest_pos_x(wx, ww, gh, 3, 0, 0) + 10, wy + bh + 2, wx, wy, ww, gh, 3, 0) != 0
         9
+    elsif pest_vis(wx, 130, gh, 8) >= 8
+        10
+    elsif pest_first(wx, 130, gh, 8, 7) != 8 - pest_vis(wx, 130, gh, 8)
+        11
+    elsif pest_en_vista(wx, 130, gh, 8, 7, 7) != 1
+        12
+    elsif pest_en_vista(wx, 130, gh, 8, 0, 7) != 0
+        13
+    elsif pest_first(wx, ww, gh, 3, 2) != 0
+        14
     else
         0

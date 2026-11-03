@@ -41,6 +41,10 @@ pub mod comp {
     pub const GEOM: u32 = 34;
     pub const DMAP: u32 = 35;
     pub const COMMIT: u32 = 36;
+    pub const PRIMS: u32 = 37;
+    pub const PRIMS_ACK: u32 = 38;
+    /// Tope de bytes del comando GPRIM que sigue a un `PRIMS`.
+    pub const PRIMS_MAX_LEN: u32 = 262_144;
 
     pub const GEOM_HIDDEN: u32 = 1;
     pub const GEOM_OPAQUE: u32 = 2;
@@ -224,6 +228,25 @@ impl Msg {
         m
     }
 
+    pub fn encode_comp_prims(len: u32, x: u32, y: u32, w: u32, h: u32, flags: u32) -> Self {
+        let mut m = Self::zero();
+        m.set_op(comp::PRIMS);
+        m.set_u32(4, len);
+        m.set_u32(8, x);
+        m.set_u32(12, y);
+        m.set_u32(16, w);
+        m.set_u32(20, h);
+        m.set_u32(24, flags);
+        m
+    }
+
+    pub fn encode_comp_prims_ack(ok: u32) -> Self {
+        let mut m = Self::zero();
+        m.set_op(comp::PRIMS_ACK);
+        m.set_u32(4, ok);
+        m
+    }
+
     pub fn encode_comp_frame(x: u32, y: u32, w: u32, h: u32) -> Self {
         let mut m = Self::zero();
         m.set_op(comp::FRAME);
@@ -297,6 +320,10 @@ mod tests {
         let commit = Msg::encode_comp_commit(0, 0, 640, 480, comp::COMMIT_CLEAR_RT);
         assert_eq!(commit.op(), comp::COMMIT);
         assert_eq!(commit.u32(20), comp::COMMIT_CLEAR_RT);
+
+        let p = Msg::encode_comp_prims(4096, 1, 2, 3, 4, 2);
+        assert_eq!((p.op(), p.u32(4), p.u32(20), p.u32(24)), (comp::PRIMS, 4096, 4, 2));
+        assert_eq!(Msg::encode_comp_prims_ack(1).u32(4), 1);
     }
 
     #[test]

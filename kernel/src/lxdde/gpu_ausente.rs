@@ -126,6 +126,19 @@ pub fn submit_matmul_resident(
     Err(())
 }
 
+pub fn submit_gprim(
+    _rt_va: u64,
+    _pitch_px: u32,
+    _w: u32,
+    _h: u32,
+    _fmt: u32,
+    _prims: &[u8],
+    _psf: &[u8],
+    _cells: &[u8],
+) -> Result<bool, ()> {
+    Err(())
+}
+
 pub fn submit_softmax_rows(_x: &mut [f32], _rows: usize, _cols: usize) -> Result<bool, ()> {
     Err(())
 }

@@ -18,6 +18,19 @@ fn op_comp_dmap() -> Int
 fn op_comp_commit() -> Int
     36
 
+# PRIMS (WM → compositor): lista de primitivas para pintar en la GPU con GPRIM. Tras el mensaje
+# de 32 B vienen `len` bytes en el mismo socket: un comando GPRIM entero (comp_gprim_layout.sal).
+# El compositor rellena RT, dimensiones y pitch; el WM sólo pone el rect de present y las flags.
+# Responde con PRIMS_ACK (u32 @4: 1 pintado, 0 no: el WM debe pintar él en CPU).
+fn op_comp_prims() -> Int
+    37
+
+fn op_comp_prims_ack() -> Int
+    38
+
+fn comp_prims_max_len() -> Int
+    262144
+
 fn comp_geom_hidden() -> Int
     1
 
@@ -85,4 +98,19 @@ fn msg_encode_comp_frame(ptr: Int, x: Int, y: Int, w: Int, h: Int) -> Int ! allo
     _b = msg_set_u32(ptr, 8, y)
     _c = msg_set_u32(ptr, 12, w)
     _d = msg_set_u32(ptr, 16, h)
+    0
+
+fn msg_encode_comp_prims(ptr: Int, len: Int, x: Int, y: Int, w: Int, h: Int, flags: Int) -> Int ! alloc
+    _o = msg_set_op(ptr, op_comp_prims())
+    _l = msg_set_u32(ptr, 4, len)
+    _x = msg_set_u32(ptr, 8, x)
+    _y = msg_set_u32(ptr, 12, y)
+    _w = msg_set_u32(ptr, 16, w)
+    _h = msg_set_u32(ptr, 20, h)
+    _f = msg_set_u32(ptr, 24, flags)
+    0
+
+fn msg_encode_comp_prims_ack(ptr: Int, ok: Int) -> Int ! alloc
+    _o = msg_set_op(ptr, op_comp_prims_ack())
+    _k = msg_set_u32(ptr, 4, ok)
     0

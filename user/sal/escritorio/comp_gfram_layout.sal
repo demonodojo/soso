@@ -4,7 +4,7 @@ fn comp_gfram_len() -> Int
     61
 
 fn comp_st_size() -> Int
-    190
+    198
 
 fn comp_st_gpu_ok() -> Int
     0
@@ -35,6 +35,10 @@ fn comp_st_msg() -> Int
 
 fn comp_st_tex_h() -> Int
     182
+
+# Estado de GPRIM: 0 sin probar, 1 el kernel de la GPU lo acepta, -1 lo ha rechazado (se acabó).
+fn comp_st_gprim() -> Int
+    190
 
 fn comp_st_get(st: Int, off: Int) -> Int ! alloc
     bytes_get_i64(bytes_view_mem(st, comp_st_size()), off)

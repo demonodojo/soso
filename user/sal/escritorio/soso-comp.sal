@@ -3,11 +3,63 @@ import "comp_proto.sal"
 import "comp_gpu.sal"
 import "comp_escena.sal"
 import "comp_scanout_policy.sal"
+import "comp_gprim_layout.sal"
 
 fn comp_puerto() -> Int
     7432
 
-fn comp_servir_wm(wm_fd: Int, compos: Int, clen: Int, st: Int, tab: Int, gbuf: Int) -> Int ! io, alloc
+# Lee exactamente `len` bytes del socket en `dst`; devuelve 1 si llegaron todos.
+fn comp_leer_exacto(fd: Int, dst: Int, len: Int) -> Int ! io, alloc
+    got = 0
+    ok = 1
+    while got < len
+        if ok != 0
+            n = read_fd(fd, dst + got, len - got)
+            if n <= 0
+                ok = 0
+            else
+                got = got + n
+    ok
+
+# PRIMS: el WM manda una lista de primitivas (comando GPRIM) para pintarla en la GPU. Devuelve 0 si
+# el socket se rompió. Responde siempre con PRIMS_ACK: 1 = pintado; 0 = el WM debe pintar en CPU.
+# El primer rechazo del kernel (GPU sin el kernel SASS) se recuerda y no se vuelve a intentar.
+fn comp_prims_servir(wm_fd: Int, st: Int, msg: Int, pbuf: Int) -> Int ! io, alloc
+    len = msg_get_u32(msg, 4)
+    if len < comp_gprim_hdr_len()
+        0
+    elsif len > comp_prims_max_len()
+        0
+    elsif comp_leer_exacto(wm_fd, pbuf, len) == 0
+        0
+    else
+        ok = 0
+        if comp_st_get(st, comp_st_gpu_ok()) != 0
+            if comp_st_get(st, comp_st_gprim()) >= 0
+                b = bytes_view_mem(pbuf, len)
+                _r = bytes_set_i64(b, 5, comp_st_get(st, comp_st_rt_h()))
+                _w = bytes_set_u32(b, 13, comp_st_get(st, comp_st_fb_w()))
+                _h = bytes_set_u32(b, 17, comp_st_get(st, comp_st_fb_h()))
+                _p = bytes_set_u32(b, 21, comp_st_get(st, comp_st_pitch()))
+                _f = bytes_set_u32(b, 25, msg_get_u32(msg, 24))
+                _px = bytes_set_u32(b, 32, msg_get_u32(msg, 8))
+                _py = bytes_set_u32(b, 36, msg_get_u32(msg, 12))
+                _pw = bytes_set_u32(b, 40, msg_get_u32(msg, 16))
+                _ph = bytes_set_u32(b, 44, msg_get_u32(msg, 20))
+                if gpu_submit(pbuf, len) < 0
+                    _s = comp_st_set(st, comp_st_gprim(), -1)
+                else
+                    _s = comp_st_set(st, comp_st_gprim(), 1)
+                    ok = 1
+        ack = st + comp_st_msg()
+        _e = msg_encode_comp_prims_ack(ack, ok)
+        w = write_fd(wm_fd, ack, msg_len())
+        if w == msg_len()
+            1
+        else
+            0
+
+fn comp_servir_wm(wm_fd: Int, compos: Int, clen: Int, st: Int, tab: Int, gbuf: Int, pbuf: Int) -> Int ! io, alloc
     msg = st + comp_st_msg()
     seguir = 1
     while seguir != 0
@@ -44,7 +96,10 @@ fn comp_servir_wm(wm_fd: Int, compos: Int, clen: Int, st: Int, tab: Int, gbuf: I
                                     clr = 1
                                 _c = comp_escena_commit(st, tab, gbuf, msg_get_u32(msg, 4), msg_get_u32(msg, 8), msg_get_u32(msg, 12), msg_get_u32(msg, 16), clr)
                             else
-                                seguir = 0
+                                if op == op_comp_prims()
+                                    seguir = comp_prims_servir(wm_fd, st, msg, pbuf)
+                                else
+                                    seguir = 0
     0
 
 fn main() -> Int ! io, alloc
@@ -83,6 +138,7 @@ fn main() -> Int ! io, alloc
                         st = bytes_ptr(bytes_new(comp_st_size()))
                         tab = bytes_ptr(bytes_new(comp_surf_tab_bytes()))
                         gbuf = bytes_ptr(bytes_new(comp_gscen_buf_len()))
+                        pbuf = bytes_ptr(bytes_new(comp_prims_max_len()))
                         _z = comp_escena_init_tab(tab)
                         _gi = comp_gpu_try_init(st, clen, gw, gh, gpitch)
                         gpu_ok = comp_st_get(st, comp_st_gpu_ok())
@@ -100,6 +156,6 @@ fn main() -> Int ! io, alloc
                                     _e = msg_encode_comp_escena(escena, sid, sw, sh, stride, bpp, fmt, gpu_ok)
                                     _w = write_fd(wm, escena, msg_len())
                                     if _w == msg_len()
-                                        _s = comp_servir_wm(wm, compos, clen, st, tab, gbuf)
+                                        _s = comp_servir_wm(wm, compos, clen, st, tab, gbuf, pbuf)
                                     _c = close_fd(wm)
                             0

@@ -1,9 +1,11 @@
 import "../../../user/sal/escritorio/comp_gprim_layout.sal"
+import "../../../user/sal/escritorio/gprim_prueba_escena.sal"
+import "../../../user/sal/escritorio/gprim_prueba_escena.sal"
 
 fn main() -> Int ! alloc
-    if comp_gprim_hdr_len() != 32
+    if comp_gprim_hdr_len() != 48
         1
-    elsif comp_gprim_buf_len() != 32 + 24 * 64
+    elsif comp_gprim_buf_len() != 48 + 32 * 64
         2
     elsif esc_o_flags() + 4 != esc_prim_bytes()
         3
@@ -14,7 +16,7 @@ fn main() -> Int ! alloc
         n = esc_rrect(e, cap, n, -7, 4, 40, 44, esc_radios(6, 6, 0, 0), 12345, 255, 0, 0)
         n = esc_solido(e, cap, n, 1, 2, 3, 4, 99, 90)
         buf = bytes_ptr(bytes_new(comp_gprim_buf_len()))
-        m = comp_gprim_volcar(buf, 7, 640, 480, 2560, 1, e, cap, n)
+        m = comp_gprim_volcar(buf, 7, 640, 480, 2560, 1, 1, 5, 6, 7, 8, e, cap, n)
         b = bytes_view_mem(buf, comp_gprim_buf_len())
         if m != 2
             4
@@ -28,15 +30,41 @@ fn main() -> Int ! alloc
             8
         elsif bytes_get_u8(b, 29) != 2
             9
-        elsif bytes_get_u32(b, 32) != esc_k_rrect()
+        elsif bytes_get_u8(b, 31) != 1
+            15
+        elsif bytes_get_u32(b, 44) != 8
+            16
+        elsif bytes_get_u32(b, 48) != esc_k_rrect()
             10
-        elsif bytes_get_u32(b, 32 + 4) != 4294967289
+        elsif bytes_get_u32(b, 48 + 4) != 4294967289
             11
-        elsif bytes_get_u32(b, 32 + esc_o_radios()) != esc_radios(6, 6, 0, 0)
+        elsif bytes_get_u32(b, 48 + esc_o_radios()) != esc_radios(6, 6, 0, 0)
             12
-        elsif bytes_get_u32(b, 32 + 64 + esc_o_alfa()) != 90
+        elsif bytes_get_u32(b, 48 + 64 + esc_o_alfa()) != 90
             13
-        elsif bytes_get_u32(b, 32 + 64 + esc_o_kind()) != esc_k_solido()
+        elsif bytes_get_u32(b, 48 + 64 + esc_o_kind()) != esc_k_solido()
             14
         else
-            0
+            # Blobs: la fuente y las celdas de la escena de prueba van tras las primitivas.
+            ge = esc_nueva(gprim_prueba_cap())
+            gn = gprim_prueba_construir(ge)
+            psf = psf_sintetica()
+            cel = gprim_prueba_celdas()
+            tot = comp_gprim_total(gn, gprim_prueba_psf_len(), gprim_prueba_ncells())
+            gb = bytes_ptr(bytes_new(tot + 64))
+            _v = comp_gprim_volcar(gb, 1, 128, 96, 512, 2, 1, 0, 0, 128, 96, ge, gprim_prueba_cap(), gn)
+            t2 = comp_gprim_blobs(gb, gn, psf, gprim_prueba_psf_len(), cel, gprim_prueba_ncells())
+            v = bytes_view_mem(gb, tot)
+            po = 48 + gn * 64
+            if t2 != tot
+                17
+            elsif bytes_get_u32(v, po) != 96
+                18
+            elsif bytes_get_u32(v, po + 4) != psf2_magic()
+                19
+            elsif bytes_get_u32(v, po + 4 + 96) != 36
+                20
+            elsif bytes_get_u8(v, po + 4 + 96 + 4) != bytes_get_u8(bytes_view_mem(cel, 12), 0)
+                21
+            else
+                0

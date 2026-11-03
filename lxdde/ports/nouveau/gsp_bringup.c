@@ -1676,6 +1676,26 @@ int lx_nouveau_submit_matmul_resident(uint64_t w_va, unsigned rows, unsigned col
     return -1;
 }
 
+int lx_nouveau_submit_gprim(uint64_t rt_va, unsigned pitch_px, unsigned w, unsigned h,
+                            unsigned fmt, const void *prims, unsigned nprims,
+                            const void *psf, unsigned psf_len, const void *cells,
+                            unsigned ncells)
+{
+    if (!prims || nprims == 0 || rt_va == 0 || w == 0 || h == 0) {
+        return -1;
+    }
+    if (compute_usable() && g_compute.res_mapped && g_compute.gprim_ok && g_buf.ready) {
+        int ok = gsp_compute_gprim(&g_compute, &g_ce, rt_va, pitch_px, w, h, fmt,
+                                   prims, nprims, psf, psf_len, cells, ncells,
+                                   G4D_SCRATCH_VA, g_scratch.va) == 0;
+        compute_resultado(ok);
+        if (ok) {
+            return 1;
+        }
+    }
+    return -1;
+}
+
 int lx_nouveau_submit_softmax_rows(float *x, unsigned rows, unsigned cols)
 {
     if (!x || rows == 0 || cols == 0) {

@@ -1,4 +1,6 @@
 // G1: backend GPU de la escena de primitivas del escritorio (GPRIM / GSCEN v2).
+// FUENTE ÚNICA: la compila NVRTC (tools/gpu-prim/cubin.py) para el SASS del kernel de soso
+// y tools/gpu-prim/validar.py para validarlo en el host.
 // Un hilo por píxel recorre la lista en orden, así que el resultado es idéntico al backend
 // CPU de user/sal/escritorio/escena.sal (esc_cpu_ejecutar). Formato de primitiva: 16 palabras
 // de 32 bits; ver crates/soso-wm-proto/src/gprim.rs. Sin cabeceras de CUDA (NVRTC).
@@ -65,11 +67,12 @@ __device__ __forceinline__ bool en_rrect(int x, int y, int x0, int y0, int x1, i
     return x >= x0 + il && x < x1 - ir;
 }
 
-extern "C" __global__ void gprim(unsigned* rt, int pitch_px, int ancho, int alto, int fmt,
-                                 const int* prims, int n,
-                                 const unsigned* celdas, const unsigned char* psf) {
+// Bloques de una dimensión (el lanzador de soso fija ntid = (256,1,1)): x = columna, y = fila.
+extern "C" __global__ void gprim_rt(unsigned* rt, int pitch_px, int ancho, int alto, int fmt,
+                                    const int* prims, int n,
+                                    const unsigned* celdas, const unsigned char* psf) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
-    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int y = blockIdx.y;
     if (x >= ancho || y >= alto) return;
     unsigned* px = rt + (size_t)y * pitch_px + x;
     for (int i = 0; i < n; i++) {

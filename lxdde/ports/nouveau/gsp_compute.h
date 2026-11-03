@@ -23,6 +23,7 @@
 #define G9_SASS_VA    (GSP_VA_BASE + 0x30000ull)     /* VRAM: blob SASS de matmul */
 #define G10_SASS_VA   (GSP_VA_BASE + 0x40000ull)     /* VRAM: blob SASS de softmax_rows */
 #define G11_SASS_VA   (GSP_VA_BASE + 0x50000ull)     /* VRAM: blob SASS de layernorm_rows */
+#define G12_SASS_VA   (GSP_VA_BASE + 0x60000ull)     /* VRAM: blob SASS de gprim (escena 2D) */
 #define G_SASS_SLOT   0x10000ull                     /* hueco de los kernels cuantizados */
 /* QMD v05 (384 B) dentro de `cp->data`; SEND_PCAS_A exige alineación >>8. */
 #define G4F_QMD_OFF   0x1000u
@@ -142,6 +143,10 @@ struct gsp_compute {
     struct gsp_kernel matmul;
     struct gsp_kernel softmax_rows;
     struct gsp_kernel layernorm_rows;
+    /* Escena de primitivas 2D del escritorio (GPRIM). No es obligatorio: si el juego no
+     * trae el kernel, `gprim_ok` queda a 0 y el resto del compute sigue igual. */
+    struct gsp_kernel gprim;
+    int gprim_ok;
     struct gsp_dma_buf data;   /* cbank0 + x + y + semáforo, en sysmem */
     uint64_t data_va;
     struct gsp_dma_buf mv;     /* G5: tanda de filas + x + y, en sysmem */
@@ -281,6 +286,17 @@ int gsp_compute_matmul_resident(struct gsp_compute *cp, struct gsp_ce *ce,
                                 uint64_t w_va, unsigned rows, unsigned cols,
                                 unsigned n, const float *x, float *y,
                                 uint64_t scratch_va, void *scratch_cpu);
+
+/* GPRIM: ejecuta `nprims` primitivas de 64 B (formato de escena.sal) sobre el render target
+ * residente en VRAM `rt_va` (pitch en píxeles, 4 B por píxel, `fmt` 0 RGB / 1 BGR). `psf` es la
+ * fuente PSF2 y `cells` las celdas (3 palabras: glifo, tinta, fondo) de las primitivas de
+ * rejilla. Devuelve 0 si lo hizo la GPU y <0 si no (el llamante cae a CPU). */
+int gsp_compute_gprim(struct gsp_compute *cp, struct gsp_ce *ce, uint64_t rt_va,
+                      unsigned pitch_px, unsigned w, unsigned h, unsigned fmt,
+                      const void *prims, unsigned nprims,
+                      const void *psf, unsigned psf_len,
+                      const void *cells, unsigned ncells,
+                      uint64_t scratch_va, void *scratch_cpu);
 
 int gsp_compute_softmax_rows(struct gsp_compute *cp, struct gsp_ce *ce,
                              float *x, unsigned rows, unsigned cols,

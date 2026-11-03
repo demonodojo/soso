@@ -294,6 +294,9 @@ fn gpu_map(handle: Int, src_ptr: Int, len: Int) -> Int ! io
 fn gpu_submit(cmd_ptr: Int, cmd_len: Int) -> Int ! io
     syscall(sys_gpu_submit(), cmd_ptr, cmd_len, 0, 0, 0, 0)
 
+fn gpu_read(handle: Int, dst_ptr: Int, len: Int) -> Int ! io
+    syscall(33, handle, dst_ptr, len, 0, 0, 0)
+
 fn gpu_free(handle: Int) -> Int ! io
     syscall(sys_gpu_free(), handle, 0, 0, 0, 0, 0)
 

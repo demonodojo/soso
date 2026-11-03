@@ -29,4 +29,16 @@ fn main() -> Int ! alloc
                             if msg_get_u32(m, 12) != 100
                                 7
                             else
-                                0
+                                _pr = msg_encode_comp_prims(m, 4096, 1, 2, 3, 4, 2)
+                                if msg_get_op(m) != 37
+                                    8
+                                elsif msg_get_u32(m, 4) != 4096
+                                    9
+                                elsif msg_get_u32(m, 20) != 4
+                                    10
+                                else
+                                    _ak = msg_encode_comp_prims_ack(m, 1)
+                                    if msg_get_op(m) != 38
+                                        11
+                                    else
+                                        0

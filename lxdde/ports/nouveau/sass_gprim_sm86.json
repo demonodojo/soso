@@ -1,0 +1,30 @@
+{
+  "arch": "sm_86",
+  "tag": "gprim_sm86",
+  "familia": "GSP_FAM_AMPERE",
+  "kernels": [
+    {
+      "kernel": "gprim",
+      "simbolo": "gprim_rt",
+      "arch": "sm_86",
+      "bytes": 12160,
+      "regcount": 35,
+      "param_base": 352,
+      "param_size": 56,
+      "cbank_size": 408,
+      "param_off": [
+        0,
+        8,
+        12,
+        16,
+        20,
+        24,
+        32,
+        40,
+        48
+      ],
+      "shared_size": 0,
+      "barrier_count": 0
+    }
+  ]
+}

@@ -1,0 +1,114 @@
+import "soso.sal"
+import "comp_gprim_layout.sal"
+import "gprim_prueba_escena.sal"
+
+# Prueba de GPRIM en la GPU del guest: pinta la escena de primitivas con el kernel SASS, lee el
+# render target de vuelta y lo compara píxel a píxel con el backend CPU (escena.sal).
+#
+#   gprim-prueba              solo compara (no presenta)
+#   gprim-prueba --presentar  además presenta la escena en pantalla (necesita gfx3d y scanout)
+#
+# Códigos de salida: 0 igual; 1 error de preparación; 2 sin GPU/gfx3d (no es fallo);
+# 3 el kernel no está disponible (ENOTSUP/ENOSYS); 4 los píxeles difieren.
+
+fn gprim_arg(nombre: String) -> Int ! io, alloc
+    a = 1
+    r = 0
+    while a < argc()
+        if str_eq(argv(a), nombre) != 0
+            r = 1
+        a = a + 1
+    r
+
+fn gprim_prueba_enviar(cmd: Int, rt: Int, flags: Int, n: Int, w: Int, h: Int, pitch: Int, e: Int, cap: Int, psf: Int, cel: Int) -> Int ! io, alloc
+    m = comp_gprim_volcar(cmd, rt, w, h, pitch, flags, 1, 0, 0, w, h, e, cap, n)
+    total = comp_gprim_blobs(cmd, m, psf, gprim_prueba_psf_len(), cel, gprim_prueba_ncells())
+    gpu_submit(cmd, total)
+
+fn gprim_comparar(a: Int, b: Int, w: Int, h: Int) -> Int ! alloc
+    va = bytes_view_mem(a, w * h * 4)
+    vb = bytes_view_mem(b, w * h * 4)
+    malos = 0
+    i = 0
+    while i < w * h
+        if bytes_get_u32(va, i * 4) != bytes_get_u32(vb, i * 4)
+            malos = malos + 1
+        i = i + 1
+    malos
+
+fn gprim_probar() -> Int ! io, alloc
+    w = gprim_prueba_w()
+    h = gprim_prueba_h()
+    cap = gprim_prueba_cap()
+    pitch = w * 4
+    len = pitch * h
+    e = esc_nueva(cap)
+    n = gprim_prueba_construir(e)
+    psf = psf_sintetica()
+    cel = gprim_prueba_celdas()
+    esperado = bytes_ptr(bytes_new(len))
+    _x = esc_cpu_ejecutar_r(esperado, len, w, h, w, 4, 1, e, cap, n, cel, psf, gprim_prueba_psf_len())
+    rt = gpu_alloc_vram(len)
+    if rt < 0
+        _p = print_str(d"gprim-prueba: gpu_alloc_vram fallo\n")
+        1
+    else
+        # Fondo conocido distinto de la escena: si la GPU no escribe, la comparacion lo delata.
+        basura = bytes_ptr(bytes_new(len))
+        _f = rellenar_rect(basura, len, w, h, w, 4, 1, 0, 0, w, h, color_rgb(1, 2, 3))
+        _m = gpu_map(rt, basura, len)
+        cmd = bytes_ptr(bytes_new(comp_gprim_total(cap, gprim_prueba_psf_len(), gprim_prueba_ncells()) + 64))
+        r = gprim_prueba_enviar(cmd, rt, 2, n, w, h, pitch, e, cap, psf, cel)
+        if r < 0
+            _p = print_str(d"gprim-prueba: GPRIM rechazado (")
+            _q = print_str(int_to_str(r))
+            _r = print_str(d"): la GPU no ejecuta el kernel\n")
+            _l = gpu_free(rt)
+            3
+        else
+            leido = bytes_ptr(bytes_new(len))
+            if gpu_read(rt, leido, len) < 0
+                _p = print_str(d"gprim-prueba: gpu_read fallo\n")
+                _l = gpu_free(rt)
+                1
+            else
+                malos = gprim_comparar(esperado, leido, w, h)
+                _p = print_str(d"gprim-prueba: ")
+                _q = print_str(int_to_str(n))
+                _r = print_str(d" primitivas, pixeles distintos: ")
+                _s = print_str(int_to_str(malos))
+                _t = print_str(d"\n")
+                if malos == 0
+                    if gprim_arg(d"--presentar") != 0
+                        _g = gprim_presentar(rt, cmd, n, w, h, pitch, e, cap, psf, cel)
+                    _l = gpu_free(rt)
+                    _o = print_str(d"gprim-prueba: OK\n")
+                    0
+                else
+                    _l = gpu_free(rt)
+                    4
+
+# Segunda pasada con presentacion: el RT queda en pantalla 3 s.
+fn gprim_presentar(rt: Int, cmd: Int, n: Int, w: Int, h: Int, pitch: Int, e: Int, cap: Int, psf: Int, cel: Int) -> Int ! io, alloc
+    _m = fb_set_mode(fb_mode_graficos())
+    r = gprim_prueba_enviar(cmd, rt, 0, n, w, h, pitch, e, cap, psf, cel)
+    _p = print_str(d"gprim-prueba: presentacion -> ")
+    _q = print_str(int_to_str(r))
+    _s = print_str(d"\n")
+    t0 = uptime_ms()
+    while uptime_ms() - t0 < 3000
+        _y = 0
+    _c = fb_set_mode(fb_mode_consola())
+    r
+
+fn main() -> Int ! io, alloc
+    ginfo = bytes_ptr(bytes_new(gpu_info_size()))
+    if gpu_info(ginfo) < 0
+        _p = print_str(d"gprim-prueba: sin GPU\n")
+        2
+    else
+        if gpu_gfx3d_ready(ginfo) == 0
+            _q = print_str(d"gprim-prueba: gfx3d no disponible\n")
+            2
+        else
+            gprim_probar()

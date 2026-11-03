@@ -32,7 +32,7 @@ def oraculo():
 def ptx():
     out = pathlib.Path("/tmp/gprim.ptx")
     subprocess.run([sys.executable, str(REPO / "tools/cuda-nvrtc/compilar.py"),
-                    str(REPO / "tools/gpu-prim/gprim.cu"), str(out)], check=True)
+                    str(REPO / "lxdde/ports/nouveau/gprim.cu"), str(out)], check=True)
     return out.read_bytes() + b"\0"
 
 
@@ -45,7 +45,7 @@ def gpu(prims, nprim, ptx_bytes, psf, celdas):
     dev = ctypes.c_int(); ok(cu.cuDeviceGet(ctypes.byref(dev), 0), "cuDeviceGet")
     ctx = ctypes.c_void_p(); ok(cu.cuCtxCreate_v2(ctypes.byref(ctx), 0, dev), "cuCtxCreate")
     mod = ctypes.c_void_p(); ok(cu.cuModuleLoadData(ctypes.byref(mod), ptx_bytes), "cuModuleLoadData")
-    fn = ctypes.c_void_p(); ok(cu.cuModuleGetFunction(ctypes.byref(fn), mod, b"gprim"), "cuModuleGetFunction")
+    fn = ctypes.c_void_p(); ok(cu.cuModuleGetFunction(ctypes.byref(fn), mod, b"gprim_rt"), "cuModuleGetFunction")
     d_rt = ctypes.c_uint64(); ok(cu.cuMemAlloc_v2(ctypes.byref(d_rt), W * H * 4), "cuMemAlloc rt")
     ok(cu.cuMemsetD8_v2(d_rt, 0, W * H * 4), "memset")
     d_pr = ctypes.c_uint64(); ok(cu.cuMemAlloc_v2(ctypes.byref(d_pr), len(prims)), "cuMemAlloc prims")
@@ -58,7 +58,7 @@ def gpu(prims, nprim, ptx_bytes, psf, celdas):
             ctypes.c_uint64(d_pr.value), ctypes.c_int(nprim),
             ctypes.c_uint64(d_ce.value), ctypes.c_uint64(d_ps.value)]
     ptrs = (ctypes.c_void_p * len(args))(*[ctypes.cast(ctypes.pointer(a), ctypes.c_void_p) for a in args])
-    ok(cu.cuLaunchKernel(fn, (W + 15) // 16, (H + 15) // 16, 1, 16, 16, 1, 0, None, ptrs, None), "launch")
+    ok(cu.cuLaunchKernel(fn, (W + 255) // 256, H, 1, 256, 1, 1, 0, None, ptrs, None), "launch")
     ok(cu.cuCtxSynchronize(), "sync")
     buf = ctypes.create_string_buffer(W * H * 4)
     ok(cu.cuMemcpyDtoH_v2(buf, d_rt, W * H * 4), "DtoH")

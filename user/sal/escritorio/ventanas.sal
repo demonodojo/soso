@@ -191,11 +191,22 @@ fn pest_x1(wx: Int, ww: Int, gh: Int) -> Int
 fn pest_ancho_max() -> Int
     200
 
+# Pestañas que caben a la vez (al menos 40 px cada una); con más, la tira se desplaza para
+# mantener a la vista la activa.
+fn pest_vis(wx: Int, ww: Int, gh: Int, n: Int) -> Int
+    v = (pest_x1(wx, ww, gh) - pest_x0(wx)) / 40
+    if v > n
+        v = n
+    if v < 1
+        v = 1
+    v
+
 fn pest_ancho(wx: Int, ww: Int, gh: Int, n: Int) -> Int
     if n <= 0
         0
     else
-        a = (pest_x1(wx, ww, gh) - pest_x0(wx)) / n
+        v = pest_vis(wx, ww, gh, n)
+        a = (pest_x1(wx, ww, gh) - pest_x0(wx)) / v
         if a > pest_ancho_max()
             pest_ancho_max()
         elsif a < 28
@@ -203,15 +214,36 @@ fn pest_ancho(wx: Int, ww: Int, gh: Int, n: Int) -> Int
         else
             a
 
-fn pest_pos_x(wx: Int, ww: Int, gh: Int, n: Int, k: Int) -> Int
-    pest_x0(wx) + k * pest_ancho(wx, ww, gh, n)
+# Primera pestaña a la vista, dada la posición `act` de la activa.
+fn pest_first(wx: Int, ww: Int, gh: Int, n: Int, act: Int) -> Int
+    v = pest_vis(wx, ww, gh, n)
+    f = 0
+    if n > v
+        f = act - v / 2
+        if f > n - v
+            f = n - v
+        if f < 0
+            f = 0
+    f
+
+fn pest_en_vista(wx: Int, ww: Int, gh: Int, n: Int, k: Int, act: Int) -> Int
+    f = pest_first(wx, ww, gh, n, act)
+    if k < f
+        0
+    elsif k >= f + pest_vis(wx, ww, gh, n)
+        0
+    else
+        1
+
+fn pest_pos_x(wx: Int, ww: Int, gh: Int, n: Int, k: Int, act: Int) -> Int
+    pest_x0(wx) + (k - pest_first(wx, ww, gh, n, act)) * pest_ancho(wx, ww, gh, n)
 
 # Ancho de la zona de la × al final de cada pestaña.
 fn pest_cierre_ancho() -> Int
     20
 
 # 0 nada; 1..n pestaña k+1; 101..: × de la pestaña k (100 + k + 1); 200 botón «+».
-fn pest_hit(x: Int, y: Int, wx: Int, wy: Int, ww: Int, gh: Int, n: Int) -> Int
+fn pest_hit(x: Int, y: Int, wx: Int, wy: Int, ww: Int, gh: Int, n: Int, act: Int) -> Int
     bh = barra_alto(gh)
     r = 0
     if y >= wy
@@ -226,12 +258,13 @@ fn pest_hit(x: Int, y: Int, wx: Int, wy: Int, ww: Int, gh: Int, n: Int) -> Int
                     tw = pest_ancho(wx, ww, gh, n)
                     k = 0
                     while k < n
-                        tx = pest_pos_x(wx, ww, gh, n, k)
-                        if x >= tx
-                            if x < tx + tw
-                                if y >= wy + 4
-                                    r = k + 1
-                                    if x >= tx + tw - pest_cierre_ancho()
-                                        r = 100 + k + 1
+                        tx = pest_pos_x(wx, ww, gh, n, k, act)
+                        if pest_en_vista(wx, ww, gh, n, k, act) != 0
+                            if x >= tx
+                                if x < tx + tw
+                                    if y >= wy + 4
+                                        r = k + 1
+                                        if x >= tx + tw - pest_cierre_ancho()
+                                            r = 100 + k + 1
                         k = k + 1
     r

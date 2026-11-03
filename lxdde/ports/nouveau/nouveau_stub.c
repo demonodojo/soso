@@ -17,6 +17,10 @@ extern int lx_nouveau_submit_matvec_q_resident(uint64_t w_va, unsigned dtype,
 extern int lx_nouveau_submit_matmul_resident(uint64_t w_va, unsigned rows,
                                              unsigned cols, unsigned n,
                                              const float *x, float *y);
+extern int lx_nouveau_submit_gprim(uint64_t rt_va, unsigned pitch_px, unsigned w,
+                                   unsigned h, unsigned fmt, const void *prims,
+                                   unsigned nprims, const void *psf, unsigned psf_len,
+                                   const void *cells, unsigned ncells);
 extern int lx_nouveau_submit_softmax_rows(float *x, unsigned rows, unsigned cols);
 extern int lx_nouveau_submit_layernorm_rows(float *x, const float *weight,
                                             const float *bias, unsigned rows,
@@ -121,6 +125,15 @@ int lx_nouveau_compute_matmul_resident(uint64_t w_va, unsigned rows, unsigned co
                                        unsigned n, const float *x, float *y)
 {
     return lx_nouveau_submit_matmul_resident(w_va, rows, cols, n, x, y);
+}
+
+int lx_nouveau_compute_gprim(uint64_t rt_va, unsigned pitch_px, unsigned w, unsigned h,
+                             unsigned fmt, const void *prims, unsigned nprims,
+                             const void *psf, unsigned psf_len, const void *cells,
+                             unsigned ncells)
+{
+    return lx_nouveau_submit_gprim(rt_va, pitch_px, w, h, fmt, prims, nprims, psf,
+                                   psf_len, cells, ncells);
 }
 
 int lx_nouveau_compute_softmax_rows(float *x, unsigned rows, unsigned cols)
