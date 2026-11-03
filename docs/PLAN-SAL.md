@@ -188,3 +188,15 @@ Pin `7090ba4`, hash
 y `tests/sal/soso-lib.sal` (`--target soso`) salen con código 0. No se ha
 repetido `cargo xtask test-sal`: falta la toolchain Rust de soso para el
 compilador nativo, y `--cross-only` retira `/bin/sal` si el pin no coincide.
+
+## Toolchain de Sal como paquete (CI)
+
+El CI no tiene el checkout `../sal`, así que el compilador y el SDK viajan en
+una release del repo (`sal-toolchain-<id12>`, `id12` = 12 primeros hex del
+`sha256=` de `config/sal-source.lock`).
+
+- `cargo xtask sal-pack` (compila la revisión `base=` del lock en un worktree desechable; no toca el pin ni `../sal`) → `target/sal-toolchain-<id12>-x86_64-linux.tar.gz`
+  (`sal`, `sdk/`, `source.lock`); imprime el `gh release create` para publicarlo.
+- `cargo xtask sal-fetch` baja la release del pin y construye con ella
+  (`cargo xtask sal-build --toolchain <paquete|dir>`, sin `../sal`).
+- Si cambia `base=` en el lock, hay que volver a empaquetar y publicar.

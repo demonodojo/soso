@@ -172,6 +172,14 @@ impl TestFilter {
             println!("      [{sid}] omitido: {nombre}");
             return;
         }
+        // Los binarios de Sal se compilan con el repo externo `../sal`, que el
+        // CI no tiene: sin `rootfs/bin/soso-wm` en la imagen no hay nada que probar.
+        if nombre.starts_with("soso-wm:")
+            && !super::project_root().join("rootfs/bin/soso-wm").is_file()
+        {
+            println!("      [{sid}] omitido (sin rootfs/bin/soso-wm; falta `cargo xtask sal-build`): {nombre}");
+            return;
+        }
         f();
     }
 }

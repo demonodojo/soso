@@ -14,35 +14,22 @@ fn ejecutar(cmd: &mut Command) {
     }
 }
 
-pub fn build(args: &[String]) {
-    let root = super::project_root();
-    let cross = match args {
-        [] => false,
-        [a] if a == "--cross-only" => true,
-        _ => {
-            eprintln!("uso: cargo xtask sal-build [--cross-only]");
-            exit(2);
-        }
-    };
-    ejecutar(
-        Command::new("python3")
-            .current_dir(&root)
-            .arg("scripts/sal-source.py"),
-    );
-    // Un fallo posterior no debe dejar artefactos parciales marcados como listos.
-    quitar(&root.join("target/sal/source.lock"));
-    ejecutar(
-        Command::new("bash")
-            .current_dir(&root)
-            .arg("scripts/sal-sdk.sh"),
-    );
-    let source = std::env::var_os("SOSO_SAL_SOURCE")
+/// Binario `sal` del checkout hermano (`SOSO_SAL_SOURCE`, por defecto `../sal`).
+fn sal_source(root: &Path) -> std::path::PathBuf {
+    std::env::var_os("SOSO_SAL_SOURCE")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| root.join("../sal"));
+        .unwrap_or_else(|| root.join("../sal"))
+}
+
+fn sal_compilado(root: &Path) -> std::path::PathBuf {
+    compilar_sal(root, &sal_source(root))
+}
+
+fn compilar_sal(root: &Path, source: &Path) -> std::path::PathBuf {
     let manifest = source.join("Cargo.toml");
     ejecutar(
         Command::new("cargo")
-            .current_dir(&root)
+            .current_dir(root)
             .args([
                 "build",
                 "--locked",
@@ -54,7 +41,7 @@ pub fn build(args: &[String]) {
             .arg(&manifest),
     );
     let meta = Command::new("cargo")
-        .current_dir(&root)
+        .current_dir(root)
         .args(["metadata", "--format-version", "1", "--manifest-path"])
         .arg(&manifest)
         .output()
@@ -65,14 +52,157 @@ pub fn build(args: &[String]) {
     let target_dir = meta_json["target_directory"]
         .as_str()
         .expect("target_directory en metadata sal");
-    let sal_bin = Path::new(target_dir).join("release/sal");
+    Path::new(target_dir).join("release/sal")
+}
+
+fn rust_lld() -> std::path::PathBuf {
     let sysroot = Command::new("rustc")
         .args(["--print", "sysroot"])
         .output()
         .expect("rustc");
     assert!(sysroot.status.success());
-    let lld = Path::new(std::str::from_utf8(&sysroot.stdout).unwrap().trim())
-        .join("lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld");
+    Path::new(std::str::from_utf8(&sysroot.stdout).unwrap().trim())
+        .join("lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld")
+}
+
+/// Identificador del toolchain: los 12 primeros hex del sha256 del pin.
+fn id_toolchain(lock: &str) -> String {
+    let sha = lock
+        .lines()
+        .find_map(|l| l.strip_prefix("sha256="))
+        .expect("sha256= en sal-source.lock");
+    sha[..12].to_string()
+}
+
+fn nombre_paquete(id: &str) -> String {
+    format!("sal-toolchain-{id}-x86_64-linux.tar.gz")
+}
+
+/// `cargo xtask sal-pack`: empaqueta el compilador host y el SDK freestanding
+/// de la revisión `base=` de `config/sal-source.lock` (sin tocar el pin), para
+/// que el CI no necesite el checkout `../sal`. Se compila en un worktree
+/// desechable junto a `soso` (Sal depende de `../soso/crates/sosomodel`).
+pub fn pack() {
+    let root = super::project_root();
+    let lock = fs::read_to_string(root.join("config/sal-source.lock")).unwrap();
+    let base = lock
+        .lines()
+        .find_map(|l| l.strip_prefix("base="))
+        .expect("base= en sal-source.lock")
+        .to_string();
+    let origen = sal_source(&root);
+    let wt = root.join("..").join(format!("sal-pin-{}", &base[..12]));
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(&origen)
+        .args(["worktree", "remove", "--force"])
+        .arg(&wt)
+        .status();
+    ejecutar(
+        Command::new("git")
+            .arg("-C")
+            .arg(&origen)
+            .args(["worktree", "add", "--detach"])
+            .arg(&wt)
+            .arg(&base),
+    );
+    let sal_bin = compilar_sal(&root, &wt);
+    ejecutar(
+        Command::new("bash")
+            .current_dir(&root)
+            .env("SOSO_SAL_SOURCE", &wt)
+            .arg("scripts/sal-sdk.sh"),
+    );
+    let area = root.join("target/sal/paquete");
+    let _ = fs::remove_dir_all(&area);
+    fs::create_dir_all(area.join("sdk")).unwrap();
+    fs::copy(&sal_bin, area.join("sal")).expect("copiar sal");
+    for file in [
+        "runtime.o",
+        "kernels.o",
+        "libsal-soso.a",
+        "link.ld",
+        "sal_runtime.h",
+        "manifest.txt",
+    ] {
+        fs::copy(root.join("target/sal/sdk").join(file), area.join("sdk").join(file))
+            .unwrap_or_else(|e| panic!("{file}: {e}"));
+    }
+    fs::write(area.join("source.lock"), &lock).unwrap();
+    let out = root.join("target").join(nombre_paquete(&id_toolchain(&lock)));
+    ejecutar(
+        Command::new("tar")
+            .arg("-czf")
+            .arg(&out)
+            .arg("-C")
+            .arg(&area)
+            .args(["sal", "sdk", "source.lock"]),
+    );
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(&origen)
+        .args(["worktree", "remove", "--force"])
+        .arg(&wt)
+        .status();
+    let id = id_toolchain(&lock);
+    println!("Toolchain de Sal ({}): {}", &base[..12], out.display());
+    println!(
+        "Publicar: gh release create sal-toolchain-{id} {} -R demonodojo/soso --title \"Toolchain de Sal {id}\" --notes \"Compilador y SDK de Sal, base {}\"",
+        out.display(),
+        &base[..12],
+    );
+}
+
+/// `cargo xtask sal-fetch`: baja de la release del repo el toolchain del pin y
+/// construye con él.
+pub fn fetch() {
+    let root = super::project_root();
+    let lock = fs::read_to_string(root.join("config/sal-source.lock")).unwrap();
+    let id = id_toolchain(&lock);
+    let dir = root.join("target/sal/descarga");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    ejecutar(
+        Command::new("gh")
+            .current_dir(&root)
+            .args(["release", "download", &format!("sal-toolchain-{id}")])
+            .args(["-R", "demonodojo/soso", "-p", &nombre_paquete(&id), "-D"])
+            .arg(&dir),
+    );
+    build(&[
+        "--toolchain".to_string(),
+        dir.join(nombre_paquete(&id)).display().to_string(),
+    ]);
+}
+
+/// Deja listo `target/sal` desde un toolchain empaquetado (`.tar.gz` o carpeta).
+fn preparar_toolchain(root: &Path, ruta: &Path) -> std::path::PathBuf {
+    let dir = if ruta.is_dir() {
+        ruta.to_path_buf()
+    } else {
+        let dst = root.join("target/sal/toolchain");
+        let _ = fs::remove_dir_all(&dst);
+        fs::create_dir_all(&dst).unwrap();
+        ejecutar(Command::new("tar").arg("-xzf").arg(ruta).arg("-C").arg(&dst));
+        dst
+    };
+    let lock = fs::read(dir.join("source.lock")).expect("el paquete no trae source.lock");
+    assert_eq!(
+        lock,
+        fs::read(root.join("config/sal-source.lock")).unwrap(),
+        "el toolchain empaquetado no corresponde a config/sal-source.lock"
+    );
+    quitar(&root.join("target/sal/source.lock"));
+    let sdk = root.join("target/sal/sdk");
+    let _ = fs::remove_dir_all(&sdk);
+    fs::create_dir_all(&sdk).unwrap();
+    for entry in fs::read_dir(dir.join("sdk")).unwrap().flatten() {
+        fs::copy(entry.path(), sdk.join(entry.file_name())).unwrap();
+    }
+    dir.join("sal")
+}
+
+fn compilar_apps(root: &Path, sal_bin: &Path, lld: &Path) {
     for (source_file, name) in [
         ("user/sal/sal-contar.sal", "sal-contar"),
         ("user/sal/escritorio/soso-wm.sal", "soso-wm"),
@@ -85,16 +215,54 @@ pub fn build(args: &[String]) {
         ("tests/sal/runtime.sal", "runtime"),
     ] {
         ejecutar(
-            Command::new(&sal_bin)
-                .current_dir(&root)
-                .env("SAL_LD", &lld)
+            Command::new(sal_bin)
+                .current_dir(root)
+                .env("SAL_LD", lld)
                 .env("SAL_SDK", root.join("target/sal/sdk"))
                 .args(["build", source_file, "--target", "soso", "-o"])
                 .arg(root.join("target/sal").join(name)),
         );
     }
+}
+
+pub fn build(args: &[String]) {
+    let root = super::project_root();
+    let (cross, toolchain) = match args {
+        [] => (false, None),
+        [a] if a == "--cross-only" => (true, None),
+        [a, ruta] if a == "--toolchain" => (true, Some(Path::new(ruta))),
+        _ => {
+            eprintln!("uso: cargo xtask sal-build [--cross-only | --toolchain <paquete.tar.gz|dir>]");
+            exit(2);
+        }
+    };
+    if let Some(ruta) = toolchain {
+        let sal_bin = preparar_toolchain(&root, ruta);
+        compilar_apps(&root, &sal_bin, &rust_lld());
+        fs::copy(
+            root.join("config/sal-source.lock"),
+            root.join("target/sal/source.lock"),
+        )
+        .expect("procedencia Sal");
+        instalar_guest(&root, false);
+        return;
+    }
+    ejecutar(
+        Command::new("python3")
+            .current_dir(&root)
+            .arg("scripts/sal-source.py"),
+    );
+    // Un fallo posterior no debe dejar artefactos parciales marcados como listos.
+    quitar(&root.join("target/sal/source.lock"));
+    ejecutar(
+        Command::new("bash")
+            .current_dir(&root)
+            .arg("scripts/sal-sdk.sh"),
+    );
+    let sal_bin = sal_compilado(&root);
+    compilar_apps(&root, &sal_bin, &rust_lld());
     // Empaqueta el escritorio en rootfs aunque falte el bootstrap nativo (sal-native.sh).
-    instalar_guest(&root);
+    instalar_guest(&root, true);
     if !cross {
         ejecutar(
             Command::new("bash")
@@ -122,12 +290,14 @@ pub fn build(args: &[String]) {
     }
 }
 
-fn instalar_guest(root: &Path) {
-    ejecutar(
-        Command::new("python3")
-            .current_dir(root)
-            .arg("scripts/sal-source.py"),
-    );
+fn instalar_guest(root: &Path, verificar_fuente: bool) {
+    if verificar_fuente {
+        ejecutar(
+            Command::new("python3")
+                .current_dir(root)
+                .arg("scripts/sal-source.py"),
+        );
+    }
     ejecutar(
         Command::new("python3")
             .current_dir(root)

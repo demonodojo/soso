@@ -52,6 +52,20 @@ fn vendor() -> PathBuf {
     PathBuf::from(home).join(".cache/soso-rust-vendor")
 }
 
+/// El vendor de Rust (~GB) no existe en el CI. Sin él las pruebas se saltan,
+/// salvo que `SOSO_RUST_VENDOR_REQUIRED` exija que esté.
+fn vendor_o_saltar() -> Option<PathBuf> {
+    let v = vendor();
+    if v.join("library/std").is_dir() {
+        return Some(v);
+    }
+    if std::env::var_os("SOSO_RUST_VENDOR_REQUIRED").is_some() {
+        panic!("falta el vendor en {}", v.display());
+    }
+    eprintln!("SALTADA: falta el vendor en {}", v.display());
+    None
+}
+
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .arg("-C")
@@ -247,8 +261,7 @@ fn sustituir_fichero(ruta: &Path, busca: &str, reemplazo: &str) {
 
 #[test]
 fn la_receta_iguala_al_script_sobre_la_revision_fijada() {
-    let v = vendor();
-    assert!(v.join("library/std").is_dir(), "falta el vendor en {}", v.display());
+    let Some(v) = vendor_o_saltar() else { return };
     let head = git(&v, &["rev-parse", "HEAD"]);
     assert_eq!(head.trim(), REV, "el lock fija {REV}");
 
@@ -311,7 +324,7 @@ fn la_receta_iguala_al_script_sobre_la_revision_fijada() {
 
 #[test]
 fn converge_desde_el_parche_viejo() {
-    let v = vendor();
+    let Some(v) = vendor_o_saltar() else { return };
     let head = git(&v, &["rev-parse", "HEAD"]);
     assert_eq!(head.trim(), REV);
 

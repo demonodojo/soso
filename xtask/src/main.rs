@@ -25,6 +25,8 @@ fn main() {
     let cmd = std::env::args().nth(1).unwrap_or_else(|| "run".into());
     match cmd.as_str() {
         "sal-build" => sal::build(&std::env::args().skip(2).collect::<Vec<_>>()),
+        "sal-pack" => sal::pack(),
+        "sal-fetch" => sal::fetch(),
         "test-sal" => sal::test(),
         "build" => {
             build_image();

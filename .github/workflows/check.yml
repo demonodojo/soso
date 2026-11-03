@@ -50,6 +50,13 @@ jobs:
           rustup target add x86_64-unknown-none x86_64-unknown-uefi
       - name: Dependencias
         run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 gcc
+      - name: Toolchain de Sal (release del pin)
+        # Sin él no hay rootfs/bin/soso-wm y la suite omite esos pasos.
+        # Se publica con `cargo xtask sal-pack`; ver docs/PLAN-SAL.md.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: cargo xtask sal-fetch
       - name: cargo xtask test sys init
         run: cargo xtask test -- --guest sys --only init
       - name: Conservar logs
@@ -79,6 +86,13 @@ jobs:
           rustup target add x86_64-unknown-none x86_64-unknown-uefi
       - name: Dependencias
         run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 gcc
+      - name: Toolchain de Sal (release del pin)
+        # Sin él no hay rootfs/bin/soso-wm y la suite omite esos pasos.
+        # Se publica con `cargo xtask sal-pack`; ver docs/PLAN-SAL.md.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: cargo xtask sal-fetch
       - name: cargo xtask test (4 shards, TCG)
         env:
           SOSO_QEMU_ACCEL: tcg
