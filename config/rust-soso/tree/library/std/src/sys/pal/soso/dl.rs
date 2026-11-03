@@ -253,12 +253,12 @@ pub fn cargar(ruta: &Path) -> Result<usize, String> {
         if memsz == 0 {
             continue;
         }
-        let mut prot = soso_abi::PROT_READ;
+        let mut prot = soso_rt::PROT_READ;
         if pf & PF_W != 0 {
-            prot |= soso_abi::PROT_WRITE;
+            prot |= soso_rt::PROT_WRITE;
         }
         if pf & PF_X != 0 {
-            prot |= soso_abi::PROT_EXEC;
+            prot |= soso_rt::PROT_EXEC;
         }
         let start = base + va - nominal;
         let len = (memsz + PAGE - 1) & !(PAGE - 1);

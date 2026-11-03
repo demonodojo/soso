@@ -7,7 +7,16 @@ vendor=${SOSO_RUST_VENDOR:-"$HOME/.cache/soso-rust-vendor"}
 out="$repo/target/sal/native"
 mkdir -p "$out/sysroot/lib/rustlib"
 rustc="$vendor/build-soso/x86_64-unknown-linux-gnu/stage1/bin/rustc"
+# El bootstrap de `rust-build-std` deja el compilador en ci-rustc-sysroot (no hay
+# stage1/bin); el sysroot se pasa aparte con --sysroot, así que sirve el mismo.
+[ -x "$rustc" ] || rustc="$vendor/build-soso/x86_64-unknown-linux-gnu/ci-rustc-sysroot/bin/rustc"
 syslib="$vendor/build-soso/x86_64-unknown-linux-gnu/ci-rustc-sysroot/lib/rustlib/x86_64-unknown-soso"
+# Las rlib de std compiladas por `rust-build-std` caen en stage2 cuando
+# ci-rustc-sysroot solo trae self-contained.
+if ! ls "$syslib"/lib/libstd-*.rlib >/dev/null 2>&1; then
+    alt="$vendor/build-soso/x86_64-unknown-linux-gnu/stage2/lib/rustlib/x86_64-unknown-soso"
+    ls "$alt"/lib/libstd-*.rlib >/dev/null 2>&1 && syslib="$alt"
+fi
 if [ ! -x "$rustc" ] || [ ! -d "$syslib/lib" ]; then
     echo 'Falta la toolchain Rust de soso: consulta docs/SELF-HOSTING.md (rust-bootstrap / rust-build-std).' >&2
     exit 1
