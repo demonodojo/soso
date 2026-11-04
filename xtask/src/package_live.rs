@@ -73,17 +73,24 @@ pub fn run_with_capacity_measured(model_pick_bytes: Option<u64>, measured_usb_by
         selection.tiny_dir.as_deref(),
     );
 
-    let mut total = live_image_bytes(&data, &models, &uefi);
+    let mut total = live_image_bytes(&data, &models, measured_usb_bytes);
     for _ in 0..2 {
         write_rootfs_install_meta(&root, total);
         data = super::mkfs_rootfs_with_profile(true, &profile, super::RootfsImgMode::PackOnly);
-        total = live_image_bytes(&data, &models, &uefi);
+        total = live_image_bytes(&data, &models, measured_usb_bytes);
     }
 
     let data_len = std::fs::metadata(&data).expect("data").len();
     let models_len = std::fs::metadata(&models).expect("models").len();
-    let total = live_image_bytes(&data, &models, &uefi);
-    let p2_size = (data_len + align - 1) / align * align;
+    let total = live_image_bytes(&data, &models, measured_usb_bytes);
+    let p2_size = live_root_partition_bytes(data_len, models_len, measured_usb_bytes);
+    if p2_size > (data_len + align - 1) / align * align {
+        println!(
+            "package-usb-live: rootfs {} MiB, partición {} MiB (holgura para --skip-models)",
+            data_len / align,
+            p2_size / align
+        );
+    }
 
     let out_dir = root.join("target/usb-live");
     std::fs::create_dir_all(&out_dir).expect("usb-live dir");
@@ -464,12 +471,65 @@ impl Drop for LiveLlmConf {
     }
 }
 
-fn live_image_bytes(data: &Path, models: &Path, _uefi: &Path) -> u64 {
+/// Holgura mínima de la partición del rootfs live sobre lo que ocupa hoy.
+pub(crate) const ROOTFS_HEADROOM_MIN: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Tamaño de la p2 del live: el mayor de `2 × rootfs` y `rootfs + 4 GiB`.
+///
+/// La p2 iba justa al rootfs del momento, y en cuanto este crecía un
+/// `flash-usb-live --skip-models` ya no cabía: agrandarla obliga a mover los
+/// modelos, y eso es un flash completo. Con `usb_bytes` la holgura se recorta
+/// a lo que dejan libre la ESP, SOSOINSTALL y el modelo ya elegido: primero el
+/// modelo, luego la holgura. Nunca baja del rootfs.
+///
+/// Al montar, el kernel hace crecer sosofs hasta llenar la partición
+/// (`grow_root_if_needed`), así que la holgura también es espacio libre en el live.
+pub(crate) fn live_root_partition_bytes(data_len: u64, models_len: u64, usb_bytes: Option<u64>) -> u64 {
+    const ALIGN: u64 = 1024 * 1024;
+    let rootfs = data_len.div_ceil(ALIGN) * ALIGN;
+    let quiero = (2 * rootfs).max(rootfs + ROOTFS_HEADROOM_MIN);
+    let Some(usb) = usb_bytes else {
+        return quiero;
+    };
+    let p3 = models_len.div_ceil(ALIGN) * ALIGN;
+    let resto = LIVE_ESP_BYTES + live_models::P4_INSTALL_BYTES + p3 + ALIGN;
+    let libre = usb.saturating_sub(resto + rootfs);
+    let holgura = (quiero - rootfs).min(libre) / ALIGN * ALIGN;
+    rootfs + holgura
+}
+
+/// Tramos `(byte inicial, longitud)` de la imagen live que hay que escribir en
+/// el pendrive: toda la imagen salvo la holgura de p2 detrás del sosofs.
+///
+/// La holgura son ceros dispersos y por USB 2.0 cuesta minutos escribirlos.
+/// Lo que quede ahí de un flash anterior da igual: al crecer, sosofs da por
+/// libres los bloques nuevos y los escribe antes de leerlos. Si la imagen no
+/// trae un sosofs legible en p2, se copia entera.
+pub(crate) fn live_copy_ranges(img: &Path) -> Vec<(u64, u64)> {
+    let len = std::fs::metadata(img).map(|m| m.len()).unwrap_or(0);
+    let entera = vec![(0, len)];
+    let Some((first, last)) = partition_range(img, 2) else {
+        return entera;
+    };
+    let sectores = last - first + 1;
+    let Ok(fs) = crate::sosofs_img::montar(img, first, sectores) else {
+        return entera;
+    };
+    let usado = fs.block_count() * block_dev::BLOCK_SIZE as u64;
+    let fin_rootfs = first * 512 + usado;
+    let fin_p2 = (last + 1) * 512;
+    if usado >= sectores * 512 || fin_p2 >= len {
+        return entera;
+    }
+    vec![(0, fin_rootfs), (fin_p2, len - fin_p2)]
+}
+
+fn live_image_bytes(data: &Path, models: &Path, usb_bytes: Option<u64>) -> u64 {
     let data_len = std::fs::metadata(data).expect("data").len();
     let models_len = std::fs::metadata(models).expect("models").len();
     let align = 1024 * 1024;
     let header = LIVE_ESP_BYTES;
-    let p2_size = (data_len + align - 1) / align * align;
+    let p2_size = live_root_partition_bytes(data_len, models_len, usb_bytes);
     let p3_size = (models_len + align - 1) / align * align;
     header + p2_size + live_models::P4_INSTALL_BYTES + p3_size + align
 }
@@ -1036,11 +1096,13 @@ pub(crate) fn dd_partition(
 }
 
 /// Escribe `data` en la partición `part` del dispositivo (desde el sector 0 de la partición).
-pub(crate) fn dd_to_partition(
+/// Comprueba que `src` cabe en la partición `dst_part` de `dst` sin escribir
+/// nada. Devuelve (primer sector de la partición, sectores que ocupa `src`).
+pub(crate) fn check_fits_partition(
     src: &Path,
     dst: &Path,
     dst_part: u32,
-) -> Result<(), String> {
+) -> Result<(u64, u64), String> {
     let data_len = std::fs::metadata(src)
         .map_err(|e| format!("stat {}: {e}", src.display()))?
         .len();
@@ -1050,12 +1112,21 @@ pub(crate) fn dd_to_partition(
     let need_sectors = data_len.div_ceil(512);
     if need_sectors > dst_sectors {
         return Err(format!(
-            "{} ({} B) no cabe en partición {dst_part} ({} sectores) — haz un flash completo",
+            "{} ({} MiB) no cabe en la partición {dst_part} ({} MiB) — haz un flash completo",
             src.display(),
-            data_len,
-            dst_sectors
+            data_len / (1024 * 1024),
+            dst_sectors / 2048
         ));
     }
+    Ok((dst_first, need_sectors))
+}
+
+pub(crate) fn dd_to_partition(
+    src: &Path,
+    dst: &Path,
+    dst_part: u32,
+) -> Result<(), String> {
+    let (dst_first, need_sectors) = check_fits_partition(src, dst, dst_part)?;
     run_cmd(
         Command::new("dd")
             .arg(format!("if={}", src.display()))
@@ -1608,4 +1679,50 @@ echo "✅ soso instalado en $TARGET"
 echo "   Reinicia y elige \"soso\" en GRUB."
 "#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+
+    #[test]
+    fn rootfs_pequeno_recibe_cuatro_gib_de_holgura() {
+        // 960 MiB: el doble se queda corto, gana rootfs + 4 GiB.
+        assert_eq!(live_root_partition_bytes(960 * MIB, GIB, None), 960 * MIB + 4 * GIB);
+    }
+
+    #[test]
+    fn rootfs_grande_recibe_el_doble() {
+        // 5 GiB: el doble (10 GiB) supera a rootfs + 4 GiB (9 GiB).
+        assert_eq!(live_root_partition_bytes(5 * GIB, GIB, None), 10 * GIB);
+    }
+
+    #[test]
+    fn el_tamano_se_redondea_a_mib() {
+        let p2 = live_root_partition_bytes(2 * GIB + 1, GIB, None);
+        assert_eq!(p2 % MIB, 0);
+        assert_eq!(p2, 2 * GIB + MIB + 4 * GIB);
+    }
+
+    #[test]
+    fn en_un_pendrive_justo_la_holgura_cede_al_modelo() {
+        let rootfs = 2800 * MIB;
+        let modelo = 3 * GIB;
+        let resto = LIVE_ESP_BYTES + live_models::P4_INSTALL_BYTES + modelo + MIB;
+        // Sobran 1 GiB + 0,5 MiB: la holgura se queda en 1 GiB.
+        let usb = resto + rootfs + GIB + MIB / 2;
+        assert_eq!(live_root_partition_bytes(rootfs, modelo, Some(usb)), rootfs + GIB);
+        // Sin sitio: la p2 vuelve a ser el rootfs justo.
+        assert_eq!(live_root_partition_bytes(rootfs, modelo, Some(resto + rootfs)), rootfs);
+        assert_eq!(live_root_partition_bytes(rootfs, modelo, Some(1)), rootfs);
+    }
+
+    #[test]
+    fn en_un_pendrive_grande_la_holgura_es_completa() {
+        let p2 = live_root_partition_bytes(2800 * MIB, 14 * GIB, Some(500 * GIB));
+        assert_eq!(p2, 2800 * MIB + 4 * GIB);
+    }
 }

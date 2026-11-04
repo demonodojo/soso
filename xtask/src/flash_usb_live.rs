@@ -206,19 +206,17 @@ fn write_full(usb: &Path) {
     }
 
     println!("flash-usb-live: escribiendo {} → {}", live.display(), usb.display());
-    install_disk::run_cmd(
-        Command::new("dd")
-            .arg(format!("if={}", live.display()))
-            .arg(format!("of={}", usb.display()))
-            .args([
-                "bs=1M",
-                "status=progress",
-                "iflag=direct",
-                "oflag=direct",
-                "conv=fsync",
-            ]),
-        "dd",
-    );
+    let tramos = package_live::live_copy_ranges(&live);
+    if let [_, (fin_p2, _)] = tramos.as_slice() {
+        let omito = fin_p2 - tramos[0].1;
+        println!(
+            "flash-usb-live: omito {} MiB de holgura vacía del rootfs",
+            omito / (1024 * 1024)
+        );
+    }
+    for (inicio, largo) in tramos {
+        copiar_tramo_dd(&live, usb, inicio, largo);
+    }
     crate::fat32_write::drop_path_cache(usb);
     install_disk::run_cmd(&mut Command::new("sync"), "sync");
 
@@ -264,47 +262,11 @@ fn write_incremental(usb: &Path, parts: &[FlashPart]) {
     }
 
     let root = super::project_root();
-    let want_kernel = parts.contains(&FlashPart::Kernel);
-    let want_rootfs = parts.contains(&FlashPart::Rootfs);
-
-    if want_kernel {
-        let uefi = root.join("target/soso-uefi.img");
-        if !uefi.exists() {
-            eprintln!("flash-usb-live: falta {}", uefi.display());
-            exit(1);
-        }
-        println!(
-            "flash-usb-live: actualizando kernel in situ desde {}…",
-            uefi.display()
-        );
-        if let Err(e) = package_live::update_esp_from_uefi(&uefi, usb) {
-            eprintln!("flash-usb-live: {e}");
-            eprintln!(
-                "flash-usb-live: no pude actualizar el kernel in situ (¿ESP \
-                 sin kernel-x86_64 / KERNEL~1?). Un dd de soso-uefi.img p1 \
-                 (~31 MiB) sobre una ESP live más grande la deja muda. \
-                 Recupera con un flash completo (sin --only)."
-            );
-            exit(1);
-        }
-        crate::fat32_write::drop_path_cache(usb);
-    }
-
-    if want_rootfs {
-        let data = root.join("target/soso-data.img");
-        if !data.exists() {
-            eprintln!("flash-usb-live: falta {}", data.display());
-            exit(1);
-        }
-        println!(
-            "flash-usb-live: actualizando rootfs (p2) desde {}…",
-            data.display()
-        );
-        if let Err(e) = package_live::dd_to_partition(&data, usb, 2) {
-            eprintln!("flash-usb-live: {e}");
-            exit(1);
-        }
-        crate::fat32_write::drop_path_cache(usb);
+    let uefi = root.join("target/soso-uefi.img");
+    let data = root.join("target/soso-data.img");
+    if let Err(e) = write_incremental_parts(usb, &uefi, &data, parts) {
+        eprintln!("flash-usb-live: {e}");
+        exit(1);
     }
 
     install_disk::run_cmd(&mut Command::new("sync"), "sync");
@@ -322,6 +284,78 @@ fn write_incremental(usb: &Path, parts: &[FlashPart]) {
         usb.display()
     );
     install_disk::release_removable(usb);
+}
+
+/// Copia `largo` bytes de `img` desde `inicio` al mismo sitio de `dev`.
+/// E/S directa sólo si el tramo va alineado a 4 KiB: en un disco 4Kn un
+/// O_DIRECT a 512 B falla.
+fn copiar_tramo_dd(img: &Path, dev: &Path, inicio: u64, largo: u64) {
+    let directo = inicio % 4096 == 0 && largo % 4096 == 0;
+    let mut cmd = Command::new("dd");
+    cmd.arg(format!("if={}", img.display()))
+        .arg(format!("of={}", dev.display()))
+        .args(["bs=1M", "status=progress", "conv=fsync,notrunc"])
+        .arg(if directo {
+            "iflag=direct,skip_bytes,count_bytes"
+        } else {
+            "iflag=skip_bytes,count_bytes"
+        })
+        .arg(if directo { "oflag=direct,seek_bytes" } else { "oflag=seek_bytes" })
+        .arg(format!("skip={inicio}"))
+        .arg(format!("seek={inicio}"))
+        .arg(format!("count={largo}"));
+    install_disk::run_cmd(&mut cmd, "dd");
+}
+
+/// Escribe en el pendrive las partes pedidas, pero sólo después de comprobar
+/// que todas se pueden escribir. Antes el kernel iba a la ESP y luego el
+/// rootfs no cabía en p2: el pendrive quedaba con kernel nuevo y rootfs viejo,
+/// e `init` moría al arrancar (docs/DIAGNOSTICO-ROG-2026-11-04.md).
+fn write_incremental_parts(
+    usb: &Path,
+    uefi: &Path,
+    data: &Path,
+    parts: &[FlashPart],
+) -> Result<(), String> {
+    let want_kernel = parts.contains(&FlashPart::Kernel);
+    let want_rootfs = parts.contains(&FlashPart::Rootfs);
+
+    if want_kernel && !uefi.exists() {
+        return Err(format!("falta {}", uefi.display()));
+    }
+    if want_rootfs {
+        if !data.exists() {
+            return Err(format!("falta {}", data.display()));
+        }
+        package_live::check_fits_partition(data, usb, 2)
+            .map_err(|e| format!("{e}; no he escrito nada en el pendrive"))?;
+    }
+
+    if want_kernel {
+        println!(
+            "flash-usb-live: actualizando kernel in situ desde {}…",
+            uefi.display()
+        );
+        package_live::update_esp_from_uefi(uefi, usb).map_err(|e| {
+            format!(
+                "{e}\nflash-usb-live: no pude actualizar el kernel in situ (¿ESP \
+                 sin kernel-x86_64 / KERNEL~1?). Un dd de soso-uefi.img p1 \
+                 (~31 MiB) sobre una ESP live más grande la deja muda. \
+                 Recupera con un flash completo (sin --only)."
+            )
+        })?;
+        crate::fat32_write::drop_path_cache(usb);
+    }
+
+    if want_rootfs {
+        println!(
+            "flash-usb-live: actualizando rootfs (p2) desde {}…",
+            data.display()
+        );
+        package_live::dd_to_partition(data, usb, 2)?;
+        crate::fat32_write::drop_path_cache(usb);
+    }
+    Ok(())
 }
 
 fn usage() -> ! {
@@ -438,8 +472,9 @@ mod tests {
     }
 
     fn require_mkfs_vfat() -> bool {
+        // `-h` sale con 1 en dosfstools 4.x: el test se saltaba siempre.
         Command::new("mkfs.vfat")
-            .arg("-h")
+            .arg("--help")
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
@@ -690,6 +725,196 @@ mod tests {
         assert_eq!(kern[4], 0xDD, "el kernel no se actualizó");
         assert!(kern[32 * 1024..].iter().all(|&b| b == 0), "hueco no rellenado");
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Pendrive live de prueba (p2 de `p2_mb`) con un kernel viejo (0xCC) en la
+    /// ESP, y una imagen UEFI con un kernel nuevo (0xDD).
+    fn live_con_kernel_viejo(dir: &Path, p2_mb: u64) -> (PathBuf, PathBuf) {
+        let usb = dir.join("usb.img");
+        let uefi = dir.join("uefi.img");
+        create_test_live_img(&usb, 40, p2_mb, 8);
+        create_test_live_img(&uefi, 40, 8, 8);
+        format_p1_vfat(&usb);
+        format_p1_vfat(&uefi);
+        let usb_p1 = package_live::partition_first_sector(&usb, 1).unwrap();
+        let uefi_p1 = package_live::partition_first_sector(&uefi, 1).unwrap();
+        let mut viejo = vec![0x7f, b'E', b'L', b'F'];
+        viejo.resize(64 * 1024, 0xCC);
+        let mut nuevo = vec![0x7f, b'E', b'L', b'F'];
+        nuevo.resize(32 * 1024, 0xDD);
+        crate::fat32_write::write_root_file(&usb, usb_p1, b"KERNEL~1", b"   ", &viejo).unwrap();
+        crate::fat32_write::write_root_file(&uefi, uefi_p1, b"KERNEL~1", b"   ", &nuevo)
+            .unwrap();
+        (usb, uefi)
+    }
+
+    fn byte_del_kernel(usb: &Path) -> u8 {
+        let p1 = package_live::partition_first_sector(usb, 1).unwrap();
+        let k = crate::fat32_write::read_root_file(usb, p1, &crate::fat32_write::KERNEL_8_3)
+            .unwrap();
+        k[4]
+    }
+
+    fn rootfs_de(dir: &Path, mb: u64) -> PathBuf {
+        let data = dir.join("soso-data.img");
+        fs::write(&data, vec![0x5Au8; (mb * 1024 * 1024) as usize]).unwrap();
+        data
+    }
+
+    #[test]
+    fn skip_models_sin_sitio_para_el_rootfs_no_toca_la_esp() {
+        if !require_sgdisk() || !require_mkfs_vfat() {
+            eprintln!("skip_models_sin_sitio_para_el_rootfs_no_toca_la_esp: sin sgdisk/mkfs.vfat, omito");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("soso-flash-nocabe-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let (usb, uefi) = live_con_kernel_viejo(&dir, 8);
+        let data = rootfs_de(&dir, 16);
+        let antes = fs::read(&usb).unwrap();
+
+        let err = write_incremental_parts(
+            &usb,
+            &uefi,
+            &data,
+            &[FlashPart::Kernel, FlashPart::Rootfs],
+        )
+        .unwrap_err();
+        assert!(err.contains("no cabe"), "{err}");
+        assert!(err.contains("no he escrito nada"), "{err}");
+        assert_eq!(byte_del_kernel(&usb), 0xCC, "el kernel viejo se pisó");
+        assert!(fs::read(&usb).unwrap() == antes, "el pendrive cambió");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn skip_models_con_sitio_escribe_kernel_y_rootfs() {
+        if !require_sgdisk() || !require_mkfs_vfat() {
+            eprintln!("skip_models_con_sitio_escribe_kernel_y_rootfs: sin sgdisk/mkfs.vfat, omito");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("soso-flash-cabe-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let (usb, uefi) = live_con_kernel_viejo(&dir, 16);
+        let data = rootfs_de(&dir, 8);
+
+        write_incremental_parts(&usb, &uefi, &data, &[FlashPart::Kernel, FlashPart::Rootfs])
+            .unwrap();
+        assert_eq!(byte_del_kernel(&usb), 0xDD, "el kernel no se actualizó");
+        let (p2, _) = package_live::partition_range(&usb, 2).unwrap();
+        let mut f = fs::File::open(&usb).unwrap();
+        f.seek(std::io::SeekFrom::Start(p2 * 512)).unwrap();
+        let mut b = vec![0u8; 8 * 1024 * 1024];
+        f.read_exact(&mut b).unwrap();
+        assert!(b.iter().all(|&x| x == 0x5A), "el rootfs no llegó a p2");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// sosofs de `bloques` bloques de 4 KiB en memoria, con un fichero dentro.
+    fn sosofs_en_memoria(dir: &Path, bloques: u64) -> Vec<u8> {
+        struct Mem(Vec<u8>);
+        impl block_dev::BlockDevice for Mem {
+            fn block_count(&self) -> u64 {
+                (self.0.len() / 4096) as u64
+            }
+            fn read_block(
+                &mut self,
+                b: u64,
+                buf: &mut block_dev::Block,
+            ) -> Result<(), block_dev::BlockError> {
+                let o = b as usize * 4096;
+                buf.copy_from_slice(&self.0[o..o + 4096]);
+                Ok(())
+            }
+            fn write_block(
+                &mut self,
+                b: u64,
+                buf: &block_dev::Block,
+            ) -> Result<(), block_dev::BlockError> {
+                let o = b as usize * 4096;
+                self.0[o..o + 4096].copy_from_slice(buf);
+                Ok(())
+            }
+            fn flush(&mut self) -> Result<(), block_dev::BlockError> {
+                Ok(())
+            }
+        }
+        let src = dir.join("rootfs-src");
+        fs::create_dir_all(src.join("etc")).unwrap();
+        fs::write(src.join("etc/hola"), b"hola").unwrap();
+        let mut dev = Mem(vec![0; bloques as usize * 4096]);
+        sosofs::builder::build_image(&src, &mut dev).unwrap();
+        dev.0
+    }
+
+    #[test]
+    fn el_flash_completo_no_escribe_la_holgura_del_rootfs() {
+        if !require_sgdisk() {
+            eprintln!("el_flash_completo_no_escribe_la_holgura_del_rootfs: sin sgdisk, omito");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("soso-flash-holgura-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // p2 de 8 MiB con un sosofs de 1 MiB: 7 MiB de holgura.
+        let img = dir.join("live.img");
+        create_test_live_img(&img, 4, 8, 4);
+        let rootfs = sosofs_en_memoria(&dir, 256);
+        let (p2, p2_last) = package_live::partition_range(&img, 2).unwrap();
+        let (p3, _) = package_live::partition_range(&img, 3).unwrap();
+        {
+            let mut f = fs::OpenOptions::new().write(true).open(&img).unwrap();
+            f.seek(std::io::SeekFrom::Start(p2 * 512)).unwrap();
+            f.write_all(&rootfs).unwrap();
+            f.seek(std::io::SeekFrom::Start(p3 * 512)).unwrap();
+            f.write_all(&[0x33; 4096]).unwrap();
+        }
+        let len = fs::metadata(&img).unwrap().len();
+
+        let tramos = package_live::live_copy_ranges(&img);
+        let fin_p2 = (p2_last + 1) * 512;
+        assert_eq!(tramos, vec![(0, p2 * 512 + 1024 * 1024), (fin_p2, len - fin_p2)]);
+
+        // Pendrive con restos de un flash anterior (0xEE).
+        let usb = dir.join("usb.img");
+        fs::write(&usb, vec![0xEEu8; len as usize]).unwrap();
+        for (inicio, largo) in tramos {
+            copiar_tramo_dd(&img, &usb, inicio, largo);
+        }
+        let escrito = fs::read(&usb).unwrap();
+        let original = fs::read(&img).unwrap();
+        let fin_rootfs = (p2 * 512 + 1024 * 1024) as usize;
+        assert!(escrito[..fin_rootfs] == original[..fin_rootfs], "cabeza mal copiada");
+        assert!(escrito[fin_rootfs..fin_p2 as usize].iter().all(|&b| b == 0xEE), "holgura escrita");
+        assert!(escrito[fin_p2 as usize..] == original[fin_p2 as usize..], "cola mal copiada");
+        // Y el sosofs sigue montando desde el pendrive.
+        let fs = crate::sosofs_img::montar(&usb, p2, p2_last - p2 + 1).unwrap();
+        assert_eq!(fs.block_count(), 256);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sin_sosofs_en_p2_el_flash_copia_la_imagen_entera() {
+        if !require_sgdisk() {
+            eprintln!("sin_sosofs_en_p2_el_flash_copia_la_imagen_entera: sin sgdisk, omito");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("soso-flash-entera-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("live.img");
+        create_test_live_img(&img, 4, 8, 4);
+        let len = fs::metadata(&img).unwrap().len();
+        assert_eq!(package_live::live_copy_ranges(&img), vec![(0, len)]);
         let _ = fs::remove_dir_all(&dir);
     }
 

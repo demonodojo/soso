@@ -84,6 +84,7 @@ dependencies = [
  "gptdisk",
  "libsoso",
  "soso-update-core",
+ "sosofs",
  "sosomfs",
 ]
 

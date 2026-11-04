@@ -43,6 +43,8 @@ const CHUNK: usize = 512 * 1024;
 const SECTOR: usize = 512;
 /// Índice GPT del rootfs en el live (0 ESP, 1 rootfs, 2 modelos, 3 SOSOINSTALL).
 const GPT_ROOT: usize = 1;
+/// Sectores de 512 B por bloque de sosofs (4 KiB).
+const SOSOFS_BLOCK_SECTORES: u64 = 4096 / SECTOR as u64;
 const SECTORS_PER_MFS_BLOCK: u64 = MFS_BLOCK as u64 / SECTOR as u64;
 const PROGRESS_INTERVAL_MS: u64 = 2000;
 const PROGRESS_STEP_MIB: u64 = 64;
@@ -814,6 +816,26 @@ fn rootfs_sectores(src_id: u32) -> Option<u64> {
 
 /// Copia `bytes` desde LBA 0. Si hay que estirar el rootfs, lo que va detrás de él
 /// (SOSOINSTALL y modelos) se copia `crecer.delta` sectores más allá.
+/// Tramo `[inicio, fin)` de sectores del rootfs del origen que no hace falta
+/// copiar: lo que queda en p2 detrás del último bloque que usa sosofs. En el
+/// live el volumen crece hasta llenar la p2 (con holgura de varios GiB para los
+/// `--skip-models`), y casi todo eso está libre. Lo que haya en el destino en
+/// ese tramo da igual: sosofs no lee un bloque libre sin escribirlo antes.
+fn hueco_rootfs(src_id: u32) -> Option<(u64, u64)> {
+    let (hdr, entries) = read_gpt(src_id)?;
+    let e = gptdisk::entry(&entries, &hdr, GPT_ROOT)?;
+    let (first, last) = (gptdisk::entry_first_lba(e), gptdisk::entry_last_lba(e));
+    let por_bloque = SOSOFS_BLOCK_SECTORES;
+    let usados = sosofs::uso::bloques_en_uso(|b, buf: &mut [u8; 4096]| {
+        sys::disk_read(src_id, first + b * por_bloque, buf) >= 0
+    })?;
+    let inicio = first + usados * por_bloque;
+    if inicio > last {
+        return None;
+    }
+    Some((inicio, last + 1))
+}
+
 fn clonar(src_id: u32, dst_id: u32, bytes: u64, crecer: GrowRoot) -> bool {
     // En el heap, no en la pila: la pila de usuario son 64 KiB.
     let mut buf = vec![0u8; CHUNK];
@@ -829,10 +851,21 @@ fn clonar(src_id: u32, dst_id: u32, bytes: u64, crecer: GrowRoot) -> bool {
     } else {
         (total_sectores, 0)
     };
-    let tramos = [
-        (0u64, 0u64, cabeza),
-        (cabeza, cabeza + desplazar, total_sectores - cabeza),
-    ];
+    // (origen, destino, sectores). La cola libre del rootfs no se copia.
+    let mut tramos: Vec<(u64, u64, u64)> = Vec::new();
+    match hueco_rootfs(src_id) {
+        Some((h0, h1)) if h1 <= cabeza => {
+            println!(
+                "  rootfs: omito {} MiB libres de la partición",
+                (h1 - h0) / 2048
+            );
+            tramos.push((0, 0, h0));
+            tramos.push((h1, h1, cabeza - h1));
+        }
+        _ => tramos.push((0, 0, cabeza)),
+    }
+    tramos.push((cabeza, cabeza + desplazar, total_sectores - cabeza));
+    let bytes: u64 = tramos.iter().map(|t| t.2 * SECTOR as u64).sum();
     let mut hecho = 0u64;
     for (src_lba, dst_lba, sectores) in tramos {
         if !copiar_tramo(

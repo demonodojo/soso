@@ -19,6 +19,7 @@
 extern crate alloc;
 
 pub mod layout;
+pub mod uso;
 
 mod cache;
 mod fs;

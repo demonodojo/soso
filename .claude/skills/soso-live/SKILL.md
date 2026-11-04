@@ -39,7 +39,7 @@ sólo lo que es del medio: particiones, ficheros de la ESP, shim y USB.
 | # | Nombre | Contenido |
 |---|--------|-----------|
 | 1 | ESP (FAT) | `BOOTX64.EFI` (shim) + `bootsoso.efi` + huecos 8.3 |
-| 2 | sosofs | rootfs |
+| 2 | sosofs | rootfs; la partición mide `max(2 × rootfs, rootfs + 4 GiB)` (recortada si no cabe con el modelo) para que los `--skip-models` sigan cabiendo; el kernel estira sosofs hasta llenarla |
 | 4 | `SOSOINSTALL` (FAT) | `install-soso.sh` para Linux; **tras el rootfs, no al final** |
 | 3 | sosomfs | modelos (se estira al flashear; grow del superbloque al montar) |
 
@@ -181,6 +181,7 @@ Userspace: `user/coreutils/src/bin/soso-install.rs`.
    Linux, Windows, vacío) y particiones. Sin destino, pide al usuario cuál.
 2. Destino **solo NVMe**, nunca el disco de arranque; `--force` si hay otro SO.
 3. Clona el live (prefijo usado hasta el fin de los modelos empaquetados;
+   salta la cola libre de p2 tras el último bloque ocupado de sosofs, `sosofs::uso`;
    omite cola vacía de p3); `gptdisk::relayout` (respaldo GPT al final, p3
    estirada, **GUID nuevos** — si no, el firmware no distingue USB y destino).
    Transferencias USB: READ(10) hasta 512 KiB con TRBs encadenados; progreso
@@ -290,6 +291,13 @@ cargo xtask hw-matrix show
 > agrandarlo; si no hay clusters, el ELF tiene que caber o hace falta un
 > flash completo. No hace `dd` de `soso-uefi.img` p1 (~31 MiB) sobre la ESP
 > live (run17). Ver `docs/DIAGNOSTICO-ROG-2026-09-10.md` run17.
+
+> **`--skip-models` comprueba antes de escribir.** Si el rootfs nuevo no cabe
+> en la p2 del stick, se niega sin tocar nada («no he escrito nada en el
+> pendrive»). Antes escribía el kernel y luego abortaba el rootfs: kernel nuevo
+> + rootfs viejo, e `init` moría con NX (`docs/DIAGNOSTICO-ROG-2026-11-04.md`).
+> Los sticks flasheados antes de la holgura de p2 necesitan un flash completo.
+> El flash completo no escribe la holgura (`package_live::live_copy_ranges`).
 
 No `sudo cargo`: root no tiene rustup. `cargo xtask flash-usb-live …` pide
 sudo solo para grabar el disco (HOME/PATH salen de `SUDO_UID` si ya eres root).

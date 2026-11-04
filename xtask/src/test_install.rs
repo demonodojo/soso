@@ -33,6 +33,15 @@ const MAC: &str = "52:54:00:12:34:42";
 /// hace falta un destino de más de ~10 GiB para que un cuarto sea mayor que eso.
 const TARGET_MARGIN_BYTES: u64 = 12 * 1024 * 1024 * 1024;
 
+/// Tamaño del NVMe de prueba: el live más [`TARGET_MARGIN_BYTES`], y como
+/// mínimo lo justo para que un cuarto del disco supere la p2 del live (que
+/// lleva holgura para `--skip-models`); si no, el instalador no estira el
+/// rootfs —nunca encoge— y la prueba no puede ver que lo hace.
+fn tamano_destino(live_bytes: u64, live_p2_bytes: u64) -> u64 {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    (live_bytes + TARGET_MARGIN_BYTES).max(4 * live_p2_bytes + 4 * GIB)
+}
+
 pub fn run() {
     let root = crate::project_root();
     let dir = root.join("target/test-install");
@@ -66,7 +75,12 @@ pub fn run() {
     std::fs::copy(&ovmf_vars_src, &vars).expect("copiar OVMF_VARS");
 
     let target = dir.join("nvme-target.img");
-    let target_bytes = std::fs::metadata(&live).expect("tamaño del live").len() + TARGET_MARGIN_BYTES;
+    let target_bytes = tamano_destino(
+        std::fs::metadata(&live).expect("tamaño del live").len(),
+        crate::package_live::partition_range(&live, 2)
+            .map(|(a, b)| (b - a + 1) * 512)
+            .unwrap_or(0),
+    );
     crear_vacia(&target, target_bytes);
     // Segundo NVMe haciéndose pasar por el disco de Linux: el instalador tiene
     // que negarse a tocarlo, que es justo lo que no puede fallar nunca.
