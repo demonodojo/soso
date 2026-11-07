@@ -498,32 +498,6 @@ pub(crate) fn live_root_partition_bytes(data_len: u64, models_len: u64, usb_byte
     rootfs + holgura
 }
 
-/// Tramos `(byte inicial, longitud)` de la imagen live que hay que escribir en
-/// el pendrive: toda la imagen salvo la holgura de p2 detrás del sosofs.
-///
-/// La holgura son ceros dispersos y por USB 2.0 cuesta minutos escribirlos.
-/// Lo que quede ahí de un flash anterior da igual: al crecer, sosofs da por
-/// libres los bloques nuevos y los escribe antes de leerlos. Si la imagen no
-/// trae un sosofs legible en p2, se copia entera.
-pub(crate) fn live_copy_ranges(img: &Path) -> Vec<(u64, u64)> {
-    let len = std::fs::metadata(img).map(|m| m.len()).unwrap_or(0);
-    let entera = vec![(0, len)];
-    let Some((first, last)) = partition_range(img, 2) else {
-        return entera;
-    };
-    let sectores = last - first + 1;
-    let Ok(fs) = crate::sosofs_img::montar(img, first, sectores) else {
-        return entera;
-    };
-    let usado = fs.block_count() * block_dev::BLOCK_SIZE as u64;
-    let fin_rootfs = first * 512 + usado;
-    let fin_p2 = (last + 1) * 512;
-    if usado >= sectores * 512 || fin_p2 >= len {
-        return entera;
-    }
-    vec![(0, fin_rootfs), (fin_p2, len - fin_p2)]
-}
-
 fn live_image_bytes(data: &Path, models: &Path, usb_bytes: Option<u64>) -> u64 {
     let data_len = std::fs::metadata(data).expect("data").len();
     let models_len = std::fs::metadata(models).expect("models").len();

@@ -38,7 +38,11 @@
 #define GSP_3D_CT_MEM_LAYOUT_PITCH           (1u << 12)
 #define GSP_3D_CLEAR_RGBA                    (0x3cu) /* R+G+B+A enable */
 #define GSP_3D_CT_SELECT_ONE                 0x1u    /* count=1, target0=0 */
-#define GSP_3D_REPORT_RELEASE_WRITES         0x10u   /* RELEASE | writes complete */
+/* clc597.h NVC597_SET_REPORT_SEMAPHORE_D: bit 4 es RELEASE
+ * (AFTER_ALL_PRECEEDING_WRITES_COMPLETE) y bits 15:12 son
+ * PIPELINE_LOCATION. ALL es 0xF. Con la ubicación a cero el release
+ * queda en NONE y el semáforo no sube. */
+#define GSP_3D_REPORT_RELEASE_WRITES         (0x10u | (0xFu << 12))
 
 #define GSP_3D_WAIT_MS 5000u
 

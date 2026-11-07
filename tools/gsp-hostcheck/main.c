@@ -3098,13 +3098,36 @@ static int check_3d_encode(void)
     c.pushbuf.size = sizeof(pb);
     c.ready = 1;
     c.pb_pos = 0;
+    memset(pb, 0, sizeof(pb));
     if (gsp_3d_selftest_encode(&c, BLACKWELL_3D_B, 0x80100000ull, 64u, 64u, 256u,
                                0xff00ff00u, 0x80200000ull, 1u) != 0) {
         printf("FALLO: gsp_3d_selftest_encode (cabecera SET_OBJECT)\n");
         return -1;
     }
-    printf("OK: pushbuffer 3D CLEAR_SURFACE (cls Blackwell 0x%04x)\n",
-           BLACKWELL_3D_B);
+    if (GSP_3D_REPORT_RELEASE_WRITES != (0x10u | (0xFu << 12))) {
+        printf("FALLO: SET_REPORT_SEMAPHORE_D = 0x%x sin PIPELINE_LOCATION_ALL\n",
+               GSP_3D_REPORT_RELEASE_WRITES);
+        return -1;
+    }
+    {
+        unsigned i;
+        int found = 0;
+
+        for (i = 0; i + 4 <= (unsigned)sizeof(pb); i += 4) {
+            uint32_t w;
+
+            memcpy(&w, pb + i, 4);
+            if (w == GSP_3D_REPORT_RELEASE_WRITES)
+                found = 1;
+        }
+        if (!found) {
+            printf("FALLO: el clear 3D no escribe 0x%x en SET_REPORT_SEMAPHORE_D\n",
+                   GSP_3D_REPORT_RELEASE_WRITES);
+            return -1;
+        }
+    }
+    printf("OK: pushbuffer 3D CLEAR_SURFACE (cls Blackwell 0x%04x, semáforo 0x%x)\n",
+           BLACKWELL_3D_B, GSP_3D_REPORT_RELEASE_WRITES);
     return 0;
 }
 

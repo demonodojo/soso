@@ -72,6 +72,10 @@ fn bombeo_red_bsp() {
     crate::net::poll();
     #[cfg(feature = "lxdde")]
     crate::lxdde::wifi::poll();
+    // Un escaneo WiFi tarda segundos y `sosh` no lee la entrada mientras
+    // espera: el teclado USB no tiene interrupción y se quedaba en el xHCI
+    // hasta que acabara. Sólo se llama desde esperas en syscall, no desde la IRQ.
+    crate::drivers::kbd::poll_devices_espera();
 }
 
 pub fn sleep_ms(ms: u32) {

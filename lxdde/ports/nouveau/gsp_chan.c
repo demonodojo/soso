@@ -321,21 +321,23 @@ static void chan_probe_usermode(void)
               "doorbell 0x%06x es una dirección real\n", NV_VFN_DOORBELL);
 }
 
-/* `gv100_vmm_join` (lo usa `tu102_vmm`, que es la MMU de Ampere en Linux):
- * el directorio queda en el bloque de instancia en +0x200, y Volta+ lo lee
- * en la ranura 0 de +0x2a0. RM escribe +0x200 al crear el canal —el CE
- * traduce con eso—. Si la ranura sigue a 0 o a 1, el GR no tiene directorio,
+/* `gv100_vmm_join` (lo usa `gh100_vmm` / `tu102_vmm` en Linux): el directorio
+ * queda en el bloque de instancia en +0x200, y Volta+ lo lee en la ranura 0
+ * de +0x2a0. RM escribe +0x200 al crear el canal —el CE traduce con eso—. Si
+ * la ranura +0x2a0 sigue vacía o distinta, el GR no tiene directorio unido,
  * la falta de MMU retiene el mutex y el PBDMA acaba en HANG_DURING_HTE.
- * Solo el canal de GR en Ampere: Blackwell ya lanza con lo que dejó RM. */
+ * Ampere y GB20x (Blackwell): ambos usan `.join = gv100_vmm_join`. */
 static void chan_join_gr_pdb(struct gsp_chan *c)
 {
     uint64_t pdb, slot;
     uint32_t mask_lo;
+    enum nv_family fam;
 
     if (!c || c->engine != NV2080_ENGINE_TYPE_GR0 || !c->inst_addr) {
         return;
     }
-    if (gsp_nv_family_current() != NV_FAM_AMPERE || !gsp_pramin_alive()) {
+    fam = gsp_nv_family_current();
+    if ((fam != NV_FAM_AMPERE && fam != NV_FAM_BLACKWELL) || !gsp_pramin_alive()) {
         return;
     }
     pdb = (uint64_t)gsp_pramin_rd32(c->inst_addr + 0x200u);

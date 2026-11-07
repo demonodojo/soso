@@ -1128,6 +1128,11 @@ fn wifi_setup_interactivo(forzar: bool) {
             return;
         }
     };
+    // Enter en línea vacía es Some(""), no None (None es Ctrl-D). El prompt
+    // promete que Enter omite.
+    if eleccion.trim().is_empty() {
+        return;
+    }
     let idx = match eleccion.trim().parse::<usize>() {
         Ok(n) if n >= 1 && n <= redes.len() => n - 1,
         _ => {

@@ -59,6 +59,11 @@ build unclaimed \
 echo "=== iwl unclaimed PCI hostcheck ==="
 run unclaimed
 
+build poll_us \
+    "$root/tools/iwl-hostcheck/poll_us_test.c"
+echo "=== iwl poll µs hostcheck ==="
+run poll_us
+
 build load_8000 \
     "$root/tools/iwl-hostcheck/load_8000_test.c" \
     "$src/iwl_trans_8000.c"

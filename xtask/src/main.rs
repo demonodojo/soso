@@ -14,6 +14,10 @@ use std::process::{Command, exit};
 mod heap_scan;
 
 #[cfg(test)]
+#[path = "../../kernel/src/drivers/rtl_xid.rs"]
+mod rtl_xid;
+
+#[cfg(test)]
 mod heap_hueco;
 
 mod sal;

@@ -4,18 +4,18 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out="$root/target/rtl-hostcheck"
-fw="$root/rootfs/lib/firmware/rtl_nic/rtl8168h-2.fw"
-
 mkdir -p "$out"
-
-if [[ ! -f "$fw" ]]; then
-  echo "falta $fw — ./scripts/l6-pack-rtl-fw.sh" >&2
-  exit 1
-fi
 
 cc -O1 -Wall -Wextra -o "$out/phy_fw_test" "$root/tools/rtl-hostcheck/phy_fw_test.c"
 echo "=== rtl PHY firmware hostcheck ==="
-"$out/phy_fw_test" "$fw"
+for name in rtl8168h-2.fw rtl8125a-3.fw rtl8125b-2.fw; do
+  fw="$root/rootfs/lib/firmware/rtl_nic/$name"
+  if [[ ! -f "$fw" ]]; then
+    echo "falta $fw — ./scripts/l6-pack-rtl-fw.sh" >&2
+    exit 1
+  fi
+  "$out/phy_fw_test" "$fw"
+done
 
 src="$root/kernel/src/drivers/rtl8169.rs"
 for needle in 0x808a 0x0811 0x0a42 0x0bcf 0x0bcd; do

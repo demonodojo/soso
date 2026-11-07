@@ -2,6 +2,7 @@
 #include "iwl_internal.h"
 #include "iwl_ax211.h"
 #include "lx_emul.h"
+#include "iwl_poll.h"
 
 #ifndef IWL_HOSTCHECK_SRAM_BYTES
 #define IWL_HOSTCHECK_SRAM_BYTES 0
@@ -58,15 +59,20 @@ static uint32_t iwl_read_prph_no_grab(struct iwl_ax211_priv *iwl, uint32_t addr)
     return iwl_read32(iwl, HBUS_TARG_PRPH_RDAT);
 }
 
-static int iwl_poll_bit(struct iwl_ax211_priv *iwl, uint32_t off, uint32_t mask,
-                        uint32_t want, int ms)
+static uint32_t iwl_poll_read(void *ctx, uint32_t off)
 {
-    while (ms-- > 0) {
-        if ((iwl_read32(iwl, off) & mask) == want)
-            return 0;
-        lx_mdelay(1);
-    }
-    return -1;
+    return iwl_read32(ctx, off);
+}
+
+static int iwl_poll_bit(struct iwl_ax211_priv *iwl, uint32_t off, uint32_t mask,
+                        uint32_t want, int timeout_us)
+{
+    /* iwl_poll_bit_us devuelve los µs esperados si el bit llega (0 si ya
+     * estaba, >0 si hubo que esperar) y -1 si vence. Linux mira `err < 0`.
+     * Aquí 0 = listo: grab/finish/prepare comparan contra cero. */
+    int waited = iwl_poll_bit_us(iwl_poll_read, iwl, off, mask, want, timeout_us);
+
+    return waited < 0 ? -1 : 0;
 }
 
 static void iwl_set_bit(struct iwl_ax211_priv *iwl, uint32_t off, uint32_t mask)
@@ -87,7 +93,8 @@ static int iwl_grab_nic_access(struct iwl_ax211_priv *iwl)
 
     iwl_set_bit(iwl, CSR_GP_CNTRL, CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ);
     lx_udelay(2);
-    if (iwl_poll_bit(iwl, CSR_GP_CNTRL, mask, poll, 15) != 0) {
+    /* Linux `iwl_trans_pcie_grab_nic_access`: 15000 µs. */
+    if (iwl_poll_bit(iwl, CSR_GP_CNTRL, mask, poll, 15000) != 0) {
         lx_printk("iwl_trans: grab_nic_access timeout GP=0x%08x\n",
                   iwl_read32(iwl, CSR_GP_CNTRL));
         return -1;
@@ -344,12 +351,13 @@ void iwl_trans_dump_fw_errors(struct iwl_ax211_priv *iwl)
 
 static int iwl_prepare_card_hw(struct iwl_ax211_priv *iwl)
 {
+    /* Linux `HW_READY_TIMEOUT`: 50 µs. */
     if (iwl_poll_bit(iwl, CSR_HW_IF_CONFIG_REG, CSR_HW_IF_CONFIG_REG_BIT_NIC_READY,
-                     CSR_HW_IF_CONFIG_REG_BIT_NIC_READY, 200) == 0)
+                     CSR_HW_IF_CONFIG_REG_BIT_NIC_READY, 50) == 0)
         return 0;
     iwl_set_bit(iwl, CSR_HW_IF_CONFIG_REG, CSR_HW_IF_CONFIG_REG_BIT_NIC_READY);
     if (iwl_poll_bit(iwl, CSR_HW_IF_CONFIG_REG, CSR_HW_IF_CONFIG_REG_BIT_NIC_READY,
-                     CSR_HW_IF_CONFIG_REG_BIT_NIC_READY, 200) != 0) {
+                     CSR_HW_IF_CONFIG_REG_BIT_NIC_READY, 50) != 0) {
         lx_printk("iwl_trans: NIC no listo\n");
         return -1;
     }
@@ -389,7 +397,8 @@ static void iwl_sw_reset(struct iwl_ax211_priv *iwl)
 
 static int iwl_finish_nic_init(struct iwl_ax211_priv *iwl)
 {
-    /* iwl_finish_nic_init: set_bit INIT_DONE, poll MAC_CLOCK_READY 25 s. */
+    /* Linux `iwl_finish_nic_init`: 25000 µs = 25 ms. */
+    lx_printk("iwl_trans: finish_nic_init, esperando MAC_CLOCK_READY\n");
     iwl_set_bit(iwl, CSR_GP_CNTRL, CSR_GP_CNTRL_REG_FLAG_INIT_DONE);
     if (iwl_poll_bit(iwl, CSR_GP_CNTRL, CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY,
                      CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY, 25000) != 0) {

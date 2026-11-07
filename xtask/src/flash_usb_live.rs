@@ -34,6 +34,7 @@ pub fn run(args: &[String]) {
     if !crate::as_user::is_root() {
         install_disk::validate_device(&usb, parsed.yes, None, confirm, false);
         prepare(&usb, &parsed);
+        confirmar_sudo();
         crate::as_user::exec_elevated();
     }
 
@@ -47,6 +48,24 @@ pub fn run(args: &[String]) {
         prepare(&usb, &parsed);
     }
     write_usb(&usb, &parsed);
+}
+
+/// Pide confirmación justo antes de la contraseña de sudo. El empaquetado
+/// tarda minutos y, si la contraseña llega sin nadie delante, sudo se cierra
+/// por timeout. Sin TTY (no hay quien responda) no pregunta.
+fn confirmar_sudo() {
+    use std::io::{BufRead, IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return;
+    }
+    print!("\nflash-usb-live: el empaquetado ha terminado. ¿Estás listo para escribir la contraseña de sudo? [s/N] ");
+    let _ = std::io::stdout().flush();
+    let mut linea = String::new();
+    let _ = std::io::stdin().lock().read_line(&mut linea);
+    if !matches!(linea.trim().to_lowercase().as_str(), "s" | "si" | "sí" | "y" | "yes") {
+        eprintln!("flash-usb-live: cancelado antes de grabar; no se ha escrito nada en el pendrive.");
+        exit(1);
+    }
 }
 
 fn prepare(usb: &Path, parsed: &ParsedArgs) {
@@ -206,17 +225,19 @@ fn write_full(usb: &Path) {
     }
 
     println!("flash-usb-live: escribiendo {} → {}", live.display(), usb.display());
-    let tramos = package_live::live_copy_ranges(&live);
-    if let [_, (fin_p2, _)] = tramos.as_slice() {
-        let omito = fin_p2 - tramos[0].1;
-        println!(
-            "flash-usb-live: omito {} MiB de holgura vacía del rootfs",
-            omito / (1024 * 1024)
-        );
-    }
-    for (inicio, largo) in tramos {
-        copiar_tramo_dd(&live, usb, inicio, largo);
-    }
+    install_disk::run_cmd(
+        Command::new("dd")
+            .arg(format!("if={}", live.display()))
+            .arg(format!("of={}", usb.display()))
+            .args([
+                "bs=1M",
+                "status=progress",
+                "iflag=direct",
+                "oflag=direct",
+                "conv=fsync",
+            ]),
+        "dd",
+    );
     crate::fat32_write::drop_path_cache(usb);
     install_disk::run_cmd(&mut Command::new("sync"), "sync");
 
@@ -284,27 +305,6 @@ fn write_incremental(usb: &Path, parts: &[FlashPart]) {
         usb.display()
     );
     install_disk::release_removable(usb);
-}
-
-/// Copia `largo` bytes de `img` desde `inicio` al mismo sitio de `dev`.
-/// E/S directa sólo si el tramo va alineado a 4 KiB: en un disco 4Kn un
-/// O_DIRECT a 512 B falla.
-fn copiar_tramo_dd(img: &Path, dev: &Path, inicio: u64, largo: u64) {
-    let directo = inicio % 4096 == 0 && largo % 4096 == 0;
-    let mut cmd = Command::new("dd");
-    cmd.arg(format!("if={}", img.display()))
-        .arg(format!("of={}", dev.display()))
-        .args(["bs=1M", "status=progress", "conv=fsync,notrunc"])
-        .arg(if directo {
-            "iflag=direct,skip_bytes,count_bytes"
-        } else {
-            "iflag=skip_bytes,count_bytes"
-        })
-        .arg(if directo { "oflag=direct,seek_bytes" } else { "oflag=seek_bytes" })
-        .arg(format!("skip={inicio}"))
-        .arg(format!("seek={inicio}"))
-        .arg(format!("count={largo}"));
-    install_disk::run_cmd(&mut cmd, "dd");
 }
 
 /// Escribe en el pendrive las partes pedidas, pero sólo después de comprobar
@@ -814,107 +814,6 @@ mod tests {
         f.read_exact(&mut b).unwrap();
         assert!(b.iter().all(|&x| x == 0x5A), "el rootfs no llegó a p2");
 
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    /// sosofs de `bloques` bloques de 4 KiB en memoria, con un fichero dentro.
-    fn sosofs_en_memoria(dir: &Path, bloques: u64) -> Vec<u8> {
-        struct Mem(Vec<u8>);
-        impl block_dev::BlockDevice for Mem {
-            fn block_count(&self) -> u64 {
-                (self.0.len() / 4096) as u64
-            }
-            fn read_block(
-                &mut self,
-                b: u64,
-                buf: &mut block_dev::Block,
-            ) -> Result<(), block_dev::BlockError> {
-                let o = b as usize * 4096;
-                buf.copy_from_slice(&self.0[o..o + 4096]);
-                Ok(())
-            }
-            fn write_block(
-                &mut self,
-                b: u64,
-                buf: &block_dev::Block,
-            ) -> Result<(), block_dev::BlockError> {
-                let o = b as usize * 4096;
-                self.0[o..o + 4096].copy_from_slice(buf);
-                Ok(())
-            }
-            fn flush(&mut self) -> Result<(), block_dev::BlockError> {
-                Ok(())
-            }
-        }
-        let src = dir.join("rootfs-src");
-        fs::create_dir_all(src.join("etc")).unwrap();
-        fs::write(src.join("etc/hola"), b"hola").unwrap();
-        let mut dev = Mem(vec![0; bloques as usize * 4096]);
-        sosofs::builder::build_image(&src, &mut dev).unwrap();
-        dev.0
-    }
-
-    #[test]
-    fn el_flash_completo_no_escribe_la_holgura_del_rootfs() {
-        if !require_sgdisk() {
-            eprintln!("el_flash_completo_no_escribe_la_holgura_del_rootfs: sin sgdisk, omito");
-            return;
-        }
-        let dir = std::env::temp_dir().join(format!("soso-flash-holgura-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-
-        // p2 de 8 MiB con un sosofs de 1 MiB: 7 MiB de holgura.
-        let img = dir.join("live.img");
-        create_test_live_img(&img, 4, 8, 4);
-        let rootfs = sosofs_en_memoria(&dir, 256);
-        let (p2, p2_last) = package_live::partition_range(&img, 2).unwrap();
-        let (p3, _) = package_live::partition_range(&img, 3).unwrap();
-        {
-            let mut f = fs::OpenOptions::new().write(true).open(&img).unwrap();
-            f.seek(std::io::SeekFrom::Start(p2 * 512)).unwrap();
-            f.write_all(&rootfs).unwrap();
-            f.seek(std::io::SeekFrom::Start(p3 * 512)).unwrap();
-            f.write_all(&[0x33; 4096]).unwrap();
-        }
-        let len = fs::metadata(&img).unwrap().len();
-
-        let tramos = package_live::live_copy_ranges(&img);
-        let fin_p2 = (p2_last + 1) * 512;
-        assert_eq!(tramos, vec![(0, p2 * 512 + 1024 * 1024), (fin_p2, len - fin_p2)]);
-
-        // Pendrive con restos de un flash anterior (0xEE).
-        let usb = dir.join("usb.img");
-        fs::write(&usb, vec![0xEEu8; len as usize]).unwrap();
-        for (inicio, largo) in tramos {
-            copiar_tramo_dd(&img, &usb, inicio, largo);
-        }
-        let escrito = fs::read(&usb).unwrap();
-        let original = fs::read(&img).unwrap();
-        let fin_rootfs = (p2 * 512 + 1024 * 1024) as usize;
-        assert!(escrito[..fin_rootfs] == original[..fin_rootfs], "cabeza mal copiada");
-        assert!(escrito[fin_rootfs..fin_p2 as usize].iter().all(|&b| b == 0xEE), "holgura escrita");
-        assert!(escrito[fin_p2 as usize..] == original[fin_p2 as usize..], "cola mal copiada");
-        // Y el sosofs sigue montando desde el pendrive.
-        let fs = crate::sosofs_img::montar(&usb, p2, p2_last - p2 + 1).unwrap();
-        assert_eq!(fs.block_count(), 256);
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn sin_sosofs_en_p2_el_flash_copia_la_imagen_entera() {
-        if !require_sgdisk() {
-            eprintln!("sin_sosofs_en_p2_el_flash_copia_la_imagen_entera: sin sgdisk, omito");
-            return;
-        }
-        let dir = std::env::temp_dir().join(format!("soso-flash-entera-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let img = dir.join("live.img");
-        create_test_live_img(&img, 4, 8, 4);
-        let len = fs::metadata(&img).unwrap().len();
-        assert_eq!(package_live::live_copy_ranges(&img), vec![(0, len)]);
         let _ = fs::remove_dir_all(&dir);
     }
 

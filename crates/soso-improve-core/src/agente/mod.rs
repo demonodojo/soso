@@ -368,15 +368,33 @@ pub fn correr_con_originales<E: Entorno, M: Modelo, R: Reloj>(
             break;
         };
         let texto = msg.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
-        let llamadas: Vec<Value> = msg.get("tool_calls").and_then(|t| t.as_array()).cloned().unwrap_or_default();
+        let mut llamadas: Vec<Value> = msg.get("tool_calls").and_then(|t| t.as_array()).cloned().unwrap_or_default();
+        // El protocolo es una llamada por turno. El servidor de soso rechaza el resto con 400; LM Studio las
+        // ejecuta todas y una respuesta de TwIL (hasta 35 `bash` o `read`) agota las 60 herramientas del intento.
+        // Se atiende la primera y se le dice al modelo que las demás no se han hecho.
+        let sobrantes = llamadas.len().saturating_sub(1);
+        if sobrantes > 0 {
+            llamadas.truncate(1);
+        }
         let mut asistente = json!({"role": "assistant", "content": texto});
         if !llamadas.is_empty() {
+            // Un argumento `null` (TwIL, R44: `"limit": null`) no puede ni ejecutarse ni reenviarse: la plantilla Jinja
+            // hace `args_value | string` y LM Studio no aplica ese filtro a null, así que cada reenvío contesta 400.
+            for ll in llamadas.iter_mut() {
+                if let Ok(s) = argumentos_limpios(ll.pointer("/function/arguments")) {
+                    ll["function"]["arguments"] = Value::String(s);
+                }
+            }
             // Una llamada con el JSON roto (cortada por `max_tokens` o atascada repitiendo un carácter: campaña 59, R43 con Qwen) NO puede quedar en el historial:
             // llama-server la vuelve a leer en cada petición y contesta 500 «Failed to parse tool call arguments» para siempre. En el historial va `{}`; el
-            // error se le dice al modelo en el resultado de esa llamada.
+            // error se le dice al modelo en el resultado de esa llamada, a partir de los argumentos originales.
             let mut saneadas = llamadas.clone();
             for ll in saneadas.iter_mut() {
-                let rota = ll.pointer("/function/arguments").and_then(|a| a.as_str()).map_or(false, |a| serde_json::from_str::<Value>(a).is_err());
+                let rota = match ll.pointer("/function/arguments") {
+                    Some(Value::String(s)) => serde_json::from_str::<Value>(s).is_err(),
+                    Some(_) => true,
+                    None => false,
+                };
                 if rota {
                     ll["function"]["arguments"] = Value::String(String::from("{}"));
                 }
@@ -624,6 +642,11 @@ pub fn correr_con_originales<E: Entorno, M: Modelo, R: Reloj>(
                 }
             };
             mensajes.push(json!({"role": "tool", "tool_call_id": id, "content": r.texto}));
+        }
+        if sobrantes > 0 {
+            mensajes.push(json!({"role": "user", "content": format!(
+                "Has pedido {sobrantes} llamada(s) más en el mismo turno y no las he ejecutado. En cada respuesta va una sola llamada: espera este resultado y pide la siguiente."
+            )}));
         }
         al_turno(e, &mensajes);
         if atascado && informe.redirecciones < 2 && (!hubo_edicion(&mensajes) || sin_codigo_nuevo(e, &pol.raiz, &originales)) {
@@ -939,6 +962,40 @@ fn aviso_de_repeticion(herramienta: &str, veces: usize) -> String {
         _ => "Cambia los argumentos o usa otra herramienta.",
     };
     format!("No he ejecutado esta llamada: es la misma que ya falló {} veces seguidas y volvería a fallar. {consejo}", veces - 1)
+}
+
+/// Argumentos que se pueden reenviar a un servidor OpenAI-compatible: un objeto JSON en cadena, sin `null`.
+///
+/// `Err` si no hay objeto (JSON roto, ausente o de otro tipo). El historial guarda entonces `{}` cuando
+/// algo sí llegó, para no envenenar la petición siguiente.
+fn argumentos_limpios(crudo: Option<&Value>) -> Result<String, ()> {
+    let mut v = match crudo {
+        Some(Value::String(s)) => serde_json::from_str::<Value>(s).map_err(|_| ())?,
+        Some(Value::Object(o)) => Value::Object(o.clone()),
+        _ => return Err(()),
+    };
+    if !v.is_object() {
+        return Err(());
+    }
+    quitar_nulos(&mut v);
+    Ok(v.to_string())
+}
+
+fn quitar_nulos(v: &mut Value) {
+    match v {
+        Value::Object(m) => {
+            m.retain(|_, val| !val.is_null());
+            for val in m.values_mut() {
+                quitar_nulos(val);
+            }
+        }
+        Value::Array(a) => {
+            for val in a {
+                quitar_nulos(val);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Tokens que ocupa la conversación, por exceso (una cadena de código o castellano da ~3,5 caracteres por token).

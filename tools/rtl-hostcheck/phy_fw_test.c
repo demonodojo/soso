@@ -158,8 +158,8 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	printf("OK: rtl8168h-2.fw magic=%u start=%zu opcodes=%zu\n",
-	       info->magic, start, nwords);
+	printf("OK: %s magic=%u start=%zu opcodes=%zu\n",
+	       path, info->magic, start, nwords);
 	free(data);
 
 	if (rlen_pack(0) != 0 || rlen_pack(3) != 0) {

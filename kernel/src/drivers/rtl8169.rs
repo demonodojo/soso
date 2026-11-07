@@ -1,9 +1,13 @@
-//! Realtek RTL8111/8168/8211/8411 (familia Linux `r8169`) — TX/RX polled.
+//! Realtek RTL8111/8168/8211/8411 y RTL8125 (familia Linux `r8169`) — TX/RX polled.
 //!
 //! Bring-up calcado de `drivers/net/ethernet/realtek/r8169_main.c`: reset por
 //! `ChipCmd`, anillos de descriptores Own/EOR, `TxPoll` NPQ, ERI/`RXDV_GATED_EN`
-//! en 8168G/H, MDIO por PHYAR o GPHY OCP según el XID de `TxConfig`.
+//! en 8168G/H, OCP y ephy de VER_61/VER_63 en el 8125, MDIO por PHYAR o GPHY OCP
+//! según el XID de `TxConfig`.
 //! No mueve tráfico si el enlace PHY sigue DOWN (cable).
+
+#[path = "rtl_xid.rs"]
+mod rtl_xid;
 
 use crate::arch::irq;
 use crate::drivers::{dma, pci};
@@ -14,7 +18,6 @@ use core::sync::atomic::{AtomicBool, Ordering, compiler_fence};
 use spin::{Mutex, Once};
 
 const VENDOR_REALTEK: u16 = 0x10ec;
-const DEVICE_IDS: &[u16] = &[0x8168, 0x8161, 0x8162, 0x8167, 0x8136];
 
 const BAR_MMIO: u8 = 2;
 
@@ -26,9 +29,15 @@ const REG_CHIPCMD: u32 = 0x37;
 const REG_TXPOLL: u32 = 0x38;
 const REG_INTRMASK: u32 = 0x3c;
 const REG_INTRSTATUS: u32 = 0x3e;
+/// Linux `enum rtl8125_registers`. En el 8168, 0x38 es TxPoll y 0x3c la máscara.
+const REG_INTRMASK_8125: u32 = 0x38;
+const REG_INTRSTATUS_8125: u32 = 0x3c;
+const REG_TXPOLL_8125: u32 = 0x90;
+const REG_MAC0_BKP: u32 = 0x19e0;
 const REG_TXCONFIG: u32 = 0x40;
 const REG_RXCONFIG: u32 = 0x44;
 const REG_CFG9346: u32 = 0x50;
+const REG_CONFIG1: u32 = 0x52;
 const REG_CONFIG2: u32 = 0x53;
 const REG_CONFIG3: u32 = 0x54;
 const REG_CONFIG5: u32 = 0x56;
@@ -73,6 +82,11 @@ const RX128_INT_EN: u32 = 1 << 15;
 const RX_MULTI_EN: u32 = 1 << 14;
 const RX_EARLY_OFF: u32 = 1 << 11;
 const RX_DMA_BURST: u32 = 7 << 8;
+/// Linux `RX_FETCH_DFLT_8125` (8 << 27). En 8125B el bit 11 es pause-slot.
+const RX_FETCH_DFLT_8125: u32 = 8 << 27;
+const RX_PAUSE_SLOT_ON: u32 = 1 << 11;
+const LINK_LIST_RDY: u8 = 1 << 1;
+const RXTX_EMPTY: u8 = (1 << 5) | (1 << 4);
 const RX_ACCEPT: u32 = 0x0e; // broadcast + multicast + my phys
 const TX_AUTO_FIFO: u32 = 1 << 7;
 const RXDV_GATED_EN: u32 = 1 << 19;
@@ -121,6 +135,9 @@ const IRQ_LINK_CHG: u16 = 0x0020;
 const IRQ_RX_FIFO: u16 = 0x0040;
 const IRQ_MASK: u16 =
     IRQ_RX_OK | IRQ_RX_ERR | IRQ_TX_OK | IRQ_TX_ERR | IRQ_RX_OVERFLOW | IRQ_LINK_CHG | IRQ_RX_FIFO;
+/// Linux `rtl_set_irq_mask` para VER_61/63: sin `RxFIFOOver`.
+const IRQ_MASK_8125: u32 = (IRQ_RX_OK | IRQ_RX_ERR | IRQ_TX_OK | IRQ_TX_ERR | IRQ_RX_OVERFLOW
+    | IRQ_LINK_CHG) as u32;
 
 const RX_DESC: usize = 64;
 const TX_DESC: usize = 64;
@@ -323,16 +340,24 @@ fn mac_version(xid_raw: u16) -> u16 {
 }
 
 fn mac_version_name(ver: u16) -> &'static str {
-    match ver {
-        0x540 | 0x541 => "RTL_GIGA_MAC_VER_46 (8168H)",
-        0x4c0..=0x4cf => "RTL_GIGA_MAC_VER_40+ (8168G)",
-        0x2c0..=0x2cf => "RTL_GIGA_MAC_VER_28+",
-        _ => "desconocido",
+    match rtl_xid::family(ver) {
+        rtl_xid::RtlFamily::Rtl8168h => "RTL_GIGA_MAC_VER_46 (8168H)",
+        rtl_xid::RtlFamily::Rtl8125a => "RTL_GIGA_MAC_VER_61 (8125A)",
+        rtl_xid::RtlFamily::Rtl8125b => "RTL_GIGA_MAC_VER_63 (8125B)",
+        rtl_xid::RtlFamily::Other(v) => match v {
+            0x4c0..=0x4cf => "RTL_GIGA_MAC_VER_40+ (8168G)",
+            0x2c0..=0x2cf => "RTL_GIGA_MAC_VER_28+",
+            _ => "desconocido",
+        },
     }
 }
 
 fn is_8168h(ver: u16) -> bool {
-    matches!(ver, 0x540 | 0x541)
+    rtl_xid::is_8168h(ver)
+}
+
+fn is_8125(ver: u16) -> bool {
+    rtl_xid::is_8125(ver)
 }
 
 fn ocp_wait(mmio: u64, want_set: bool) -> bool {
@@ -750,12 +775,17 @@ fn rtl_fw_apply(nic: &mut Nic, pa: &RtlPhyAction<'_>) {
     nic.ocp_base = OCP_STD_PHY;
 }
 
+fn phy_firmware_path(ver: u16) -> &'static str {
+    match rtl_xid::family(ver) {
+        rtl_xid::RtlFamily::Rtl8125a => "/lib/firmware/rtl_nic/rtl8125a-3.fw",
+        rtl_xid::RtlFamily::Rtl8125b => "/lib/firmware/rtl_nic/rtl8125b-2.fw",
+        rtl_xid::RtlFamily::Rtl8168h => "/lib/firmware/rtl_nic/rtl8168h-2.fw",
+        rtl_xid::RtlFamily::Other(_) => "/lib/firmware/rtl_nic/rtl8168g-3.fw",
+    }
+}
+
 fn load_phy_firmware(nic: &mut Nic) -> bool {
-    let path = if is_8168h(nic._mac_ver) {
-        "/lib/firmware/rtl_nic/rtl8168h-2.fw"
-    } else {
-        "/lib/firmware/rtl_nic/rtl8168g-3.fw"
-    };
+    let path = phy_firmware_path(nic._mac_ver);
     let Ok(ino) = crate::vfs::resolve(path) else {
         println!("rtl8169: firmware PHY ausente ({path})");
         return false;
@@ -887,6 +917,225 @@ fn rtl_hw_init_8168g(bar: u64) {
     w32(bar, REG_MISC, r32(bar, REG_MISC) & !RXDV_GATED_EN);
 }
 
+fn wait_mcu_mask(bar: u64, mask: u8) {
+    for _ in 0..42 {
+        if r8(bar, REG_MCU) & mask == mask {
+            return;
+        }
+        delay_ms(1);
+    }
+}
+
+/// Linux `rtl_hw_init_8125` (`r8169_main.c`, VER_61..63). No es `rtl_hw_init_8168g`.
+fn rtl_hw_init_8125(bar: u64) {
+    w32(bar, REG_MISC, r32(bar, REG_MISC) | RXDV_GATED_EN);
+    delay_ms(2);
+    wait_mcu_mask(bar, RXTX_EMPTY);
+    w8(bar, REG_CHIPCMD, r8(bar, REG_CHIPCMD) & !(CMD_TX_EN | CMD_RX_EN));
+    delay_ms(1);
+    w8(bar, REG_MCU, r8(bar, REG_MCU) & !NOW_IS_OOB);
+    mac_ocp_modify(bar, 0xe8de, 1u16 << 14, 0);
+    wait_mcu_mask(bar, LINK_LIST_RDY);
+    mac_ocp_write(bar, 0xc0aa, 0x07d0);
+    mac_ocp_write(bar, 0xc0a6, 0x0150);
+    mac_ocp_write(bar, 0xc01e, 0x5555);
+    wait_mcu_mask(bar, LINK_LIST_RDY);
+    klogln!("rtl8169: rtl_hw_init_8125 ok");
+}
+
+fn rtl8125_config_eee_mac(mmio: u64, ver63: bool) {
+    if ver63 {
+        // MTU 1500 + ETH_HLEN + 0x20. Linux `rtl8125_set_eee_txidle_timer`.
+        w16(mmio, 0x6048, 1500 + 14 + 0x20);
+        mac_ocp_modify(mmio, 0xe040, 0, 0x0003);
+    } else {
+        mac_ocp_modify(mmio, 0xe040, 0, 0x0003);
+        mac_ocp_modify(mmio, 0xeb62, 0, 0x0006);
+    }
+}
+
+/// Linux `rtl_hw_start_8125_common`.
+fn rtl_hw_start_8125_common(nic: &mut Nic, ver63: bool) {
+    let mmio = nic.mmio;
+    w8(mmio, REG_CONFIG3, r8(mmio, REG_CONFIG3) & !RDY_TO_L23);
+    w16(mmio, 0x382, 0x221b);
+    w8(mmio, 0x4500, 0);
+    w16(mmio, 0x4800, 0);
+    mac_ocp_modify(mmio, 0xd40a, 0x0010, 0x0000);
+    w8(mmio, REG_CONFIG1, r8(mmio, REG_CONFIG1) & !0x10);
+    mac_ocp_write(mmio, 0xc140, 0xffff);
+    mac_ocp_write(mmio, 0xc142, 0xffff);
+    mac_ocp_modify(mmio, 0xd3e2, 0x0fff, 0x03a9);
+    mac_ocp_modify(mmio, 0xd3e4, 0x00ff, 0x0000);
+    mac_ocp_modify(mmio, 0xe860, 0x0000, 0x0080);
+    mac_ocp_modify(mmio, 0xeb58, 0x0001, 0x0000);
+    if ver63 {
+        mac_ocp_modify(mmio, 0xe614, 0x0700, 0x0200);
+        mac_ocp_modify(mmio, 0xe63e, 0x0c30, 0x0000);
+    } else {
+        mac_ocp_modify(mmio, 0xe614, 0x0700, 0x0400);
+        mac_ocp_modify(mmio, 0xe63e, 0x0c30, 0x0020);
+    }
+    mac_ocp_modify(mmio, 0xc0b4, 0x0000, 0x000c);
+    mac_ocp_modify(mmio, 0xeb6a, 0x00ff, 0x0033);
+    mac_ocp_modify(mmio, 0xeb50, 0x03e0, 0x0040);
+    mac_ocp_modify(mmio, 0xe056, 0x00f0, 0x0030);
+    mac_ocp_modify(mmio, 0xe040, 0x1000, 0x0000);
+    mac_ocp_modify(mmio, 0xea1c, 0x0003, 0x0001);
+    mac_ocp_modify(mmio, 0xe0c0, 0x4f0f, 0x4403);
+    mac_ocp_modify(mmio, 0xe052, 0x0080, 0x0068);
+    mac_ocp_modify(mmio, 0xd430, 0x0fff, 0x047f);
+    mac_ocp_modify(mmio, 0xea1c, 0x0004, 0x0000);
+    mac_ocp_modify(mmio, 0xeb54, 0x0000, 0x0001);
+    spin_n(1_000);
+    mac_ocp_modify(mmio, 0xeb54, 0x0001, 0x0000);
+    w16(mmio, 0x1880, r16(mmio, 0x1880) & !0x0030);
+    mac_ocp_write(mmio, 0xe098, 0xc302);
+    for _ in 0..10 {
+        if mac_ocp_read(mmio, 0xe00e) & (1 << 13) == 0 {
+            break;
+        }
+        delay_ms(1);
+    }
+    rtl8125_config_eee_mac(mmio, ver63);
+    w32(mmio, REG_MISC, r32(mmio, REG_MISC) & !RXDV_GATED_EN);
+}
+
+/// Linux `rtl_hw_start_8125`: borra la coalescencia 0xa00..0xb00 y aplica el
+/// ephy de 8125A (`rtl_hw_start_8125a_2`) o 8125B. No llama a `rtl_hw_start_8168h_1`.
+fn rtl_hw_start_8125(nic: &mut Nic, bus: u8, dev: u8, func: u8) {
+    let ver63 = matches!(rtl_xid::family(nic.xid), rtl_xid::RtlFamily::Rtl8125b);
+    let ephy: &[EphyInfo] = if ver63 {
+        &[
+            EphyInfo { offset: 0x0b, mask: 0xffff, bits: 0xa908 },
+            EphyInfo { offset: 0x1e, mask: 0xffff, bits: 0x20eb },
+            EphyInfo { offset: 0x4b, mask: 0xffff, bits: 0xa908 },
+            EphyInfo { offset: 0x5e, mask: 0xffff, bits: 0x20eb },
+            EphyInfo { offset: 0x22, mask: 0x0030, bits: 0x0020 },
+            EphyInfo { offset: 0x62, mask: 0x0030, bits: 0x0020 },
+        ]
+    } else {
+        &[
+            EphyInfo { offset: 0x04, mask: 0xffff, bits: 0xd000 },
+            EphyInfo { offset: 0x0a, mask: 0xffff, bits: 0x8653 },
+            EphyInfo { offset: 0x23, mask: 0xffff, bits: 0xab66 },
+            EphyInfo { offset: 0x20, mask: 0xffff, bits: 0x9455 },
+            EphyInfo { offset: 0x21, mask: 0xffff, bits: 0x99ff },
+            EphyInfo { offset: 0x29, mask: 0xffff, bits: 0xfe04 },
+            EphyInfo { offset: 0x44, mask: 0xffff, bits: 0xd000 },
+            EphyInfo { offset: 0x4a, mask: 0xffff, bits: 0x8653 },
+            EphyInfo { offset: 0x63, mask: 0xffff, bits: 0xab66 },
+            EphyInfo { offset: 0x60, mask: 0xffff, bits: 0x9455 },
+            EphyInfo { offset: 0x61, mask: 0xffff, bits: 0x99ff },
+            EphyInfo { offset: 0x69, mask: 0xffff, bits: 0xfe04 },
+        ]
+    };
+
+    w8(nic.mmio, REG_CFG9346, CFG_UNLOCK);
+    for off in (0xa00u32..0xb00).step_by(4) {
+        w32(nic.mmio, off, 0);
+    }
+    rtl_set_def_aspm_entry_latency(bus, dev, func);
+    ephy_init(nic.mmio, ephy);
+    rtl_hw_start_8125_common(nic, ver63);
+    w8(nic.mmio, REG_CFG9346, CFG_LOCK);
+    klogln!(
+        "rtl8169: rtl_hw_start_8125{} ok",
+        if ver63 { "b" } else { "a_2" }
+    );
+}
+
+fn rtl8125_config_eee_phy(nic: &mut Nic, ver63: bool) {
+    if !ver63 {
+        phy_modify_paged(nic, 0x0a43, 0x11, 0, 1 << 4);
+        phy_modify_paged(nic, 0x0a4a, 0x11, 0, 0x0200);
+        phy_modify_paged(nic, 0x0a42, 0x14, 0, 0x0080);
+    }
+    phy_modify_paged(nic, 0x0a6d, 0x12, 0x0001, 0);
+    phy_modify_paged(nic, 0x0a6d, 0x14, 0x0010, 0);
+    if ver63 {
+        phy_modify_paged(nic, 0x0a42, 0x14, 0x0080, 0);
+        phy_modify_paged(nic, 0x0a4a, 0x11, 0x0200, 0);
+    }
+}
+
+/// Linux `rtl8125a_2_hw_phy_config` / `rtl8125b_hw_phy_config`.
+/// El blob es `rtl8125a-3.fw` o `rtl8125b-2.fw`. Si no está, la carga no se hace.
+fn rtl8125_hw_phy_config(nic: &mut Nic) {
+    let ver63 = matches!(rtl_xid::family(nic.xid), rtl_xid::RtlFamily::Rtl8125b);
+    if ver63 {
+        let _ = load_phy_firmware(nic);
+        phy_modify_paged(nic, 0x0a44, 0x11, 0, 0x0800);
+        phy_modify_paged(nic, 0x0ac4, 0x13, 0x00f0, 0x0090);
+        phy_modify_paged(nic, 0x0ad3, 0x10, 0x0003, 0x0001);
+        phy_write(nic, 0x1f, 0x0b87);
+        phy_write(nic, 0x16, 0x80f5);
+        phy_write(nic, 0x17, 0x760e);
+        phy_write(nic, 0x16, 0x8107);
+        phy_write(nic, 0x17, 0x360e);
+        phy_write(nic, 0x16, 0x8551);
+        let v = phy_read(nic, 0x17);
+        phy_write(nic, 0x17, (v & !0xff00) | 0x0800);
+        phy_write(nic, 0x1f, 0);
+        phy_modify_paged(nic, 0x0bf0, 0x10, 0xe000, 0xa000);
+        phy_modify_paged(nic, 0x0bf4, 0x13, 0x0f00, 0x0300);
+        for parm in [0x8044u16, 0x804a, 0x8050, 0x8056, 0x805c, 0x8062, 0x8068, 0x806e, 0x8074, 0x807a]
+        {
+            r8168g_phy_param(nic, parm, 0xffff, 0x2417);
+        }
+        phy_modify_paged(nic, 0x0a4c, 0x15, 0, 0x0040);
+        phy_modify_paged(nic, 0x0bf8, 0x12, 0xe000, 0xa000);
+        phy_modify_paged(nic, 0x0a5b, 0x12, 1 << 15, 0);
+    } else {
+        phy_modify_paged(nic, 0x0ad4, 0x17, 0, 0x0010);
+        phy_modify_paged(nic, 0x0ad1, 0x13, 0x03ff, 0x03ff);
+        phy_modify_paged(nic, 0x0ad3, 0x11, 0x003f, 0x0006);
+        phy_modify_paged(nic, 0x0ac0, 0x14, 0x1100, 0);
+        phy_modify_paged(nic, 0x0acc, 0x10, 0x0003, 0x0002);
+        phy_modify_paged(nic, 0x0ad4, 0x10, 0x00e7, 0x0044);
+        phy_modify_paged(nic, 0x0ac1, 0x12, 0x0080, 0);
+        phy_modify_paged(nic, 0x0ac8, 0x10, 0x0300, 0);
+        phy_modify_paged(nic, 0x0ac5, 0x17, 0x0007, 0x0002);
+        phy_write_paged(nic, 0x0ad4, 0x16, 0x00a8);
+        phy_write_paged(nic, 0x0ac5, 0x16, 0x01ff);
+        phy_modify_paged(nic, 0x0ac8, 0x15, 0x00f0, 0x0030);
+        phy_write(nic, 0x1f, 0x0b87);
+        phy_write(nic, 0x16, 0x80a2);
+        phy_write(nic, 0x17, 0x0153);
+        phy_write(nic, 0x16, 0x809c);
+        phy_write(nic, 0x17, 0x0153);
+        phy_write(nic, 0x1f, 0);
+        phy_write(nic, 0x1f, 0x0a43);
+        phy_write(nic, 0x13, 0x81b3);
+        for word in [
+            0x0043u16, 0x00a7, 0x00d6, 0x00ec, 0x00f6, 0x00fb, 0x00fd, 0x00ff, 0x00bb, 0x0058,
+            0x0029, 0x0013, 0x0009, 0x0004, 0x0002,
+        ] {
+            phy_write(nic, 0x14, word);
+        }
+        for _ in 0..25 {
+            phy_write(nic, 0x14, 0);
+        }
+        phy_write(nic, 0x1f, 0);
+        r8168g_phy_param(nic, 0x8257, 0xffff, 0x020f);
+        r8168g_phy_param(nic, 0x80ea, 0xffff, 0x7843);
+        let _ = load_phy_firmware(nic);
+        phy_modify_paged(nic, 0x0d06, 0x14, 0, 0x2000);
+        r8168g_phy_param(nic, 0x81a2, 0, 0x0100);
+        phy_modify_paged(nic, 0x0b54, 0x16, 0xff00, 0xdb00);
+        phy_modify_paged(nic, 0x0a45, 0x12, 0x0001, 0);
+        phy_modify_paged(nic, 0x0a5d, 0x12, 0, 0x0020);
+        phy_modify_paged(nic, 0x0ad4, 0x17, 0x0010, 0);
+        phy_modify_paged(nic, 0x0a86, 0x15, 0x0001, 0);
+        phy_modify_paged(nic, 0x0a44, 0x11, 0, 1 << 11);
+    }
+    rtl8125_config_eee_phy(nic, ver63);
+    klogln!(
+        "rtl8169: PHY 8125{} config Linux",
+        if ver63 { "B" } else { "A" }
+    );
+}
+
 fn phy_autoneg(nic: &mut Nic) {
     phy_write(nic, MII_BMCR, BMCR_RESET);
     spin_n(80_000);
@@ -973,12 +1222,81 @@ pub fn poll_link() -> Option<bool> {
     None
 }
 
+fn mac_usable(mac: &[u8; 6]) -> bool {
+    mac[0] & 1 == 0 && *mac != [0; 6]
+}
+
+fn read_mac_at(bar: u64, off: u32) -> [u8; 6] {
+    let mut mac = [0u8; 6];
+    for (i, b) in mac.iter_mut().enumerate() {
+        *b = r8(bar, off + i as u32);
+    }
+    mac
+}
+
+/// Linux `rtl_read_mac_address`: en el 8125 la estación está en `MAC0_BKP`.
+fn read_station_mac(bar: u64, bar_size: u64, ver: u16) -> Option<[u8; 6]> {
+    if is_8125(ver) && bar_size >= u64::from(REG_MAC0_BKP) + 6 {
+        let mac = read_mac_at(bar, REG_MAC0_BKP);
+        if mac_usable(&mac) {
+            return Some(mac);
+        }
+    }
+    let mac = read_mac_at(bar, REG_MAC0);
+    if mac_usable(&mac) { Some(mac) } else { None }
+}
+
+/// Linux `rtl_rar_set`: escribe la estación en MAC4 y luego en MAC0.
+fn rar_set(bar: u64, mac: &[u8; 6]) {
+    w32(
+        bar,
+        REG_MAC0 + 4,
+        u32::from(u16::from_le_bytes([mac[4], mac[5]])),
+    );
+    let _ = r8(bar, REG_CHIPCMD);
+    w32(
+        bar,
+        REG_MAC0,
+        u32::from_le_bytes([mac[0], mac[1], mac[2], mac[3]]),
+    );
+    let _ = r8(bar, REG_CHIPCMD);
+}
+
+fn ack_intr(mmio: u64, ver: u16) -> u32 {
+    if is_8125(ver) {
+        let st = r32(mmio, REG_INTRSTATUS_8125);
+        w32(mmio, REG_INTRSTATUS_8125, st);
+        st
+    } else {
+        let st = u32::from(r16(mmio, REG_INTRSTATUS));
+        w16(mmio, REG_INTRSTATUS, st as u16);
+        st
+    }
+}
+
+fn arm_intr(mmio: u64, ver: u16) {
+    if is_8125(ver) {
+        w32(mmio, REG_INTRSTATUS_8125, 0xffff_ffff);
+        w32(mmio, REG_INTRMASK_8125, IRQ_MASK_8125);
+    } else {
+        w16(mmio, REG_INTRSTATUS, 0xffff);
+        w16(mmio, REG_INTRMASK, IRQ_MASK);
+    }
+}
+
+fn tx_kick(mmio: u64, ver: u16) {
+    if is_8125(ver) {
+        w16(mmio, REG_TXPOLL_8125, 1);
+    } else {
+        w8(mmio, REG_TXPOLL, TXPOLL_NPQ);
+    }
+}
+
 fn rtl_irq() {
     if let Some(n) = NIC.get() {
         if let Some(mut nic) = n.try_lock() {
-            let st = r16(nic.mmio, REG_INTRSTATUS);
-            w16(nic.mmio, REG_INTRSTATUS, st);
-            if st & IRQ_LINK_CHG != 0 {
+            let st = ack_intr(nic.mmio, nic._mac_ver);
+            if st & u32::from(IRQ_LINK_CHG) != 0 {
                 let (up, phy, bmsr) = read_link(&mut nic);
                 let was = nic.link_up;
                 nic.link_up = up;
@@ -1007,7 +1325,7 @@ pub fn init() -> Option<[u8; 6]> {
     let devs = pci::devices();
     let dev = devs
         .iter()
-        .find(|d| d.vendor_id == VENDOR_REALTEK && DEVICE_IDS.contains(&d.device_id))?;
+        .find(|d| d.vendor_id == VENDOR_REALTEK && rtl_xid::PCI_DEVICE_IDS.contains(&d.device_id))?;
 
     let rev = pci::read8(dev.bus, dev.device, dev.function, 0x08);
     klogln!(
@@ -1050,16 +1368,14 @@ pub fn init() -> Option<[u8; 6]> {
 
     if is_8168h(ver) {
         rtl_hw_init_8168g(bar);
+    } else if is_8125(ver) {
+        rtl_hw_init_8125(bar);
     }
 
-    let mut mac = [0u8; 6];
-    for (i, b) in mac.iter_mut().enumerate() {
-        *b = r8(bar, REG_MAC0 + i as u32);
-    }
-    if mac[0] & 1 != 0 || mac == [0; 6] {
+    let Some(mac) = read_station_mac(bar, bar_size, ver) else {
         println!("rtl8169: MAC ilegible");
         return None;
-    }
+    };
     klogln!(
         "rtl8169: mac {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
@@ -1090,10 +1406,15 @@ pub fn init() -> Option<[u8; 6]> {
 
     w8(bar, REG_CFG9346, CFG_UNLOCK);
     w16(bar, REG_CPLUSCMD, CPLUS_PCIMULRW);
-    w8(bar, REG_MAXTXPKT, TX_PKT_MAX);
+    if !is_8125(ver) {
+        w8(bar, REG_MAXTXPKT, TX_PKT_MAX);
+    }
     w16(bar, REG_RXMAXSIZE, BUF_LEN as u16);
+    if is_8125(ver) {
+        rar_set(bar, &mac);
+    }
 
-    if phy_ocp(xid_raw) {
+    if phy_ocp(xid_raw) && !is_8125(ver) {
         w32(bar, REG_MISC, r32(bar, REG_MISC) & !RXDV_GATED_EN);
         eri_clear_bits(bar, 0xdc, ERIAR_MASK_0001, 1);
         eri_set_bits(bar, 0xdc, ERIAR_MASK_0001, 1);
@@ -1108,13 +1429,18 @@ pub fn init() -> Option<[u8; 6]> {
     let _ = r16(bar, REG_CPLUSCMD);
     w8(bar, REG_CHIPCMD, CMD_TX_EN | CMD_RX_EN);
 
-    let mut rxcfg = RX128_INT_EN | RX_DMA_BURST;
-    if phy_ocp(xid_raw) {
+    let mut rxcfg = match rtl_xid::family(ver) {
+        rtl_xid::RtlFamily::Rtl8125a => RX_FETCH_DFLT_8125 | RX_DMA_BURST,
+        rtl_xid::RtlFamily::Rtl8125b => RX_FETCH_DFLT_8125 | RX_DMA_BURST | RX_PAUSE_SLOT_ON,
+        _ => RX128_INT_EN | RX_DMA_BURST,
+    };
+    if !is_8125(ver) && phy_ocp(xid_raw) {
         rxcfg |= RX_MULTI_EN | RX_EARLY_OFF;
     }
     w32(bar, REG_RXCONFIG, rxcfg);
     let mut txcfg = (7u32 << 8) | (3u32 << 24);
-    if xid_raw >= 0x2c0 {
+    // Linux `rtl_is_8168evl_up` llega hasta VER_53. VER_61/63 no llevan este bit.
+    if xid_raw >= 0x2c0 && !is_8125(ver) {
         txcfg |= TX_AUTO_FIFO;
     }
     w32(bar, REG_TXCONFIG, txcfg);
@@ -1125,7 +1451,9 @@ pub fn init() -> Option<[u8; 6]> {
         REG_RXCONFIG,
         (r32(bar, REG_RXCONFIG) & !0x3f) | RX_ACCEPT,
     );
-    w16(bar, REG_INTRMITIGATE, 0);
+    if !is_8125(ver) {
+        w16(bar, REG_INTRMITIGATE, 0);
+    }
 
     let mut nic = Nic {
         mmio: bar,
@@ -1144,6 +1472,9 @@ pub fn init() -> Option<[u8; 6]> {
     if is_8168h(ver) {
         rtl_hw_start_8168h_1(&mut nic, dev.bus, dev.device, dev.function);
         rtl8168h_hw_phy_config(&mut nic);
+    } else if is_8125(ver) {
+        rtl_hw_start_8125(&mut nic, dev.bus, dev.device, dev.function);
+        rtl8125_hw_phy_config(&mut nic);
     }
     phy_power_up(&mut nic);
     phy_autoneg(&mut nic);
@@ -1158,7 +1489,6 @@ pub fn init() -> Option<[u8; 6]> {
     nic.link_up = link_up;
     log_link(&nic, phy, bmsr, link_up);
 
-    w16(bar, REG_INTRSTATUS, 0xffff);
     if let Some(msix) = pci::find_msix(dev.bus, dev.device, dev.function) {
         if let Some(vec) = irq::allocate(rtl_irq) {
             if pci::msix_setup(&msix, 0, vec, pci::msix_default_dest()).is_ok() {
@@ -1166,7 +1496,7 @@ pub fn init() -> Option<[u8; 6]> {
             }
         }
     }
-    w16(bar, REG_INTRMASK, IRQ_MASK);
+    arm_intr(bar, ver);
 
     let _ = (nic.rx_buf_phys, nic.tx_buf_phys);
     NIC.call_once(|| Mutex::new(nic));
@@ -1266,7 +1596,7 @@ pub fn send(packet: &[u8]) -> Result<(), ()> {
     }
     compiler_fence(Ordering::SeqCst);
     set_opts1(&mut tx[i], o);
-    w8(nic.mmio, REG_TXPOLL, TXPOLL_NPQ);
+    tx_kick(nic.mmio, nic._mac_ver);
     nic.tx_i = ((i + 1) % TX_DESC) as u16;
     for _ in 0..500_000 {
         if tx_free(tx, i) {

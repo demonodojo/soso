@@ -644,8 +644,7 @@ fn poll_i8042(from_irq: bool) {
 /// interrupciones cerradas en su núcleo (o está dentro de la IRQ).
 static HW_POLL: Mutex<()> = Mutex::new(());
 
-fn poll_hw(from_irq: bool) {
-    let _poll = HW_POLL.lock();
+fn poll_hw_inner(from_irq: bool) {
     poll_i8042(from_irq);
     #[cfg(feature = "drv-usb")]
     if from_irq {
@@ -665,6 +664,11 @@ fn poll_hw(from_irq: bool) {
     }
 }
 
+fn poll_hw(from_irq: bool) {
+    let _poll = HW_POLL.lock();
+    poll_hw_inner(from_irq);
+}
+
 #[cfg(feature = "drv-usb")]
 fn dispatch_pointer_event(evt: xhci_nostd::PointerEvent) {
     crate::drivers::mouse::apply_hid_pointer(evt);
@@ -674,10 +678,23 @@ fn dispatch_pointer_event(evt: xhci_nostd::PointerEvent) {
 ///
 /// La IRQ 1 no basta: el auxiliar PS/2 avisa por la IRQ 12, y el HID USB solo
 /// entra si alguien sondea el xHCI. El escritorio no lee la tty.
+/// Para las esperas largas de los drivers: lee el teclado sólo si nadie lo
+/// está leyendo ya (un vaciado interrumpido por esa misma espera no se
+/// repite, así no hay reentrada ni cerrojo tomado dos veces).
+pub fn poll_devices_espera() {
+    let Some(_poll) = HW_POLL.try_lock() else {
+        return;
+    };
+    without_interrupts(|| poll_hw_inner(false));
+}
+
 pub fn poll_devices() {
     crate::drivers::mouse::refresh_bounds();
     crate::drivers::hid_i2c::poll();
-    without_interrupts(|| poll_hw(false));
+    without_interrupts(|| {
+        let _poll = HW_POLL.lock();
+        poll_hw_inner(false);
+    });
 }
 
 pub fn i8042_ready() -> bool {
@@ -690,7 +707,8 @@ pub fn handle_irq() {
 
 pub fn read_byte() -> Option<u8> {
     let b = without_interrupts(|| {
-        poll_hw(false);
+        let _poll = HW_POLL.lock();
+        poll_hw_inner(false);
         RX.lock().pop()
     });
     if b.is_some() {
@@ -701,7 +719,8 @@ pub fn read_byte() -> Option<u8> {
 
 pub fn has_input() -> bool {
     without_interrupts(|| {
-        poll_hw(false);
+        let _poll = HW_POLL.lock();
+        poll_hw_inner(false);
         RX.lock().has_data()
     })
 }

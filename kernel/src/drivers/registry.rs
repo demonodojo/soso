@@ -106,7 +106,7 @@ pub const DRIVERS: &[DriverInfo] = &[
         feature: "drv-rtl8169",
         rule: MatchRule::PciIds {
             vendor: 0x10ec,
-            devices: &[0x8168, 0x8161, 0x8162, 0x8167, 0x8136],
+            devices: &[0x8168, 0x8161, 0x8162, 0x8167, 0x8136, 0x8125],
         },
         lxdde_port: None,
     },

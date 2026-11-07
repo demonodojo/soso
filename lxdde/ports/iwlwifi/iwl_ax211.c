@@ -183,6 +183,7 @@ int iwl_ax211_start_firmware(void)
     if (iwl->alive)
         return 0;
 
+    lx_printk("iwlwifi: start_firmware\n");
     iwl_set_phase(iwl, "fw_load");
     if (iwl_load_firmware_files(iwl) != 0) {
         lx_printk("iwlwifi: firmware no encontrado\n");

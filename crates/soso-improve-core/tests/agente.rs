@@ -1242,6 +1242,51 @@ fn plegar_en_bloques_reescribe_el_principio_de_la_conversacion_muchas_menos_vece
 }
 
 #[test]
+fn varias_llamadas_en_un_turno_solo_ejecutan_la_primera() {
+    let msg = json!({
+        "role": "assistant",
+        "content": "<think>\nleo dos archivos\n</think>",
+        "tool_calls": [
+            {"id": "a", "type": "function", "function": {"name": "read", "arguments": "{\"filePath\":\"README.md\"}"}},
+            {"id": "b", "type": "function", "function": {"name": "read", "arguments": "{\"filePath\":\"src/lib.rs\"}"}},
+            {"id": "c", "type": "function", "function": {"name": "bash", "arguments": "{\"command\":\"cargo test\"}"}}
+        ]
+    });
+    let mut e = repo();
+    let mut m = Guion(vec![msg, json!({"role": "assistant", "content": "fin"})], vec![]);
+    let inf = correr(&mut e, &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg_base(), "t", &mut |_, _| {});
+    assert_eq!((inf.fin, inf.llamadas), (Fin::Terminado, 1), "{:?}", inf.error);
+    let asistente = inf.mensajes.iter().find(|x| x["role"] == "assistant" && x.get("tool_calls").is_some()).unwrap();
+    assert_eq!(asistente["tool_calls"].as_array().unwrap().len(), 1);
+    let herramientas: Vec<_> = inf.mensajes.iter().filter(|x| x["role"] == "tool").collect();
+    assert_eq!(herramientas.len(), 1);
+    assert_eq!(herramientas[0]["tool_call_id"], "a");
+    assert!(m.1[1].contains("no las he ejecutado") && m.1[1].contains("una sola llamada"), "{}", m.1[1]);
+    assert!(!m.1[1].contains("src/lib.rs"), "la segunda lectura no se ejecuta ni se reenvía");
+    assert!(e.ordenes.borrow().is_empty(), "el bash del mismo turno no llega a ejecutarse");
+}
+
+#[test]
+fn un_argumento_null_no_se_reenvia_y_la_llamada_sigue() {
+    let msg = json!({
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "read", "arguments": "{\"filePath\":\"README.md\",\"limit\":null,\"offset\":1}"}}]
+    });
+    let mut m = Guion(vec![msg, json!({"role": "assistant", "content": "fin"})], vec![]);
+    let inf = correr(&mut repo(), &mut m, &RelojSimulado::nuevo(0), &Politica::nueva(R), &cfg_base(), "t", &mut |_, _| {});
+    assert_eq!((inf.fin, inf.llamadas), (Fin::Terminado, 1), "{:?}", inf.error);
+    let args = inf.mensajes[2]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+    let v: Value = serde_json::from_str(args).unwrap();
+    assert!(v.get("limit").is_none(), "{args}");
+    assert_eq!(v["filePath"], "README.md");
+    assert_eq!(v["offset"], 1);
+    assert!(!m.1[1].contains("null"), "el null no puede volver al servidor: {}", m.1[1]);
+    let resp = inf.mensajes.iter().find(|x| x["role"] == "tool").unwrap();
+    assert!(resp["content"].as_str().unwrap().contains("hola"), "la lectura se ejecuta sin el límite nulo");
+}
+
+#[test]
 fn una_llamada_con_el_json_roto_no_se_guarda_en_el_historial_y_el_modelo_recibe_el_error() {
     let rota = json!({"role": "assistant", "content": null, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "read", "arguments": "{\"filePath\": \"README.md\", \"x\": \"000000000000000000"}}]});
     let mut e = repo();

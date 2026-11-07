@@ -35,6 +35,8 @@ const EVENT_POLL_INTERVAL_US: u32 = 10;
 const CMD_TIMEOUT_US: u32 = 5_000_000;
 /// Timeout de transfer events.
 const TRANSFER_TIMEOUT_US: u32 = 5_000_000;
+/// Toque corto para SET_IDLE en teclado/puntero HID (no bloquear el arranque 5 s).
+const HID_SET_IDLE_TIMEOUT_US: u32 = 200_000;
 /// Timeout EP0 (SET_CONFIGURATION, GET_DESCRIPTOR). Linux USB_CTRL_SET_TIMEOUT = 5 s.
 const EP0_TRANSFER_TIMEOUT_US: u32 = 5_000_000;
 /// Reintentos con reset de puerto si SET_CONFIGURATION falla (Linux hub.c PORT_INIT_TRIES).
@@ -2048,7 +2050,11 @@ impl XhciController {
             );
             self.db.ring_endpoint(slot_id, 1);
 
-            match self.wait_transfer_event(slot_id, Some(handles.status_trb_phys)) {
+            match self.wait_transfer_event_timeout(
+                slot_id,
+                Some(handles.status_trb_phys),
+                HID_SET_IDLE_TIMEOUT_US,
+            ) {
                 Some(evt) if evt.completion_code() == TRB_COMPLETION_SUCCESS => {
                     log::debug!("xhci: SET_IDLE succeeded");
                 }
@@ -2170,7 +2176,11 @@ impl XhciController {
                 0,
             );
             self.db.ring_endpoint(slot_id, 1);
-            let _ = self.wait_transfer_event(slot_id, Some(handles.status_trb_phys));
+            let _ = self.wait_transfer_event_timeout(
+                slot_id,
+                Some(handles.status_trb_phys),
+                HID_SET_IDLE_TIMEOUT_US,
+            );
         }
 
         let report_len = ep_desc.xhci_max_packet_size().max(8) as usize;

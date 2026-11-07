@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copia rtl8168h-2.fw (descomprime .zst) a rootfs/lib/firmware/rtl_nic/.
+# Copia el firmware PHY de r8169 (descomprime .zst) a rootfs/lib/firmware/rtl_nic/.
 # Uso: ./scripts/l6-pack-rtl-fw.sh [--repack]
 set -euo pipefail
 
@@ -33,4 +33,6 @@ pack_one() {
 }
 
 pack_one rtl8168h-2.fw
+pack_one rtl8125a-3.fw
+pack_one rtl8125b-2.fw
 echo "=== rtl PHY firmware → $DST ==="
