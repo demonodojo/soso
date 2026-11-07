@@ -2,6 +2,7 @@
 #include "iwl_internal.h"
 #include "iwl_ax211.h"
 #include "lx_emul.h"
+#include "iwl_poll.h"
 
 extern void *memset(void *dst, int c, unsigned long n);
 
@@ -29,7 +30,7 @@ static int iwl_pnvm_load(struct iwl_ax211_priv *iwl)
                       (unsigned)iwl->sku_id[2]);
             return 0;
         }
-        lx_mdelay(1);
+        iwl_mdelay_locked(1);
     }
     lx_printk("iwl_mvm: timeout PNVM_INIT_COMPLETE_NTFY\n");
     return -1;
@@ -69,7 +70,7 @@ static int iwl_mvm_run_init_8000(struct iwl_ax211_priv *iwl)
         iwl_trans_poll(iwl);
         if (iwl->init_complete)
             break;
-        lx_mdelay(10);
+        iwl_mdelay_locked(10);
     }
     if (!iwl->init_complete) {
         lx_printk("iwl_mvm: timeout INIT_COMPLETE_NOTIF (8000)\n");
@@ -141,7 +142,7 @@ int iwl_mvm_run_init(struct iwl_ax211_priv *iwl)
             if (iwl->init_complete) {
                 break;
             }
-            lx_mdelay(10);
+            iwl_mdelay_locked(10);
         }
     }
     if (!iwl->init_complete) {

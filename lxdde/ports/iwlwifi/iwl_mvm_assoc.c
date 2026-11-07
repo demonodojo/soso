@@ -2,6 +2,7 @@
 #include "iwl_internal.h"
 #include "iwl_ax211.h"
 #include "lx_emul.h"
+#include "iwl_poll.h"
 
 extern void *memcpy(void *dst, const void *src, unsigned long n);
 extern void *memset(void *dst, int c, unsigned long n);
@@ -517,7 +518,7 @@ static int wait_mlme_flag(struct iwl_ax211_priv *iwl, uint8_t *flag)
             iwl_trans_poll(iwl);
         if (*flag)
             return 0;
-        lx_mdelay(20);
+        iwl_mdelay_locked(20);
     }
     return -1;
 }
@@ -537,7 +538,7 @@ static int iwl_mvm_wait_assoc_beacon(struct iwl_ax211_priv *iwl)
         if (iwl->dtim_period && iwl->sync_beacon_seen &&
             (iwl->sync_tsf || iwl->sync_device_ts))
             return 0;
-        lx_mdelay(20);
+        iwl_mdelay_locked(20);
     }
     lx_printk("iwl_mvm: beacon/DTIM timeout (dtim=%u sync=%u tsf=%llu gp2=%u)\n",
               (unsigned)iwl->dtim_period, (unsigned)iwl->sync_beacon_seen,

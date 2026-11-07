@@ -113,11 +113,14 @@ static int encode_clear_pb(struct gsp_chan *c, uint32_t threed_cls,
     td_pb_write(c, &pos, (uint32_t)sem_va);
     td_pb_method(c, &pos, GSP_3D_SUBCHANNEL, GSP_3D_SET_REPORT_SEMAPHORE_C, 1);
     td_pb_write(c, &pos, sem_payload);
-    td_pb_method(c, &pos, GSP_3D_SUBCHANNEL, GSP_3D_SET_REPORT_SEMAPHORE_D, 1);
-    td_pb_write(c, &pos, GSP_3D_REPORT_RELEASE_WRITES);
 
+    /* D ejecuta el release y espera a las escrituras precedentes. El clear
+     * tiene que ir antes, o PIPELINE_LOCATION_ALL no tiene de qué retirarse. */
     td_pb_method(c, &pos, GSP_3D_SUBCHANNEL, GSP_3D_CLEAR_SURFACE, 1);
     td_pb_write(c, &pos, GSP_3D_CLEAR_RGBA);
+
+    td_pb_method(c, &pos, GSP_3D_SUBCHANNEL, GSP_3D_SET_REPORT_SEMAPHORE_D, 1);
+    td_pb_write(c, &pos, GSP_3D_REPORT_RELEASE_WRITES);
 
     if (pb_off) {
         *pb_off = start;

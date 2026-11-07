@@ -734,7 +734,7 @@ static int iwl_8000_wait_alive(struct iwl_ax211_priv *iwl, const char *phase)
         iwl_8000_poll_alive_int(iwl);
         if (iwl->alive)
             return 0;
-        lx_mdelay(10);
+        iwl_mdelay_locked(10);
     }
     iwl_8000_log_alive_timeout(iwl, phase);
     return -1;

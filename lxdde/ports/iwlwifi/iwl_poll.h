@@ -22,4 +22,13 @@ static inline int iwl_poll_bit_us(uint32_t (*read32)(void *ctx, uint32_t off),
     return -1;
 }
 
+/* Espera con el transporte ya cogido. `lx_mdelay` en la BSP bombea
+ * `net::poll` y reentra en esta misma pila. Linux `iwl_poll_bit` solo
+ * hace `udelay` (`iwl-io.c`). */
+static inline void iwl_mdelay_locked(unsigned ms)
+{
+    while (ms--)
+        lx_udelay(1000);
+}
+
 #endif

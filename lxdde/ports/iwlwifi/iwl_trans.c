@@ -1570,7 +1570,7 @@ int iwl_trans_gen2_start(struct iwl_ax211_priv *iwl)
         drain_rx_gen2(iwl);
         if (iwl->alive)
             return 0;
-        lx_mdelay(10);
+        iwl_mdelay_locked(10);
     }
     {
         uint32_t inta = iwl_read32(iwl, CSR_INT);
@@ -1698,7 +1698,7 @@ int iwl_trans_gen3_start(struct iwl_ax211_priv *iwl)
         drain_rx_gen2(iwl);
         if (iwl->alive)
             return 0;
-        lx_mdelay(10);
+        iwl_mdelay_locked(10);
     }
     {
         uint32_t inta = iwl_read32(iwl, CSR_INT);
@@ -1893,7 +1893,7 @@ int iwl_trans_wait_mgmt_tx_resp(struct iwl_ax211_priv *iwl, unsigned iters)
             iwl_trans_poll(iwl);
         if (iwl->last_mgmt_tx_status != 0)
             return 0;
-        lx_mdelay(5);
+        iwl_mdelay_locked(5);
     }
     return -1;
 }
@@ -2609,7 +2609,7 @@ int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t i
                 return -1;
             return 0;
         }
-        lx_mdelay(1);
+        iwl_mdelay_locked(1);
     }
     {
         unsigned slot = SEQ_TO_INDEX(iwl->cmd_pending_seq) % IWL_CMD_QUEUE_SIZE;

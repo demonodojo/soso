@@ -19,6 +19,8 @@
 
 void lx_printk(const char *fmt, ...) { (void)fmt; }
 void lx_mdelay(unsigned int ms) { (void)ms; }
+void lx_udelay(unsigned int us) { (void)us; }
+uint64_t lx_ktime_get_ns(void) { return 0; }
 
 int iwl_trans_send_cmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
                        const void *payload, uint16_t pay_len)

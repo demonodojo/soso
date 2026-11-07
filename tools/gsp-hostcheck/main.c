@@ -3111,18 +3111,27 @@ static int check_3d_encode(void)
     }
     {
         unsigned i;
-        int found = 0;
+        int clear_at = -1;
+        int rel_at = -1;
+        const unsigned clear_mthd = (GSP_3D_CLEAR_SURFACE >> 2) & 0xfffu;
 
         for (i = 0; i + 4 <= (unsigned)sizeof(pb); i += 4) {
             uint32_t w;
 
             memcpy(&w, pb + i, 4);
-            if (w == GSP_3D_REPORT_RELEASE_WRITES)
-                found = 1;
+            if (clear_at < 0 && (w & 0xfffu) == clear_mthd)
+                clear_at = (int)i;
+            if (rel_at < 0 && w == GSP_3D_REPORT_RELEASE_WRITES)
+                rel_at = (int)i;
         }
-        if (!found) {
+        if (rel_at < 0) {
             printf("FALLO: el clear 3D no escribe 0x%x en SET_REPORT_SEMAPHORE_D\n",
                    GSP_3D_REPORT_RELEASE_WRITES);
+            return -1;
+        }
+        if (clear_at < 0 || clear_at > rel_at) {
+            printf("FALLO: CLEAR_SURFACE (0x%x) no va antes del release 0x%x\n",
+                   GSP_3D_CLEAR_SURFACE, GSP_3D_REPORT_RELEASE_WRITES);
             return -1;
         }
     }

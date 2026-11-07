@@ -2,6 +2,7 @@
 #include "iwl_internal.h"
 #include "iwl_ax211.h"
 #include "lx_emul.h"
+#include "iwl_poll.h"
 
 extern void *memcpy(void *dst, const void *src, unsigned long n);
 extern void *memset(void *dst, int c, unsigned long n);
@@ -677,15 +678,29 @@ int iwl_mvm_scan(struct iwl_ax211_priv *iwl)
         return -1;
     }
 
-    for (int i = 0; i < 400; i++) {
-        iwl_trans_poll(iwl);
-        if (iwl->scan_count != last_count) {
-            lx_printk("iwl_mvm: scan_count=%d\n", iwl->scan_count);
-            last_count = iwl->scan_count;
+    {
+        /* 8 s. El contador y el reloj cortan por separado: si el retardo no
+         * mueve el reloj, acaba el contador; si el reloj se pasa, acaba igual.
+         * Así siempre se imprime «scan fin». */
+        uint64_t t0 = lx_ktime_get_ns();
+        const uint64_t budget_ns = 400ull * 20ull * 1000000ull;
+        int i;
+
+        for (i = 0; i < 400; i++) {
+            uint64_t now;
+
+            iwl_trans_poll(iwl);
+            if (iwl->scan_count != last_count) {
+                lx_printk("iwl_mvm: scan_count=%d\n", iwl->scan_count);
+                last_count = iwl->scan_count;
+            }
+            if (iwl->scan_end != IWL_SCAN_END_NONE)
+                break;
+            now = lx_ktime_get_ns();
+            if (now - t0 >= budget_ns)
+                break;
+            iwl_mdelay_locked(20);
         }
-        if (iwl->scan_end != IWL_SCAN_END_NONE)
-            break;
-        lx_mdelay(20);
     }
 
     if (iwl->scan_end == IWL_SCAN_END_NONE) {

@@ -137,11 +137,83 @@ Para llevar los dos al stick hace falta un flash con rootfs y kernel
 
 ## 5. Qué no se ha hecho
 
-Ni drivers ni `sosh` del USB se han tocado en esta sesión. El árbol ya tenía
-los dos parches sin commitear. `./scripts/l6-g3-gsp-hostcheck.sh` y
+En la sesión de la tarde no se tocó el USB. El árbol ya tenía los dos parches
+sin commitear. `./scripts/l6-g3-gsp-hostcheck.sh` y
 `./scripts/l6-iwl-fw-hostcheck.sh` cierran en verde y no cubren el clear en
-silicio ni un scan real. No se ha reordenado `CLEAR_SURFACE`.
+silicio ni un scan real.
 
 `docs/hw-matrix.json`: `ga107-igpu` y `ax200-wifi` con este arranque (GSP, VRAM,
 CE y MVM en `ok`; scan en `ok` con 18 BSS; asociación y DHCP en `pendiente`;
 `sesion_sostenida=ok` por sosh a los 97 s; `arranques_consecutivos_ok=0`).
+
+## 6. Arranque de las 19:46
+
+Mismo stick, kernel distinto. `BOOTMARK` a las 19:46. Copia en
+`target/usb-diagnostic-2026-11-07-1946/` (no va a git). ESP p1 desmontada.
+`SOSOHASH` sigue en `886e8bb0d-dirty` del 2026-11-05: el kernel se actualizó
+in situ y el manifiesto no.
+
+| Dato | Valor |
+|------|-------|
+| Log | flush #20, uptime 114 232 ms. `kbd sc=3 ultimo=0x06 enc=1 ent=1` |
+| Banner | `soso 0.3.28 (8c0c5fb57)`, sin `-dirty` |
+| Userspace | `sosh — escribe 'help' para la ayuda` |
+| GPU | `GSP_INIT_DONE recibido tras 6 mensaje(s)`; `pool VRAM=sí`; `CE readback verificado (G4e GO)` |
+| 3D | `3D — semáforo no llegó a 1 en 5000 ms (vale 0)`; `USERD GPGet=1 GPPut=1`; 40 dwords; `PBDMA0 INTR_0=0`; `3D clear falló en autoprueba` |
+| WiFi | `UCODE_ALIVE_NTFY`; `up mínimo listo`; `SCAN_COMPLETE status=1 uid=0x1 count=23 end=1`; 19 BSS |
+| Selector | `wifi: número de red (Enter para omitir): 5` y el log acaba ahí |
+| Ethernet | `rtl8169: … enlace DOWN 10M half` (`phystatus 0x84`) |
+
+`8c0c5fb57` ya define `GSP_3D_REPORT_RELEASE_WRITES` como `0x10 | (0xF << 12)`.
+El semáforo sigue en 0. `SET_REPORT_SEMAPHORE_D` (`clc797.h:3922`) es el método
+que suelta el release y espera a las escrituras precedentes (`clc797.h:3928-3930`,
+etapa `ALL` en `clc797.h:3934-3946`). En el pushbuffer de ese kernel el clear
+iba detrás, así que no era una escritura precedente.
+
+En el árbol, sin flashear, `encode_clear_pb` emite `CLEAR_SURFACE` (`0x19d0`)
+antes de ese dword. `./scripts/l6-g3-gsp-hostcheck.sh` imprime `semáforo 0xf010`
+y exige que el método `0x19d0` vaya delante. No cubre el clear en silicio.
+No se ha puesto el bit 28 `STRUCTURE_SIZE_ONE_WORD`.
+
+`docs/hw-matrix.json`: las dos entradas con este arranque (GSP, VRAM, CE, ALIVE,
+MVM y scan en `ok`; asociación y DHCP en `pendiente`; `arranques_consecutivos_ok=0`).
+
+## 7. Arranque de las 20:17
+
+`BOOTMARK` a las 20:17. Copia en `target/usb-diagnostic-2026-11-07-2024/`
+(no va a git). ESP p1 desmontada. `SOSOHASH` sigue en `886e8bb0d-dirty` del
+2026-11-05.
+
+| Dato | Valor |
+|------|-------|
+| Log | flush #19, uptime 96 528 ms. Es el último volcado; fatlog sondea cada 2 s |
+| Banner | `soso 0.3.28 (8c0c5fb57-dirty)` |
+| Userspace | `sosh — escribe 'help' para la ayuda`, luego `wifi: escaneando redes…` |
+| GPU | `GSP_INIT_DONE`; `pool VRAM=sí`; `CE readback verificado (G4e GO)` |
+| 3D | `3D — semáforo no llegó a 1 en 5000 ms (vale 0)`; `USERD GPGet=1 GPPut=1`; 40 dwords; `PBDMA0 INTR_0=0` |
+| WiFi | `UCODE_ALIVE_NTFY`; `SCAN_REQ_UMAC v15`; el log acaba en `scan_count=15`. No hay `scan fin` |
+| Teclado | `kbd sc=0` |
+| Ethernet | `rtl8169: … enlace DOWN 10M half` (`phystatus 0x84`) |
+
+El semáforo sigue en 0 con el clear ya delante del release: no es este cuelgue.
+`3D clear falló en autoprueba (compute sigue)` sale y el arranque llega a sosh.
+Volver al encode de octubre (`0x10`, clear después del release, commit
+`79a57a89a`) restituye un dword que ya falló el mismo día. El 10 de octubre la
+shell llegaba y el enlace servía (`docs/DIAGNOSTICO-ROG-2026-10-10.md`); el
+clear 3D aún no existía.
+
+El cuelgue es el scan. `sosh` llama a `wifi_setup_si_hace_falta` antes del
+prompt y `scan()` no suelta `TRANS_LOCK` hasta que el bucle acaba. Desde el
+24 de octubre (`173a5880e`) `lx_mdelay` en la BSP bombea `net::poll` en cada
+milisegundo. Linux no hace eso: `iwl_poll_bit` solo lee un registro y hace
+`udelay` (`lxdde/linux/.../iwl-io.c`, 6.6.32).
+
+En el árbol, sin flashear, las esperas de iwlwifi que corren con el transporte
+cogido usan `iwl_mdelay_locked` (`lx_udelay`, sin bombeo). El bucle del scan
+corta a los 8 s por contador o por `lx_ktime_get_ns`, y siempre imprime
+`scan fin`. `./scripts/l6-iwl-fw-hostcheck.sh` cierra en verde, con
+`scan cuyo poll no progresa sale por timeout`. No cubre un scan en silicio.
+
+`docs/hw-matrix.json`: `ga107-igpu` y `ax200-wifi` con este arranque (GSP, VRAM,
+CE, ALIVE y MVM en `ok`; scan en `fail`; asociación y DHCP en `pendiente`;
+`arranques_consecutivos_ok=0`).

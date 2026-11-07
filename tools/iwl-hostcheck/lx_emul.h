@@ -10,6 +10,7 @@
 void lx_printk(const char *fmt, ...);
 void lx_mdelay(unsigned int ms);
 void lx_udelay(unsigned int us);
+uint64_t lx_ktime_get_ns(void);
 void *lx_dma_alloc_coherent(void *dev, size_t size, uint64_t *dma, unsigned gfp);
 void lx_dma_free_coherent(void *dev, size_t size, void *cpu, uint64_t dma);
 typedef void (*lx_pci_each_fn)(uint16_t vendor, uint16_t device,

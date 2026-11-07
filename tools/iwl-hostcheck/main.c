@@ -11,6 +11,7 @@
 void lx_printk(const char *fmt, ...) { (void)fmt; }
 
 void lx_mdelay(unsigned int ms) { (void)ms; }
+void lx_udelay(unsigned int us) { (void)us; }
 
 void *lx_kmalloc(unsigned long size, unsigned gfp) {
     (void)gfp;

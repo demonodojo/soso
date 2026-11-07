@@ -8,8 +8,17 @@
 #include "iwl_internal.h"
 #include "iwl_ax211.h"
 
-void lx_printk(const char *fmt, ...) { (void)fmt; }
+static int g_scan_fin_logged;
+static int g_scan_stall;
+
+void lx_printk(const char *fmt, ...)
+{
+    if (fmt && strstr(fmt, "scan fin"))
+        g_scan_fin_logged = 1;
+}
 void lx_mdelay(unsigned int ms) { (void)ms; }
+void lx_udelay(unsigned int us) { (void)us; }
+uint64_t lx_ktime_get_ns(void) { return 0; }
 
 int iwl_trans_send_cmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
                        const void *payload, uint16_t pay_len)
@@ -34,6 +43,10 @@ int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t i
         struct iwl_ax211_bss b;
 
         g_scan_req_umac++;
+        if (g_scan_stall) {
+            iwl->cmd_status = 1;
+            return 0;
+        }
         memset(&b, 0, sizeof(b));
         memcpy(b.ssid, "Rutilo", 6);
         b.rsn = 1;
@@ -680,6 +693,57 @@ static int check_scan_cfg_bcast_ax200(void)
     return 0;
 }
 
+/* El poll no marca fin de scan. El bucle tiene que salir por el contador
+ * (el reloj de host no avanza) e imprimir «scan fin». */
+static int check_scan_timeout_if_poll_stuck(void)
+{
+    struct iwl_ax211_priv iwl;
+    int rc;
+
+    memset(&iwl, 0, sizeof(iwl));
+    scan_abi_rf_ok(&iwl);
+    g_scan_stall = 1;
+    g_scan_fin_logged = 0;
+    g_scan_req_umac = 0;
+    iwl.alive = 1;
+    iwl.radio_ready = 1;
+    iwl.mvm_up_done = 1;
+    iwl.nvm_n_channels = 2;
+    iwl.nvm_chan_flags[0] = NVM_CHANNEL_VALID | NVM_CHANNEL_ACTIVE;
+    iwl.nvm_chan_flags[1] = NVM_CHANNEL_VALID | NVM_CHANNEL_ACTIVE;
+    iwl.cmd_ver_count = 2;
+    iwl.cmd_ver[0].group = LONG_GROUP;
+    iwl.cmd_ver[0].cmd = SCAN_REQ_UMAC;
+    iwl.cmd_ver[0].version = 15;
+    iwl.cmd_ver[1].group = LONG_GROUP;
+    iwl.cmd_ver[1].cmd = SCAN_CFG_CMD;
+    iwl.cmd_ver[1].version = 5;
+    iwl.fw_valid_tx_ant = 0x3;
+    iwl.fw_valid_rx_ant = 0x3;
+
+    rc = iwl_mvm_scan(&iwl);
+    g_scan_stall = 0;
+    if (g_scan_req_umac == 0) {
+        fprintf(stderr, "el scan atascado no llegó a mandar SCAN_REQ_UMAC\n");
+        return -1;
+    }
+    if (rc != IWL_SCAN_RC_TIMEOUT || iwl.scan_end != IWL_SCAN_END_TIMEOUT) {
+        fprintf(stderr, "scan sin progreso rc=%d end=%d (esperaba timeout)\n",
+                rc, iwl.scan_end);
+        return -1;
+    }
+    if (!g_scan_fin_logged) {
+        fprintf(stderr, "scan sin progreso no imprimió scan fin\n");
+        return -1;
+    }
+    if (iwl.scan_active) {
+        fprintf(stderr, "scan sin progreso dejó scan_active\n");
+        return -1;
+    }
+    puts("OK: scan cuyo poll no progresa sale por timeout");
+    return 0;
+}
+
 int main(void)
 {
     if (check_scan_cfg_bcast_ax200() != 0)
@@ -701,6 +765,8 @@ int main(void)
     if (check_connect_rescan_if_empty() != 0)
         return 1;
     if (check_connect_no_assoc_without_scan() != 0)
+        return 1;
+    if (check_scan_timeout_if_poll_stuck() != 0)
         return 1;
     return 0;
 }

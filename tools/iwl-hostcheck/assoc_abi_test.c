@@ -39,6 +39,7 @@ static int g_data_alloc_tid = -1;
 
 void lx_printk(const char *fmt, ...) { (void)fmt; }
 void lx_mdelay(unsigned int ms) { (void)ms; }
+void lx_udelay(unsigned int us) { (void)us; }
 
 void *lx_dma_alloc_coherent(void *dev, size_t size, uint64_t *dma, unsigned gfp)
 {
