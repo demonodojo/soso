@@ -3,14 +3,17 @@
 //! Si no hay mass storage, el controlador puede quedar activo para teclado HID.
 //! Se conservan todos los xHCI (como Linux: un HCD por controlador).
 
+use crate::arch::irq;
 use crate::arch::tsc;
 use crate::drivers::dma;
 use crate::drivers::pci;
 use crate::mm;
 use crate::{klogln, println};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use spin::Mutex;
-use xhci_nostd::{set_allocator, set_delay_us, MassStorage, XhciController};
+use xhci_nostd::hid::{MOD_LEFT_SHIFT, MOD_RIGHT_ALT, MOD_RIGHT_SHIFT};
+use xhci_nostd::{set_allocator, set_delay_us, KeyEvent, MassStorage, XhciController};
 
 const SECTOR: usize = 512;
 const CLASS_SERIAL_USB: u8 = 0x0c;
@@ -24,7 +27,21 @@ struct UsbHost {
     /// otro hilo tenga cogido el vector `HOSTS` para un write BOT largo.
     ctrl: Mutex<XhciController>,
     ms: Option<MassStorage>,
+    bus: u8,
+    device: u8,
+    function: u8,
 }
+
+/// Punteros estables a cada `ctrl`. El sondeo HID no toma `HOSTS`: un write
+/// del stick (el otro xHCI) no debe saltarse el teclado.
+const MAX_XHCI: usize = 4;
+static CTRL_PTR: [AtomicPtr<Mutex<XhciController>>; MAX_XHCI] = [
+    AtomicPtr::new(core::ptr::null_mut()),
+    AtomicPtr::new(core::ptr::null_mut()),
+    AtomicPtr::new(core::ptr::null_mut()),
+    AtomicPtr::new(core::ptr::null_mut()),
+];
+static CTRLS_READY: AtomicBool = AtomicBool::new(false);
 
 // SAFETY: acceso serializado con Mutex; punteros MMIO/DMA estables.
 unsafe impl Send for UsbHost {}
@@ -176,6 +193,9 @@ pub fn init() {
         hosts.push(UsbHost {
             ctrl: Mutex::new(ctrl),
             ms,
+            bus: xdev.bus,
+            device: xdev.device,
+            function: xdev.function,
         });
     }
 
@@ -183,6 +203,7 @@ pub fn init() {
     let has_ms = hosts.iter().any(|h| h.ms.is_some());
     let has_kbd = hosts.iter().any(|h| h.ctrl.lock().has_keyboard());
     *HOSTS.lock() = hosts;
+    publish_ctrl_ptrs();
 
     if !has_ms && !has_kbd {
         println!("usb: {n} xHCI activos, sin mass storage ni teclado HID");
@@ -384,39 +405,156 @@ pub struct UsbKbdEvent {
     pub modifiers: u8,
 }
 
-/// Sondea el teclado HID. No necesita el candado del vector si otro hilo está
-/// en un write BOT: solo `try_lock` por controlador (Linux `hid_irq_in`).
+/// Sondea el teclado HID. No toma `HOSTS`: el stick está en otro xHCI y un
+/// write BOT no debe saltarse este sondeo. Solo `try_lock` del controlador
+/// (Linux `hid_irq_in` no coge el candado del disco).
 pub fn poll_pointer_event() -> Option<xhci_nostd::PointerEvent> {
+    for_each_ctrl(|ctrl| ctrl.poll_pointer())
+}
+
+pub fn poll_keyboard_event() -> Option<UsbKbdEvent> {
+    for_each_ctrl(|ctrl| ctrl.poll_keyboard().map(key_to_usb))
+}
+
+/// Vacía teclados. Si `deliver` devuelve false, la tecla vuelve a la cola
+/// del controlador: ya no está en el anillo del xHCI.
+pub fn drain_keyboard_events(mut deliver: impl FnMut(UsbKbdEvent) -> bool) {
+    for_each_ctrl(|ctrl| {
+        while let Some(raw) = ctrl.poll_keyboard() {
+            if !deliver(key_to_usb(raw)) {
+                ctrl.requeue_keyboard(raw);
+                return Some(());
+            }
+        }
+        None
+    });
+}
+
+fn key_to_usb(evt: KeyEvent) -> UsbKbdEvent {
+    UsbKbdEvent {
+        modifiers: evt.modifiers,
+        scancode: evt.scancode,
+        usage_id: evt.usage_id,
+        pressed: evt.pressed,
+        shift: evt.modifiers & (MOD_LEFT_SHIFT | MOD_RIGHT_SHIFT) != 0,
+        altgr: evt.modifiers & MOD_RIGHT_ALT != 0,
+    }
+}
+
+fn for_each_ctrl<T>(mut f: impl FnMut(&mut XhciController) -> Option<T>) -> Option<T> {
+    if CTRLS_READY.load(Ordering::Acquire) {
+        for slot in &CTRL_PTR {
+            let p = slot.load(Ordering::Acquire);
+            if p.is_null() {
+                continue;
+            }
+            let Some(mut ctrl) = (unsafe { &*p }).try_lock() else {
+                continue;
+            };
+            if let Some(v) = f(&mut ctrl) {
+                return Some(v);
+            }
+        }
+        return None;
+    }
     let guard = HOSTS.try_lock()?;
     for host in guard.iter() {
-        let mut ctrl = host.ctrl.try_lock()?;
-        if let Some(evt) = ctrl.poll_pointer() {
-            return Some(evt);
+        let Some(mut ctrl) = host.ctrl.try_lock() else {
+            continue;
+        };
+        if let Some(v) = f(&mut ctrl) {
+            return Some(v);
         }
     }
     None
 }
 
-pub fn poll_keyboard_event() -> Option<UsbKbdEvent> {
-    use xhci_nostd::hid::{MOD_LEFT_SHIFT, MOD_RIGHT_ALT, MOD_RIGHT_SHIFT};
+fn publish_ctrl_ptrs() {
+    let hosts = HOSTS.lock();
+    for (i, host) in hosts.iter().enumerate().take(MAX_XHCI) {
+        CTRL_PTR[i].store(
+            &host.ctrl as *const Mutex<XhciController> as *mut _,
+            Ordering::Release,
+        );
+    }
+    CTRLS_READY.store(true, Ordering::Release);
+}
 
-    let guard = HOSTS.try_lock()?;
-    for host in guard.iter() {
-        let mut ctrl = host.ctrl.try_lock()?;
-        if let Some(evt) = ctrl.poll_keyboard() {
-            let shift = evt.modifiers & (MOD_LEFT_SHIFT | MOD_RIGHT_SHIFT) != 0;
-            let altgr = evt.modifiers & MOD_RIGHT_ALT != 0;
-            return Some(UsbKbdEvent {
-                modifiers: evt.modifiers,
-                scancode: evt.scancode,
-                usage_id: evt.usage_id,
-                pressed: evt.pressed,
-                shift,
-                altgr,
-            });
+fn xhci_irq_0() {
+    xhci_irq_slot(0);
+}
+fn xhci_irq_1() {
+    xhci_irq_slot(1);
+}
+fn xhci_irq_2() {
+    xhci_irq_slot(2);
+}
+fn xhci_irq_3() {
+    xhci_irq_slot(3);
+}
+
+const XHCI_IRQS: [fn(); MAX_XHCI] = [xhci_irq_0, xhci_irq_1, xhci_irq_2, xhci_irq_3];
+
+fn xhci_irq_slot(i: usize) {
+    let p = CTRL_PTR[i].load(Ordering::Acquire);
+    if p.is_null() {
+        return;
+    }
+    let fired = {
+        let Some(mut ctrl) = (unsafe { &*p }).try_lock() else {
+            return;
+        };
+        ctrl.service_interrupt()
+    };
+    if !fired {
+        return;
+    }
+    drain_keyboard_events(|evt| crate::drivers::kbd::deliver_usb_from_irq(evt));
+}
+
+/// MSI-X del interrupter 0, como Linux `xhci_try_enable_msi` + `xhci_irq`.
+/// Solo en controladores con HID: el mass storage sigue en sondeo síncrono.
+pub fn arm_hid_irqs() {
+    let hosts = HOSTS.lock();
+    for (i, host) in hosts.iter().enumerate().take(MAX_XHCI) {
+        let hid = {
+            let ctrl = host.ctrl.lock();
+            ctrl.has_keyboard() || ctrl.pointer_count() > 0
+        };
+        if !hid {
+            continue;
+        }
+        let Some(vec) = irq::allocate(XHCI_IRQS[i]) else {
+            klogln!(
+                "usb: xHCI {:02x}:{:02x}.{} sin vector IRQ",
+                host.bus, host.device, host.function
+            );
+            continue;
+        };
+        if let Some(msix) = pci::find_msix(host.bus, host.device, host.function) {
+            if pci::msix_setup(&msix, 0, vec, pci::msix_default_dest()).is_ok() {
+                klogln!(
+                    "usb: xHCI {:02x}:{:02x}.{} MSI-X vector={vec:#x}",
+                    host.bus, host.device, host.function
+                );
+                continue;
+            }
+        }
+        let line = pci::read8(host.bus, host.device, host.function, 0x3c);
+        let pin = pci::read8(host.bus, host.device, host.function, 0x3d);
+        if pin != 0 && crate::arch::ioapic::route_isa(line, vec, pci::msix_default_dest()).is_ok()
+        {
+            klogln!(
+                "usb: xHCI {:02x}:{:02x}.{} INTx IRQ{line} vector={vec:#x}",
+                host.bus, host.device, host.function
+            );
+        } else {
+            klogln!(
+                "usb: xHCI {:02x}:{:02x}.{} sin MSI-X ni INTx; solo sondeo",
+                host.bus, host.device, host.function
+            );
         }
     }
-    None
 }
 
 #[allow(dead_code)]

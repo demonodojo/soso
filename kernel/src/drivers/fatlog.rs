@@ -163,9 +163,9 @@ fn bombeo_red_bsp() {
     crate::net::poll();
     #[cfg(feature = "lxdde")]
     crate::lxdde::poll();
-    // El teclado USB no tiene IRQ: mientras se escribe la ESP (por el mismo
-    // xHCI del pendrive) nadie lo sondea y las teclas se quedan en el anillo.
-    crate::drivers::kbd::poll_devices_espera();
+    // La IRQ MSI-X entrega el HID. Este sondeo cubre el intento en que el
+    // candado del controlador no estaba libre. No toma el candado del transporte.
+    crate::drivers::kbd::poll_hid_espera();
 }
 
 fn write_bytes(

@@ -580,14 +580,14 @@ fn handle_usb_event(evt: crate::drivers::usb_storage::UsbKbdEvent) {
 }
 
 #[cfg(feature = "drv-usb")]
-fn handle_usb_event_try(evt: crate::drivers::usb_storage::UsbKbdEvent) {
+fn handle_usb_event_try(evt: crate::drivers::usb_storage::UsbKbdEvent) -> bool {
     if evt.scancode == 0 && evt.usage_id < 0xE0 {
-        return;
+        return true;
     }
-    log_scancode_raw(evt.scancode);
     let Some(mut km) = KM.try_lock() else {
-        return;
+        return false;
     };
+    log_scancode_raw(evt.scancode);
 
     if evt.usage_id >= 0xE0 && evt.usage_id <= 0xE7 {
         match evt.usage_id {
@@ -597,21 +597,29 @@ fn handle_usb_event_try(evt: crate::drivers::usb_storage::UsbKbdEvent) {
             0xE6 => km.altgr_press(evt.pressed),
             _ => {}
         }
-        return;
+        return true;
     }
 
     if usb_cad(&evt) {
         crate::task::note_framebuffer_cad();
         crate::task::kick_scheduler();
-        return;
+        return true;
     }
 
     if !evt.pressed || evt.scancode == 0 {
-        return;
+        return true;
     }
 
     let out = km.translate_scancode(evt.scancode, evt.shift, evt.altgr);
     enqueue_output_try(&mut km, out);
+    true
+}
+
+/// La IRQ del xHCI ya sacó el informe. `false`: el candado no estaba libre
+/// y el llamador tiene que devolver la tecla a la cola.
+#[cfg(feature = "drv-usb")]
+pub fn deliver_usb_from_irq(evt: crate::drivers::usb_storage::UsbKbdEvent) -> bool {
+    handle_usb_event_try(evt)
 }
 
 fn poll_i8042(from_irq: bool) {
@@ -644,29 +652,36 @@ fn poll_i8042(from_irq: bool) {
 /// interrupciones cerradas en su núcleo (o está dentro de la IRQ).
 static HW_POLL: Mutex<()> = Mutex::new(());
 
-fn poll_hw_inner(from_irq: bool) {
-    poll_i8042(from_irq);
+fn poll_hw(from_irq: bool) {
+    {
+        // Solo el puerto 0x60. El sondeo USB es largo y no debe retener esto:
+        // la IRQ 1 y la lectura de la tty se quedarían detrás.
+        let _poll = HW_POLL.lock();
+        poll_i8042(from_irq);
+    }
     #[cfg(feature = "drv-usb")]
-    if from_irq {
-        while let Some(evt) = crate::drivers::usb_storage::poll_keyboard_event() {
-            handle_usb_event_try(evt);
-        }
-        while let Some(evt) = crate::drivers::usb_storage::poll_pointer_event() {
-            dispatch_pointer_event(evt);
-        }
-    } else {
-        while let Some(evt) = crate::drivers::usb_storage::poll_keyboard_event() {
+    poll_usb_hid(from_irq);
+}
+
+#[cfg(feature = "drv-usb")]
+fn poll_usb_hid(from_irq: bool) {
+    crate::drivers::usb_storage::drain_keyboard_events(|evt| {
+        if from_irq {
+            handle_usb_event_try(evt)
+        } else {
             handle_usb_event(evt);
+            true
         }
-        while let Some(evt) = crate::drivers::usb_storage::poll_pointer_event() {
-            dispatch_pointer_event(evt);
-        }
+    });
+    while let Some(evt) = crate::drivers::usb_storage::poll_pointer_event() {
+        dispatch_pointer_event(evt);
     }
 }
 
-fn poll_hw(from_irq: bool) {
-    let _poll = HW_POLL.lock();
-    poll_hw_inner(from_irq);
+/// Durante `lx_mdelay` en la BSP. No toma `TRANS_LOCK` ni `HW_POLL`.
+pub fn poll_hid_espera() {
+    #[cfg(feature = "drv-usb")]
+    poll_usb_hid(true);
 }
 
 #[cfg(feature = "drv-usb")]
@@ -678,23 +693,15 @@ fn dispatch_pointer_event(evt: xhci_nostd::PointerEvent) {
 ///
 /// La IRQ 1 no basta: el auxiliar PS/2 avisa por la IRQ 12, y el HID USB solo
 /// entra si alguien sondea el xHCI. El escritorio no lee la tty.
-/// Para las esperas largas de los drivers: lee el teclado sólo si nadie lo
-/// está leyendo ya (un vaciado interrumpido por esa misma espera no se
-/// repite, así no hay reentrada ni cerrojo tomado dos veces).
-pub fn poll_devices_espera() {
-    let Some(_poll) = HW_POLL.try_lock() else {
-        return;
-    };
-    without_interrupts(|| poll_hw_inner(false));
-}
-
 pub fn poll_devices() {
     crate::drivers::mouse::refresh_bounds();
     crate::drivers::hid_i2c::poll();
     without_interrupts(|| {
         let _poll = HW_POLL.lock();
-        poll_hw_inner(false);
+        poll_i8042(false);
     });
+    #[cfg(feature = "drv-usb")]
+    poll_usb_hid(false);
 }
 
 pub fn i8042_ready() -> bool {
@@ -706,11 +713,13 @@ pub fn handle_irq() {
 }
 
 pub fn read_byte() -> Option<u8> {
-    let b = without_interrupts(|| {
+    without_interrupts(|| {
         let _poll = HW_POLL.lock();
-        poll_hw_inner(false);
-        RX.lock().pop()
+        poll_i8042(false);
     });
+    #[cfg(feature = "drv-usb")]
+    poll_usb_hid(false);
+    let b = without_interrupts(|| RX.lock().pop());
     if b.is_some() {
         CH_ENTREGADOS.fetch_add(1, Ordering::Relaxed);
     }
@@ -720,9 +729,11 @@ pub fn read_byte() -> Option<u8> {
 pub fn has_input() -> bool {
     without_interrupts(|| {
         let _poll = HW_POLL.lock();
-        poll_hw_inner(false);
-        RX.lock().has_data()
-    })
+        poll_i8042(false);
+    });
+    #[cfg(feature = "drv-usb")]
+    poll_usb_hid(false);
+    without_interrupts(|| RX.lock().has_data())
 }
 
 fn setup_controller() -> Option<(u8, u8)> {
@@ -784,6 +795,7 @@ pub fn init() {
                 let n = crate::drivers::usb_storage::usb_keyboard_count();
                 println!("kbd: usb hid activo ({n})");
             }
+            crate::drivers::usb_storage::arm_hid_irqs();
         }
         return;
     }
@@ -808,6 +820,7 @@ pub fn init() {
             let n = crate::drivers::usb_storage::usb_keyboard_count();
             println!("kbd: usb hid activo ({n})");
         }
+        crate::drivers::usb_storage::arm_hid_irqs();
     }
 }
 

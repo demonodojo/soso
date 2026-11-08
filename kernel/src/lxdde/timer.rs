@@ -72,10 +72,10 @@ fn bombeo_red_bsp() {
     crate::net::poll();
     #[cfg(feature = "lxdde")]
     crate::lxdde::wifi::poll();
-    // Un escaneo WiFi tarda segundos y `sosh` no lee la entrada mientras
-    // espera: el teclado USB no tiene interrupción y se quedaba en el xHCI
-    // hasta que acabara. Sólo se llama desde esperas en syscall, no desde la IRQ.
-    crate::drivers::kbd::poll_devices_espera();
+    // `wifi::scan` retiene TRANS_LOCK en esta fibra: `wifi::poll` no entra.
+    // El HID no usa ese candado. La IRQ MSI-X entrega el informe; este
+    // sondeo cubre el intento en que el candado del controlador falló.
+    crate::drivers::kbd::poll_hid_espera();
 }
 
 pub fn sleep_ms(ms: u32) {

@@ -217,3 +217,37 @@ corta a los 8 s por contador o por `lx_ktime_get_ns`, y siempre imprime
 `docs/hw-matrix.json`: `ga107-igpu` y `ax200-wifi` con este arranque (GSP, VRAM,
 CE, ALIVE y MVM en `ok`; scan en `fail`; asociación y DHCP en `pendiente`;
 `arranques_consecutivos_ok=0`).
+
+## 8. Arranque de las 00:46 (8 nov)
+
+`BOOTMARK` a las 00:46. Copia en `target/usb-diagnostic-2026-11-08/`
+(no va a git). ESP p1 desmontada. `SOSOHASH` sigue en `886e8bb0d-dirty` del
+2026-11-05. El kernel del banner es `soso 0.3.28 (38e4298c8)`, el commit
+`booting`, que ya usa `iwl_mdelay_locked`.
+
+| Dato | Valor |
+|------|-------|
+| Log | flush #21, uptime 96 857 ms. Cabecera `kbd sc=0 ultimo=0x00 enc=0 ent=0` |
+| Banner | `soso 0.3.28 (38e4298c8)` |
+| Userspace | `sosh — escribe 'help' para la ayuda` |
+| GPU | `GSP_INIT_DONE`; `pool VRAM=sí`; `CE readback verificado (G4e GO)` |
+| 3D | `3D — semáforo no llegó a 1 en 5000 ms (vale 0)`; `USERD GPGet=1 GPPut=1`; 40 dwords; `PBDMA0 INTR_0=0` |
+| WiFi | `UCODE_ALIVE_NTFY`; `scan fin count=19 end=1`; 16 BSS en la lista |
+| Selector | `wifi: número de red (Enter para omitir):` y el log acaba ahí |
+| Teclado | `kbd: ps2 listo`; `kbd: usb hid activo (2)` (`0b05:18c6`); ninguna tecla |
+| Ethernet | `rtl8169: … enlace DOWN 10M half` (`phystatus 0x84`) |
+
+El scan de las 20:17 ya no se repite. Lo que queda es el prompt: `sosh` entra
+en `WaitingTty` y el scheduler solo mira si la consola tiene bytes. No hay IRQ
+de xHCI; Linux los entrega en `xhci_irq` (`lxdde/linux/drivers/usb/host/xhci-ring.c:3093`,
+6.6.32). El anillo USB solo se vaciaba desde la IRQ 1, desde `lx_mdelay` o
+desde `input_poll`. Este kernel ya no espera el scan con `lx_mdelay`, así que
+en el prompt no sondea el HID. Encaja con `kbd sc=0`.
+
+En el árbol, sin flashear, `schedule_inner` llama a `kbd::poll_devices` en la
+BSP antes de coger `PROCS`. El rootfs del stick sigue siendo el del 5 nov:
+`--only kernel` no actualiza `sosh`.
+
+`docs/hw-matrix.json`: `ga107-igpu` y `ax200-wifi` con este arranque (GSP, VRAM,
+CE, ALIVE, MVM y scan en `ok`; asociación y DHCP en `pendiente`;
+`arranques_consecutivos_ok=0`).

@@ -679,7 +679,46 @@ pub fn overwrite_in_dir_from(
         pad,
         0,
     )?;
+    // `DONTNEED` a mitad de la copia tira páginas sucias: en el stick los
+    // primeros 349 sectores del kernel no llegaban y el bootloader no veía ELF.
+    // Primero se sincroniza, luego se suelta la caché y se relee del dispositivo.
+    dst_f
+        .sync_all()
+        .map_err(|e| format!("fsync {}: {e}", dst.display()))?;
     drop_written_pages(&dst_f, dst_loc.data_off, src_loc.size as u64 + pad as u64);
+    if let Err(e) = ranges_match(
+        &mut src_f,
+        src_loc.data_off,
+        &mut dst_f,
+        dst_loc.data_off,
+        src_loc.size as usize,
+    ) {
+        copy_between(
+            &mut src_f,
+            src_loc.data_off,
+            &mut dst_f,
+            dst_loc.data_off,
+            src_loc.size as usize,
+        )?;
+        write_fill(
+            &mut dst_f,
+            dst_loc.data_off + src_loc.size as u64,
+            pad,
+            0,
+        )?;
+        dst_f
+            .sync_all()
+            .map_err(|e| format!("fsync {}: {e}", dst.display()))?;
+        drop_written_pages(&dst_f, dst_loc.data_off, src_loc.size as u64 + pad as u64);
+        ranges_match(
+            &mut src_f,
+            src_loc.data_off,
+            &mut dst_f,
+            dst_loc.data_off,
+            src_loc.size as usize,
+        )
+        .map_err(|e2| format!("{e}; reintento: {e2}"))?;
+    }
     Ok((src_loc.size, dst_loc.size))
 }
 
@@ -1474,6 +1513,41 @@ fn copy_bytes(f: &mut std::fs::File, src: u64, dst: u64, len: usize) -> Result<(
     Ok(())
 }
 
+fn ranges_match(
+    src: &mut std::fs::File,
+    src_off: u64,
+    dst: &mut std::fs::File,
+    dst_off: u64,
+    len: usize,
+) -> Result<(), String> {
+    if len == 0 {
+        return Ok(());
+    }
+    let mut a = vec![0u8; IO_CHUNK.min(len)];
+    let mut b = vec![0u8; a.len()];
+    let mut done = 0usize;
+    while done < len {
+        let n = (len - done).min(a.len());
+        read_at(src, src_off + done as u64, &mut a[..n])?;
+        read_at(dst, dst_off + done as u64, &mut b[..n])?;
+        if a[..n] != b[..n] {
+            let rel = a[..n]
+                .iter()
+                .zip(b[..n].iter())
+                .position(|(x, y)| x != y)
+                .unwrap_or(0);
+            let at = done + rel;
+            return Err(format!(
+                "el destino no conserva el origen en el byte {at} (origen {:02x?}, destino {:02x?})",
+                &a[rel..(rel + 4).min(n)],
+                &b[rel..(rel + 4).min(n)]
+            ));
+        }
+        done += n;
+    }
+    Ok(())
+}
+
 fn copy_between(
     src: &mut std::fs::File,
     src_off: u64,
@@ -1490,9 +1564,6 @@ fn copy_between(
         let n = (len - done).min(buf.len());
         read_at(src, src_off + done as u64, &mut buf[..n])?;
         write_at(dst, dst_off + done as u64, &buf[..n])?;
-        if len > IO_CHUNK {
-            drop_written_pages(dst, dst_off + done as u64, n as u64);
-        }
         done += n;
     }
     Ok(())

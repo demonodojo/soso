@@ -344,7 +344,6 @@ fn write_incremental_parts(
                  Recupera con un flash completo (sin --only)."
             )
         })?;
-        crate::fat32_write::drop_path_cache(usb);
     }
 
     if want_rootfs {
@@ -353,7 +352,6 @@ fn write_incremental_parts(
             data.display()
         );
         package_live::dd_to_partition(data, usb, 2)?;
-        crate::fat32_write::drop_path_cache(usb);
     }
     Ok(())
 }

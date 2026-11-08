@@ -1596,6 +1596,10 @@ extern "C" fn schedule_inner() -> ! {
             crate::lxdde::poll();
             #[cfg(feature = "lxdde")]
             crate::net::wifi_wpa::mantener();
+            // La MSI-X del xHCI entrega el HID. Este sondeo cubre el caso en
+            // que el candado del controlador falló y sosh está en WaitingTty.
+            // PROCS aún no está cogido: poll_devices despierta con try_lock.
+            crate::drivers::kbd::poll_devices();
         }
         x86_64::instructions::interrupts::disable();
         let now = crate::arch::pit::uptime_ms();

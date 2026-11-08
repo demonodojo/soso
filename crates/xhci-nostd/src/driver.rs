@@ -4,6 +4,7 @@
 //! management, device enumeration, and HID keyboard integration into a single
 //! struct that the kernel can init once and then poll for keyboard events.
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use alloc::vec;
 
@@ -98,6 +99,9 @@ pub struct XhciController {
     transfer_rings: Vec<Vec<Option<TransferRing>>>,
     /// Teclados HID activos (puede haber más de uno en el mismo xHCI).
     keyboards: Vec<KeyboardInfo>,
+    /// Teclas ya sacadas del anillo y devueltas: el candado del keymap no
+    /// estaba libre y no se pueden tirar.
+    held_keys: VecDeque<KeyEvent>,
     /// Ratones / touchpads HID activos.
     pointers: Vec<PointerInfo>,
     /// Transfer completions desviados mientras otro slot esperaba su evento.
@@ -353,6 +357,7 @@ impl XhciController {
             devices,
             transfer_rings,
             keyboards: Vec::new(),
+            held_keys: VecDeque::new(),
             pointers: Vec::new(),
             inventory: Vec::new(),
             pending_transfers: Vec::new(),
@@ -2229,6 +2234,31 @@ impl XhciController {
         if iman & IMAN_IP != 0 {
             self.rt.set_iman(0, iman | IMAN_IP);
         }
+        let sts = self.op.usbsts();
+        if sts != u32::MAX && sts & USBSTS_EINT != 0 {
+            self.op.set_usbsts(USBSTS_EINT);
+        }
+    }
+
+    /// Linux `xhci_irq`: reconoce EINT, limpia IMAN.IP y vacía el anillo.
+    ///
+    /// El HID rearma el IN al despachar el transfer event. Sin esto el
+    /// siguiente informe no llega y una pulsación corta desaparece.
+    pub fn service_interrupt(&mut self) -> bool {
+        let sts = self.op.usbsts();
+        if sts == u32::MAX || sts & USBSTS_EINT == 0 {
+            return false;
+        }
+        self.op.set_usbsts(USBSTS_EINT);
+        let iman = self.rt.iman(0);
+        self.rt.set_iman(0, iman | IMAN_IP);
+        self.drain_hw_events();
+        true
+    }
+
+    /// Devuelve una tecla que no pudo entrar en la tty.
+    pub fn requeue_keyboard(&mut self, evt: KeyEvent) {
+        self.held_keys.push_front(evt);
     }
 
     fn keyboard_index(&self, slot_id: u8, ep_id: u8) -> Option<usize> {
@@ -2457,6 +2487,9 @@ impl XhciController {
     /// Poll for keyboard events. Call this from the kernel's main loop or
     /// interrupt handler. Returns the next key event, if any.
     pub fn poll_keyboard(&mut self) -> Option<KeyEvent> {
+        if let Some(evt) = self.held_keys.pop_front() {
+            return Some(evt);
+        }
         if self.keyboards.is_empty() {
             return None;
         }

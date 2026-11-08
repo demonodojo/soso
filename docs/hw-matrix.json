@@ -766,45 +766,49 @@
       },
       "artefactos": {},
       "git": {
-        "commit": "8c0c5fb57",
-        "commit_corto": "8c0c5fb57",
-        "version": "0.3.28",
+        "commit": "5f2d77c1d",
+        "commit_corto": "5f2d77c1d",
+        "version": "0.3.26",
         "dirty": true,
-        "cambios_locales": "USB 20:17 banner 8c0c5fb57-dirty: CLEAR_SURFACE va antes del release y el semáforo 3D sigue en 0. El cuelgue es el scan (sin «scan fin», último count=15). Árbol, sin flashear: iwl_mdelay_locked no bombea net::poll con TRANS_LOCK cogido. Hostcheck: scan sin progreso sale por timeout."
+        "cambios_locales": "USB 10:55 banner soso 0.3.26 (5f2d77c1d-dirty). El -dirty son paquetes de prueba y los enlaces lxdde, no el código del kernel. Flush #40 a los 208647 ms, kbd sc=131 ent=63. Eco «widi» corregido a wifi scan. sondeo parado max 8067 ms (transporte) y 9217 ms (volcado del log ~1480 ms). SOSOHASH sigue en 886e8bb0d-dirty del 2026-11-05."
       },
       "perfil_drivers": "live-usb + nouveau",
       "arranques_consecutivos_ok": 0,
       "sesion_sostenida": {
         "status": "ok",
-        "nota": "sosh — flush #19 a los 96 s, colgado en el scan (sin scan fin). Un arranque a sosh no es aceptación.",
-        "fecha": "2026-11-07"
+        "nota": "5f2d77c1d: sosh, ls, echo, cat y halt a los 208 s. Se pierden teclas (eco widi, tres borrados) y wifi::poll no corre hasta 9217 ms. enc=ent=63 no cuenta la pulsación que no llegó a informe. Un arranque no es aceptación.",
+        "fecha": "2026-11-08"
       },
       "wifi": {
         "alive": {
           "status": "ok",
           "nota": "UCODE_ALIVE_NTFY",
-          "fecha": "2026-11-07"
+          "fecha": "2026-11-08"
         },
         "init_complete": {
           "status": "ok",
           "nota": "INIT_COMPLETE_NOTIF",
-          "fecha": "2026-11-07"
+          "fecha": "2026-11-08"
         },
         "mvm_ready": {
           "status": "ok",
           "nota": "MVM up",
-          "fecha": "2026-11-07"
+          "fecha": "2026-11-08"
         },
         "scan": {
-          "status": "fail",
-          "nota": "Sin «scan fin». Último scan_count=15; el prompt de sosh no volvió.",
-          "fecha": "2026-11-07"
+          "status": "ok",
+          "nota": "5f2d77c1d: scan fin count=21 y 24 end=1 (autoconnect). El de la shell acaba count=7 end=3 tras sondeo parado 16 veces, max 8067 ms.",
+          "fecha": "2026-11-08"
         },
         "assoc_wpa2": {
-          "status": "pendiente"
+          "status": "ok",
+          "nota": "5f2d77c1d: 4-way completado en el autoconnect, enlace autorizado.",
+          "fecha": "2026-11-08"
         },
         "dhcp": {
-          "status": "pendiente"
+          "status": "ok",
+          "nota": "5f2d77c1d: lease 192.168.68.132/24 por el AX200. rtl8169 sigue DOWN.",
+          "fecha": "2026-11-08"
         },
         "ssh": {
           "status": "pendiente"
@@ -816,17 +820,17 @@
       "gpu": {
         "gsp_rpc": {
           "status": "ok",
-          "nota": "GSP_INIT_DONE; pool y CE vivos. El clear 3D no señalizó (semáforo 0) en 8c0c5fb57-dirty, que ya suelta el release después del clear.",
-          "fecha": "2026-11-07"
+          "nota": "GSP_INIT_DONE; pool y CE vivos. El clear 3D no señalizó (semáforo 0) en 38e4298c8.",
+          "fecha": "2026-11-08"
         },
         "vram_pool": {
           "status": "ok",
-          "fecha": "2026-11-07"
+          "fecha": "2026-11-08"
         },
         "ce_readback": {
           "status": "ok",
           "nota": "CE readback GO",
-          "fecha": "2026-11-07"
+          "fecha": "2026-11-08"
         },
         "compute_cpu_gpu": {
           "status": "pendiente"
@@ -969,7 +973,15 @@
         "target/usb-diagnostic-2026-11-07-1946/SOSODRV.TXT",
         "target/usb-diagnostic-2026-11-07-1946/hostcheck-gsp.txt",
         "target/usb-diagnostic-2026-11-07-2024/SOSOLOG.TXT",
-        "target/usb-diagnostic-2026-11-07-2024/SOSODRV.TXT"
+        "target/usb-diagnostic-2026-11-07-2024/SOSODRV.TXT",
+        "target/usb-diagnostic-2026-11-08/SOSOLOG.TXT",
+        "target/usb-diagnostic-2026-11-08/SOSODRV.TXT",
+        "target/usb-diagnostic-2026-11-08-0824/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-11-08-0824/SOSODRV.txt",
+        "target/usb-diagnostic-2026-11-08-0958/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-11-08-0958/SOSODRV.txt",
+        "target/usb-diagnostic-2026-11-08-1055/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-11-08-1055/SOSODRV.txt"
       ],
       "historial": [
         {
@@ -6913,10 +6925,112 @@
           "campana_gpu": false,
           "flushes": 1,
           "fecha": "2026-11-07"
+        },
+        {
+          "log_hash": "57d13bb36c91b6ad6db39f9d91d2878c45b13d5f3ecc2b58a6ef177a900434bb",
+          "kernel": "soso 0.3.28 (38e4298c8)",
+          "identidad_conocida": true,
+          "artefactos": {},
+          "pci": [
+            "10de:249c",
+            "1002:1638",
+            "1022:b000",
+            "1022:1639",
+            "1002:1637",
+            "1022:15e3",
+            "8086:2723",
+            "10ec:8168",
+            "1022:1630",
+            "1022:1631",
+            "1022:1632",
+            "1022:1633",
+            "1022:1634",
+            "1022:1635",
+            "1022:790b",
+            "1022:790e",
+            "1022:166a",
+            "1022:166b",
+            "1022:166c",
+            "1022:166d",
+            "1022:166e",
+            "1022:166f",
+            "1022:1670",
+            "1022:1671",
+            "10de:228b",
+            "1022:15df",
+            "1022:15e2",
+            "0b05:1866",
+            "0b05:18c6",
+            "048d:1234"
+          ],
+          "wifi": {
+            "alive": {
+              "status": "ok",
+              "nota": "UCODE_ALIVE_NTFY",
+              "fecha": "2026-11-08"
+            },
+            "init_complete": {
+              "status": "ok",
+              "nota": "INIT_COMPLETE_NOTIF",
+              "fecha": "2026-11-08"
+            },
+            "mvm_ready": {
+              "status": "ok",
+              "nota": "MVM up",
+              "fecha": "2026-11-08"
+            },
+            "scan": {
+              "status": "ok",
+              "nota": "scan fin count=19 end=1; 16 BSS. El prompt queda sin tecla (kbd sc=0).",
+              "fecha": "2026-11-08"
+            },
+            "assoc_wpa2": {
+              "status": "pendiente"
+            },
+            "dhcp": {
+              "status": "pendiente"
+            },
+            "ssh": {
+              "status": "pendiente"
+            },
+            "reconexion": {
+              "status": "pendiente"
+            }
+          },
+          "gpu": {
+            "gsp_rpc": {
+              "status": "ok",
+              "nota": "GSP_INIT_DONE; pool y CE vivos. El clear 3D no señalizó (semáforo 0) en 38e4298c8.",
+              "fecha": "2026-11-08"
+            },
+            "vram_pool": {
+              "status": "ok",
+              "fecha": "2026-11-08"
+            },
+            "ce_readback": {
+              "status": "ok",
+              "nota": "CE readback GO",
+              "fecha": "2026-11-08"
+            },
+            "compute_cpu_gpu": {
+              "status": "pendiente"
+            },
+            "carga_real": {
+              "status": "pendiente"
+            },
+            "apagado_limpio": {
+              "status": "pendiente"
+            }
+          },
+          "userspace": true,
+          "campana_wifi": false,
+          "campana_gpu": false,
+          "flushes": 1,
+          "fecha": "2026-11-08"
         }
       ],
-      "notas": "2026-11-07 20:17 flush #19 uptime 96528 ms, banner soso 0.3.28 (8c0c5fb57-dirty); SOSOHASH sigue en 886e8bb0d-dirty del 2026-11-05. sosh arranca y se queda en «escaneando redes…»: no hay «scan fin» (último scan_count=15) y no hubo flush posterior. No es aceptación (racha sin subir). GPU: GSP_INIT_DONE, pool VRAM=sí, CE readback GO; el semáforo 3D sigue en 0 con CLEAR_SURFACE ya antes del release. WiFi: UCODE_ALIVE_NTFY y MVM up; el scan no vuelve. Sin asociación ni DHCP. rtl8169 enlace DOWN (phystatus 0x84). Árbol, sin flashear: la espera del scan usa iwl_mdelay_locked y no reentra en net::poll. Hostcheck: un scan cuyo poll no progresa sale por timeout. docs/DIAGNOSTICO-ROG-2026-11-07.md. Copia target/usb-diagnostic-2026-11-07-2024/.",
-      "actualizado": "2026-11-07"
+      "notas": "2026-11-08 10:55 soso 0.3.26 (5f2d77c1d-dirty): flush #40 uptime 208647 ms, kbd sc=131 ultimo=0x1c enc=63 ent=63. La orden wifi scan entra como «widi» y hace falta borrarla. wifi::poll no corre 8067 ms (transporte iwlwifi ocupado, durante el scan) y 9217 ms (volcado del log ~1480 ms). Autoconnect: dos scan fin end=1, 4-way y DHCP 192.168.68.132/24. El scan de la shell acaba end=3. halt limpio. No es aceptación (racha sin subir). GSP_INIT_DONE. rtl8169 enlace DOWN. docs/DIAGNOSTICO-ROG-2026-11-08.md. Copia target/usb-diagnostic-2026-11-08-1055/.",
+      "actualizado": "2026-11-08"
     },
     {
       "id": "ax211-wifi",
@@ -7715,45 +7829,49 @@
       },
       "artefactos": {},
       "git": {
-        "commit": "8c0c5fb57",
-        "commit_corto": "8c0c5fb57",
-        "version": "0.3.28",
+        "commit": "5f2d77c1d",
+        "commit_corto": "5f2d77c1d",
+        "version": "0.3.26",
         "dirty": true,
-        "cambios_locales": "USB 20:17 banner 8c0c5fb57-dirty: CLEAR_SURFACE va antes del release y el semáforo 3D sigue en 0. El cuelgue es el scan (sin «scan fin», último count=15). Árbol, sin flashear: iwl_mdelay_locked no bombea net::poll con TRANS_LOCK cogido. Hostcheck: scan sin progreso sale por timeout."
+        "cambios_locales": "USB 10:55 banner soso 0.3.26 (5f2d77c1d-dirty). El -dirty son paquetes de prueba y los enlaces lxdde, no el código del kernel. Flush #40 a los 208647 ms, kbd sc=131 ent=63. Eco «widi» corregido a wifi scan. sondeo parado max 8067 ms (transporte) y 9217 ms (volcado del log ~1480 ms). SOSOHASH sigue en 886e8bb0d-dirty del 2026-11-05."
       },
       "perfil_drivers": "live-usb + iwlwifi",
       "arranques_consecutivos_ok": 0,
       "sesion_sostenida": {
         "status": "ok",
-        "nota": "sosh — flush #19 a los 96 s, colgado en el scan (sin scan fin). Un arranque a sosh no es aceptación.",
-        "fecha": "2026-11-07"
+        "nota": "5f2d77c1d: sosh, ls, echo, cat y halt a los 208 s. Se pierden teclas (eco widi, tres borrados) y wifi::poll no corre hasta 9217 ms. enc=ent=63 no cuenta la pulsación que no llegó a informe. Un arranque no es aceptación.",
+        "fecha": "2026-11-08"
       },
       "wifi": {
         "alive": {
           "status": "ok",
           "nota": "UCODE_ALIVE_NTFY",
-          "fecha": "2026-11-07"
+          "fecha": "2026-11-08"
         },
         "init_complete": {
           "status": "ok",
           "nota": "INIT_COMPLETE_NOTIF",
-          "fecha": "2026-11-07"
+          "fecha": "2026-11-08"
         },
         "mvm_ready": {
           "status": "ok",
           "nota": "MVM up",
-          "fecha": "2026-11-07"
+          "fecha": "2026-11-08"
         },
         "scan": {
-          "status": "fail",
-          "nota": "Sin «scan fin». Último scan_count=15; el prompt de sosh no volvió.",
-          "fecha": "2026-11-07"
+          "status": "ok",
+          "nota": "5f2d77c1d: scan fin count=21 y 24 end=1 (autoconnect). El de la shell acaba count=7 end=3 tras sondeo parado 16 veces, max 8067 ms.",
+          "fecha": "2026-11-08"
         },
         "assoc_wpa2": {
-          "status": "pendiente"
+          "status": "ok",
+          "nota": "5f2d77c1d: 4-way completado en el autoconnect, enlace autorizado.",
+          "fecha": "2026-11-08"
         },
         "dhcp": {
-          "status": "pendiente"
+          "status": "ok",
+          "nota": "5f2d77c1d: lease 192.168.68.132/24 por el AX200. rtl8169 sigue DOWN.",
+          "fecha": "2026-11-08"
         },
         "ssh": {
           "status": "pendiente"
@@ -7765,17 +7883,17 @@
       "gpu": {
         "gsp_rpc": {
           "status": "ok",
-          "nota": "GSP_INIT_DONE; pool y CE vivos. El clear 3D no señalizó (semáforo 0) en 8c0c5fb57-dirty, que ya suelta el release después del clear.",
-          "fecha": "2026-11-07"
+          "nota": "GSP_INIT_DONE; pool y CE vivos. El clear 3D no señalizó (semáforo 0) en 38e4298c8.",
+          "fecha": "2026-11-08"
         },
         "vram_pool": {
           "status": "ok",
-          "fecha": "2026-11-07"
+          "fecha": "2026-11-08"
         },
         "ce_readback": {
           "status": "ok",
           "nota": "CE readback GO",
-          "fecha": "2026-11-07"
+          "fecha": "2026-11-08"
         },
         "compute_cpu_gpu": {
           "status": "pendiente"
@@ -7917,7 +8035,15 @@
         "target/usb-diagnostic-2026-11-07-1946/SOSODRV.TXT",
         "target/usb-diagnostic-2026-11-07-1946/hostcheck-gsp.txt",
         "target/usb-diagnostic-2026-11-07-2024/SOSOLOG.TXT",
-        "target/usb-diagnostic-2026-11-07-2024/SOSODRV.TXT"
+        "target/usb-diagnostic-2026-11-07-2024/SOSODRV.TXT",
+        "target/usb-diagnostic-2026-11-08/SOSOLOG.TXT",
+        "target/usb-diagnostic-2026-11-08/SOSODRV.TXT",
+        "target/usb-diagnostic-2026-11-08-0824/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-11-08-0824/SOSODRV.txt",
+        "target/usb-diagnostic-2026-11-08-0958/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-11-08-0958/SOSODRV.txt",
+        "target/usb-diagnostic-2026-11-08-1055/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-11-08-1055/SOSODRV.txt"
       ],
       "historial": [
         {
@@ -13966,10 +14092,112 @@
           "campana_gpu": false,
           "flushes": 1,
           "fecha": "2026-11-07"
+        },
+        {
+          "log_hash": "57d13bb36c91b6ad6db39f9d91d2878c45b13d5f3ecc2b58a6ef177a900434bb",
+          "kernel": "soso 0.3.28 (38e4298c8)",
+          "identidad_conocida": true,
+          "artefactos": {},
+          "pci": [
+            "10de:249c",
+            "1002:1638",
+            "1022:b000",
+            "1022:1639",
+            "1002:1637",
+            "1022:15e3",
+            "8086:2723",
+            "10ec:8168",
+            "1022:1630",
+            "1022:1631",
+            "1022:1632",
+            "1022:1633",
+            "1022:1634",
+            "1022:1635",
+            "1022:790b",
+            "1022:790e",
+            "1022:166a",
+            "1022:166b",
+            "1022:166c",
+            "1022:166d",
+            "1022:166e",
+            "1022:166f",
+            "1022:1670",
+            "1022:1671",
+            "10de:228b",
+            "1022:15df",
+            "1022:15e2",
+            "0b05:1866",
+            "0b05:18c6",
+            "048d:1234"
+          ],
+          "wifi": {
+            "alive": {
+              "status": "ok",
+              "nota": "UCODE_ALIVE_NTFY",
+              "fecha": "2026-11-08"
+            },
+            "init_complete": {
+              "status": "ok",
+              "nota": "INIT_COMPLETE_NOTIF",
+              "fecha": "2026-11-08"
+            },
+            "mvm_ready": {
+              "status": "ok",
+              "nota": "MVM up",
+              "fecha": "2026-11-08"
+            },
+            "scan": {
+              "status": "ok",
+              "nota": "scan fin count=19 end=1; 16 BSS. El prompt queda sin tecla (kbd sc=0).",
+              "fecha": "2026-11-08"
+            },
+            "assoc_wpa2": {
+              "status": "pendiente"
+            },
+            "dhcp": {
+              "status": "pendiente"
+            },
+            "ssh": {
+              "status": "pendiente"
+            },
+            "reconexion": {
+              "status": "pendiente"
+            }
+          },
+          "gpu": {
+            "gsp_rpc": {
+              "status": "ok",
+              "nota": "GSP_INIT_DONE; pool y CE vivos. El clear 3D no señalizó (semáforo 0) en 38e4298c8.",
+              "fecha": "2026-11-08"
+            },
+            "vram_pool": {
+              "status": "ok",
+              "fecha": "2026-11-08"
+            },
+            "ce_readback": {
+              "status": "ok",
+              "nota": "CE readback GO",
+              "fecha": "2026-11-08"
+            },
+            "compute_cpu_gpu": {
+              "status": "pendiente"
+            },
+            "carga_real": {
+              "status": "pendiente"
+            },
+            "apagado_limpio": {
+              "status": "pendiente"
+            }
+          },
+          "userspace": true,
+          "campana_wifi": false,
+          "campana_gpu": false,
+          "flushes": 1,
+          "fecha": "2026-11-08"
         }
       ],
-      "notas": "2026-11-07 20:17 flush #19 uptime 96528 ms, banner soso 0.3.28 (8c0c5fb57-dirty); SOSOHASH sigue en 886e8bb0d-dirty del 2026-11-05. sosh arranca y se queda en «escaneando redes…»: no hay «scan fin» (último scan_count=15) y no hubo flush posterior. No es aceptación (racha sin subir). GPU: GSP_INIT_DONE, pool VRAM=sí, CE readback GO; el semáforo 3D sigue en 0 con CLEAR_SURFACE ya antes del release. WiFi: UCODE_ALIVE_NTFY y MVM up; el scan no vuelve. Sin asociación ni DHCP. rtl8169 enlace DOWN (phystatus 0x84). Árbol, sin flashear: la espera del scan usa iwl_mdelay_locked y no reentra en net::poll. Hostcheck: un scan cuyo poll no progresa sale por timeout. docs/DIAGNOSTICO-ROG-2026-11-07.md. Copia target/usb-diagnostic-2026-11-07-2024/.",
-      "actualizado": "2026-11-07"
+      "notas": "2026-11-08 10:55 soso 0.3.26 (5f2d77c1d-dirty): flush #40 uptime 208647 ms, kbd sc=131 ultimo=0x1c enc=63 ent=63. La orden wifi scan entra como «widi» y hace falta borrarla. wifi::poll no corre 8067 ms (transporte iwlwifi ocupado, durante el scan) y 9217 ms (volcado del log ~1480 ms). Autoconnect: dos scan fin end=1, 4-way y DHCP 192.168.68.132/24. El scan de la shell acaba end=3. halt limpio. No es aceptación (racha sin subir). GSP_INIT_DONE. rtl8169 enlace DOWN. docs/DIAGNOSTICO-ROG-2026-11-08.md. Copia target/usb-diagnostic-2026-11-08-1055/.",
+      "actualizado": "2026-11-08"
     },
     {
       "id": "deck-oled",
