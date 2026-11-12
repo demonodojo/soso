@@ -299,6 +299,50 @@ pub unsafe extern "C" fn sal_os_strtod(p: *const c_char, end: *mut *const c_char
     }
     v
 }
+
+/// Decimal `strtoll` for freestanding Sal (`sal_dict_keys` Int keys).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sal_os_strtoll(
+    p: *const c_char,
+    end: *mut *mut c_char,
+    base: i32,
+) -> i64 {
+    if base != 0 && base != 10 {
+        fallo("strtoll: solo base 10");
+    }
+    let s = texto(p);
+    let mut i = 0usize;
+    let bytes = s.as_bytes();
+    let mut neg = false;
+    if bytes.first() == Some(&b'-') {
+        neg = true;
+        i = 1;
+    }
+    let mut mag: u64 = 0;
+    let start = i;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c < b'0' || c > b'9' {
+            break;
+        }
+        mag = mag
+            .checked_mul(10)
+            .and_then(|v| v.checked_add((c - b'0') as u64))
+            .unwrap_or_else(|| fallo("strtoll: desbordamiento"));
+        i += 1;
+    }
+    if i == start {
+        fallo("strtoll: dígito esperado");
+    }
+    if !end.is_null() {
+        end.write(p.add(i) as *mut c_char);
+    }
+    if neg {
+        -(mag as i64)
+    } else {
+        mag as i64
+    }
+}
 #[unsafe(no_mangle)]
 pub extern "C" fn expf(x: f32) -> f32 {
     libm::expf(x)

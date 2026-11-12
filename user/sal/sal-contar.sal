@@ -7,7 +7,7 @@ fn continuacion(c: Int) -> Int
     else
         1
 
-fn texto_valido(s: String) -> Int
+fn texto_valido(s: &String) -> Int
     ok = 1
     i = 0
     n = str_len(s)
@@ -53,7 +53,7 @@ fn texto_valido(s: String) -> Int
     ok
 
 fn contar(texto: String) -> Int ! io, alloc
-    if texto_valido(texto) == 0
+    if texto_valido(&texto) == 0
         _e = eprint_str(d"sal-contar: se requiere UTF-8 sin NUL\n")
         1
     else

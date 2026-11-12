@@ -2,11 +2,23 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 use xhci_nostd::hid::{PointerReportLayout, PointerState};
 
 use super::i2c_dw::DesignWareI2c;
 use crate::arch::acpi_hid_i2c::{self, HidI2cBinding};
+
+static IRQ_PENDIENTE: AtomicBool = AtomicBool::new(false);
+
+pub fn marcar_irq_pendiente() {
+    IRQ_PENDIENTE.store(true, Ordering::Release);
+    crate::net::marcar_trabajo_pendiente();
+}
+
+pub fn tomar_irq_pendiente() -> bool {
+    IRQ_PENDIENTE.swap(false, Ordering::AcqRel)
+}
 
 struct HidI2cDevice {
     bus: DesignWareI2c,
@@ -31,13 +43,47 @@ struct HidDesc {
 pub fn init() {
     let bindings = acpi_hid_i2c::discover();
     let mut devs = DEVICES.lock();
-    for b in bindings {
+    for b in bindings.iter().copied() {
         if let Some(d) = probe_binding(b) {
+            arm_attention(b);
             devs.push(d);
         }
     }
     if !devs.is_empty() {
         crate::println!("hid-i2c: {} touchpad(s) listo(s)", devs.len());
+    }
+}
+
+fn hid_gsi_irq() {
+    marcar_irq_pendiente();
+}
+
+fn arm_attention(b: HidI2cBinding) {
+    if let Some(gsi) = b.gsi {
+        if let Some(vec) = crate::arch::irq::allocate(hid_gsi_irq) {
+            match crate::arch::ioapic::route(gsi, vec, crate::arch::apic::id(), b.gsi_flags) {
+                Ok(()) => {
+                    crate::println!("hid-i2c: irq gsi={gsi} vector={vec:#x}");
+                    return;
+                }
+                Err(e) => crate::klogln!("hid-i2c: route gsi={gsi} fallo ({e})"),
+            }
+        }
+    }
+    let Some(pin) = b.gpio_pin else {
+        crate::klogln!("hid-i2c: sin GSI ni GpioInt; solo sondeo");
+        return;
+    };
+    let Some(gpio) = acpi_hid_i2c::discover_amd_gpio() else {
+        crate::klogln!("hid-i2c: GpioInt pin={pin} sin AMDI0030");
+        return;
+    };
+    let Some(gsi) = gpio.gsi else {
+        crate::klogln!("hid-i2c: AMDI0030 sin Interrupt");
+        return;
+    };
+    if let Err(e) = super::amd_gpio::arm_pin(gpio.mmio, gpio.len, pin, gsi, gpio.gsi_flags) {
+        crate::klogln!("hid-i2c: amd-gpio pin={pin} fallo ({e})");
     }
 }
 

@@ -1,9 +1,9 @@
 import "mate.sal"
 
-fn path_is_root(p: String) -> Int ! alloc
+fn path_is_root(p: &String) -> Int ! alloc
     str_eq(p, d"/")
 
-fn path_parent_matches(p: String, want: String) -> Int ! alloc
+fn path_parent_matches(p: &String, want: &String) -> Int ! alloc
     if path_is_root(p) != 0
         str_eq(want, d"/")
     else
@@ -31,7 +31,7 @@ fn path_parent_matches(p: String, want: String) -> Int ! alloc
                     j = j + 1
                 ok
 
-fn path_join_matches(base: String, name: String, want: String) -> Int ! alloc
+fn path_join_matches(base: &String, name: &String, want: &String) -> Int ! alloc
     bl = str_len(base)
     nl = str_len(name)
     wl = str_len(want)
@@ -75,5 +75,5 @@ fn path_join_matches(base: String, name: String, want: String) -> Int ! alloc
                 k = k + 1
         ok
 
-fn path_row_is_parent(name: String) -> Int ! alloc
+fn path_row_is_parent(name: &String) -> Int ! alloc
     str_eq(name, d"..")

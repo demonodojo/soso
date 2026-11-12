@@ -34,6 +34,7 @@ el alcance: consultar o editar documentación no inicia su implementación.
 | Gráficos 3D y juegos nativos | [PLAN-GRAFICOS-JUEGOS.md](../../../../docs/PLAN-GRAFICOS-JUEGOS.md) (H1–F8; motor 3D NVIDIA + `soso-gfx`); scanout HDMI [PLAN-NVDISPLAY.md](../../../../docs/PLAN-NVDISPLAY.md) (N0–N8) |
 | Steam Deck / ath11k | [PLAN-STEAMDECK.md](../../../../docs/PLAN-STEAMDECK.md) |
 | WiFi operativo | [WIFI-OPERATIVA.md](../../../../docs/WIFI-OPERATIVA.md) y diagnóstico del equipo relevante |
+| IRQs pendientes (MSI iwl, NMI/#MC, HID-I2C, HDA) | [PLAN-IRQ-PENDIENTES.md](../../../../docs/PLAN-IRQ-PENDIENTES.md), fases I1–I4 |
 | Toolchain y compilación nativa | [SELF-HOSTING.md](../../../../docs/SELF-HOSTING.md); SI-6/SI-7 añaden agente e integración, no sustituyen los requisitos de toolchain |
 | Lenguaje Sal, runtime y utilidades | [PLAN-SAL.md](../../../../docs/PLAN-SAL.md), SAL-1–SAL-4; fuentes del compilador en el checkout hermano Sal |
 | Escritorio gráfico `soso-wm` | [PLAN-ESCRITORIO.md](../../../../docs/PLAN-ESCRITORIO.md), W1–W3 kernel, S0–S4 Sal, W6–W7 clientes y pruebas |

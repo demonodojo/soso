@@ -1,6 +1,7 @@
 /* Puente lx_emul → driver Intel AX211/AX200. */
 #include "lx_emul.h"
 #include "iwl_ax211.h"
+#include "iwl_internal.h"
 
 extern int lx_mac80211_register_hw(void);
 
@@ -132,6 +133,16 @@ int lx_iwlwifi_bssid(unsigned char bssid[6])
 void lx_iwlwifi_poll(void)
 {
     iwl_ax211_poll();
+}
+
+uint32_t lx_iwlwifi_irq_top(void)
+{
+    return iwl_trans_irq_top(&g_iwl);
+}
+
+void lx_iwlwifi_enable_runtime_ints(void)
+{
+    iwl_trans_enable_runtime_ints(&g_iwl);
 }
 
 void lx_iwlwifi_check_health(uint64_t now_ms)

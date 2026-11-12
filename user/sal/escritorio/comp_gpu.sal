@@ -2,7 +2,8 @@ import "soso.sal"
 import "comp_gfram_layout.sal"
 
 fn comp_gpu_try_init(st: Int, clen: Int, w: Int, h: Int, pitch: Int) -> Int ! io, alloc
-    info = bytes_ptr(bytes_new(gpu_info_size()))
+    info_own = bytes_new(gpu_info_size())
+    info = bytes_ptr(info_own)
     if gpu_info(info) < 0
         _g = comp_st_set(st, comp_st_gpu_ok(), 0)
         0

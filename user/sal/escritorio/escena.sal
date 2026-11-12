@@ -96,11 +96,14 @@ fn esc_o_flags() -> Int
 
 # ---- Lista de primitivas ----------------------------------------------------
 
+# Devuelve el puntero crudo; el `Bytes` dueño se fuga a propósito (vida = proceso).
+# Los callers del WM guardan el `Int` en estado opaco; no cambiar a `Bytes` aquí.
 fn esc_nueva(cap: Int) -> Int ! alloc
     bytes_ptr(bytes_new(cap * esc_prim_bytes()))
 
 fn esc_get(e: Int, cap: Int, n: Int, off: Int) -> Int ! alloc
-    v = bytes_get_u32(bytes_view_mem(e, cap * esc_prim_bytes()), n * esc_prim_bytes() + off)
+    b = bytes_view_mem(e, cap * esc_prim_bytes())
+    v = bytes_get_u32(b, n * esc_prim_bytes() + off)
     if v >= 2147483648
         v - 4294967296
     else
@@ -110,7 +113,8 @@ fn esc_set(e: Int, cap: Int, n: Int, off: Int, v: Int) -> Int ! alloc
     w = v
     if w < 0
         w = w + 4294967296
-    bytes_set_u32(bytes_view_mem(e, cap * esc_prim_bytes()), n * esc_prim_bytes() + off, w)
+    b = bytes_view_mem(e, cap * esc_prim_bytes())
+    bytes_set_u32(b, n * esc_prim_bytes() + off, w)
     0
 
 # Reserva la primitiva `n` (puesta a cero) y devuelve n + 1; si no cabe, n.

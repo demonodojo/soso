@@ -13,11 +13,11 @@ fn puerto_wm() -> Int
 fn compos_len(stride: Int, sh: Int, bpp: Int) -> Int
     stride * sh * bpp
 
-fn compos_ram(sw: Int, sh: Int, stride: Int, bpp: Int) -> Int ! alloc
-    bytes_ptr(bytes_new(compos_len(stride, sh, bpp)))
+fn compos_ram(sw: Int, sh: Int, stride: Int, bpp: Int) -> Bytes ! alloc
+    bytes_new(compos_len(stride, sh, bpp))
 
-fn bucle_wm(st: Int, listener: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
-    while st_get(st, st_salir()) == 0
+fn bucle_wm(st: &mut Estado, listener: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
+    while st.salir == 0
         _t = wm_tick(st, listener, compos, clen, sw, sh, stride, bpp, fmt)
     0
 
@@ -45,15 +45,15 @@ fn term_busca_cp(grid: Int, glen: Int, w: Int, h: Int, cp: Int) -> Int ! alloc
         row = row + 1
     found
 
-fn prueba_term_echo(st: Int, tab: Int, i: Int, cp: Int) -> Int ! alloc
-    if tab_get(tab, i, tab_tipo()) != tab_tipo_term()
+fn prueba_term_echo(st: &mut Estado, i: Int, cp: Int) -> Int ! alloc
+    if st.tab.tipo(i) != tab_tipo_term()
         0
     else
-        grid = tab_get(tab, i, tab_shm_ptr())
-        ww = tab_get(tab, i, tab_ww())
-        wh = tab_get(tab, i, tab_wh())
-        gw = wm_tab_gw(tab, i)
-        gh = wm_tab_gh(tab, i)
+        grid = st.tab.shm_ptr(i)
+        ww = st.tab.ww(i)
+        wh = st.tab.wh(i)
+        gw = wm_tab_gw(st, i)
+        gh = wm_tab_gh(st, i)
         cols = wm_term_cols(ww, gw)
         rows = wm_term_rows(wh, gh, wm_bar_h(st))
         term_busca_cp(grid, cols * rows * celda_bytes(), cols, rows, cp)
@@ -62,20 +62,21 @@ fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, 
     listener = tcp_listen(puerto_wm())
     ok = 1
     if listener >= 0
-        evt = bytes_ptr(bytes_new(24 * 8))
-        msg = bytes_ptr(bytes_new(msg_len()))
-        st = st_nuevo(evt, msg)
-        _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo(st))
-        _t1 = wm_abrir_terminal(st, sw, sh)
-        tab = st_get(st, st_tab())
-        t0i = st_get(st, st_focus())
+        evt_own = bytes_new(24 * 8)
+        msg_own = bytes_new(msg_len())
+        evt = bytes_ptr(evt_own)
+        msg = bytes_ptr(msg_own)
+        st = Estado.new(evt, msg)
+        _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo(&mut st))
+        _t1 = wm_abrir_terminal(&mut st, sw, sh)
+        t0i = st.focus
         if t0i >= 0
-            fd0 = tab_get(tab, t0i, tab_fd())
+            fd0 = st.tab.fd(t0i)
             _w0 = write_str_fd(fd0, d"echo uno\n")
-        _t2 = wm_abrir_terminal(st, sw, sh)
-        t1i = st_get(st, st_focus())
+        _t2 = wm_abrir_terminal(&mut st, sw, sh)
+        t1i = st.focus
         if t1i >= 0
-            fd1 = tab_get(tab, t1i, tab_fd())
+            fd1 = st.tab.fd(t1i)
             _w1 = write_str_fd(fd1, d"echo dos\n")
         _p = spawn_io_full(d"/bin/demo-cliente", fd_tty_heredado(), fd_tty_heredado(), fd_tty_heredado(), fd_kernel_log())
         t0 = uptime_ms()
@@ -89,24 +90,23 @@ fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, 
             if uptime_ms() - t0 > 20000
                 ok = 2
             if ok == 0
-                _t = wm_tick(st, listener, compos, clen, sw, sh, stride, bpp, fmt)
+                _t = wm_tick(&mut st, listener, compos, clen, sw, sh, stride, bpp, fmt)
             if ok == 0
-                tab = st_get(st, st_tab())
                 if uno == 0
                     if t0i >= 0
-                        if prueba_term_echo(st, tab, t0i, 117) != 0
+                        if prueba_term_echo(&mut st, t0i, 117) != 0
                             uno = 1
                 if dos == 0
                     if t1i >= 0
-                        if prueba_term_echo(st, tab, t1i, 100) != 0
+                        if prueba_term_echo(&mut st, t1i, 100) != 0
                             dos = 1
                 if demo == 0
-                    fi = st_get(st, st_focus())
+                    fi = st.focus
                     if fi >= 0
-                        if tab_get(tab, fi, tab_fase()) == 2
-                            wx = tab_get(tab, fi, tab_wx())
-                            wy = tab_get(tab, fi, tab_wy())
-                            if prueba_pixel_ok(compos, clen, stride, bpp, fmt, wx + 10, wy + wm_bar_h(st) + 10, 40, 80, 200) != 0
+                        if st.tab.fase(fi) == 2
+                            wx = st.tab.wx(fi)
+                            wy = st.tab.wy(fi)
+                            if prueba_pixel_ok(compos, clen, stride, bpp, fmt, wx + 10, wy + wm_bar_h(&mut st) + 10, 40, 80, 200) != 0
                                 demo = 1
                                 demo_i = fi
                 # T3 de extremo a extremo con un cliente real (demo-cliente ignora
@@ -116,15 +116,15 @@ fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, 
                     if dos != 0
                         if demo != 0
                             if vstage == 0
-                                _ig = wm_integrar(st, t1i, demo_i)
-                                _ac = grupo_activar(tab, t1i)
+                                _ig = wm_integrar(&mut st, t1i, demo_i)
+                                _ac = st.tab.grupo_activar(t1i)
                                 vstage = 1
                             elsif vstage == 1
-                                if tab_get(tab, demo_i, tab_vis()) == 2
-                                    _ac2 = grupo_activar(tab, demo_i)
+                                if st.tab.vis(demo_i) == 2
+                                    _ac2 = st.tab.grupo_activar(demo_i)
                                     vstage = 2
                             elsif vstage == 2
-                                if tab_get(tab, demo_i, tab_vis()) == 1
+                                if st.tab.vis(demo_i) == 1
                                     ok = 1
         close_fd(listener)
         if ok == 2
@@ -178,16 +178,18 @@ fn prueba_mono_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: 
     if listener < 0
         ok = 7
     if listener >= 0
-        evt = bytes_ptr(bytes_new(24 * 8))
-        msg = bytes_ptr(bytes_new(msg_len()))
-        st = st_nuevo(evt, msg)
+        evt_own = bytes_new(24 * 8)
+        msg_own = bytes_new(msg_len())
+        evt = bytes_ptr(evt_own)
+        msg = bytes_ptr(msg_own)
+        st = Estado.new(evt, msg)
         mono_pid = -1
-        _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo(st))
+        _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo(&mut st))
         warm = 0
         while warm < 8
-            _w = wm_tick(st, listener, compos, clen, sw, sh, stride, bpp, fmt)
+            _w = wm_tick(&mut st, listener, compos, clen, sw, sh, stride, bpp, fmt)
             warm = warm + 1
-        _ss = wm_ss_armar(st, compos, clen, sw, sh, stride, bpp, fmt)
+        _ss = wm_ss_armar(&mut st, compos, clen, sw, sh, stride, bpp, fmt)
         if _ss == 0
             ok = 4
         if _ss != 0
@@ -195,7 +197,7 @@ fn prueba_mono_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: 
             if mono_pid < 0
                 ok = 4
             if mono_pid >= 0
-                _mp = st_set(st, st_ss_pid(), mono_pid)
+                st.ss_pid = mono_pid
                 t0 = uptime_ms()
                 pintado = 0
                 fase2 = 0
@@ -207,17 +209,16 @@ fn prueba_mono_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: 
                         else
                             ok = 5
                     if ok == 0
-                        _t = wm_tick(st, listener, compos, clen, sw, sh, stride, bpp, fmt)
+                        _t = wm_tick(&mut st, listener, compos, clen, sw, sh, stride, bpp, fmt)
                     if ok == 0
-                        si = st_get(st, st_ss_slot())
+                        si = st.ss_slot
                         if si >= 0
-                            tab = st_get(st, st_tab())
-                            if tab_get(tab, si, tab_fase()) == 2
+                            if st.tab.fase(si) == 2
                                 fase2 = 1
-                                ptr = tab_get(tab, si, tab_shm_ptr())
+                                ptr = st.tab.shm_ptr(si)
                                 if ptr > 0
-                                    cw = tab_get(tab, si, tab_cw())
-                                    ch = tab_get(tab, si, tab_ch())
+                                    cw = st.tab.cw(si)
+                                    ch = st.tab.ch(si)
                                     slen = cw * ch * 4
                                     if prueba_mono_shm_cualquier_paso(ptr, slen, cw, ch, fmt) != 0
                                         pintado = 1
@@ -225,7 +226,7 @@ fn prueba_mono_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: 
                             ok = 1
             if mono_pid > 0
                 _k = kill_pid(mono_pid, 9)
-        _x = wm_ss_cerrar(st)
+        _x = wm_ss_cerrar(&mut st)
         close_fd(listener)
         if ok == 1
             _pr = print_str(d"soso-wm: prueba-mono OK\n")
@@ -266,22 +267,25 @@ fn bucle_grafico(ejecutar: String) -> Int ! io, alloc
             bpp = fb_info_bpp(info)
             fmt = fb_info_formato(info)
             plen = compos_len(stride, sh, bpp)
-            evt = bytes_ptr(bytes_new(24 * 8))
-            msg = bytes_ptr(bytes_new(msg_len()))
-            st = st_nuevo(evt, msg)
+            evt_own = bytes_new(24 * 8)
+            msg_own = bytes_new(msg_len())
+            evt = bytes_ptr(evt_own)
+            msg = bytes_ptr(msg_own)
+            st = Estado.new(evt, msg)
             sin_comp = arg_flag(d"--sin-comp")
-            compos = wm_comp_ensure(st, sw, sh, stride, sin_comp)
+            compos = wm_comp_ensure(&mut st, sw, sh, stride, sin_comp)
             if compos < 0
-                compos = bytes_ptr(bytes_new(plen))
-            _bg = rellenar_rect(compos, plen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo(st))
+                compos_own = bytes_new(plen)
+                compos = bytes_ptr(compos_own)
+            _bg = rellenar_rect(compos, plen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo(&mut st))
             listener = tcp_listen(puerto_wm())
             if listener < 0
                 rc = 4
             if listener >= 0
-                _ic = wm_iniciar_cursor(st, sw, sh)
-                _d0 = wm_marcar_dirty(st, 0, 0, sw, sh)
+                _ic = wm_iniciar_cursor(&mut st, sw, sh)
+                _d0 = wm_marcar_dirty(&mut st, 0, 0, sw, sh)
                 _sp = lanzar_ejecutar()
-                _loop = bucle_wm(st, listener, compos, plen, sw, sh, stride, bpp, fmt)
+                _loop = bucle_wm(&mut st, listener, compos, plen, sw, sh, stride, bpp, fmt)
                 _c = fb_set_mode(fb_mode_consola())
                 close_fd(listener)
     rc
@@ -349,10 +353,12 @@ fn prueba_web_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: I
     listener = tcp_listen(puerto_wm())
     ok = 1
     if listener >= 0
-        evt = bytes_ptr(bytes_new(24 * 8))
-        msg = bytes_ptr(bytes_new(msg_len()))
-        st = st_nuevo(evt, msg)
-        _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo(st))
+        evt_own = bytes_new(24 * 8)
+        msg_own = bytes_new(msg_len())
+        evt = bytes_ptr(evt_own)
+        msg = bytes_ptr(msg_own)
+        st = Estado.new(evt, msg)
+        _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo(&mut st))
         _p = spawn_io_4(d"/var/paquetes/soso-web/bin/soso-web", d"--grafico", d"--local", d"/var/paquetes/soso-web/share/ejemplo/web-prueba.html", fd_tty_heredado(), fd_tty_heredado(), fd_tty_heredado(), fd_kernel_log())
         t0 = uptime_ms()
         ok = 0
@@ -360,13 +366,12 @@ fn prueba_web_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: I
             if uptime_ms() - t0 > 30000
                 ok = 2
             if ok == 0
-                _t = wm_tick(st, listener, compos, clen, sw, sh, stride, bpp, fmt)
+                _t = wm_tick(&mut st, listener, compos, clen, sw, sh, stride, bpp, fmt)
             if ok == 0
-                fi = st_get(st, st_focus())
+                fi = st.focus
                 if fi >= 0
-                    tab = st_get(st, st_tab())
-                    if tab_get(tab, fi, tab_fase()) == 2
-                        if prueba_web_pixel_ok(tab, fi) != 0
+                    if st.tab.fase(fi) == 2
+                        if prueba_web_pixel_ok(&mut st, fi) != 0
                             ok = 1
         close_fd(listener)
         if ok == 1
@@ -374,17 +379,17 @@ fn prueba_web_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: I
             ok = 0
     ok
 
-fn prueba_layout_solapan(tab: Int, z: Int, nz: Int, a: Int, b: Int) -> Int ! alloc
-    ia = z_get(z, a)
-    ib = z_get(z, b)
-    wx = tab_get(tab, ia, tab_wx())
-    wy = tab_get(tab, ia, tab_wy())
-    ww = tab_get(tab, ia, tab_ww())
-    wh = tab_get(tab, ia, tab_wh())
-    wx2 = tab_get(tab, ib, tab_wx())
-    wy2 = tab_get(tab, ib, tab_wy())
-    ww2 = tab_get(tab, ib, tab_ww())
-    wh2 = tab_get(tab, ib, tab_wh())
+fn prueba_layout_solapan(st: &mut Estado, a: Int, b: Int) -> Int ! alloc
+    ia = st.tab.z_get(a)
+    ib = st.tab.z_get(b)
+    wx = st.tab.wx(ia)
+    wy = st.tab.wy(ia)
+    ww = st.tab.ww(ia)
+    wh = st.tab.wh(ia)
+    wx2 = st.tab.wx(ib)
+    wy2 = st.tab.wy(ib)
+    ww2 = st.tab.ww(ib)
+    wh2 = st.tab.wh(ib)
     if wx < wx2 + ww2
         if wx2 < wx + ww
             if wy < wy2 + wh2
@@ -392,22 +397,20 @@ fn prueba_layout_solapan(tab: Int, z: Int, nz: Int, a: Int, b: Int) -> Int ! all
                     1
     0
 
-fn prueba_layout_mosaic(st: Int, sw: Int, sh: Int) -> Int ! alloc
-    tab = st_get(st, st_tab())
-    z = st_get(st, st_z())
-    nz = st_get(st, st_nz())
+fn prueba_layout_mosaic(st: &mut Estado, sw: Int, sh: Int) -> Int ! alloc
+    nz = st.tab.nz()
     if nz != 4
         100
     else
-        _m = st_set(st, st_mosaic(), 1)
+        st.mosaic = 1
         _a = wm_aplicar_mosaic(st, sw, sh)
         ok = 0
         k = 0
         while k < nz
             if ok == 0
-                i = z_get(z, k)
-                ww = tab_get(tab, i, tab_ww())
-                wh = tab_get(tab, i, tab_wh())
+                i = st.tab.z_get(k)
+                ww = st.tab.ww(i)
+                wh = st.tab.wh(i)
                 if ww < ventana_min_ancho()
                     ok = 110 + k
                 if wh < ventana_min_alto(wm_gh_wm(st)) + wm_bar_h(st)
@@ -418,34 +421,33 @@ fn prueba_layout_mosaic(st: Int, sw: Int, sh: Int) -> Int ! alloc
             if ok == 0
                 b = a + 1
                 while b < nz
-                    if prueba_layout_solapan(tab, z, nz, a, b) != 0
+                    if prueba_layout_solapan(st, a, b) != 0
                         ok = 130 + a * 4 + b
                     b = b + 1
             a = a + 1
         if ok == 0
-            _m0 = st_set(st, st_mosaic(), 0)
+            st.mosaic = 0
             _r0 = wm_aplicar_mosaic(st, sw, sh)
         ok
 
-fn prueba_layout_drag(st: Int, sw: Int, sh: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc, io
-    tab = st_get(st, st_tab())
-    fi = st_get(st, st_focus())
+fn prueba_layout_drag(st: &mut Estado, sw: Int, sh: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc, io
+    fi = st.focus
     if fi < 0
         200
     else
-        wx0 = tab_get(tab, fi, tab_wx())
-        wy0 = tab_get(tab, fi, tab_wy())
+        wx0 = st.tab.wx(fi)
+        wy0 = st.tab.wy(fi)
         gx = 10
         gy = 5
-        _di = st_set(st, st_drag_ix(), fi)
-        _dk = st_set(st, st_drag_kind(), 1)
-        _gx = st_set(st, st_grab_x(), gx)
-        _gy = st_set(st, st_grab_y(), gy)
+        st.drag_ix = fi
+        st.drag_kind = 1
+        st.grab_x = gx
+        st.grab_y = gy
         nx = wx0 + 50
         ny = wy0 + 40
         _mv = wm_raton_mover(st, nx, ny, 1, sw, sh)
-        wx1 = tab_get(tab, fi, tab_wx())
-        wy1 = tab_get(tab, fi, tab_wy())
+        wx1 = st.tab.wx(fi)
+        wy1 = st.tab.wy(fi)
         if wx1 != nx - gx
             201
         else
@@ -453,31 +455,30 @@ fn prueba_layout_drag(st: Int, sw: Int, sh: Int, compos: Int, clen: Int, stride:
                 202
             else
                 _c = wm_compose(st, compos, clen, sw, sh, stride, bpp, fmt)
-                if tab_get(tab, fi, tab_wx()) != wx1
+                if st.tab.wx(fi) != wx1
                     203
                 else
                     0
 
-fn prueba_layout_float(st: Int, sw: Int, sh: Int) -> Int ! alloc
-    tab = st_get(st, st_tab())
+fn prueba_layout_float(st: &mut Estado, sw: Int, sh: Int) -> Int ! alloc
     i = 0
-    _x = tab_set(tab, i, tab_wx(), 0)
-    _y = tab_set(tab, i, tab_wy(), 40 + wm_bar_h(st))
-    _w = tab_set(tab, i, tab_ww(), 500)
-    _h = tab_set(tab, i, tab_wh(), 350 + wm_bar_h(st))
-    _fx = tab_set(tab, i, tab_fwx(), 0)
-    _fy = tab_set(tab, i, tab_fwy(), 40 + wm_bar_h(st))
-    _fw = tab_set(tab, i, tab_fww(), 500)
-    _fh = tab_set(tab, i, tab_fwh(), 350 + wm_bar_h(st))
+    st.tab.set_wx(i, 0)
+    st.tab.set_wy(i, 40 + wm_bar_h(st))
+    st.tab.set_ww(i, 500)
+    st.tab.set_wh(i, 350 + wm_bar_h(st))
+    st.tab.set_fwx(i, 0)
+    st.tab.set_fwy(i, 40 + wm_bar_h(st))
+    st.tab.set_fww(i, 500)
+    st.tab.set_fwh(i, 350 + wm_bar_h(st))
     rc = 0
     if rc == 0
-        _m = st_set(st, st_mosaic(), 1)
+        st.mosaic = 1
         _a = wm_aplicar_mosaic(st, sw, sh)
-        _m0 = st_set(st, st_mosaic(), 0)
+        st.mosaic = 0
         _a2 = wm_aplicar_mosaic(st, sw, sh)
-        ww = tab_get(tab, i, tab_ww())
-        fw = tab_get(tab, i, tab_fww())
-        if tab_get(tab, i, tab_wx()) != 0
+        ww = st.tab.ww(i)
+        fw = st.tab.fww(i)
+        if st.tab.wx(i) != 0
             rc = 300
         if rc == 0
             if fw != 500
@@ -488,79 +489,77 @@ fn prueba_layout_float(st: Int, sw: Int, sh: Int) -> Int ! alloc
     rc
 
 # Pestañas (T1/T2): integrar, reordenar arrastrando, despegar y volver a integrar.
-fn prueba_layout_pestanas(st: Int, sw: Int, sh: Int) -> Int ! io, alloc
-    tab = st_get(st, st_tab())
+fn prueba_layout_pestanas(st: &mut Estado, sw: Int, sh: Int) -> Int ! io, alloc
     _a = wm_integrar(st, 1, 0)
     _b = wm_integrar(st, 2, 0)
     rc = 0
-    if grupo_n(tab, 0) != 3
+    if st.tab.grupo_n(0) != 3
         rc = 400
     if rc == 0
-        wx = tab_get(tab, 0, tab_wx())
-        wy = tab_get(tab, 0, tab_wy())
+        wx = st.tab.wx(0)
+        wy = st.tab.wy(0)
         # Arrastra la 3.ª pestaña hasta el sitio de la 1.ª: queda la primera.
         _ra = wm_pest_arrastrar(st, 2, pest_x0(wx) + 5, wy + wm_bar_h(st) / 2, sh)
-        if grupo_pos(tab, 2) != 0
+        if st.tab.grupo_pos(2) != 0
             rc = 401
     if rc == 0
         # Fuera de la barra se despega: ventana propia y arrastre de ventana.
-        _rd = wm_pest_arrastrar(st, 2, tab_get(tab, 0, tab_wx()) + 60, tab_get(tab, 0, tab_wy()) + 200, sh)
-        if grupo_n(tab, 0) != 2
+        _rd = wm_pest_arrastrar(st, 2, st.tab.wx(0) + 60, st.tab.wy(0) + 200, sh)
+        if st.tab.grupo_n(0) != 2
             rc = 402
-        elsif grupo_cab(tab, 2) != 2
+        elsif st.tab.grupo_cab(2) != 2
             rc = 403
-        elsif st_get(st, st_drag_kind()) != 1
+        elsif st.drag_kind != 1
             rc = 404
     if rc == 0
         # Soltarla sobre la barra de la ventana que queda la integra otra vez.
-        dst = wm_destino_soltar(st, pest_x0(tab_get(tab, 0, tab_wx())) + 20, tab_get(tab, 0, tab_wy()) + 5, 2)
+        dst = wm_destino_soltar(st, pest_x0(st.tab.wx(0)) + 20, st.tab.wy(0) + 5, 2)
         if dst != 0
             rc = 405
         else
             _ig = wm_integrar(st, 2, dst)
-            if grupo_n(tab, 0) != 3
+            if st.tab.grupo_n(0) != 3
                 rc = 406
     if rc == 0
         rc = prueba_layout_lista(st, sw, sh)
-    _d = st_set(st, st_drag_ix(), -1)
-    _k = st_set(st, st_drag_kind(), 0)
+    st.drag_ix = -1
+    st.drag_kind = 0
     rc
 
 # Lista de pestañas (T4): con la tira desbordada aparece «▾», y su menú elige pestaña.
-fn prueba_layout_lista(st: Int, sw: Int, sh: Int) -> Int ! io, alloc
-    tab = st_get(st, st_tab())
+fn prueba_layout_lista(st: &mut Estado, sw: Int, sh: Int) -> Int ! io, alloc
     gh = wm_gh_wm(st)
     rc = 0
-    _w = tab_set(tab, 0, tab_ww(), 200)
-    wx = tab_get(tab, 0, tab_wx())
-    wy = tab_get(tab, 0, tab_wy())
-    ww = tab_get(tab, 0, tab_ww())
-    n = grupo_n(tab, 0)
+    st.tab.set_ww(0, 200)
+    wx = st.tab.wx(0)
+    wy = st.tab.wy(0)
+    ww = st.tab.ww(0)
+    n = st.tab.grupo_n(0)
     if pest_desborda(wx, ww, gh, n) == 0
         rc = 410
     if rc == 0
-        if pest_hit(pest_lista_x(wx, ww, gh) + 3, wy + 8, wx, wy, ww, gh, n, wm_pest_act(tab, 0)) != 201
+        if pest_hit(pest_lista_x(wx, ww, gh) + 3, wy + 8, wx, wy, ww, gh, n, wm_pest_act(st, 0)) != 201
             rc = 411
     if rc == 0
         _ab = wm_lista_abrir(st, 0, sw, sh)
-        if st_get(st, st_ctx()) != 0
+        if st.ctx != 0
             rc = 412
         elsif ctx_cuenta(st) != n
             rc = 413
         else
             ia = ctx_item_alto(st)
-            it = ctx_item(st, st_get(st, st_ctx_x()) + 4, st_get(st, st_ctx_y()) + ia + ia / 2)
+            it = ctx_item(st, st.ctx_x + 4, st.ctx_y + ia + ia / 2)
             if it != 1
                 rc = 414
             else
-                _la = wm_activar_pestana(st, tab, 0, it)
-                if grupo_panel_activo(tab, 0) != grupo_miembro(tab, 0, 1)
+                _la = wm_activar_pestana(st, 0, it)
+                if st.tab.grupo_panel_activo(0) != st.tab.grupo_miembro(0, 1)
                     rc = 415
     _cc = wm_ctx_cerrar(st)
-    _w2 = tab_set(tab, 0, tab_ww(), 500)
+    st.tab.set_ww(0, 500)
     rc
 
-fn prueba_layout_preparar(st: Int, sw: Int, sh: Int) -> Int ! io, alloc
+fn prueba_layout_preparar(st: &mut Estado, sw: Int, sh: Int) -> Int ! io, alloc
     _esc = wm_init_escala(st, sw)
     n = 0
     while n < 4
@@ -569,25 +568,29 @@ fn prueba_layout_preparar(st: Int, sw: Int, sh: Int) -> Int ! io, alloc
     0
 
 fn prueba_layout_mosaic_only(sw: Int, sh: Int) -> Int ! io, alloc
-    evt = bytes_ptr(bytes_new(24 * 8))
-    msg = bytes_ptr(bytes_new(msg_len()))
-    st = st_nuevo(evt, msg)
-    _prep = prueba_layout_preparar(st, sw, sh)
-    prueba_layout_mosaic(st, sw, sh)
+    evt_own = bytes_new(24 * 8)
+    msg_own = bytes_new(msg_len())
+    evt = bytes_ptr(evt_own)
+    msg = bytes_ptr(msg_own)
+    st = Estado.new(evt, msg)
+    _prep = prueba_layout_preparar(&mut st, sw, sh)
+    prueba_layout_mosaic(&mut st, sw, sh)
 
 fn prueba_layout_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
-    evt = bytes_ptr(bytes_new(24 * 8))
-    msg = bytes_ptr(bytes_new(msg_len()))
-    st = st_nuevo(evt, msg)
-    _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo(st))
-    _prep = prueba_layout_preparar(st, sw, sh)
-    ok = prueba_layout_mosaic(st, sw, sh)
+    evt_own = bytes_new(24 * 8)
+    msg_own = bytes_new(msg_len())
+    evt = bytes_ptr(evt_own)
+    msg = bytes_ptr(msg_own)
+    st = Estado.new(evt, msg)
+    _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo(&mut st))
+    _prep = prueba_layout_preparar(&mut st, sw, sh)
+    ok = prueba_layout_mosaic(&mut st, sw, sh)
     if ok == 0
-        ok = prueba_layout_drag(st, sw, sh, compos, clen, stride, bpp, fmt)
+        ok = prueba_layout_drag(&mut st, sw, sh, compos, clen, stride, bpp, fmt)
     if ok == 0
-        ok = prueba_layout_float(st, sw, sh)
+        ok = prueba_layout_float(&mut st, sw, sh)
     if ok == 0
-        ok = prueba_layout_pestanas(st, sw, sh)
+        ok = prueba_layout_pestanas(&mut st, sw, sh)
     if ok == 0
         _pr = print_str(d"soso-wm: prueba-layout OK\n")
         ok = 0
@@ -610,20 +613,23 @@ fn fotograma() -> Int ! io, alloc
             bpp = fb_info_bpp(info)
             fmt = fb_info_formato(info)
             plen = compos_len(stride, sh, bpp)
-            compos = bytes_ptr(bytes_new(plen))
-            evt = bytes_ptr(bytes_new(24 * 8))
-            msg = bytes_ptr(bytes_new(msg_len()))
-            st = st_nuevo(evt, msg)
-            _bg = wm_pintar_fondo(st, compos, plen, sw, sh, stride, bpp, fmt)
+            compos_own = bytes_new(plen)
+            compos = bytes_ptr(compos_own)
+            evt_own = bytes_new(24 * 8)
+            msg_own = bytes_new(msg_len())
+            evt = bytes_ptr(evt_own)
+            msg = bytes_ptr(msg_own)
+            st = Estado.new(evt, msg)
+            _bg = wm_pintar_fondo(&mut st, compos, plen, sw, sh, stride, bpp, fmt)
             listener = tcp_listen(puerto_wm())
             if listener < 0
                 rc = 4
             if listener >= 0
-                _ic = wm_iniciar_cursor(st, sw, sh)
-                _d0 = wm_marcar_dirty(st, 0, 0, sw, sh)
+                _ic = wm_iniciar_cursor(&mut st, sw, sh)
+                _d0 = wm_marcar_dirty(&mut st, 0, 0, sw, sh)
                 n = 0
                 while n < 8
-                    _t = wm_tick(st, listener, compos, plen, sw, sh, stride, bpp, fmt)
+                    _t = wm_tick(&mut st, listener, compos, plen, sw, sh, stride, bpp, fmt)
                     n = n + 1
                 _pr = print_str(d"soso-wm: fotograma OK\n")
                 rc = 0
@@ -637,7 +643,8 @@ fn main() -> Int ! io, alloc
         info = fb_info_nuevo()
         r = fb_info(info)
         if r < 0
-            compos = compos_ram(640, 480, 640, 4)
+            compos_own = compos_ram(640, 480, 640, 4)
+            compos = bytes_ptr(compos_own)
             rc = prueba_web_modo(compos, compos_len(640, 480, 4), 640, 480, 640, 4, fmt_bgr())
         if r >= 0
             sw = fb_info_ancho(info)
@@ -646,14 +653,16 @@ fn main() -> Int ! io, alloc
             bpp = fb_info_bpp(info)
             fmt = fb_info_formato(info)
             plen = compos_len(stride, sh, bpp)
-            compos = bytes_ptr(bytes_new(plen))
+            compos_own = bytes_new(plen)
+            compos = bytes_ptr(compos_own)
             rc = prueba_web_modo(compos, plen, sw, sh, stride, bpp, fmt)
     if arg_flag(d"--prueba-web") == 0
         if arg_flag(d"--prueba") != 0
             info = fb_info_nuevo()
             r = fb_info(info)
             if r < 0
-                compos = compos_ram(640, 480, 640, 4)
+                compos_own = compos_ram(640, 480, 640, 4)
+                compos = bytes_ptr(compos_own)
                 rc = prueba_modo(compos, compos_len(640, 480, 4), 640, 480, 640, 4, fmt_bgr())
             if r >= 0
                 sw = fb_info_ancho(info)
@@ -662,11 +671,13 @@ fn main() -> Int ! io, alloc
                 bpp = fb_info_bpp(info)
                 fmt = fb_info_formato(info)
                 plen = compos_len(stride, sh, bpp)
-                compos = bytes_ptr(bytes_new(plen))
+                compos_own = bytes_new(plen)
+                compos = bytes_ptr(compos_own)
                 rc = prueba_modo(compos, plen, sw, sh, stride, bpp, fmt)
         if arg_flag(d"--prueba") == 0
             if arg_flag(d"--prueba-layout") != 0
-                compos = compos_ram(1280, 800, 1280, 4)
+                compos_own = compos_ram(1280, 800, 1280, 4)
+                compos = bytes_ptr(compos_own)
                 rc = prueba_layout_modo(compos, compos_len(1280, 800, 4), 1280, 800, 1280, 4, fmt_bgr())
                 if rc == 0
                     info = fb_info_nuevo()
@@ -686,7 +697,8 @@ fn main() -> Int ! io, alloc
                                         rc = rc2
             if arg_flag(d"--prueba-layout") == 0
                 if arg_flag(d"--prueba-mono") != 0
-                    compos = compos_ram(640, 480, 640, 4)
+                    compos_own = compos_ram(640, 480, 640, 4)
+                    compos = bytes_ptr(compos_own)
                     rc = prueba_mono_modo(compos, compos_len(640, 480, 4), 640, 480, 640, 4, fmt_bgr())
                 if arg_flag(d"--prueba-mono") == 0
                     if arg_flag(d"--prueba-lanzar") != 0

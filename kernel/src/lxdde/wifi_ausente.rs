@@ -22,6 +22,18 @@ pub fn start_firmware() -> i32 {
 
 pub fn poll() {}
 
+pub fn arm_irqs() {}
+
+pub fn marcar_trabajo_pendiente() {}
+
+pub fn tomar_trabajo_pendiente() -> bool {
+    false
+}
+
+pub fn irq_count() -> u64 {
+    0
+}
+
 pub fn wifi_present() -> bool {
     false
 }

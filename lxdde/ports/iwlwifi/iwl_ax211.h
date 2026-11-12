@@ -225,6 +225,8 @@ struct iwl_ax211_priv {
     uint8_t rx_had_traffic;
     /* Guardia de reentrada: envío/RX/poll tienen un único propietario. */
     uint8_t in_trans;
+    /* Top-half MSI: ack hecho con in_trans; el próximo poll drena. */
+    uint8_t irq_pending;
     int cmd_status;
     int cmd_fw_err;
     uint8_t cmd_resp[512];

@@ -2039,6 +2039,8 @@ void iwl_8000_tx_init_program(uint64_t kw_dma, const uint64_t *ring_dma,
                               unsigned n_queues, struct iwl_8000_tx_init_prog *out);
 int iwl_8000_tx_preload_ready(const struct iwl_ax211_priv *iwl);
 void iwl_trans_poll(struct iwl_ax211_priv *iwl);
+uint32_t iwl_trans_irq_top(struct iwl_ax211_priv *iwl);
+void iwl_trans_enable_runtime_ints(struct iwl_ax211_priv *iwl);
 void iwl_trans_txq_drain_mgmt(struct iwl_ax211_priv *iwl);
 int iwl_trans_txq_alloc_data(struct iwl_ax211_priv *iwl, uint8_t sta_id, uint8_t tid);
 void iwl_trans_txq_drain_data(struct iwl_ax211_priv *iwl);

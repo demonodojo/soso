@@ -2,8 +2,9 @@ import "../../../user/sal/escritorio/escena.sal"
 import "../../../user/sal/escritorio/fuente.sal"
 
 # Fuente PSF2 sintética de 4 glifos 8x8 (flags 0: el índice es el código).
-fn psf_sintetica() -> Int ! alloc
-    p = bytes_ptr(bytes_new(32 + 4 * 8))
+fn psf_sintetica() -> Bytes ! alloc
+    own = bytes_new(32 + 4 * 8)
+    p = bytes_ptr(own)
     b = bytes_view_mem(p, 64)
     _m = bytes_set_u32(b, 0, psf2_magic())
     _h = bytes_set_u32(b, 8, 32)
@@ -18,16 +19,20 @@ fn psf_sintetica() -> Int ! alloc
             _v = bytes_set_u8(b, 32 + g * 8 + r, (g * 37 + r * 91 + 17) & 255)
             r = r + 1
         g = g + 1
-    p
+    own
 
 fn main() -> Int ! alloc
     w = 40
     h = 24
     len = w * h * 4
-    psf = psf_sintetica()
-    a = bytes_ptr(bytes_new(len))
-    b = bytes_ptr(bytes_new(len))
-    cel = bytes_ptr(bytes_new(4 * 3 * 12))
+    psf_own = psf_sintetica()
+    psf = bytes_ptr(psf_own)
+    a_own = bytes_new(len)
+    b_own = bytes_new(len)
+    cel_own = bytes_new(4 * 3 * 12)
+    a = bytes_ptr(a_own)
+    b = bytes_ptr(b_own)
+    cel = bytes_ptr(cel_own)
     cb = bytes_view_mem(cel, 4 * 3 * 12)
     k = 0
     while k < 12

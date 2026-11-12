@@ -1,7 +1,8 @@
 import "../../../user/sal/escritorio/fuente.sal"
 
 fn main() -> Int ! alloc
-    buf = bytes_ptr(bytes_new(4096))
+    own = bytes_new(4096)
+    buf = bytes_ptr(own)
     b = bytes_view_mem(buf, 4096)
     bytes_set_u32(b, 0, psf2_magic())
     bytes_set_u32(b, 8, 32)

@@ -1,119 +1,10 @@
 import "mate.sal"
 import "ventanas.sal"
 import "soso.sal"
+import "term.sal"
 
 fn tab_cap() -> Int
     16
-
-fn tab_slot_bytes() -> Int
-    312
-
-fn tab_tipo() -> Int
-    0
-
-fn tab_fd() -> Int
-    8
-
-fn tab_pid() -> Int
-    16
-
-fn tab_shm_id() -> Int
-    24
-
-fn tab_shm_ptr() -> Int
-    32
-
-fn tab_cw() -> Int
-    40
-
-fn tab_ch() -> Int
-    48
-
-fn tab_wx() -> Int
-    56
-
-fn tab_wy() -> Int
-    64
-
-fn tab_ww() -> Int
-    72
-
-fn tab_wh() -> Int
-    80
-
-fn tab_fase() -> Int
-    88
-
-fn tab_fwx() -> Int
-    96
-
-fn tab_fwy() -> Int
-    104
-
-fn tab_acc_len() -> Int
-    112
-
-fn tab_term_pos() -> Int
-    120
-
-fn tab_term_st() -> Int
-    128
-
-fn tab_titulo_off() -> Int
-    136
-
-fn tab_acc_off() -> Int
-    168
-
-fn tab_fww() -> Int
-    200
-
-fn tab_fwh() -> Int
-    208
-
-fn tab_escala() -> Int
-    216
-
-fn tab_estado() -> Int
-    224
-
-fn tab_sx() -> Int
-    232
-
-fn tab_sy() -> Int
-    240
-
-fn tab_sw() -> Int
-    248
-
-fn tab_sh() -> Int
-    256
-
-# Grupo = ventana visible con N paneles (pestañas). La cabecera del grupo es uno de
-# sus slots y guarda la geometría y el estado de la ventana. `tab_cab`: cabecera + 1
-# (0 = el propio slot, así un slot a ceros es un grupo de un solo panel).
-# `tab_activo` (sólo en la cabecera): panel activo + 1 (0 = la propia cabecera).
-fn tab_cab() -> Int
-    264
-
-fn tab_activo() -> Int
-    272
-
-# Orden de la pestaña dentro de su grupo, y aplicación con la que se lanzó el cliente
-# (app_*), para poder abrir otra pestaña igual.
-fn tab_orden() -> Int
-    280
-
-fn tab_app() -> Int
-    288
-
-# Último estado de visibilidad enviado al cliente (0 sin enviar, 1 visible, 2 oculto) y
-# «actividad pendiente» (salida nueva mientras el panel no era el activo).
-fn tab_vis() -> Int
-    296
-
-fn tab_pend() -> Int
-    304
 
 fn app_ninguna() -> Int
     0
@@ -130,67 +21,6 @@ fn estado_max() -> Int
 fn estado_min() -> Int
     2
 
-fn tab_slot_off(i: Int) -> Int
-    i * tab_slot_bytes()
-
-fn tab_get_raw(tab: Int, i: Int, off: Int) -> Int ! alloc
-    b = bytes_view_mem(tab + tab_slot_off(i), tab_slot_bytes())
-    bytes_get_i64(b, off)
-
-fn tab_set_raw(tab: Int, i: Int, off: Int, v: Int) -> Int ! alloc
-    b = bytes_view_mem(tab + tab_slot_off(i), tab_slot_bytes())
-    bytes_set_i64(b, off, v)
-    0
-
-# 1 si el campo es de la ventana (grupo) y no del panel.
-fn tab_off_es_grupo(off: Int) -> Int
-    if off >= tab_wx()
-        if off <= tab_wh()
-            1
-        else
-            tab_off_es_grupo_b(off)
-    else
-        0
-
-fn tab_off_es_grupo_b(off: Int) -> Int
-    if off == tab_fwx()
-        1
-    elsif off == tab_fwy()
-        1
-    elsif off == tab_fww()
-        1
-    elsif off == tab_fwh()
-        1
-    elsif off == tab_estado()
-        1
-    elsif off >= tab_sx()
-        if off <= tab_sh()
-            1
-        else
-            0
-    else
-        0
-
-fn grupo_cab(tab: Int, i: Int) -> Int ! alloc
-    c = tab_get_raw(tab, i, tab_cab())
-    if c == 0
-        i
-    else
-        c - 1
-
-# Los campos de ventana se leen/escriben en la cabecera del grupo; el resto, en el slot.
-fn tab_get(tab: Int, i: Int, off: Int) -> Int ! alloc
-    if tab_off_es_grupo(off) != 0
-        tab_get_raw(tab, grupo_cab(tab, i), off)
-    else
-        tab_get_raw(tab, i, off)
-
-fn tab_set(tab: Int, i: Int, off: Int, v: Int) -> Int ! alloc
-    if tab_off_es_grupo(off) != 0
-        tab_set_raw(tab, grupo_cab(tab, i), off, v)
-    else
-        tab_set_raw(tab, i, off, v)
-
 fn tab_tipo_libre() -> Int
     0
 
@@ -200,147 +30,588 @@ fn tab_tipo_term() -> Int
 fn tab_tipo_cli() -> Int
     2
 
-fn tab_buscar_libre(tab: Int) -> Int ! alloc
-    i = 0
-    found = -1
-    while i < tab_cap()
-        if found < 0
-            if tab_get(tab, i, tab_tipo()) == tab_tipo_libre()
-                found = i
-        i = i + 1
-    found
+# Una ranura del escritorio. Los campos de ventana (wx..wh, fwx..fwh, estado,
+# sx..sh) se leen y escriben siempre en la cabecera del grupo; el resto, en el
+# propio panel. `term` es el estado del emulador cuando el panel es un PTY.
+struct Panel
+    tipo: Int
+    fd: Int
+    pid: Int
+    shm_id: Int
+    shm_ptr: Int
+    cw: Int
+    ch: Int
+    wx: Int
+    wy: Int
+    ww: Int
+    wh: Int
+    fase: Int
+    fwx: Int
+    fwy: Int
+    acc_len: Int
+    term_pos: Int
+    term: Term
+    titulo: Bytes
+    acc: Bytes
+    fww: Int
+    fwh: Int
+    escala: Int
+    estado: Int
+    sx: Int
+    sy: Int
+    sw: Int
+    sh: Int
+    cab: Int
+    activo: Int
+    orden: Int
+    app: Int
+    vis: Int
+    pend: Int
 
-fn tab_slot_activo(tab: Int, i: Int) -> Int ! alloc
-    if i < 0
-        0
+init Panel() ! alloc
+    Panel(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+          Term.new(0, 0), Bytes.new(32), Bytes.new(32),
+          0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+# Grupo = ventana visible con N paneles (pestañas). La cabecera del grupo es uno
+# de sus slots y guarda la geometría y el estado de la ventana. `cab`: cabecera + 1
+# (0 = el propio slot, así un slot a cero es un grupo de un solo panel).
+# `activo` (sólo en la cabecera): panel activo + 1 (0 = la propia cabecera).
+struct Tabla
+    ps: List[Panel]
+    z: List[Int]
+    nz: Int
+
+init Tabla() ! alloc
+    ps = list_new[Panel]()
+    j = 0
+    while j < tab_cap()
+        _p = list_push(&mut ps, Panel.new())
+        j = j + 1
+    z = list_new[Int]()
+    j = 0
+    while j < tab_cap()
+        _q = list_push(&mut z, 0)
+        j = j + 1
+    Tabla(ps, z, 0)
+
+# ---- Campos de cada ranura ---------------------------------------------------
+
+method Tabla.tipo(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.tipo
+
+method Tabla.set_tipo(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.tipo = v
+    0
+
+method Tabla.fd(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.fd
+
+method Tabla.set_fd(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.fd = v
+    0
+
+method Tabla.pid(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.pid
+
+method Tabla.set_pid(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.pid = v
+    0
+
+method Tabla.shm_id(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.shm_id
+
+method Tabla.set_shm_id(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.shm_id = v
+    0
+
+method Tabla.shm_ptr(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.shm_ptr
+
+method Tabla.set_shm_ptr(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.shm_ptr = v
+    0
+
+method Tabla.cw(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.cw
+
+method Tabla.set_cw(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.cw = v
+    0
+
+method Tabla.ch(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.ch
+
+method Tabla.set_ch(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.ch = v
+    0
+
+method Tabla.fase(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.fase
+
+method Tabla.set_fase(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.fase = v
+    0
+
+method Tabla.acc_len(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.acc_len
+
+method Tabla.set_acc_len(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.acc_len = v
+    0
+
+method Tabla.term_pos(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.term_pos
+
+method Tabla.set_term_pos(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.term_pos = v
+    0
+
+method Tabla.escala(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.escala
+
+method Tabla.set_escala(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.escala = v
+    0
+
+method Tabla.grupo_cab(&mut self, i: Int) -> Int
+    self.cab(i)
+
+method Tabla.cab(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    if p.cab == 0
+        i
     else
-        if i >= tab_cap()
-            0
-        else
-            if tab_get(tab, i, tab_tipo()) == tab_tipo_libre()
-                0
-            else
-                1
+        p.cab - 1
 
-fn tab_titulo_set(tab: Int, i: Int, titulo: String) -> Int ! alloc
-    b = bytes_view_mem(tab + tab_slot_off(i) + tab_titulo_off(), 32)
+method Tabla.activo(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.activo
+
+method Tabla.orden(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.orden
+
+method Tabla.set_orden(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.orden = v
+    0
+
+method Tabla.app(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.app
+
+method Tabla.set_app(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.app = v
+    0
+
+method Tabla.vis(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.vis
+
+method Tabla.set_vis(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.vis = v
+    0
+
+method Tabla.pend(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.pend
+
+method Tabla.set_pend(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.pend = v
+    0
+
+# ---- Campos de ventana (redirigidos a la cabecera del grupo) -----------------
+
+method Tabla.wx(&mut self, i: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.wx
+
+method Tabla.set_wx(&mut self, i: Int, v: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.wx = v
+    0
+
+method Tabla.wy(&mut self, i: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.wy
+
+method Tabla.set_wy(&mut self, i: Int, v: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.wy = v
+    0
+
+method Tabla.ww(&mut self, i: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.ww
+
+method Tabla.set_ww(&mut self, i: Int, v: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.ww = v
+    0
+
+method Tabla.wh(&mut self, i: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.wh
+
+method Tabla.set_wh(&mut self, i: Int, v: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.wh = v
+    0
+
+method Tabla.fwx(&mut self, i: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.fwx
+
+method Tabla.set_fwx(&mut self, i: Int, v: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.fwx = v
+    0
+
+method Tabla.fwy(&mut self, i: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.fwy
+
+method Tabla.set_fwy(&mut self, i: Int, v: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.fwy = v
+    0
+
+method Tabla.fww(&mut self, i: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.fww
+
+method Tabla.set_fww(&mut self, i: Int, v: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.fww = v
+    0
+
+method Tabla.fwh(&mut self, i: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.fwh
+
+method Tabla.set_fwh(&mut self, i: Int, v: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.fwh = v
+    0
+
+method Tabla.estado(&mut self, i: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.estado
+
+method Tabla.set_estado(&mut self, i: Int, v: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.estado = v
+    0
+
+method Tabla.sx(&mut self, i: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.sx
+
+method Tabla.set_sx(&mut self, i: Int, v: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.sx = v
+    0
+
+method Tabla.sy(&mut self, i: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.sy
+
+method Tabla.set_sy(&mut self, i: Int, v: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.sy = v
+    0
+
+method Tabla.sw(&mut self, i: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.sw
+
+method Tabla.set_sw(&mut self, i: Int, v: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.sw = v
+    0
+
+method Tabla.sh(&mut self, i: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.sh
+
+method Tabla.set_sh(&mut self, i: Int, v: Int) -> Int
+    c = self.cab(i)
+    p = list_get(&mut self.ps, c)
+    p.sh = v
+    0
+
+# ---- Título y acumulador de mensajes ----------------------------------------
+
+method Tabla.titulo_set(&mut self, i: Int, titulo: String) -> Int ! alloc
+    p = list_get(&mut self.ps, i)
     j = 0
     n = str_len(titulo)
     while j < 32
         ch = 32
         if j < n
             ch = str_char(titulo, j)
-        bytes_set_u8(b, j, ch)
+        p.titulo.set_u8(j, ch)
         j = j + 1
     0
 
-fn tab_titulo_desde_msg(tab: Int, i: Int, msg: Int) -> Int ! alloc
-    dst = bytes_view_mem(tab + tab_slot_off(i) + tab_titulo_off(), 32)
+method Tabla.titulo_desde_msg(&mut self, i: Int, msg: Int) -> Int ! alloc
     src = bytes_view_mem(msg, 32)
+    p = list_get(&mut self.ps, i)
     j = 0
     while j < 16
-        ch = bytes_get_u8(src, 16 + j)
-        bytes_set_u8(dst, j, ch)
+        p.titulo.set_u8(j, src.get_u8(16 + j))
         j = j + 1
     while j < 32
-        bytes_set_u8(dst, j, 32)
+        p.titulo.set_u8(j, 32)
         j = j + 1
     0
 
-fn tab_acc_reset(tab: Int, i: Int) -> Int ! alloc
-    _l = tab_set(tab, i, tab_acc_len(), 0)
+method Tabla.titulo_byte(&mut self, i: Int, j: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.titulo.get_u8(j)
+
+method Tabla.acc_reset(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.acc_len = 0
     0
 
-fn tab_acc_push_byte(tab: Int, i: Int, b: Int) -> Int ! alloc
-    al = tab_get(tab, i, tab_acc_len())
-    if al >= 32
+method Tabla.acc_push_byte(&mut self, i: Int, b: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    if p.acc_len >= 32
         -1
     else
-        slot = tab + tab_slot_off(i) + tab_acc_off()
-        bb = bytes_view_mem(slot, 32)
-        _s = bytes_set_u8(bb, al, u8(b))
-        _l = tab_set(tab, i, tab_acc_len(), al + 1)
-        al + 1
+        p.acc.set_u8(p.acc_len, u8(b))
+        p.acc_len = p.acc_len + 1
+        p.acc_len
 
-fn tab_acc_copiar_msg(tab: Int, i: Int, dst: Int) -> Int ! alloc
-    al = tab_get(tab, i, tab_acc_len())
-    if al < 32
+method Tabla.acc_copiar_msg(&mut self, i: Int, dst: Int) -> Int ! alloc
+    p = list_get(&mut self.ps, i)
+    if p.acc_len < 32
         0
     else
-        slot = tab + tab_slot_off(i) + tab_acc_off()
         dview = bytes_view_mem(dst, 32)
-        sview = bytes_view_mem(slot, 32)
-        _c = bytes_copy(dview, 0, sview, 0, 32)
-        _r = tab_acc_reset(tab, i)
+        _c = bytes_copy(dview, 0, p.acc, 0, 32)
+        p.acc_len = 0
         32
 
-fn tab_guardar_float(tab: Int, i: Int) -> Int ! alloc
-    _x = tab_set(tab, i, tab_fwx(), tab_get(tab, i, tab_wx()))
-    _y = tab_set(tab, i, tab_fwy(), tab_get(tab, i, tab_wy()))
-    _w = tab_set(tab, i, tab_fww(), tab_get(tab, i, tab_ww()))
-    _h = tab_set(tab, i, tab_fwh(), tab_get(tab, i, tab_wh()))
+# ---- Grupos y pestañas -------------------------------------------------------
+
+method Tabla.slot_activo(&mut self, i: Int) -> Int
+    if i < 0
+        0
+    elsif i >= tab_cap()
+        0
+    elsif self.tipo(i) == tab_tipo_libre()
+        0
+    else
+        1
+
+method Tabla.buscar_libre(&mut self) -> Int
+    i = 0
+    found = -1
+    while i < tab_cap()
+        if found < 0
+            if self.tipo(i) == tab_tipo_libre()
+                found = i
+        i = i + 1
+    found
+
+method Tabla.guardar_float(&mut self, i: Int) -> Int
+    _x = self.set_fwx(i, self.wx(i))
+    _y = self.set_fwy(i, self.wy(i))
+    _w = self.set_fww(i, self.ww(i))
+    _h = self.set_fwh(i, self.wh(i))
     0
 
-fn tab_restaurar_float(tab: Int, i: Int) -> Int ! alloc
-    fw = tab_get(tab, i, tab_fww())
+method Tabla.restaurar_float(&mut self, i: Int) -> Int
+    fw = self.fww(i)
     if fw > 0
-        _x = tab_set(tab, i, tab_wx(), tab_get(tab, i, tab_fwx()))
-        _y = tab_set(tab, i, tab_wy(), tab_get(tab, i, tab_fwy()))
-        _w = tab_set(tab, i, tab_ww(), fw)
-        _h = tab_set(tab, i, tab_wh(), tab_get(tab, i, tab_fwh()))
+        _x = self.set_wx(i, self.fwx(i))
+        _y = self.set_wy(i, self.fwy(i))
+        _w = self.set_ww(i, fw)
+        _h = self.set_wh(i, self.fwh(i))
     0
 
-fn tab_contar_tipo(tab: Int, tipo: Int) -> Int ! alloc
+method Tabla.contar_tipo(&mut self, tipo: Int) -> Int
     i = 0
     n = 0
     while i < tab_cap()
-        if tab_get(tab, i, tab_tipo()) == tipo
+        if self.tipo(i) == tipo
             n = n + 1
         i = i + 1
     n
 
-fn grupo_copiar_geom(tab: Int, de: Int, a: Int) -> Int ! alloc
-    _a = tab_set_raw(tab, a, tab_wx(), tab_get_raw(tab, de, tab_wx()))
-    _b = tab_set_raw(tab, a, tab_wy(), tab_get_raw(tab, de, tab_wy()))
-    _c = tab_set_raw(tab, a, tab_ww(), tab_get_raw(tab, de, tab_ww()))
-    _d = tab_set_raw(tab, a, tab_wh(), tab_get_raw(tab, de, tab_wh()))
-    _e = tab_set_raw(tab, a, tab_fwx(), tab_get_raw(tab, de, tab_fwx()))
-    _f = tab_set_raw(tab, a, tab_fwy(), tab_get_raw(tab, de, tab_fwy()))
-    _g = tab_set_raw(tab, a, tab_fww(), tab_get_raw(tab, de, tab_fww()))
-    _h = tab_set_raw(tab, a, tab_fwh(), tab_get_raw(tab, de, tab_fwh()))
-    _i = tab_set_raw(tab, a, tab_estado(), tab_get_raw(tab, de, tab_estado()))
-    _j = tab_set_raw(tab, a, tab_sx(), tab_get_raw(tab, de, tab_sx()))
-    _k = tab_set_raw(tab, a, tab_sy(), tab_get_raw(tab, de, tab_sy()))
-    _l = tab_set_raw(tab, a, tab_sw(), tab_get_raw(tab, de, tab_sw()))
-    _m = tab_set_raw(tab, a, tab_sh(), tab_get_raw(tab, de, tab_sh()))
+
+# Escritura directa en la ranura (sin redirigir a la cabecera). Sólo para copiar
+# la geometría de un grupo a otro slot durante una separación.
+method Tabla.set_wx_raw(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.wx = v
+    0
+
+method Tabla.set_wy_raw(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.wy = v
+    0
+
+method Tabla.set_ww_raw(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.ww = v
+    0
+
+method Tabla.set_wh_raw(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.wh = v
+    0
+
+method Tabla.set_fwx_raw(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.fwx = v
+    0
+
+method Tabla.set_fwy_raw(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.fwy = v
+    0
+
+method Tabla.set_fww_raw(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.fww = v
+    0
+
+method Tabla.set_fwh_raw(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.fwh = v
+    0
+
+method Tabla.set_estado_raw(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.estado = v
+    0
+
+method Tabla.set_sx_raw(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.sx = v
+    0
+
+method Tabla.set_sy_raw(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.sy = v
+    0
+
+method Tabla.set_sw_raw(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.sw = v
+    0
+
+method Tabla.set_sh_raw(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.sh = v
+    0
+
+method Tabla.copiar_geom(&mut self, de: Int, a: Int) -> Int
+    _a = self.set_wx_raw(a, self.wx(de))
+    _b = self.set_wy_raw(a, self.wy(de))
+    _c = self.set_ww_raw(a, self.ww(de))
+    _d = self.set_wh_raw(a, self.wh(de))
+    _e = self.set_fwx_raw(a, self.fwx(de))
+    _f = self.set_fwy_raw(a, self.fwy(de))
+    _g = self.set_fww_raw(a, self.fww(de))
+    _h = self.set_fwh_raw(a, self.fwh(de))
+    _i = self.set_estado_raw(a, self.estado(de))
+    _j = self.set_sx_raw(a, self.sx(de))
+    _k = self.set_sy_raw(a, self.sy(de))
+    _l = self.set_sw_raw(a, self.sw(de))
+    _m = self.set_sh_raw(a, self.sh(de))
+    0
+
+method Tabla.set_cab(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.cab = v
+    0
+
+method Tabla.set_activo(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.activo = v
     0
 
 # Paneles del grupo cuya cabecera es `cab`.
-fn grupo_n(tab: Int, cab: Int) -> Int ! alloc
+method Tabla.grupo_n(&mut self, cab: Int) -> Int
     n = 0
     i = 0
     while i < tab_cap()
-        if tab_get_raw(tab, i, tab_tipo()) != tab_tipo_libre()
-            if grupo_cab(tab, i) == cab
+        if self.tipo(i) != tab_tipo_libre()
+            if self.cab(i) == cab
                 n = n + 1
         i = i + 1
     n
 
-# k-ésimo panel del grupo en orden de pestañas (orden, y a igualdad el índice de slot), o -1.
-fn grupo_miembro(tab: Int, cab: Int, k: Int) -> Int ! alloc
+# k-ésimo panel del grupo en orden de pestañas (orden, y a igualdad el índice), o -1.
+method Tabla.grupo_miembro(&mut self, cab: Int, k: Int) -> Int
     r = -1
     i = 0
     while i < tab_cap()
-        if tab_get_raw(tab, i, tab_tipo()) != tab_tipo_libre()
-            if grupo_cab(tab, i) == cab
+        if self.tipo(i) != tab_tipo_libre()
+            if self.cab(i) == cab
                 menores = 0
                 j = 0
                 while j < tab_cap()
-                    if tab_get_raw(tab, j, tab_tipo()) != tab_tipo_libre()
-                        if grupo_cab(tab, j) == cab
+                    if self.tipo(j) != tab_tipo_libre()
+                        if self.cab(j) == cab
                             if j != i
-                                oj = tab_get_raw(tab, j, tab_orden())
-                                oi = tab_get_raw(tab, i, tab_orden())
+                                oj = self.orden(j)
+                                oi = self.orden(i)
                                 if oj < oi
                                     menores = menores + 1
                                 elsif oj == oi
@@ -353,116 +624,116 @@ fn grupo_miembro(tab: Int, cab: Int, k: Int) -> Int ! alloc
     r
 
 # Posición (0..n-1) del panel `i` en la tira de su grupo.
-fn grupo_pos(tab: Int, i: Int) -> Int ! alloc
-    cab = grupo_cab(tab, i)
-    n = grupo_n(tab, cab)
+method Tabla.grupo_pos(&mut self, i: Int) -> Int
+    cab = self.cab(i)
+    n = self.grupo_n(cab)
     r = -1
     k = 0
     while k < n
-        if grupo_miembro(tab, cab, k) == i
+        if self.grupo_miembro(cab, k) == i
             r = k
         k = k + 1
     r
 
-fn grupo_orden_max(tab: Int, cab: Int) -> Int ! alloc
+method Tabla.grupo_orden_max(&mut self, cab: Int) -> Int
     m = -1
     i = 0
     while i < tab_cap()
-        if tab_get_raw(tab, i, tab_tipo()) != tab_tipo_libre()
-            if grupo_cab(tab, i) == cab
-                m = max(m, tab_get_raw(tab, i, tab_orden()))
+        if self.tipo(i) != tab_tipo_libre()
+            if self.cab(i) == cab
+                m = max(m, self.orden(i))
         i = i + 1
     m
 
 # Panel activo del grupo al que pertenece `i`.
-fn grupo_panel_activo(tab: Int, i: Int) -> Int ! alloc
-    h = grupo_cab(tab, i)
-    a = tab_get_raw(tab, h, tab_activo())
+method Tabla.grupo_panel_activo(&mut self, i: Int) -> Int
+    h = self.cab(i)
+    a = self.activo(h)
     if a == 0
         h
     else
-        if grupo_cab(tab, a - 1) == h
+        if self.cab(a - 1) == h
             a - 1
         else
             h
 
-fn grupo_activar(tab: Int, i: Int) -> Int ! alloc
-    h = grupo_cab(tab, i)
+method Tabla.grupo_activar(&mut self, i: Int) -> Int
+    h = self.cab(i)
     if i == h
-        tab_set_raw(tab, h, tab_activo(), 0)
+        self.set_activo(h, 0)
     else
-        tab_set_raw(tab, h, tab_activo(), i + 1)
+        self.set_activo(h, i + 1)
 
 # Saca el panel `i` de su grupo y lo deja como ventana propia con la misma geometría.
 # Devuelve 1 si había algo que separar.
-fn grupo_separar(tab: Int, i: Int) -> Int ! alloc
-    h = grupo_cab(tab, i)
-    if grupo_n(tab, h) <= 1
+method Tabla.grupo_separar(&mut self, i: Int) -> Int
+    h = self.cab(i)
+    if self.grupo_n(h) <= 1
         0
     else
-        act = grupo_panel_activo(tab, i)
+        act = self.grupo_panel_activo(i)
         if h == i
             nh = -1
             k = 0
             while k < tab_cap()
                 if nh < 0
                     if k != i
-                        if tab_get_raw(tab, k, tab_tipo()) != tab_tipo_libre()
-                            if grupo_cab(tab, k) == h
+                        if self.tipo(k) != tab_tipo_libre()
+                            if self.cab(k) == h
                                 nh = k
                 k = k + 1
-            _g = grupo_copiar_geom(tab, h, nh)
+            _g = self.copiar_geom(h, nh)
             k = 0
             while k < tab_cap()
                 if k != i
-                    if tab_get_raw(tab, k, tab_tipo()) != tab_tipo_libre()
-                        if grupo_cab(tab, k) == h
+                    if self.tipo(k) != tab_tipo_libre()
+                        if self.cab(k) == h
                             if k == nh
-                                _a = tab_set_raw(tab, k, tab_cab(), 0)
+                                _a = self.set_cab(k, 0)
                             else
-                                _b = tab_set_raw(tab, k, tab_cab(), nh + 1)
+                                _b = self.set_cab(k, nh + 1)
                 k = k + 1
             if act == i
-                _c = tab_set_raw(tab, nh, tab_activo(), 0)
+                _c = self.set_activo(nh, 0)
             else
-                _d = tab_set_raw(tab, nh, tab_activo(), act + 1)
-            _e = tab_set_raw(tab, i, tab_activo(), 0)
+                _d = self.set_activo(nh, act + 1)
+            _e = self.set_activo(i, 0)
         else
-            _g = grupo_copiar_geom(tab, h, i)
-            _c = tab_set_raw(tab, i, tab_cab(), 0)
-            _v = tab_set_raw(tab, i, tab_activo(), 0)
+            _g = self.copiar_geom(h, i)
+            _c = self.set_cab(i, 0)
+            _v = self.set_activo(i, 0)
             if act == i
-                _x = tab_set_raw(tab, h, tab_activo(), 0)
+                _x = self.set_activo(h, 0)
         1
 
-# Integra el panel `i` (y, si es cabecera de un grupo, todo su grupo) al final del grupo
-# de `dest`, conservando su orden relativo; el integrado pasa a ser el activo.
-fn grupo_integrar(tab: Int, i: Int, dest: Int) -> Int ! alloc
-    h0 = grupo_cab(tab, i)
-    d = grupo_cab(tab, dest)
+# Integra el panel `i` (y, si es cabecera de un grupo, todo su grupo) al final del
+# grupo de `dest`, conservando su orden relativo; el integrado pasa a ser el activo.
+method Tabla.grupo_integrar(&mut self, i: Int, dest: Int) -> Int
+    h0 = self.cab(i)
+    d = self.cab(dest)
     if h0 == d
         0
     else
         if h0 != i
-            _sp = grupo_separar(tab, i)
-        h = grupo_cab(tab, i)
-        n = grupo_n(tab, h)
-        base = grupo_orden_max(tab, d) + 1
+            _sp = self.grupo_separar(i)
+        h = self.cab(i)
+        n = self.grupo_n(h)
+        base = self.grupo_orden_max(d) + 1
         j = 0
         while j < n
-            m = grupo_miembro(tab, h, 0)
-            _a = tab_set_raw(tab, m, tab_cab(), d + 1)
-            _b = tab_set_raw(tab, m, tab_activo(), 0)
-            _c = tab_set_raw(tab, m, tab_orden(), base + j)
+            m = self.grupo_miembro(h, 0)
+            _a = self.set_cab(m, d + 1)
+            _b = self.set_activo(m, 0)
+            _c = self.set_orden(m, base + j)
             j = j + 1
-        _e = tab_set_raw(tab, d, tab_activo(), grupo_activar_idx(i))
+        _e = self.set_activo(d, i + 1)
         1
 
-# Mueve el panel `i` a la posición `kpos` (0..n-1) de la tira de su grupo; renumera el orden.
-fn grupo_mover(tab: Int, i: Int, kpos: Int) -> Int ! alloc
-    cab = grupo_cab(tab, i)
-    n = grupo_n(tab, cab)
-    pos = grupo_pos(tab, i)
+# Mueve el panel `i` a la posición `kpos` (0..n-1) de la tira de su grupo; renumera.
+method Tabla.grupo_mover(&mut self, i: Int, kpos: Int) -> Int ! alloc
+    cab = self.cab(i)
+    n = self.grupo_n(cab)
+    pos = self.grupo_pos(i)
     kp = kpos
     if kp < 0
         kp = 0
@@ -473,109 +744,149 @@ fn grupo_mover(tab: Int, i: Int, kpos: Int) -> Int ! alloc
     elsif pos == kp
         0
     else
-        # Órdenes finales: los demás conservan su sitio relativo y `i` se coloca en kp.
-        # Se calculan primero en un vector auxiliar (índices de slot por posición nueva).
-        ord = bytes_new(n * 8)
+        ord = list_new[Int]()
         j = 0
         d = 0
         while j < n
             if j == kp
-                _s1 = bytes_set_i64(ord, j * 8, i)
+                _s1 = list_push(&mut ord, i)
             else
-                m = grupo_miembro(tab, cab, d)
+                m = self.grupo_miembro(cab, d)
                 if m == i
                     d = d + 1
-                    m = grupo_miembro(tab, cab, d)
-                _s2 = bytes_set_i64(ord, j * 8, m)
+                    m = self.grupo_miembro(cab, d)
+                _s2 = list_push(&mut ord, m)
                 d = d + 1
             j = j + 1
         j = 0
         while j < n
-            _o = tab_set_raw(tab, bytes_get_i64(ord, j * 8), tab_orden(), j)
+            _o = self.set_orden(list_get(&ord, j), j)
             j = j + 1
         1
 
-fn grupo_activar_idx(i: Int) -> Int
-    i + 1
-
-fn tab_cerrar_slot(tab: Int, i: Int) -> Int ! io, alloc
-    if tab_slot_activo(tab, i) == 0
+method Tabla.cerrar_slot(&mut self, i: Int) -> Int ! io, alloc
+    if self.slot_activo(i) == 0
         0
     else
-        fd = tab_get(tab, i, tab_fd())
+        fd = self.fd(i)
         if fd > 0
             _c = close_fd(fd)
-        sid = tab_get(tab, i, tab_shm_id())
+        sid = self.shm_id(i)
         if sid > 0
             _f = shm_free(sid)
-        _g = grupo_separar(tab, i)
-        _z = tab_set(tab, i, tab_tipo(), tab_tipo_libre())
-        _a = tab_set(tab, i, tab_fd(), 0)
-        _p = tab_set(tab, i, tab_pid(), 0)
-        _s = tab_set(tab, i, tab_shm_id(), 0)
-        _m = tab_set(tab, i, tab_fase(), 0)
-        _l = tab_set(tab, i, tab_acc_len(), 0)
-        _e = tab_set(tab, i, tab_estado(), 0)
-        _c = tab_set_raw(tab, i, tab_cab(), 0)
-        _v = tab_set_raw(tab, i, tab_activo(), 0)
-        _o = tab_set_raw(tab, i, tab_orden(), 0)
-        _ap = tab_set_raw(tab, i, tab_app(), 0)
-        _vv = tab_set_raw(tab, i, tab_vis(), 0)
-        _pp = tab_set_raw(tab, i, tab_pend(), 0)
+        _g = self.grupo_separar(i)
+        _z = self.set_tipo(i, tab_tipo_libre())
+        _a = self.set_fd(i, 0)
+        _p = self.set_pid(i, 0)
+        _s = self.set_shm_id(i, 0)
+        _m = self.set_fase(i, 0)
+        _l = self.set_acc_len(i, 0)
+        _e = self.set_estado(i, 0)
+        _c = self.set_cab(i, 0)
+        _v = self.set_activo(i, 0)
+        _o = self.set_orden(i, 0)
+        _ap = self.set_app(i, 0)
+        _vv = self.set_vis(i, 0)
+        _pp = self.set_pend(i, 0)
         1
 
-fn tab_zorder_size() -> Int
-    tab_cap() * 8
+# ---- Z-order -----------------------------------------------------------------
 
-fn z_get(z: Int, k: Int) -> Int ! alloc
-    b = bytes_view_mem(z, tab_zorder_size())
-    bytes_get_i64(b, k * 8)
+method Tabla.z_get(&mut self, k: Int) -> Int
+    list_get(&mut self.z, k)
 
-fn z_set(z: Int, k: Int, v: Int) -> Int ! alloc
-    b = bytes_view_mem(z, tab_zorder_size())
-    bytes_set_i64(b, k * 8, v)
+method Tabla.z_set(&mut self, k: Int, v: Int) -> Int
+    list_set(&mut self.z, k, v)
     0
 
-fn z_subir(z: Int, n: Int, idx: Int) -> Int ! alloc
+method Tabla.nz(&mut self) -> Int
+    self.nz
+
+method Tabla.set_nz(&mut self, n: Int) -> Int
+    self.nz = n
+    0
+
+method Tabla.z_subir(&mut self, n: Int, idx: Int) -> Int
     if n <= 1
         n
     else
         k = 0
         while k < n
-            if z_get(z, k) == idx
+            if self.z_get(k) == idx
                 if k + 1 < n
-                    otro = z_get(z, k + 1)
-                    _a = z_set(z, k, otro)
-                    _b = z_set(z, k + 1, idx)
+                    otro = self.z_get(k + 1)
+                    _a = self.z_set(k, otro)
+                    _b = self.z_set(k + 1, idx)
             k = k + 1
         n
 
-fn z_quitar(z: Int, n: Int, idx: Int) -> Int ! alloc
+method Tabla.z_quitar(&mut self, n: Int, idx: Int) -> Int
     k = 0
     while k < n
-        if z_get(z, k) == idx
+        if self.z_get(k) == idx
             j = k
             while j + 1 < n
-                _m = z_set(z, j, z_get(z, j + 1))
+                _m = self.z_set(j, self.z_get(j + 1))
                 j = j + 1
-            _t = z_set(z, n - 1, -1)
+            _t = self.z_set(n - 1, -1)
             n = n - 1
         else
             k = k + 1
     n
 
 # Sustituye `viejo` por `nuevo` en el mismo lugar del orden.
-fn z_reemplazar(z: Int, n: Int, viejo: Int, nuevo: Int) -> Int ! alloc
+method Tabla.z_reemplazar(&mut self, n: Int, viejo: Int, nuevo: Int) -> Int
     k = 0
     while k < n
-        if z_get(z, k) == viejo
-            _s = z_set(z, k, nuevo)
+        if self.z_get(k) == viejo
+            _s = self.z_set(k, nuevo)
         k = k + 1
     n
 
-fn z_anadir(z: Int, n: Int, idx: Int) -> Int ! alloc
+method Tabla.z_anadir(&mut self, n: Int, idx: Int) -> Int
     if n >= tab_cap()
         n
     else
-        _a = z_set(z, n, idx)
+        _a = self.z_set(n, idx)
         n + 1
+
+# ---- Estado del terminal del panel -------------------------------------------
+
+method Tabla.term_nuevo(&mut self, i: Int, cols: Int, rows: Int) -> Int ! alloc
+    p = list_get(&mut self.ps, i)
+    p.term = Term.new(cols, rows)
+    p.term_pos = 0
+    0
+
+method Tabla.term_dirty(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.term.dirty
+
+method Tabla.term_set_dirty(&mut self, i: Int, v: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.term.dirty = v
+    0
+
+method Tabla.term_cols(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.term.cols
+
+method Tabla.term_rows(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.term.rows
+
+method Tabla.term_cursor(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.term.cursor
+
+method Tabla.term_pintar(&mut self, i: Int, grid: Int, glen: Int, cols: Int, rows: Int, psf: Int, psflen: Int, gw: Int, gh: Int, tema: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, ox: Int, oy: Int) -> Int ! alloc
+    p = list_get(&mut self.ps, i)
+    p.term.pintar(grid, glen, cols, rows, psf, psflen, gw, gh, tema, compos, clen, sw, sh, stride, bpp, fmt, ox, oy)
+
+method Tabla.term_redimensionar(&mut self, i: Int, ptr: Int, len: Int, ow: Int, oh: Int, nw: Int, nh: Int) -> Int ! alloc
+    p = list_get(&mut self.ps, i)
+    p.term.redimensionar(ptr, len, ow, oh, nw, nh)
+
+method Tabla.term_feed_byte(&mut self, i: Int, ptr: Int, len: Int, w: Int, h: Int, byte: Int) -> Int ! alloc
+    p = list_get(&mut self.ps, i)
+    p.term.feed_byte(ptr, len, w, h, byte)

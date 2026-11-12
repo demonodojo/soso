@@ -152,6 +152,7 @@ pub fn init(modes: LxddeModes) {
                 wifi::phase(),
                 wifi::alive()
             );
+            wifi::arm_irqs();
         }
         crate::drivers::fatlog::flush_checkpoint();
     }
@@ -301,6 +302,14 @@ pub fn device_buf_free(va: u64) -> Result<(), ()> {
 
 pub fn gsp_fini() -> bool {
     gpu::gsp_fini()
+}
+
+pub fn wifi_tomar_irq_pendiente() -> bool {
+    wifi::tomar_trabajo_pendiente()
+}
+
+pub fn wifi_poll_soft() {
+    wifi::poll();
 }
 
 pub fn wifi_present() -> bool {

@@ -3,20 +3,20 @@ import "../../../user/sal/escritorio/term.sal"
 fn main() -> Int ! alloc
     w = 4
     h = 2
-    st = term_st_nuevo(w, h)
+    st = Term.new(w, h)
     grid = term_capa(w, h)
     glen = w * h * celda_bytes()
-    _l = term_limpiar_pantalla(st, grid, glen, w, h)
+    _l = st.limpiar_pantalla(grid, glen, w, h)
     _a = term_escribir(grid, glen, w, 0, 0, 65, 7, 0, 0)
-    _s = term_scroll(st, grid, glen, w, h)
+    _s = st.scroll(grid, glen, w, h)
     if term_leer_cp(grid, glen, w, 0, 0) != 32
         1
     else
-        nw = term_redimensionar(st, grid, glen, w, h, 6, 3)
+        nw = st.redimensionar(grid, glen, w, h, 6, 3)
         if nw <= 0
             2
         else
-            if term_st_get(st, st_cols()) != 6
+            if st.cols != 6
                 3
             else
                 0

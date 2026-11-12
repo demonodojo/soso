@@ -16,113 +16,64 @@ fn col_default_fg() -> Int
 fn col_default_bg() -> Int
     0
 
-fn term_st_size() -> Int
-    256
-
-fn st_cols() -> Int
-    0
-
-fn st_rows() -> Int
-    8
-
-fn st_cursor() -> Int
-    16
-
-fn st_fg() -> Int
-    24
-
-fn st_bg() -> Int
-    32
-
-fn st_attr() -> Int
-    40
-
-fn st_mode() -> Int
-    48
-
-fn st_csi_n() -> Int
-    56
-
-fn st_csi_cur() -> Int
-    64
-
-fn st_csi_base() -> Int
-    72
-
-fn st_utf8() -> Int
-    136
-
-fn st_dirty() -> Int
-    144
-
-fn st_hist_ptr() -> Int
-    152
-
-fn st_hist_w() -> Int
-    160
-
-fn st_hist_cap() -> Int
-    168
-
-fn st_hist_head() -> Int
-    176
-
 fn term_hist_cap() -> Int
     2000
 
 fn term_cursor_scale() -> Int
     4096
 
-fn term_st_nuevo(cols: Int, rows: Int) -> Int ! alloc
-    p = bytes_ptr(bytes_new(term_st_size()))
+# Estado del emulador de un panel PTY. `hist` es el historial de líneas
+# (`hist_cap * hist_w` celdas) y `csi` los parámetros CSI pendientes.
+struct Term
+    cols: Int
+    rows: Int
+    cursor: Int
+    fg: Int
+    bg: Int
+    attr: Int
+    mode: Int
+    csi_n: Int
+    csi_cur: Int
+    csi: List[Int]
+    utf8: Int
+    dirty: Int
+    hist: Bytes
+    hist_w: Int
+    hist_cap: Int
+    hist_head: Int
+
+init Term(cols: Int, rows: Int) ! alloc
+    csi = list_new[Int]()
+    i = 0
+    while i < 8
+        _p = list_push(&mut csi, 0)
+        i = i + 1
     hw = cols * celda_bytes()
-    hist = bytes_ptr(bytes_new(term_hist_cap() * hw))
-    b = bytes_view_mem(p, term_st_size())
-    _0 = bytes_set_i64(b, st_cols(), cols)
-    _1 = bytes_set_i64(b, st_rows(), rows)
-    _2 = bytes_set_i64(b, st_cursor(), 0)
-    _3 = bytes_set_i64(b, st_fg(), col_default_fg())
-    _4 = bytes_set_i64(b, st_bg(), col_default_bg())
-    _5 = bytes_set_i64(b, st_attr(), 0)
-    _6 = bytes_set_i64(b, st_mode(), 0)
-    _7 = bytes_set_i64(b, st_csi_n(), 0)
-    _8 = bytes_set_i64(b, st_csi_cur(), 0)
-    _9 = bytes_set_i64(b, st_utf8(), utf8_inicio())
-    _a = bytes_set_i64(b, st_dirty(), -1)
-    _b = bytes_set_i64(b, st_hist_ptr(), hist)
-    _c = bytes_set_i64(b, st_hist_w(), cols)
-    _d = bytes_set_i64(b, st_hist_cap(), term_hist_cap())
-    _e = bytes_set_i64(b, st_hist_head(), 0)
-    p
+    hist = bytes_new(term_hist_cap() * hw)
+    Term(cols, rows, 0, col_default_fg(), col_default_bg(), 0, 0, 0, 0,
+         csi, utf8_inicio(), -1, hist, cols, term_hist_cap(), 0)
 
-fn term_st_get(st: Int, off: Int) -> Int ! alloc
-    bytes_get_i64(bytes_view_mem(st, term_st_size()), off)
+method Term.csi_param(&self, i: Int) -> Int
+    list_get(&self.csi, i)
 
-fn term_st_set(st: Int, off: Int, v: Int) -> Int ! alloc
-    _s = bytes_set_i64(bytes_view_mem(st, term_st_size()), off, v)
+method Term.set_csi_param(&mut self, i: Int, v: Int) -> Int
+    list_set(&mut self.csi, i, v)
     0
 
-fn term_st_csi_param(st: Int, i: Int) -> Int ! alloc
-    bytes_get_i64(bytes_view_mem(st, term_st_size()), st_csi_base() + i * 8)
-
-fn term_st_set_csi_param(st: Int, i: Int, v: Int) -> Int ! alloc
-    _s = bytes_set_i64(bytes_view_mem(st, term_st_size()), st_csi_base() + i * 8, v)
-    0
-
-fn term_marcar_fila(st: Int, row: Int) -> Int ! alloc
-    d = term_st_get(st, st_dirty())
-    if d == -1
+method Term.marcar_fila(&mut self, row: Int) -> Int
+    if self.dirty == -1
         0
-    elsif d >= 0
-        if d != row
-            _a = term_st_set(st, st_dirty(), -1)
+    elsif self.dirty >= 0
+        if self.dirty != row
+            self.dirty = -1
             0
         else
             0
     else
-        _b = term_st_set(st, st_dirty(), row)
+        self.dirty = row
         0
 
+# Fuga intencional: capa SHM / grid del terminal (vida = panel).
 fn term_capa(w: Int, h: Int) -> Int ! alloc
     bytes_ptr(bytes_new(w * h * celda_bytes()))
 
@@ -196,16 +147,16 @@ fn term_leer_bg(ptr: Int, len: Int, w: Int, col: Int, row: Int) -> Int ! alloc
     b = bytes_view_mem(ptr, len)
     bytes_get_u8(b, term_idx(w, col, row) + 5)
 
-fn term_limpiar_pantalla(st: Int, ptr: Int, len: Int, w: Int, h: Int) -> Int ! alloc
+method Term.limpiar_pantalla(&mut self, ptr: Int, len: Int, w: Int, h: Int) -> Int ! alloc
     row = 0
     while row < h
         col = 0
         while col < w
             _t = term_escribir(ptr, len, w, col, row, 32, col_default_fg(), col_default_bg(), 0)
             col = col + 1
-        _m = term_marcar_fila(st, row)
+        _m = self.marcar_fila(row)
         row = row + 1
-    _c = term_st_set(st, st_cursor(), 0)
+    self.cursor = 0
     0
 
 fn term_fila_copiar(dst: Int, dlen: Int, dw: Int, drow: Int, src: Int, slen: Int, sw: Int, srow: Int, cols: Int) -> Int ! alloc
@@ -219,33 +170,30 @@ fn term_fila_copiar(dst: Int, dlen: Int, dw: Int, drow: Int, src: Int, slen: Int
         col = col + 1
     0
 
-fn term_hist_push(st: Int, ptr: Int, len: Int, w: Int, row: Int) -> Int ! alloc
-    hp = term_st_get(st, st_hist_ptr())
-    hw = term_st_get(st, st_hist_w())
-    cap = term_st_get(st, st_hist_cap())
-    head = term_st_get(st, st_hist_head())
-    slot = mod_pos(head, cap)
-    hlen = cap * hw * celda_bytes()
-    _c = term_fila_copiar(hp, hlen, hw, slot, ptr, len, w, row, w)
-    _h = term_st_set(st, st_hist_head(), head + 1)
+method Term.hist_push(&mut self, ptr: Int, len: Int, w: Int, row: Int) -> Int ! alloc
+    hw = self.hist_w
+    slot = mod_pos(self.hist_head, self.hist_cap)
+    hlen = self.hist_cap * hw * celda_bytes()
+    _c = term_fila_copiar(bytes_ptr(self.hist), hlen, hw, slot, ptr, len, w, row, w)
+    self.hist_head = self.hist_head + 1
     0
 
-fn term_scroll(st: Int, ptr: Int, len: Int, w: Int, h: Int) -> Int ! alloc
-    _h = term_hist_push(st, ptr, len, w, 0)
+method Term.scroll(&mut self, ptr: Int, len: Int, w: Int, h: Int) -> Int ! alloc
+    _h = self.hist_push(ptr, len, w, 0)
     row = 1
     while row < h
         _cp = term_fila_copiar(ptr, len, w, row - 1, ptr, len, w, row, w)
-        _m = term_marcar_fila(st, row - 1)
+        _m = self.marcar_fila(row - 1)
         row = row + 1
     col = 0
     lr = h - 1
     while col < w
         _t = term_escribir(ptr, len, w, col, lr, 32, col_default_fg(), col_default_bg(), 0)
         col = col + 1
-    _ml = term_marcar_fila(st, lr)
+    _ml = self.marcar_fila(lr)
     0
 
-fn term_redimensionar(st: Int, ptr: Int, len: Int, ow: Int, oh: Int, nw: Int, nh: Int) -> Int ! alloc
+method Term.redimensionar(&mut self, ptr: Int, len: Int, ow: Int, oh: Int, nw: Int, nh: Int) -> Int ! alloc
     newp = term_capa(nw, nh)
     nlen = nw * nh * celda_bytes()
     mr = min(oh, nh)
@@ -266,42 +214,42 @@ fn term_redimensionar(st: Int, ptr: Int, len: Int, ow: Int, oh: Int, nw: Int, nh
                     _t2 = term_escribir(newp, nlen, nw, col, row, 32, col_default_fg(), col_default_bg(), 0)
             col = col + 1
         row = row + 1
-    _c0 = term_st_set(st, st_cols(), nw)
-    _c1 = term_st_set(st, st_rows(), nh)
-    _hw = term_st_set(st, st_hist_w(), nw)
-    pos = term_st_get(st, st_cursor())
+    self.cols = nw
+    self.rows = nh
+    self.hist_w = nw
+    pos = self.cursor
     nc = min(term_cursor_col(pos), nw - 1)
     nr = min(term_cursor_row(pos), nh - 1)
     if nw <= 0
         nc = 0
     if nh <= 0
         nr = 0
-    _c = term_st_set(st, st_cursor(), term_pack_cursor(nc, nr))
-    _d = term_st_set(st, st_dirty(), -1)
+    self.cursor = term_pack_cursor(nc, nr)
+    self.dirty = -1
     newp
 
-fn term_nueva_linea(st: Int, ptr: Int, len: Int, w: Int, h: Int, col: Int, row: Int) -> Int ! alloc
+method Term.nueva_linea(&mut self, ptr: Int, len: Int, w: Int, h: Int, col: Int, row: Int) -> Int ! alloc
     nr = row + 1
     if nr >= h
-        _s = term_scroll(st, ptr, len, w, h)
+        _s = self.scroll(ptr, len, w, h)
     if nr >= h
         nr = h - 1
-    _c = term_st_set(st, st_cursor(), term_pack_cursor(0, nr))
+    self.cursor = term_pack_cursor(0, nr)
     0
 
-fn term_borrar_linea(st: Int, ptr: Int, len: Int, w: Int, h: Int, row: Int, mode: Int) -> Int ! alloc
+method Term.borrar_linea(&mut self, ptr: Int, len: Int, w: Int, h: Int, row: Int, mode: Int) -> Int ! alloc
     if mode == 0
-        c = term_cursor_col(term_st_get(st, st_cursor()))
+        c = term_cursor_col(self.cursor)
         while c < w
             _t = term_escribir(ptr, len, w, c, row, 32, col_default_fg(), col_default_bg(), 0)
             c = c + 1
-        _m = term_marcar_fila(st, row)
+        _m = self.marcar_fila(row)
     if mode == 1
         c = 0
         while c < w
             _t = term_escribir(ptr, len, w, c, row, 32, col_default_fg(), col_default_bg(), 0)
             c = c + 1
-        _m = term_marcar_fila(st, row)
+        _m = self.marcar_fila(row)
     if mode >= 2
         r = 0
         while r < h
@@ -309,209 +257,208 @@ fn term_borrar_linea(st: Int, ptr: Int, len: Int, w: Int, h: Int, row: Int, mode
             while c < w
                 _t = term_escribir(ptr, len, w, c, r, 32, col_default_fg(), col_default_bg(), 0)
                 c = c + 1
-            _m = term_marcar_fila(st, r)
+            _m = self.marcar_fila(r)
             r = r + 1
     0
 
-fn term_borrar_pantalla(st: Int, ptr: Int, len: Int, w: Int, h: Int, mode: Int) -> Int ! alloc
+method Term.borrar_pantalla(&mut self, ptr: Int, len: Int, w: Int, h: Int, mode: Int) -> Int ! alloc
     if mode == 0
-        r = term_cursor_row(term_st_get(st, st_cursor()))
-        _b = term_borrar_linea(st, ptr, len, w, h, r, 0)
+        r = term_cursor_row(self.cursor)
+        _b = self.borrar_linea(ptr, len, w, h, r, 0)
     if mode == 1
-        r = term_cursor_row(term_st_get(st, st_cursor()))
+        r = term_cursor_row(self.cursor)
         c = 0
         while c <= r
-            _b = term_borrar_linea(st, ptr, len, w, h, c, 1)
+            _b = self.borrar_linea(ptr, len, w, h, c, 1)
             c = c + 1
     if mode >= 2
-        _l = term_limpiar_pantalla(st, ptr, len, w, h)
+        _l = self.limpiar_pantalla(ptr, len, w, h)
     0
 
-fn term_csi_color(st: Int, p: Int) -> Int ! alloc
+method Term.csi_color(&mut self, p: Int) -> Int
     if p == 0
-        _f = term_st_set(st, st_fg(), col_default_fg())
-        _b = term_st_set(st, st_bg(), col_default_bg())
-        _a = term_st_set(st, st_attr(), 0)
+        self.fg = col_default_fg()
+        self.bg = col_default_bg()
+        self.attr = 0
     if p == 7
-        _a = term_st_set(st, st_attr(), term_st_get(st, st_attr()) | attr_inv())
+        self.attr = self.attr | attr_inv()
     if p == 27
-        _a = term_st_set(st, st_attr(), term_st_get(st, st_attr()) & (255 - attr_inv()))
+        self.attr = self.attr & (255 - attr_inv())
     if p == 39
-        _f = term_st_set(st, st_fg(), col_default_fg())
+        self.fg = col_default_fg()
     if p == 49
-        _b = term_st_set(st, st_bg(), col_default_bg())
+        self.bg = col_default_bg()
     if p >= 100
         if p <= 107
-            _b = term_st_set(st, st_bg(), p - 100 + 8)
+            self.bg = p - 100 + 8
     if p >= 90
         if p <= 97
-            _f = term_st_set(st, st_fg(), p - 90 + 8)
+            self.fg = p - 90 + 8
     if p >= 40
         if p <= 47
-            _b = term_st_set(st, st_bg(), p - 40)
+            self.bg = p - 40
     if p >= 30
         if p <= 37
-            _f = term_st_set(st, st_fg(), p - 30)
+            self.fg = p - 30
     0
 
-fn term_csi_fin(st: Int, ptr: Int, len: Int, w: Int, h: Int, cmd: Int) -> Int ! alloc
+method Term.csi_fin(&mut self, ptr: Int, len: Int, w: Int, h: Int, cmd: Int) -> Int ! alloc
     if cmd == 72
-        if term_st_get(st, st_csi_n()) >= 2
-            _c = term_st_set(st, st_cursor(), term_pack_cursor(term_st_csi_param(st, 1) - 1, term_st_csi_param(st, 0) - 1))
-        if term_st_get(st, st_csi_n()) < 2
-            _c = term_st_set(st, st_cursor(), 0)
+        if self.csi_n >= 2
+            self.cursor = term_pack_cursor(self.csi_param(1) - 1, self.csi_param(0) - 1)
+        if self.csi_n < 2
+            self.cursor = 0
     if cmd == 102
-        if term_st_get(st, st_csi_n()) >= 2
-            _c = term_st_set(st, st_cursor(), term_pack_cursor(term_st_csi_param(st, 1) - 1, term_st_csi_param(st, 0) - 1))
-        if term_st_get(st, st_csi_n()) < 2
-            _c = term_st_set(st, st_cursor(), 0)
+        if self.csi_n >= 2
+            self.cursor = term_pack_cursor(self.csi_param(1) - 1, self.csi_param(0) - 1)
+        if self.csi_n < 2
+            self.cursor = 0
     if cmd == 74
         m = 0
-        if term_st_get(st, st_csi_n()) >= 1
-            m = term_st_csi_param(st, 0)
-        _b = term_borrar_pantalla(st, ptr, len, w, h, m)
+        if self.csi_n >= 1
+            m = self.csi_param(0)
+        _b = self.borrar_pantalla(ptr, len, w, h, m)
     if cmd == 75
         m = 0
-        if term_st_get(st, st_csi_n()) >= 1
-            m = term_st_csi_param(st, 0)
-        r = term_cursor_row(term_st_get(st, st_cursor()))
-        _b = term_borrar_linea(st, ptr, len, w, h, r, m)
+        if self.csi_n >= 1
+            m = self.csi_param(0)
+        r = term_cursor_row(self.cursor)
+        _b = self.borrar_linea(ptr, len, w, h, r, m)
     if cmd == 65
         n = 1
-        if term_st_get(st, st_csi_n()) >= 1
-            n = term_st_csi_param(st, 0)
-        pos = term_st_get(st, st_cursor())
+        if self.csi_n >= 1
+            n = self.csi_param(0)
+        pos = self.cursor
         row = max(0, term_cursor_row(pos) - n)
-        _c = term_st_set(st, st_cursor(), term_pack_cursor(term_cursor_col(pos), row))
+        self.cursor = term_pack_cursor(term_cursor_col(pos), row)
     if cmd == 66
         n = 1
-        if term_st_get(st, st_csi_n()) >= 1
-            n = term_st_csi_param(st, 0)
-        pos = term_st_get(st, st_cursor())
+        if self.csi_n >= 1
+            n = self.csi_param(0)
+        pos = self.cursor
         row = min(h - 1, term_cursor_row(pos) + n)
-        _c = term_st_set(st, st_cursor(), term_pack_cursor(term_cursor_col(pos), row))
+        self.cursor = term_pack_cursor(term_cursor_col(pos), row)
     if cmd == 67
         n = 1
-        if term_st_get(st, st_csi_n()) >= 1
-            n = term_st_csi_param(st, 0)
-        pos = term_st_get(st, st_cursor())
+        if self.csi_n >= 1
+            n = self.csi_param(0)
+        pos = self.cursor
         col = min(w - 1, term_cursor_col(pos) + n)
-        _c = term_st_set(st, st_cursor(), term_pack_cursor(col, term_cursor_row(pos)))
+        self.cursor = term_pack_cursor(col, term_cursor_row(pos))
     if cmd == 68
         n = 1
-        if term_st_get(st, st_csi_n()) >= 1
-            n = term_st_csi_param(st, 0)
-        pos = term_st_get(st, st_cursor())
+        if self.csi_n >= 1
+            n = self.csi_param(0)
+        pos = self.cursor
         col = max(0, term_cursor_col(pos) - n)
-        _c = term_st_set(st, st_cursor(), term_pack_cursor(col, term_cursor_row(pos)))
+        self.cursor = term_pack_cursor(col, term_cursor_row(pos))
     if cmd == 109
         i = 0
-        n = term_st_get(st, st_csi_n())
+        n = self.csi_n
         if n == 0
-            _z = term_st_set_csi_param(st, 0, 0)
+            _z = self.set_csi_param(0, 0)
             n = 1
         while i < n
-            _p = term_csi_color(st, term_st_csi_param(st, i))
+            _p = self.csi_color(self.csi_param(i))
             i = i + 1
-    _r = term_st_set(st, st_csi_n(), 0)
-    _m = term_st_set(st, st_mode(), 0)
+    self.csi_n = 0
+    self.mode = 0
     0
 
-fn term_csi_byte(st: Int, ptr: Int, len: Int, w: Int, h: Int, b: Int) -> Int ! alloc
+method Term.csi_byte(&mut self, ptr: Int, len: Int, w: Int, h: Int, b: Int) -> Int ! alloc
     if b >= 48
         if b <= 57
-            cur = term_st_get(st, st_csi_cur())
+            cur = self.csi_cur
             if cur == 0
                 cur = b - 48
             else
                 cur = cur * 10 + (b - 48)
-            _c = term_st_set(st, st_csi_cur(), cur)
+            self.csi_cur = cur
         else
             if b == 59
-                n = term_st_get(st, st_csi_n())
-                _p = term_st_set_csi_param(st, n, term_st_get(st, st_csi_cur()))
-                _nn = term_st_set(st, st_csi_n(), n + 1)
-                _z = term_st_set(st, st_csi_cur(), 0)
+                n = self.csi_n
+                _p = self.set_csi_param(n, self.csi_cur)
+                self.csi_n = n + 1
+                self.csi_cur = 0
             else
-                n = term_st_get(st, st_csi_n())
-                if term_st_get(st, st_csi_cur()) > 0
-                    _p = term_st_set_csi_param(st, n, term_st_get(st, st_csi_cur()))
-                    _nn = term_st_set(st, st_csi_n(), n + 1)
-                _f = term_csi_fin(st, ptr, len, w, h, b)
+                n = self.csi_n
+                if self.csi_cur > 0
+                    _p = self.set_csi_param(n, self.csi_cur)
+                    self.csi_n = n + 1
+                _f = self.csi_fin(ptr, len, w, h, b)
     0
 
-fn term_put_cp(st: Int, ptr: Int, len: Int, w: Int, h: Int, cp: Int) -> Int ! alloc
-    pos = term_st_get(st, st_cursor())
+method Term.put_cp(&mut self, ptr: Int, len: Int, w: Int, h: Int, cp: Int) -> Int ! alloc
+    pos = self.cursor
     col = term_cursor_col(pos)
     row = term_cursor_row(pos)
-    fg = term_st_get(st, st_fg())
-    bg = term_st_get(st, st_bg())
-    attr = term_st_get(st, st_attr())
+    fg = self.fg
+    bg = self.bg
+    attr = self.attr
     if cp == 10
-        _n = term_nueva_linea(st, ptr, len, w, h, col, row)
+        _n = self.nueva_linea(ptr, len, w, h, col, row)
     if cp == 13
-        _c = term_st_set(st, st_cursor(), term_pack_cursor(0, row))
+        self.cursor = term_pack_cursor(0, row)
     if cp == 8
         nc = 0
         if col > 0
             nc = col - 1
             _t = term_escribir(ptr, len, w, nc, row, 32, fg, bg, attr)
-            _m = term_marcar_fila(st, row)
-        _c = term_st_set(st, st_cursor(), term_pack_cursor(nc, row))
+            _m = self.marcar_fila(row)
+        self.cursor = term_pack_cursor(nc, row)
     if cp == 9
         nc = col + 8 - mod_pos(col, 8)
-        _c = term_st_set(st, st_cursor(), term_pack_cursor(nc, row))
+        self.cursor = term_pack_cursor(nc, row)
     if cp != 10
         if cp != 13
             if cp != 8
                 if cp != 9
                     _t = term_escribir(ptr, len, w, col, row, cp, fg, bg, attr)
-                    _m = term_marcar_fila(st, row)
-                    _c = term_st_set(st, st_cursor(), term_pack_cursor(col + 1, row))
+                    _m = self.marcar_fila(row)
+                    self.cursor = term_pack_cursor(col + 1, row)
     0
 
-fn term_feed_byte(st: Int, ptr: Int, len: Int, w: Int, h: Int, byte: Int) -> Int ! alloc
-    mode = term_st_get(st, st_mode())
-    if mode == 0
+method Term.feed_byte(&mut self, ptr: Int, len: Int, w: Int, h: Int, byte: Int) -> Int ! alloc
+    if self.mode == 0
         if byte == 27
-            _m = term_st_set(st, st_mode(), 1)
+            self.mode = 1
         else
-            u8st = term_st_get(st, st_utf8())
+            u8st = self.utf8
             if u8st == 0
                 if byte < 128
-                    _p = term_put_cp(st, ptr, len, w, h, byte)
+                    _p = self.put_cp(ptr, len, w, h, byte)
                 else
                     cp = utf8_feed(0, byte)
                     if utf8_pendiente(cp) != 0
-                        _u = term_st_set(st, st_utf8(), cp)
+                        self.utf8 = cp
                     else
-                        _p = term_put_cp(st, ptr, len, w, h, cp)
+                        _p = self.put_cp(ptr, len, w, h, cp)
             else
                 cp = utf8_feed(u8st, byte)
                 if cp == utf8_reempl()
-                    _p = term_put_cp(st, ptr, len, w, h, cp)
-                    _u = term_st_set(st, st_utf8(), utf8_inicio())
+                    _p = self.put_cp(ptr, len, w, h, cp)
+                    self.utf8 = utf8_inicio()
                     if byte < 128
-                        _q = term_put_cp(st, ptr, len, w, h, byte)
+                        _q = self.put_cp(ptr, len, w, h, byte)
                 else
                     if utf8_pendiente(cp) != 0
-                        _u = term_st_set(st, st_utf8(), cp)
+                        self.utf8 = cp
                     else
-                        _p = term_put_cp(st, ptr, len, w, h, cp)
-                        _u = term_st_set(st, st_utf8(), utf8_inicio())
-    elsif mode == 1
+                        _p = self.put_cp(ptr, len, w, h, cp)
+                        self.utf8 = utf8_inicio()
+    elsif self.mode == 1
         if byte == 91
-            _a = term_st_set(st, st_mode(), 2)
-            _b = term_st_set(st, st_csi_n(), 0)
-            _c = term_st_set(st, st_csi_cur(), 0)
+            self.mode = 2
+            self.csi_n = 0
+            self.csi_cur = 0
         else
-            _d = term_st_set(st, st_mode(), 0)
+            self.mode = 0
     else
-        _e = term_csi_byte(st, ptr, len, w, h, byte)
+        _e = self.csi_byte(ptr, len, w, h, byte)
     0
 
-fn term_pintar(st: Int, grid: Int, glen: Int, cols: Int, rows: Int, psf: Int, psflen: Int, gw: Int, gh: Int, tema: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, ox: Int, oy: Int) -> Int ! alloc
-    dr = term_st_get(st, st_dirty())
+method Term.pintar(&mut self, grid: Int, glen: Int, cols: Int, rows: Int, psf: Int, psflen: Int, gw: Int, gh: Int, tema: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, ox: Int, oy: Int) -> Int ! alloc
+    dr = self.dirty
     row = 0
     while row < rows
         pinta = 0
@@ -533,10 +480,10 @@ fn term_pintar(st: Int, grid: Int, glen: Int, cols: Int, rows: Int, psf: Int, ps
                 col = col + 1
         row = row + 1
     if dr >= 0
-        _d = term_st_set(st, st_dirty(), -2)
+        self.dirty = -2
     if dr == -1
-        _e = term_st_set(st, st_dirty(), -2)
-    pos = term_st_get(st, st_cursor())
+        self.dirty = -2
+    pos = self.cursor
     cc = term_cursor_col(pos)
     cr = term_cursor_row(pos)
     cx = ox + cc * gw
@@ -545,5 +492,5 @@ fn term_pintar(st: Int, grid: Int, glen: Int, cols: Int, rows: Int, psf: Int, ps
     0
 
 fn term_limpiar(ptr: Int, len: Int, w: Int, h: Int) -> Int ! alloc
-    st = term_st_nuevo(w, h)
-    term_limpiar_pantalla(st, ptr, len, w, h)
+    st = Term.new(w, h)
+    st.limpiar_pantalla(ptr, len, w, h)

@@ -45,12 +45,6 @@ fn fuente_inicial_por_ancho(sw: Int) -> Int
     else
         1
 
-fn fuente_tab_bytes() -> Int
-    fuente_niveles() * 16
-
-fn fuente_tab_ptr(tab: Int, nivel: Int, field: Int) -> Int
-    tab + nivel * 16 + field
-
 fn fuente_nivel_ok(nivel: Int) -> Int
     if nivel < 0
         0
@@ -59,37 +53,50 @@ fn fuente_nivel_ok(nivel: Int) -> Int
     else
         1
 
-fn fuente_tab_get_ptr(tab: Int, nivel: Int) -> Int ! alloc
-    if fuente_nivel_ok(nivel) == 0
-        0
-    else
-        b = bytes_view_mem(tab, fuente_tab_bytes())
-        bytes_get_i64(b, nivel * 16)
+# Glifo PSF2 cargado para un nivel de escala. `ptr` es el búfer crudo que
+# vive hasta el fin del proceso.
+struct Fuente
+    ptr: Int
+    len: Int
 
-fn fuente_tab_get_len(tab: Int, nivel: Int) -> Int ! alloc
+struct Fuentes
+    niveles: List[Fuente]
+
+init Fuentes() ! alloc
+    xs = list_new[Fuente]()
+    i = 0
+    while i < fuente_niveles()
+        _f = list_push(&mut xs, Fuente(0, 0))
+        i = i + 1
+    Fuentes(xs)
+
+method Fuentes.ptr(&self, nivel: Int) -> Int
     if fuente_nivel_ok(nivel) == 0
         0
     else
-        b = bytes_view_mem(tab, fuente_tab_bytes())
-        v = bytes_get_i64(b, nivel * 16 + 8)
-        if v < 0
+        f = list_get(&self.niveles, nivel)
+        f.ptr
+
+method Fuentes.len(&self, nivel: Int) -> Int
+    if fuente_nivel_ok(nivel) == 0
+        0
+    else
+        f = list_get(&self.niveles, nivel)
+        if f.len < 0
             0
         else
-            v
+            f.len
 
-fn fuente_tab_set(tab: Int, nivel: Int, ptr: Int, len: Int) -> Int ! alloc
-    b = bytes_view_mem(tab, fuente_tab_bytes())
-    bytes_set_i64(b, nivel * 16, ptr)
-    bytes_set_i64(b, nivel * 16 + 8, len)
+method Fuentes.set(&mut self, nivel: Int, ptr: Int, len: Int) -> Int
+    f = list_get(&mut self.niveles, nivel)
+    f.ptr = ptr
+    f.len = len
     0
 
-fn fuente_tab_nuevo() -> Int ! alloc
-    bytes_ptr(bytes_new(fuente_tab_bytes()))
-
-fn fuente_cargar(tab: Int, nivel: Int) -> Int ! io, alloc
+method Fuentes.cargar(&mut self, nivel: Int) -> Int ! io, alloc
     if fuente_nivel_ok(nivel) == 0
         -1
-    elsif fuente_tab_get_len(tab, nivel) > 0
+    elsif self.len(nivel) > 0
         0
     else
         s = read_file(fuente_ruta(nivel))
@@ -97,18 +104,20 @@ fn fuente_cargar(tab: Int, nivel: Int) -> Int ! io, alloc
         if n < 32
             -1
         else
-            buf = bytes_new(n + 1)
-            str_bytes_copy(buf, 0, s)
-            _t = fuente_tab_set(tab, nivel, bytes_ptr(buf), n)
+            # Fuga intencional: la tabla guarda el ptr hasta el fin del proceso.
+            ptr = bytes_ptr(bytes_new(n + 1))
+            v = bytes_view_mem(ptr, n + 1)
+            str_bytes_copy(v, 0, s)
+            _t = self.set(nivel, ptr, n)
             0
 
-fn fuente_psf(tab: Int, nivel: Int) -> Int ! io, alloc
-    _c = fuente_cargar(tab, nivel)
-    fuente_tab_get_ptr(tab, nivel)
+method Fuentes.psf(&mut self, nivel: Int) -> Int ! io, alloc
+    _c = self.cargar(nivel)
+    self.ptr(nivel)
 
-fn fuente_psf_len(tab: Int, nivel: Int) -> Int ! io, alloc
-    _c = fuente_cargar(tab, nivel)
-    fuente_tab_get_len(tab, nivel)
+method Fuentes.psf_len(&mut self, nivel: Int) -> Int ! io, alloc
+    _c = self.cargar(nivel)
+    self.len(nivel)
 
 fn metrica_barra_alto(gh: Int) -> Int
     gh + 8

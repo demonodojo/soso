@@ -1,6 +1,5 @@
 import "../../../user/sal/escritorio/comp_gprim_layout.sal"
 import "../../../user/sal/escritorio/gprim_prueba_escena.sal"
-import "../../../user/sal/escritorio/gprim_prueba_escena.sal"
 
 fn main() -> Int ! alloc
     if comp_gprim_hdr_len() != 48
@@ -48,8 +47,10 @@ fn main() -> Int ! alloc
             # Blobs: la fuente y las celdas de la escena de prueba van tras las primitivas.
             ge = esc_nueva(gprim_prueba_cap())
             gn = gprim_prueba_construir(ge)
-            psf = psf_sintetica()
-            cel = gprim_prueba_celdas()
+            psf_own = psf_sintetica()
+            psf = bytes_ptr(psf_own)
+            cel_own = gprim_prueba_celdas()
+            cel = bytes_ptr(cel_own)
             tot = comp_gprim_total(gn, gprim_prueba_psf_len(), gprim_prueba_ncells())
             gb = bytes_ptr(bytes_new(tot + 64))
             _v = comp_gprim_volcar(gb, 1, 128, 96, 512, 2, 1, 0, 0, 128, 96, ge, gprim_prueba_cap(), gn)

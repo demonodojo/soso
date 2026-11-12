@@ -264,6 +264,7 @@ fn input_event_button(evt_ptr: Int, evt_len: Int, i: Int) -> Int ! alloc
     b = bytes_view_mem(evt_ptr, evt_len)
     bytes_get_u32(b, i * 24 + input_off_button())
 
+# Fuga intencional: buffer opaco de syscall (vida = proceso / prueba).
 fn fb_info_nuevo() -> Int ! alloc
     bytes_ptr(bytes_new(fb_info_size()))
 
@@ -430,21 +431,21 @@ fn sleep_ms(ms: Int) -> Int ! io
 fn uptime_ms() -> Int ! io
     syscall(sys_uptime_ms(), 0, 0, 0, 0, 0, 0)
 
-fn spawn_string_buf(s: String) -> Bytes ! alloc
+fn spawn_string_buf(s: &String) -> Bytes ! alloc
     buf = bytes_new(str_len(s) + 1)
     str_bytes_copy(buf, 0, s)
     buf
 
-fn spawn_argv_slot_ptr(tab: Bytes, i: Int, buf: Bytes, len: Int) -> Int ! alloc
+fn spawn_argv_slot_ptr(tab: &Bytes, i: Int, buf: &Bytes, len: Int) -> Int ! alloc
     bytes_set_i64(tab, i * 16, bytes_ptr(buf))
     bytes_set_i64(tab, i * 16 + 8, len)
     0
 
 fn spawn_io_full(path: String, stdin: Int, stdout: Int, stderr: Int, log_fd: Int) -> Int ! io, alloc
-    pbuf = spawn_string_buf(path)
+    pbuf = spawn_string_buf(&path)
     plen = str_len(path)
     tab = bytes_new(16)
-    _a = spawn_argv_slot_ptr(tab, 0, pbuf, plen)
+    _a = spawn_argv_slot_ptr(&tab, 0, &pbuf, plen)
     opts = bytes_new(spawnio_size())
     bytes_set_i64(opts, spawnio_off_path_ptr(), bytes_ptr(pbuf))
     bytes_set_i64(opts, spawnio_off_path_len(), plen)
@@ -457,24 +458,24 @@ fn spawn_io_full(path: String, stdin: Int, stdout: Int, stderr: Int, log_fd: Int
     syscall(sys_spawn_io(), bytes_ptr(opts), 0, 0, 0, 0, 0)
 
 fn spawn_io_argv(path: String, a1: String, a2: String, a3: String, a4: String, a5: String, n: Int, stdin: Int, stdout: Int, stderr: Int, log_fd: Int) -> Int ! io, alloc
-    pbuf = spawn_string_buf(path)
-    b1 = spawn_string_buf(a1)
-    b2 = spawn_string_buf(a2)
-    b3 = spawn_string_buf(a3)
-    b4 = spawn_string_buf(a4)
-    b5 = spawn_string_buf(a5)
+    pbuf = spawn_string_buf(&path)
+    b1 = spawn_string_buf(&a1)
+    b2 = spawn_string_buf(&a2)
+    b3 = spawn_string_buf(&a3)
+    b4 = spawn_string_buf(&a4)
+    b5 = spawn_string_buf(&a5)
     tab = bytes_new(96)
-    _p = spawn_argv_slot_ptr(tab, 0, pbuf, str_len(path))
+    _p = spawn_argv_slot_ptr(&tab, 0, &pbuf, str_len(path))
     if n >= 2
-        _1 = spawn_argv_slot_ptr(tab, 1, b1, str_len(a1))
+        _1 = spawn_argv_slot_ptr(&tab, 1, &b1, str_len(a1))
     if n >= 3
-        _2 = spawn_argv_slot_ptr(tab, 2, b2, str_len(a2))
+        _2 = spawn_argv_slot_ptr(&tab, 2, &b2, str_len(a2))
     if n >= 4
-        _3 = spawn_argv_slot_ptr(tab, 3, b3, str_len(a3))
+        _3 = spawn_argv_slot_ptr(&tab, 3, &b3, str_len(a3))
     if n >= 5
-        _4 = spawn_argv_slot_ptr(tab, 4, b4, str_len(a4))
+        _4 = spawn_argv_slot_ptr(&tab, 4, &b4, str_len(a4))
     if n >= 6
-        _5 = spawn_argv_slot_ptr(tab, 5, b5, str_len(a5))
+        _5 = spawn_argv_slot_ptr(&tab, 5, &b5, str_len(a5))
     opts = bytes_new(spawnio_size())
     bytes_set_i64(opts, spawnio_off_path_ptr(), bytes_ptr(pbuf))
     bytes_set_i64(opts, spawnio_off_path_len(), str_len(path))
@@ -487,15 +488,15 @@ fn spawn_io_argv(path: String, a1: String, a2: String, a3: String, a4: String, a
     syscall(sys_spawn_io(), bytes_ptr(opts), 0, 0, 0, 0, 0)
 
 fn spawn_io_4(path: String, a1: String, a2: String, a3: String, stdin: Int, stdout: Int, stderr: Int, log_fd: Int) -> Int ! io, alloc
-    pbuf = spawn_string_buf(path)
-    b1 = spawn_string_buf(a1)
-    b2 = spawn_string_buf(a2)
-    b3 = spawn_string_buf(a3)
+    pbuf = spawn_string_buf(&path)
+    b1 = spawn_string_buf(&a1)
+    b2 = spawn_string_buf(&a2)
+    b3 = spawn_string_buf(&a3)
     tab = bytes_new(64)
-    _p = spawn_argv_slot_ptr(tab, 0, pbuf, str_len(path))
-    _1 = spawn_argv_slot_ptr(tab, 1, b1, str_len(a1))
-    _2 = spawn_argv_slot_ptr(tab, 2, b2, str_len(a2))
-    _3 = spawn_argv_slot_ptr(tab, 3, b3, str_len(a3))
+    _p = spawn_argv_slot_ptr(&tab, 0, &pbuf, str_len(path))
+    _1 = spawn_argv_slot_ptr(&tab, 1, &b1, str_len(a1))
+    _2 = spawn_argv_slot_ptr(&tab, 2, &b2, str_len(a2))
+    _3 = spawn_argv_slot_ptr(&tab, 3, &b3, str_len(a3))
     opts = bytes_new(spawnio_size())
     bytes_set_i64(opts, spawnio_off_path_ptr(), bytes_ptr(pbuf))
     bytes_set_i64(opts, spawnio_off_path_len(), str_len(path))

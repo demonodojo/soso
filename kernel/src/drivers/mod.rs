@@ -12,6 +12,7 @@ pub mod kbd;
 pub mod mouse;
 pub mod i2c_dw;
 pub mod hid_i2c;
+pub mod amd_gpio;
 #[cfg(feature = "drv-live-disk")]
 pub mod bootreq;
 #[cfg(feature = "drv-live-disk")]

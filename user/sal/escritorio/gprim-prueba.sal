@@ -44,9 +44,12 @@ fn gprim_probar() -> Int ! io, alloc
     len = pitch * h
     e = esc_nueva(cap)
     n = gprim_prueba_construir(e)
-    psf = psf_sintetica()
-    cel = gprim_prueba_celdas()
-    esperado = bytes_ptr(bytes_new(len))
+    psf_own = psf_sintetica()
+    cel_own = gprim_prueba_celdas()
+    psf = bytes_ptr(psf_own)
+    cel = bytes_ptr(cel_own)
+    esperado_own = bytes_new(len)
+    esperado = bytes_ptr(esperado_own)
     _x = esc_cpu_ejecutar_r(esperado, len, w, h, w, 4, 1, e, cap, n, cel, psf, gprim_prueba_psf_len())
     rt = gpu_alloc_vram(len)
     if rt < 0
@@ -54,10 +57,12 @@ fn gprim_probar() -> Int ! io, alloc
         1
     else
         # Fondo conocido distinto de la escena: si la GPU no escribe, la comparacion lo delata.
-        basura = bytes_ptr(bytes_new(len))
+        basura_own = bytes_new(len)
+        basura = bytes_ptr(basura_own)
         _f = rellenar_rect(basura, len, w, h, w, 4, 1, 0, 0, w, h, color_rgb(1, 2, 3))
         _m = gpu_map(rt, basura, len)
-        cmd = bytes_ptr(bytes_new(comp_gprim_total(cap, gprim_prueba_psf_len(), gprim_prueba_ncells()) + 64))
+        cmd_own = bytes_new(comp_gprim_total(cap, gprim_prueba_psf_len(), gprim_prueba_ncells()) + 64)
+        cmd = bytes_ptr(cmd_own)
         r = gprim_prueba_enviar(cmd, rt, 2, n, w, h, pitch, e, cap, psf, cel)
         if r < 0
             _p = print_str(d"gprim-prueba: GPRIM rechazado (")
@@ -66,7 +71,8 @@ fn gprim_probar() -> Int ! io, alloc
             _l = gpu_free(rt)
             3
         else
-            leido = bytes_ptr(bytes_new(len))
+            leido_own = bytes_new(len)
+            leido = bytes_ptr(leido_own)
             if gpu_read(rt, leido, len) < 0
                 _p = print_str(d"gprim-prueba: gpu_read fallo\n")
                 _l = gpu_free(rt)

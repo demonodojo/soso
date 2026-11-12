@@ -142,15 +142,50 @@ pub(crate) fn dispatch(vector: u8, desde_ring3: bool) {
     // interrumpido hereda el estado SIMD de la cripto. Misma disciplina que
     // `mmap_fault_shim`: área local (no `TIMER_FPU`: un AP y la BSP no
     // pueden compartirla) y trampolín de alineación (cripto SSE).
-    if desde_ring3 && crate::net::trabajo_pendiente() {
-        let _ = crate::arch::interrupts::con_rsp_alineado(net_poll_shim, 0, 0);
+    if desde_ring3 {
+        let mut flags = 0u64;
+        if crate::net::trabajo_pendiente() {
+            flags |= SOFT_NET;
+        }
+        #[cfg(feature = "lxdde")]
+        if crate::lxdde::wifi_tomar_irq_pendiente() {
+            flags |= SOFT_WIFI;
+        }
+        if crate::drivers::hid_i2c::tomar_irq_pendiente() {
+            flags |= SOFT_HID;
+        }
+        if crate::drivers::hda::tomar_irq_pendiente() {
+            flags |= SOFT_HDA;
+        }
+        if flags != 0 {
+            let _ = crate::arch::interrupts::con_rsp_alineado(soft_poll_shim, flags, 0);
+        }
     }
 }
 
-extern "sysv64" fn net_poll_shim(_a: u64, _b: u64) -> u64 {
+const SOFT_NET: u64 = 1;
+#[cfg(feature = "lxdde")]
+const SOFT_WIFI: u64 = 2;
+const SOFT_HID: u64 = 4;
+const SOFT_HDA: u64 = 8;
+
+extern "sysv64" fn soft_poll_shim(flags: u64, _b: u64) -> u64 {
     let mut fpu = crate::arch::fpu::FpuArea::empty();
     unsafe { crate::arch::fpu::save(&mut fpu) };
-    crate::net::poll();
+    // WiFi antes que la pila: drenar RX al backend y luego smoltcp.
+    #[cfg(feature = "lxdde")]
+    if flags & SOFT_WIFI != 0 {
+        crate::lxdde::wifi_poll_soft();
+    }
+    if flags & SOFT_NET != 0 {
+        crate::net::poll();
+    }
+    if flags & SOFT_HID != 0 {
+        crate::drivers::hid_i2c::poll();
+    }
+    if flags & SOFT_HDA != 0 {
+        crate::drivers::hda::service_soft();
+    }
     unsafe { crate::arch::fpu::restore(&fpu) };
     0
 }

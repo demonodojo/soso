@@ -52,7 +52,9 @@ en silencio; el fallo lo canta el llamante (`iwl_ax211: firmware no encontrado`)
 | `lxdde/shim/src/{iwlwifi,skbuff,netdev,cfg80211,mac80211}_lx.c` | shims mínimos |
 | `crates/soso-wpa2/` | máquina WPA2-PSK/CCMP `no_std`, con su banco de host |
 | `kernel/src/net/wifi_wpa.rs` | supplicant: 4-way, `mantener`, reconexión |
-| `kernel/src/lxdde/wifi.rs` | sondeo, huecos >500 ms, pérdidas periódicas |
+| `kernel/src/lxdde/wifi.rs` | sondeo, MSI-X (`arm_irqs`), soft path, huecos >500 ms |
+| `iwl_trans.c` | `iwl_trans_irq_top` / `enable_runtime_ints` (CSR_INT ack sin drenar) |
+| `docs/PLAN-IRQ-PENDIENTES.md` | I1 MSI iwlwifi (y resto de IRQs pendientes) |
 | `kernel/src/lxdde/timer.rs` | `sleep_ms`: bombeo `net`/`wifi` en BSP |
 | `kernel/src/task/mod.rs` | yield forzado si `mantener` >100 ms |
 | `kernel/src/drivers/wificonf.rs` | lee `SOSOWIFI.TXT` (ESP, 8.3) |
@@ -67,12 +69,15 @@ en silencio; el fallo lo canta el llamante (`iwl_ax211: firmware no encontrado`)
 ## Pila en soso
 
 1. `lxdde` probe → firmware ALIVE (`UCODE_ALIVE_NTFY`). **«ALIVE degradado» no vale.**
-2. Syscalls `wifi_scan=56`, `wifi_status=57`, `wifi_connect=58` (`psk_len=0` = abierta).
-3. Autoconnect al arranque si `modes.iwlwifi` y ALIVE: `wifi_wpa::autoconnect()`.
-4. Credenciales: `SOSOWIFI.TXT` en la ESP (`ssid=` / `psk=`) o `/etc/wifi.conf`.
-5. Tras asociación: DHCP **sin** fallback 10.0.2.x. Backend `NicDev::LxWifi`
+2. Tras ready: `wifi::arm_irqs()` (MSI-X o INTx). Top-half = `lx_iwlwifi_irq_top`
+   (ack `CSR_INT`); soft path = `wifi::poll` + `net::poll`. El sondeo periódico
+   sigue como red de seguridad. Log: `wifi: MSI-X vector=…`.
+3. Syscalls `wifi_scan=56`, `wifi_status=57`, `wifi_connect=58` (`psk_len=0` = abierta).
+4. Autoconnect al arranque si `modes.iwlwifi` y ALIVE: `wifi_wpa::autoconnect()`.
+5. Credenciales: `SOSOWIFI.TXT` en la ESP (`ssid=` / `psk=`) o `/etc/wifi.conf`.
+6. Tras asociación: DHCP **sin** fallback 10.0.2.x. Backend `NicDev::LxWifi`
    (prioridad si ya está asociado; si no, ethernet primero).
-6. SSH en placa: puerto **22** (no 2222).
+7. SSH en placa: puerto **22** (no 2222).
 
 sosh / kshell: `wifi scan|status|connect <ssid> [psk]`.
 

@@ -1,6 +1,7 @@
 //! Puente Rust ↔ driver Intel AX211 (lxdde/iwlwifi).
 
 use core::ffi::{c_char, c_int};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const MAX_SCAN: usize = 32;
 const SSID_MAX: usize = 32;
@@ -47,10 +48,17 @@ unsafe extern "C" {
     fn lx_iwlwifi_mac(mac: *mut u8) -> c_int;
     fn lx_iwlwifi_bssid(bssid: *mut u8) -> c_int;
     fn lx_iwlwifi_poll();
+    fn lx_iwlwifi_irq_top() -> u32;
+    fn lx_iwlwifi_enable_runtime_ints();
     fn lx_iwlwifi_check_health(now_ms: u64);
     fn lx_iwlwifi_counters(out: *mut LxIwlContadores);
     fn lx_iwlwifi_reset_link();
 }
+
+const IWL_PCI_IDS: &[u16] = &[0x7f70, 0x51f0, 0x54f0, 0x2723, 0x24fd];
+
+static IRQ_PENDIENTE: AtomicBool = AtomicBool::new(false);
+static IRQ_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Espejo de `struct lx_iwl_counters` (lxdde/ports/iwlwifi/iwlwifi_lx.c).
 #[repr(C)]
@@ -301,6 +309,67 @@ pub fn start_firmware() -> i32 {
     }
     let _g = TRANS_LOCK.lock();
     unsafe { lx_iwlwifi_start_module() }
+}
+
+/// MSI-X (o INTx) tras ALIVE. El sondeo periódico sigue como red de seguridad.
+pub fn arm_irqs() {
+    if !wifi_present() || !alive() {
+        return;
+    }
+    unsafe { lx_iwlwifi_enable_runtime_ints() };
+    let Some(dev) = crate::drivers::pci::devices().iter().find(|d| {
+        d.vendor_id == 0x8086 && IWL_PCI_IDS.contains(&d.device_id)
+    }) else {
+        crate::klogln!("wifi: sin BDF iwl para MSI");
+        return;
+    };
+    let Some(vec) = crate::arch::irq::allocate(iwl_irq) else {
+        crate::klogln!("wifi: sin vector IRQ libre");
+        return;
+    };
+    if let Some(msix) = crate::drivers::pci::find_msix(dev.bus, dev.device, dev.function) {
+        if crate::drivers::pci::msix_setup(
+            &msix,
+            0,
+            vec,
+            crate::drivers::pci::msix_default_dest(),
+        )
+        .is_ok()
+        {
+            crate::println!("wifi: MSI-X vector={vec:#x}");
+            return;
+        }
+    }
+    let line = crate::drivers::pci::read8(dev.bus, dev.device, dev.function, 0x3c);
+    let pin = crate::drivers::pci::read8(dev.bus, dev.device, dev.function, 0x3d);
+    if pin != 0
+        && crate::arch::ioapic::route_isa(line, vec, crate::drivers::pci::msix_default_dest())
+            .is_ok()
+    {
+        crate::println!("wifi: INTx IRQ{line} vector={vec:#x}");
+    } else {
+        crate::klogln!("wifi: sin MSI-X ni INTx; solo sondeo");
+    }
+}
+
+fn iwl_irq() {
+    let _ = unsafe { lx_iwlwifi_irq_top() };
+    IRQ_COUNT.fetch_add(1, Ordering::Relaxed);
+    marcar_trabajo_pendiente();
+}
+
+pub fn marcar_trabajo_pendiente() {
+    IRQ_PENDIENTE.store(true, Ordering::Release);
+    crate::net::marcar_trabajo_pendiente();
+}
+
+pub fn tomar_trabajo_pendiente() -> bool {
+    IRQ_PENDIENTE.swap(false, Ordering::AcqRel)
+}
+
+#[allow(dead_code)]
+pub fn irq_count() -> u64 {
+    IRQ_COUNT.load(Ordering::Relaxed)
 }
 
 pub fn poll() {

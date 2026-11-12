@@ -49,6 +49,7 @@ fn op_escala() -> Int
 fn op_visible() -> Int
     25
 
+# Fuga intencional si el caller no conserva un `Bytes` dueño.
 fn msg_nuevo() -> Int ! alloc
     bytes_ptr(bytes_new(msg_len()))
 

@@ -116,7 +116,8 @@ fn main() -> Int ! io, alloc
             stride = fb_info_stride(info)
             bpp = fb_info_bpp(info)
             fmt = fb_info_formato(info)
-            ginfo = bytes_ptr(bytes_new(gpu_info_size()))
+            ginfo_own = bytes_new(gpu_info_size())
+            ginfo = bytes_ptr(ginfo_own)
             nvdisp_on = 0
             if gpu_info(ginfo) >= 0
                 nvdisp_on = comp_scanout_rt_nvdisp(gpu_scanout_effective(ginfo))
@@ -135,6 +136,7 @@ fn main() -> Int ! io, alloc
                     if compos < 0
                         1
                     else
+                        # Fugas intencionales: estado del compositor (bucle infinito).
                         st = bytes_ptr(bytes_new(comp_st_size()))
                         tab = bytes_ptr(bytes_new(comp_surf_tab_bytes()))
                         gbuf = bytes_ptr(bytes_new(comp_gscen_buf_len()))

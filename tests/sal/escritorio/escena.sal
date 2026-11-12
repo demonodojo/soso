@@ -16,8 +16,10 @@ fn iguales(a: Int, b: Int, w: Int, h: Int) -> Int ! alloc
 fn main() -> Int ! alloc
     w = 64
     h = 48
-    a = bytes_ptr(bytes_new(w * h * 4))
-    b = bytes_ptr(bytes_new(w * h * 4))
+    a_own = bytes_new(w * h * 4)
+    b_own = bytes_new(w * h * 4)
+    a = bytes_ptr(a_own)
+    b = bytes_ptr(b_own)
     len = w * h * 4
     fondo = color_rgb(10, 20, 30)
     _fa = rellenar_rect(a, len, w, h, w, 4, 0, 0, 0, w, h, fondo)
@@ -51,7 +53,8 @@ fn main() -> Int ! alloc
             4
         else
             # Borde: el contorno de 1 px sale del color de borde y el interior, del relleno.
-            c = bytes_ptr(bytes_new(w * h * 4))
+            c_own = bytes_new(w * h * 4)
+            c = bytes_ptr(c_own)
             _fc = rellenar_rect(c, len, w, h, w, 4, 0, 0, 0, w, h, fondo)
             m = esc_rrect(e, cap, 0, 10, 10, 30, 30, esc_radios(4, 4, 4, 4), color_rgb(0, 255, 0), 255, color_rgb(255, 0, 0), 1)
             _y = esc_cpu_ejecutar(c, len, w, h, w, 4, 0, e, cap, m)

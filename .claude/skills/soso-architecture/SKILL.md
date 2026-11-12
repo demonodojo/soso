@@ -102,11 +102,13 @@ Docs operativos: [`docs/GUIA-OPERATIVA.md`](../../docs/GUIA-OPERATIVA.md),
 
 | Module | Role |
 |--------|------|
-| `arch/` | GDT/TSS, IDT, PIC+PIT 100 Hz, paging |
+| `arch/` | GDT/TSS, IDT (incl. NMI/#MC), PIC+PIT 100 Hz, paging; `irq` soft path (net/wifi/hid/hda) |
 | `drivers/kbd.rs` | PS/2 + USB HID → cola tty; `poll_devices` también llama `hid_i2c::poll`; mapa **es** por defecto (`keymap.rs`), AltGr, teclas muertas |
-| `drivers/hid_i2c.rs` | Touchpad interno HID-over-I2C (descriptor + informes → `mouse::apply_hid_pointer`) |
+| `drivers/hid_i2c.rs` | Touchpad HID-over-I2C; atención por GSI o `amd_gpio` (GpioInt); sondeo de respaldo |
+| `drivers/amd_gpio.rs` | AMDI0030 mínimo: flanco en un pin → soft path `hid_i2c::poll` |
 | `drivers/i2c_dw.rs` | Maestro I2C DesignWare (AMDI0010) para lecturas registro de 16 bits |
-| `arch/acpi_hid_i2c.rs` | Escaneo DSDT/SSDT: MMIO `AMDI0010`, esclavo `PNP0C50` |
+| `arch/acpi_hid_i2c.rs` | DSDT/SSDT: `AMDI0010`/`AMDI0030`, `PNP0C50` + Interrupt/GpioInt |
+| `drivers/hda.rs` | HDA captura; MSI/INTx wake + INTCTL; soft path ack STS |
 | `drivers/fb.rs` | Consola GOP: buffer UTF-8 con glifos Latin-1 + €. Shadow en RAM → GOP **WC** (`arch/pat.rs` entrada 1 + `mm::set_write_combining`), copia `movntdq` + `sfence`, *jump scroll* de `rows/4` en ráfagas (<200 ms entre scrolls) con un solo `flush_all`. Ver «Consola GOP» abajo |
 | `drivers/` | serial, pci, dma, registry; drivers opcionales vía features `drv-*` |
 | `drivers/pci.rs` | ECAM + MSI-X. `devices()` = foto cacheada del bus (usar esta); `enumerate()` reescribe BARs, sólo en arranque |
@@ -287,7 +289,7 @@ Lo cubre `cargo xtask test-update saliente` (2026-09-19).
 - **hwscan:** `registry.rs` emite **una línea por dispositivo PCI**, con driver o sin él: `drv: <bdf> <vid>:<did> <driver> <compilado|ausente|desconocido> clase <cc>:<ss>:<pi> <texto>`, y destaca al final cada controlador de red (clase `02`) que nadie reclama (`hwscan: RED SIN DRIVER …`). Se imprime en **todos** los arranques; antes sólo salía si faltaba un driver *conocido*, o sea que el hardware sin regla —el que hay que diagnosticar— no dejaba rastro. Los cuatro primeros campos son contrato: `xtask::drivers::parse_hwscan_line` los lee por posición
 - **Drivers modulares:** features Cargo `drv-virtio-blk`, `drv-virtio-net`, `drv-e1000e`, `drv-rtl8169`, `drv-nvme`, `drv-usb`, `drv-gpu-nvidia`, `drv-live-disk`; meta `drv-all` (default). Metadatos PCI en `drivers/registry.rs`; `hwscan` en kshell; informe en `SOSODRV.TXT` (ESP live). Host: `SOSO_DRIVERS=qemu|live-usb|all` o `--drivers`; `cargo xtask fit-drivers <informe>` reempaqueta; `cargo xtask driver-add <git-url>` registra ports lxdde externos en `lxdde/ports-extern/`
 - **Enganche de la pila:** `net::attach_now()` sondea backends y monta smoltcp; `net::try_attach()` es la versión limitada a un intento/segundo que llama `poll()`. La distinción importa: `poll()` entra por cada vuelta del bucle ocioso y por cada tick, y mientras no haya NIC el sondeo se repetía entero — en placa real, sin virtio-net, eso era una reenumeración del ECAM y un «net: no se encontró ningún virtio-net» por vuelta, que parecía un cuelgue del live (2026-08-31). Las sondas de dispositivo (`virtio_net::init`) cachean su resultado con `Once`
-- NIC polled (no IRQ-driven RX)
+- NIC: MSI-X wake + soft `net::poll` (virtio-net/e1000e/rtl8169); iwlwifi igual (`wifi::arm_irqs`). Sondeo periódico de respaldo.
 - sunset: KEX híbrido `mlkem768x25519-sha256`, host/userauth `ssh-mldsa-65` + ed25519, chacha20-poly1305; claves en `/etc/ssh_host_key`, `/etc/ssh_host_mldsa`, `/etc/authorized_key`, `/etc/authorized_mldsa`
 - Auth: ed25519 public key only (`/etc/authorized_key`, 32 raw bytes)
 - Host key: `/etc/ssh_host_key` (32-byte seed, persistent across mkfs)

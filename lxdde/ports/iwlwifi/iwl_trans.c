@@ -1851,12 +1851,38 @@ void iwl_trans_poll(struct iwl_ax211_priv *iwl)
 {
     if (!iwl->mmio)
         return;
+    iwl->irq_pending = 0;
     if (iwl->family == IWL_DEVICE_FAMILY_8000)
         iwl_trans_8000_drain(iwl);
     else
         drain_rx_gen2(iwl);
     poll_hcmd_first_tb(iwl);
     (void)iwl_read32(iwl, CSR_INT);
+}
+
+/* Top-half MSI: ack de CSR_INT sin drenar RX. Si el transporte está
+ * ocupado, solo anota irq_pending para el próximo iwl_trans_poll. */
+uint32_t iwl_trans_irq_top(struct iwl_ax211_priv *iwl)
+{
+    uint32_t inta;
+
+    if (!iwl || !iwl->mmio)
+        return 0;
+    inta = iwl_read32(iwl, CSR_INT);
+    if (inta == 0 || inta == 0xffffffffu)
+        return 0;
+    iwl_write32(iwl, CSR_INT, inta);
+    if (iwl->in_trans)
+        iwl->irq_pending = 1;
+    return inta;
+}
+
+void iwl_trans_enable_runtime_ints(struct iwl_ax211_priv *iwl)
+{
+    if (!iwl || !iwl->mmio)
+        return;
+    iwl_write32(iwl, CSR_INT, 0xffffffffu);
+    iwl_write32(iwl, CSR_INT_MASK, CSR_INI_SET_MASK);
 }
 
 void iwl_trans_txq_drain_mgmt(struct iwl_ax211_priv *iwl)

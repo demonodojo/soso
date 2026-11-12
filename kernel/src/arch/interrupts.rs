@@ -77,10 +77,12 @@ static IDT: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
 fn instalar_excepciones_restantes(idt: &mut InterruptDescriptorTable) {
     idt.divide_error.set_handler_fn(exc_divide);
     idt.debug.set_handler_fn(debug_handler);
+    idt.non_maskable_interrupt.set_handler_fn(nmi_handler);
     idt.overflow.set_handler_fn(exc_overflow);
     idt.bound_range_exceeded.set_handler_fn(exc_bound);
     idt.device_not_available.set_handler_fn(exc_nm);
     idt.x87_floating_point.set_handler_fn(exc_x87);
+    idt.machine_check.set_handler_fn(machine_check_handler);
     idt.simd_floating_point.set_handler_fn(exc_simd);
     idt.virtualization.set_handler_fn(exc_virt);
     idt.invalid_tss.set_handler_fn(exc_tss);
@@ -122,6 +124,7 @@ fn nombre_excepcion(vector: u8) -> &'static str {
     match vector {
         0 => "divide error (#DE)",
         1 => "debug (#DB)",
+        2 => "non-maskable interrupt (NMI)",
         4 => "overflow (#OF)",
         5 => "bound range (#BR)",
         7 => "device not available (#NM)",
@@ -130,10 +133,33 @@ fn nombre_excepcion(vector: u8) -> &'static str {
         12 => "stack fault (#SS)",
         16 => "x87 floating point (#MF)",
         17 => "alignment check (#AC)",
+        18 => "machine check (#MC)",
         19 => "SIMD floating point (#XM)",
         20 => "virtualization (#VE)",
         _ => "desconocida",
     }
+}
+
+/// NMI (vector 2). LINT1 del LAPIC ya está en modo NMI (`apic.rs`).
+extern "x86-interrupt" fn nmi_handler(stack_frame: InterruptStackFrame) {
+    excepcion_generica(&stack_frame, 2, 0);
+}
+
+/// #MC (vector 18). Sin recuperación fiable; panic con MCG_STATUS si hay.
+extern "x86-interrupt" fn machine_check_handler(stack_frame: InterruptStackFrame) -> ! {
+    crate::arch::cpu_hardening::clac_en_entrada_isr();
+    let mcg = {
+        use x86_64::registers::model_specific::Msr;
+        unsafe { Msr::new(0x17a).read() } // IA32_MCG_STATUS
+    };
+    stash_exc(
+        stack_frame.instruction_pointer.as_u64(),
+        stack_frame.stack_pointer.as_u64(),
+        mcg,
+    );
+    EXC_VECTOR.store(18, Ordering::Relaxed);
+    let _ = con_rsp_alineado(exception_vector_panic_shim, 0, 0);
+    loop {}
 }
 
 static EXC_VECTOR: AtomicU64 = AtomicU64::new(0);

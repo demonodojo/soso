@@ -4,7 +4,19 @@ use crate::drivers::dma;
 use crate::drivers::pci;
 use crate::mm;
 use crate::println;
+use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
+
+static IRQ_PENDIENTE: AtomicBool = AtomicBool::new(false);
+
+pub fn marcar_irq_pendiente() {
+    IRQ_PENDIENTE.store(true, Ordering::Release);
+    crate::net::marcar_trabajo_pendiente();
+}
+
+pub fn tomar_irq_pendiente() -> bool {
+    IRQ_PENDIENTE.swap(false, Ordering::AcqRel)
+}
 
 const CLASS_HDA: u8 = 0x04;
 const SUBCLASS_HDA: u8 = 0x03;
@@ -35,15 +47,18 @@ const CORBUBASE: u32 = 0x44;
 const CORBWP: u32 = 0x48;
 const CORBRP: u32 = 0x4A;
 const CORBCTL: u32 = 0x4C;
+const INTCTL: u32 = 0x20;
 const RIRBLBASE: u32 = 0x50;
 const RIRBUBASE: u32 = 0x54;
 const RIRBWP: u32 = 0x58;
 const RIRBCTL: u32 = 0x5C;
+const RIRBSTS: u32 = 0x5D;
 const ICW: u32 = 0x60;
 const IRS: u32 = 0x64;
 
 const SD0_BASE: u32 = 0x180;
 const SD_CTL: u32 = 0x00;
+const SD_STS: u32 = 0x03;
 const SD_LPIB: u32 = 0x08;
 const SD_CBL: u32 = 0x10;
 const SD_CBID: u32 = 0x18;
@@ -68,6 +83,16 @@ impl HdaState {
     }
 
     fn rw(&self, off: u32, v: u32) {
+        unsafe {
+            core::ptr::write_volatile(mm::phys_to_virt(self.bar + off as u64).as_mut_ptr(), v);
+        }
+    }
+
+    fn rr8(&self, off: u32) -> u8 {
+        unsafe { core::ptr::read_volatile(mm::phys_to_virt(self.bar + off as u64).as_ptr()) }
+    }
+
+    fn rw8(&self, off: u32, v: u8) {
         unsafe {
             core::ptr::write_volatile(mm::phys_to_virt(self.bar + off as u64).as_mut_ptr(), v);
         }
@@ -153,7 +178,10 @@ impl HdaState {
         self.rw(SD0_BASE + SD_CBL, (BDL_COUNT * BUF_BYTES) as u32);
         self.rw(SD0_BASE + SD_CBID, self.bdl as u32);
         self.rw(SD0_BASE + SD_CBID + 4, (self.bdl >> 32) as u32);
-        self.rw(SD0_BASE + SD_CTL, 0x06);
+        // RUN|IOCE: captura + IRQ al completar buffer.
+        self.rw(SD0_BASE + SD_CTL, 0x06 | (1 << 2));
+        // CIE + stream 0 en INTCTL.
+        self.rw(INTCTL, (1 << 31) | 1);
         self.read_pos = 0;
     }
 
@@ -217,6 +245,62 @@ pub fn init() {
     st.setup_rings();
     st.bringup_codec();
     *HDA.lock() = Some(st);
+    arm_irqs(d.bus, d.device, d.function);
+}
+
+fn hda_irq() {
+    if let Some(mut g) = HDA.try_lock() {
+        if let Some(st) = g.as_mut() {
+            let sts = st.rr8(SD0_BASE + SD_STS);
+            if sts != 0 {
+                st.rw8(SD0_BASE + SD_STS, sts);
+            }
+            let rirb = st.rr8(RIRBSTS);
+            if rirb != 0 {
+                st.rw8(RIRBSTS, rirb);
+            }
+        }
+    }
+    marcar_irq_pendiente();
+}
+
+fn arm_irqs(bus: u8, device: u8, function: u8) {
+    let Some(vec) = crate::arch::irq::allocate(hda_irq) else {
+        crate::klogln!("hda: sin vector IRQ libre");
+        return;
+    };
+    if let Some(msix) = pci::find_msix(bus, device, function) {
+        if pci::msix_setup(&msix, 0, vec, pci::msix_default_dest()).is_ok() {
+            crate::klogln!("hda: MSI-X vector={vec:#x}");
+            return;
+        }
+    }
+    let line = pci::read8(bus, device, function, 0x3c);
+    let pin = pci::read8(bus, device, function, 0x3d);
+    if pin != 0 && crate::arch::ioapic::route_isa(line, vec, pci::msix_default_dest()).is_ok() {
+        crate::klogln!("hda: INTx IRQ{line} vector={vec:#x}");
+    } else {
+        crate::klogln!("hda: sin MSI-X ni INTx; solo sondeo");
+    }
+}
+
+/// Soft path tras MSI/INTx: ack de estados; el userspace sigue con `read`.
+pub fn service_soft() {
+    let mut g = HDA.lock();
+    let Some(st) = g.as_mut() else {
+        return;
+    };
+    if !st.open {
+        return;
+    }
+    let sts = st.rr8(SD0_BASE + SD_STS);
+    if sts != 0 {
+        st.rw8(SD0_BASE + SD_STS, sts);
+    }
+    let rirb = st.rr8(RIRBSTS);
+    if rirb != 0 {
+        st.rw8(RIRBSTS, rirb);
+    }
 }
 
 pub fn open(_rate: u32, _channels: u16, _bits: u16) -> Result<(), i64> {

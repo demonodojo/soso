@@ -21,8 +21,9 @@ fn gprim_prueba_ncells() -> Int
     36
 
 # Fuente PSF2 sintética: 8 glifos de 8x8 (la misma en el lado de GPU, que la recibe de stdout).
-fn psf_sintetica() -> Int ! alloc
-    p = bytes_ptr(bytes_new(32 + 8 * 8))
+fn psf_sintetica() -> Bytes ! alloc
+    own = bytes_new(32 + 8 * 8)
+    p = bytes_ptr(own)
     b = bytes_view_mem(p, 96)
     _m = bytes_set_u32(b, 0, psf2_magic())
     _h = bytes_set_u32(b, 8, 32)
@@ -37,7 +38,7 @@ fn psf_sintetica() -> Int ! alloc
             _v = bytes_set_u8(b, 32 + g * 8 + r, (g * 37 + r * 91 + 17) & 255)
             r = r + 1
         g = g + 1
-    p
+    own
 
 # Rellena `e` (capacidad gprim_prueba_cap) y devuelve el número de primitivas.
 fn gprim_prueba_construir(e: Int) -> Int ! alloc
@@ -62,8 +63,9 @@ fn gprim_prueba_construir(e: Int) -> Int ! alloc
     n = esc_rejilla(e, cap, n, 6, 66, 12, 3, 8, 8, 32, 8, 0)
     n
 
-fn gprim_prueba_celdas() -> Int ! alloc
-    cel = bytes_ptr(bytes_new(36 * 12))
+fn gprim_prueba_celdas() -> Bytes ! alloc
+    own = bytes_new(36 * 12)
+    cel = bytes_ptr(own)
     cb = bytes_view_mem(cel, 36 * 12)
     k = 0
     while k < 36
@@ -74,4 +76,4 @@ fn gprim_prueba_celdas() -> Int ! alloc
         _w1 = bytes_set_u32(cb, k * 12 + 4, color_rgb(255 - k * 5, 200, 40 + k * 4))
         _w2 = bytes_set_u32(cb, k * 12 + 8, color_rgb(10 + k, 12, 40))
         k = k + 1
-    cel
+    own
