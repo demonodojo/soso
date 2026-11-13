@@ -7,6 +7,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 use talc::{ClaimOnOom, Span, Talc, Talck};
 use x86_64::VirtAddr;
+use x86_64::instructions::interrupts::without_interrupts;
 use x86_64::structures::paging::mapper::{MapToError, Translate};
 use x86_64::structures::paging::{
     FrameAllocator, Mapper, Page, PageTableFlags, Size4KiB,
@@ -171,9 +172,13 @@ pub fn bins_alias() -> u64 {
 }
 
 pub(super) fn with_talc_audit(f: impl FnOnce(&Talc<ClaimOnOom>)) {
-    if let Some(guard) = TALC.try_lock() {
-        f(&*guard);
-    }
+    // La auditoría también retiene talc: una IRQ que reserve memoria no
+    // puede interrumpir el recorrido aunque entrar aquí use try_lock.
+    without_interrupts(|| {
+        if let Some(guard) = TALC.try_lock() {
+            f(&*guard);
+        }
+    });
 }
 
 struct ConCentinela;
@@ -275,31 +280,38 @@ fn revisar() {
 
 unsafe impl GlobalAlloc for ConCentinela {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        revisar();
-        let Some(grande) = con_cola(layout) else {
-            return core::ptr::null_mut();
-        };
-        let p = unsafe { TALC.alloc(grande) };
-        if !p.is_null() {
-            unsafe {
-                core::ptr::write_unaligned(p.add(layout.size()) as *mut u64, CENTINELA_RUST);
+        // Teclado y xHCI pueden reservar desde IRQ. Si interrumpen revisar(),
+        // anotar(), quitar() o talc con su candado tomado, el mismo núcleo
+        // vuelve a esperarlo sin poder reanudar a quien lo sostiene.
+        without_interrupts(|| {
+            revisar();
+            let Some(grande) = con_cola(layout) else {
+                return core::ptr::null_mut();
+            };
+            let p = unsafe { TALC.alloc(grande) };
+            if !p.is_null() {
+                unsafe {
+                    core::ptr::write_unaligned(p.add(layout.size()) as *mut u64, CENTINELA_RUST);
+                }
+                let ra = ra_de_quien_reserva();
+                anotar(p as usize, layout.size(), ra);
+                registrar_alloc(p as usize, layout.size(), ra);
             }
-            let ra = ra_de_quien_reserva();
-            anotar(p as usize, layout.size(), ra);
-            registrar_alloc(p as usize, layout.size(), ra);
-        }
-        p
+            p
+        })
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        revisar();
-        let Some(grande) = con_cola(layout) else {
-            return;
-        };
-        let ra = ra_de_quien_reserva();
-        registrar_free(ptr as usize, layout.size(), ra);
-        quitar(ptr as usize);
-        unsafe { TALC.dealloc(ptr, grande) };
+        without_interrupts(|| {
+            revisar();
+            let Some(grande) = con_cola(layout) else {
+                return;
+            };
+            let ra = ra_de_quien_reserva();
+            registrar_free(ptr as usize, layout.size(), ra);
+            quitar(ptr as usize);
+            unsafe { TALC.dealloc(ptr, grande) };
+        });
     }
 }
 

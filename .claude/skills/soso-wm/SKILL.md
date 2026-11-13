@@ -136,3 +136,17 @@ Ojo: los PNG se leen con la herramienta Read; GTK/Wayland no hace falta para nad
 - Pruebas guest que ejecutan `soso-wm` en background (`&`) → timeouts en xtask.
 - Asumir GPU: en QEMU el compositor puede caer a blit CPU/SHM; path VRAM requiere lxdde
   (skill **soso-gpu**).
+- Cursor en los bordes: `wm_pintar_cursor_buf` debe recortar ancho/alto como la
+  captura y restauración del fondo. Dibujar el cursor completo en el extremo
+  derecho/inferior cruza filas o termina en `bytes: out of bounds` y mata el WM.
+  Regresión host: `tests/sal/escritorio/cursor_bordes.sal`.
+- Para comprobar entrada desde fuera de QEMU, usar la tableta USB absoluta.
+  PS/2 es relativo y no sincroniza la posición del cursor del host al entrar.
+  QMP no sustituye comprobar salida/reentrada y pérdida/recuperación de foco
+  de la ventana GTK; verificar también las cuatro esquinas.
+- Terminal vacía al abrir: comprobar que `spawn_io_full` inicialice a cero todos
+  los campos opcionales de `SpawnIo` (incluido `cwd_len`) y que el WM no integre
+  un panel si `spawn_io_full` devuelve error. `term_capa` debe devolver el `Bytes`
+  dueño, no sólo su puntero, y cada panel debe conservar ese dueño. Regresiones:
+  `tests/sal/escritorio/term.sal` más apertura, escritura y cambio entre dos PTY
+  en QEMU; confirmar que el contenido inicial siga visible al volver al panel.

@@ -635,7 +635,9 @@ fn poll_i8042(from_irq: bool) {
             continue;
         }
         let sc = read_data();
-        if sc == PS2_ACK || sc == 0xAA || sc == PS2_RESEND {
+        // En funcionamiento normal 0xAA libera Mayús izquierda (set 1).
+        // La respuesta BAT del arranque ya se consumió al inicializar.
+        if sc == PS2_ACK || sc == PS2_RESEND {
             continue;
         }
         if from_irq {

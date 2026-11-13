@@ -489,6 +489,16 @@ comprueba el *registro* con `stmxcsr` en vez de esperar la excepción.
 
 ## Candados y contexto de interrupción
 
+El asignador global protege con `without_interrupts` la operación completa,
+incluida la tabla de centinelas y el historial, tanto en `alloc` como en `dealloc`.
+Reservar desde IRQ1 (`input::push`, crecimiento de la cola) o xHCI (informe del
+puntero) podía interrumpir `heap::revisar` y volver a esperar su mismo `TABLA`:
+bloqueo reproducido en QEMU con PS/2/1 CPU y USB/2 CPU. No basta proteger talc
+si los candados auxiliares del asignador siguen expuestos a reentrada.
+`with_talc_audit` protege también todo el recorrido: su `try_lock` evita esperar
+al entrar, pero una IRQ que reserve memoria tampoco puede interrumpir mientras
+la auditoría sostiene talc. Se reprodujo ese segundo bloqueo tras cerrar pestañas.
+
 `PROCS`, `HOSTS` (usb_storage) y la consola son `spin::Mutex` **no reentrantes**, y
 `with_current`/`with_fd` toman `PROCS` con las interrupciones ABIERTAS. Regla: todo lo
 que corra dentro de un handler de IRQ usa `try_lock`, nunca `lock`, y **no imprime**.

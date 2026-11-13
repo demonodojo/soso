@@ -4,19 +4,36 @@ fn main() -> Int ! alloc
     w = 4
     h = 2
     st = Term.new(w, h)
-    grid = term_capa(w, h)
+    grid_buf = term_capa(w, h)
+    grid = bytes_ptr(grid_buf)
     glen = w * h * celda_bytes()
-    _l = st.limpiar_pantalla(grid, glen, w, h)
-    _a = term_escribir(grid, glen, w, 0, 0, 65, 7, 0, 0)
-    _s = st.scroll(grid, glen, w, h)
-    if term_leer_cp(grid, glen, w, 0, 0) != 32
-        1
+    bad = 0
+    row = 0
+    while row < h
+        col = 0
+        while col < w
+            if term_leer_cp(grid, glen, w, col, row) != 32
+                bad = 10
+            if term_leer_fg(grid, glen, w, col, row) != col_default_fg()
+                bad = 11
+            if term_leer_bg(grid, glen, w, col, row) != col_default_bg()
+                bad = 12
+            col = col + 1
+        row = row + 1
+    if bad != 0
+        bad
     else
-        nw = st.redimensionar(grid, glen, w, h, 6, 3)
-        if nw <= 0
-            2
+        _l = st.limpiar_pantalla(grid, glen, w, h)
+        _a = term_escribir(grid, glen, w, 0, 0, 65, 7, 0, 0)
+        _s = st.scroll(grid, glen, w, h)
+        if term_leer_cp(grid, glen, w, 0, 0) != 32
+            1
         else
-            if st.cols != 6
-                3
+            newb = st.redimensionar(grid, glen, w, h, 6, 3)
+            if bytes_ptr(newb) <= 0
+                2
             else
-                0
+                if st.cols != 6
+                    3
+                else
+                    0

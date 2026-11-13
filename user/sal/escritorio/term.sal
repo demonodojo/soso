@@ -74,8 +74,21 @@ method Term.marcar_fila(&mut self, row: Int) -> Int
         0
 
 # Fuga intencional: capa SHM / grid del terminal (vida = panel).
-fn term_capa(w: Int, h: Int) -> Int ! alloc
-    bytes_ptr(bytes_new(w * h * celda_bytes()))
+fn term_capa(w: Int, h: Int) -> Bytes ! alloc
+    b = bytes_new(w * h * celda_bytes())
+    ptr = bytes_ptr(b)
+    len = w * h * celda_bytes()
+    v = bytes_view_mem(ptr, len)
+    i = 0
+    while i < w * h
+        off = i * celda_bytes()
+        _cp = bytes_set_u32(v, off, 32)
+        _fg = bytes_set_u8(v, off + 4, u8(col_default_fg()))
+        _bg = bytes_set_u8(v, off + 5, u8(col_default_bg()))
+        _at = bytes_set_u8(v, off + 6, 0)
+        _rs = bytes_set_u8(v, off + 7, 0)
+        i = i + 1
+    b
 
 fn term_idx(w: Int, col: Int, row: Int) -> Int
     (row * w + col) * celda_bytes()
@@ -193,8 +206,9 @@ method Term.scroll(&mut self, ptr: Int, len: Int, w: Int, h: Int) -> Int ! alloc
     _ml = self.marcar_fila(lr)
     0
 
-method Term.redimensionar(&mut self, ptr: Int, len: Int, ow: Int, oh: Int, nw: Int, nh: Int) -> Int ! alloc
-    newp = term_capa(nw, nh)
+method Term.redimensionar(&mut self, ptr: Int, len: Int, ow: Int, oh: Int, nw: Int, nh: Int) -> Bytes ! alloc
+    newb = term_capa(nw, nh)
+    newp = bytes_ptr(newb)
     nlen = nw * nh * celda_bytes()
     mr = min(oh, nh)
     mc = min(ow, nw)
@@ -226,7 +240,7 @@ method Term.redimensionar(&mut self, ptr: Int, len: Int, ow: Int, oh: Int, nw: I
         nr = 0
     self.cursor = term_pack_cursor(nc, nr)
     self.dirty = -1
-    newp
+    newb
 
 method Term.nueva_linea(&mut self, ptr: Int, len: Int, w: Int, h: Int, col: Int, row: Int) -> Int ! alloc
     nr = row + 1
@@ -457,11 +471,13 @@ method Term.feed_byte(&mut self, ptr: Int, len: Int, w: Int, h: Int, byte: Int) 
         _e = self.csi_byte(ptr, len, w, h, byte)
     0
 
-method Term.pintar(&mut self, grid: Int, glen: Int, cols: Int, rows: Int, psf: Int, psflen: Int, gw: Int, gh: Int, tema: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, ox: Int, oy: Int) -> Int ! alloc
+method Term.pintar(&mut self, grid: Int, glen: Int, cols: Int, rows: Int, psf: Int, psflen: Int, gw: Int, gh: Int, tema: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, ox: Int, oy: Int, force: Int) -> Int ! alloc
     dr = self.dirty
     row = 0
     while row < rows
         pinta = 0
+        if force != 0
+            pinta = 1
         if dr == -1
             pinta = 1
         if dr == row

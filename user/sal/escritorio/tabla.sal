@@ -39,6 +39,7 @@ struct Panel
     pid: Int
     shm_id: Int
     shm_ptr: Int
+    term_buf: Bytes
     cw: Int
     ch: Int
     wx: Int
@@ -69,7 +70,7 @@ struct Panel
     pend: Int
 
 init Panel() ! alloc
-    Panel(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    Panel(0, 0, 0, 0, 0, Bytes.new(0), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
           Term.new(0, 0), Bytes.new(32), Bytes.new(32),
           0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
@@ -140,6 +141,13 @@ method Tabla.shm_ptr(&mut self, i: Int) -> Int
 method Tabla.set_shm_ptr(&mut self, i: Int, v: Int) -> Int
     p = list_get(&mut self.ps, i)
     p.shm_ptr = v
+    0
+
+method Tabla.set_term_buf(&mut self, i: Int, v: Bytes) -> Int
+    ptr = bytes_ptr(v)
+    p = list_get(&mut self.ps, i)
+    p.term_buf = v
+    p.shm_ptr = ptr
     0
 
 method Tabla.cw(&mut self, i: Int) -> Int
@@ -879,11 +887,11 @@ method Tabla.term_cursor(&mut self, i: Int) -> Int
     p = list_get(&mut self.ps, i)
     p.term.cursor
 
-method Tabla.term_pintar(&mut self, i: Int, grid: Int, glen: Int, cols: Int, rows: Int, psf: Int, psflen: Int, gw: Int, gh: Int, tema: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, ox: Int, oy: Int) -> Int ! alloc
+method Tabla.term_pintar(&mut self, i: Int, grid: Int, glen: Int, cols: Int, rows: Int, psf: Int, psflen: Int, gw: Int, gh: Int, tema: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, ox: Int, oy: Int, force: Int) -> Int ! alloc
     p = list_get(&mut self.ps, i)
-    p.term.pintar(grid, glen, cols, rows, psf, psflen, gw, gh, tema, compos, clen, sw, sh, stride, bpp, fmt, ox, oy)
+    p.term.pintar(grid, glen, cols, rows, psf, psflen, gw, gh, tema, compos, clen, sw, sh, stride, bpp, fmt, ox, oy, force)
 
-method Tabla.term_redimensionar(&mut self, i: Int, ptr: Int, len: Int, ow: Int, oh: Int, nw: Int, nh: Int) -> Int ! alloc
+method Tabla.term_redimensionar(&mut self, i: Int, ptr: Int, len: Int, ow: Int, oh: Int, nw: Int, nh: Int) -> Bytes ! alloc
     p = list_get(&mut self.ps, i)
     p.term.redimensionar(ptr, len, ow, oh, nw, nh)
 

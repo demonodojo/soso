@@ -1,0 +1,54 @@
+import "../../../user/sal/escritorio/wm.sal"
+
+fn comprobar_cursor(x: Int, y: Int) -> Int ! alloc
+    w = 32
+    h = 24
+    len = w * h * 4
+    own = bytes_new(len)
+    buf = bytes_ptr(own)
+    evt = bytes_new(192)
+    msg = bytes_new(32)
+    st = Estado.new(bytes_ptr(evt), bytes_ptr(msg))
+    fondo = color_rgb(27, 45, 63)
+    _f = rellenar_rect(buf, len, w, h, w, 4, fmt_bgr(), 0, 0, w, h, fondo)
+    _c = wm_pintar_cursor_buf(&mut st, buf, len, w, 4, fmt_bgr(), x, y)
+    py = 0
+    ok = 0
+    while py < h
+        px = 0
+        while px < w
+            esperado = fondo
+            lx = px - x
+            ly = py - y
+            if lx >= 0
+                if lx < wm_cursor_w()
+                    if ly >= 0
+                        if ly < wm_cursor_h()
+                            if wm_cursor_pixel(lx, ly) != 0
+                                esperado = wm_color_cursor(&mut st)
+                                if lx == ly
+                                    esperado = wm_color_cursor_borde(&mut st)
+                                if ly == 0
+                                    esperado = wm_color_cursor_borde(&mut st)
+                                if ly >= 11
+                                    if lx == 1
+                                        esperado = wm_color_cursor_borde(&mut st)
+            if pixel_leer(buf, len, w, 4, fmt_bgr(), px, py) != esperado
+                ok = 1
+            px = px + 1
+        py = py + 1
+    ok
+
+fn main() -> Int ! alloc
+    if comprobar_cursor(31, 5) != 0
+        1
+    elsif comprobar_cursor(5, 23) != 0
+        2
+    elsif comprobar_cursor(31, 23) != 0
+        3
+    elsif comprobar_cursor(0, 0) != 0
+        4
+    elsif comprobar_cursor(8, 4) != 0
+        5
+    else
+        0

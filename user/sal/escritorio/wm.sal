@@ -319,10 +319,12 @@ fn wm_cursor_actualizar(st: &mut Estado, x: Int, y: Int, sw: Int, sh: Int) -> In
     0
 
 fn wm_pintar_cursor_buf(st: &mut Estado, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int, ox: Int, oy: Int) -> Int ! alloc
+    cw = wm_cursor_ancho_visible(ox, stride)
+    ch = wm_cursor_alto_visible(oy, stride, bpp, clen)
     ly = 0
-    while ly < wm_cursor_h()
+    while ly < ch
         lx = 0
-        while lx < wm_cursor_w()
+        while lx < cw
             if wm_cursor_pixel(lx, ly) != 0
                 px = ox + lx
                 py = oy + ly
@@ -1164,7 +1166,7 @@ fn wm_repintar_slot_vis(st: &mut Estado, i: Int, compos: Int, clen: Int, sw: Int
                 dr = st.tab.term_dirty(a)
                 cols = wm_term_cols(ww, gw)
                 rows = wm_term_rows(wh, gh, bh)
-                _t = st.tab.term_pintar(a, grid, cols * rows * celda_bytes(), cols, rows, psf, plen, gw, gh, tema, c, cl, sw, sh, stride, bpp, fmt, px + 4, py + bh + 4)
+                _t = st.tab.term_pintar(a, grid, cols * rows * celda_bytes(), cols, rows, psf, plen, gw, gh, tema, c, cl, sw, sh, stride, bpp, fmt, px + 4, py + bh + 4, completo)
                 if dr == -1
                     _d = wm_marcar_dirty(st, wx, wy, wx + ww, wy + wh)
                     if gmode != 0
@@ -1346,16 +1348,16 @@ fn wm_term_redimensionar_uno(st: &mut Estado, i: Int) -> Int ! alloc
                 0
             else
                 glen = ow * oh * celda_bytes()
-                newg = st.tab.term_redimensionar(i, grid, glen, ow, oh, cols, rows)
-                _a = st.tab.set_shm_ptr(i, newg)
+                newb = st.tab.term_redimensionar(i, grid, glen, ow, oh, cols, rows)
+                _a = st.tab.set_term_buf(i, newb)
                 _a = st.tab.set_cw(i, cols * gw)
                 _a = st.tab.set_ch(i, rows * gh)
                 _d = st.tab.term_set_dirty(i, -1)
                 1
         else
             glen = ow * oh * celda_bytes()
-            newg = st.tab.term_redimensionar(i, grid, glen, ow, oh, cols, rows)
-            _a = st.tab.set_shm_ptr(i, newg)
+            newb = st.tab.term_redimensionar(i, grid, glen, ow, oh, cols, rows)
+            _a = st.tab.set_term_buf(i, newb)
             _a = st.tab.set_cw(i, cols * gw)
             _a = st.tab.set_ch(i, rows * gh)
             _d = st.tab.term_set_dirty(i, -1)
@@ -2927,32 +2929,36 @@ fn wm_term_slot(st: &mut Estado) -> Int ! io, alloc
             ma = pty_fd_maestro(pack)
             sl = pty_slot(pack)
             pid = spawn_io_full(d"/bin/sosh", fd_pty_stdio(sl), fd_pty_stdio(sl), fd_pty_stdio(sl), fd_kernel_log())
-            _a = st.tab.set_tipo(si, tab_tipo_term())
-            _a = st.tab.set_fd(si, ma)
-            _a = st.tab.set_pid(si, pid)
-            _a = st.tab.set_wx(si, 40)
-            _a = st.tab.set_wy(si, 40 + wm_bar_h(st))
-            _a = st.tab.set_ww(si, 640)
-            _a = st.tab.set_wh(si, 400 + wm_bar_h(st))
-            _a = st.tab.set_cab(si, 0)
-            _a = st.tab.set_orden(si, 0)
-            _a = st.tab.set_escala(si, wm_escala_apps(st))
-            gw = fuente_gw(wm_escala_apps(st))
-            gh = fuente_gh(wm_escala_apps(st))
-            bh = wm_bar_h(st)
-            wh0 = 400 + bh
-            cols = wm_term_cols(640, gw)
-            rows = wm_term_rows(wh0, gh, bh)
-            grid = term_capa(cols, rows)
-
-            _a = st.tab.set_shm_ptr(si, grid)
-            _tn = st.tab.term_nuevo(si, cols, rows)
-            _ti = st.tab.titulo_set(si, d"Terminal")
-            _a = st.tab.set_cw(si, cols * gw)
-            _a = st.tab.set_ch(si, rows * gh)
-            _a = st.tab.set_term_pos(si, 0)
-            _a = st.tab.set_fww(si, 0)
-            _a = st.tab.set_fwh(si, 0)
+            if pid > 0
+                _a = st.tab.set_tipo(si, tab_tipo_term())
+                _a = st.tab.set_fd(si, ma)
+                _a = st.tab.set_pid(si, pid)
+                _a = st.tab.set_wx(si, 40)
+                _a = st.tab.set_wy(si, 40 + wm_bar_h(st))
+                _a = st.tab.set_ww(si, 640)
+                _a = st.tab.set_wh(si, 400 + wm_bar_h(st))
+                _a = st.tab.set_cab(si, 0)
+                _a = st.tab.set_orden(si, 0)
+                _a = st.tab.set_escala(si, wm_escala_apps(st))
+                gw = fuente_gw(wm_escala_apps(st))
+                gh = fuente_gh(wm_escala_apps(st))
+                bh = wm_bar_h(st)
+                wh0 = 400 + bh
+                cols = wm_term_cols(640, gw)
+                rows = wm_term_rows(wh0, gh, bh)
+                grid_buf = term_capa(cols, rows)
+                grid = bytes_ptr(grid_buf)
+                _a = st.tab.set_term_buf(si, grid_buf)
+                _tn = st.tab.term_nuevo(si, cols, rows)
+                _ti = st.tab.titulo_set(si, d"Terminal")
+                _a = st.tab.set_cw(si, cols * gw)
+                _a = st.tab.set_ch(si, rows * gh)
+                _a = st.tab.set_term_pos(si, 0)
+                _a = st.tab.set_fww(si, 0)
+                _a = st.tab.set_fwh(si, 0)
+            else
+                _c = close_fd(ma)
+                si = -1
         else
             si = -1
     else
@@ -3273,9 +3279,9 @@ fn wm_prueba_anadir_terminal(st: &mut Estado, sw: Int, sh: Int) -> Int ! alloc
         bh = wm_bar_h(st)
         cols = wm_term_cols(640, gw)
         rows = wm_term_rows(400 + bh, gh, bh)
-        grid = term_capa(cols, rows)
-
-        _a = st.tab.set_shm_ptr(si, grid)
+        grid_buf = term_capa(cols, rows)
+        grid = bytes_ptr(grid_buf)
+        _a = st.tab.set_term_buf(si, grid_buf)
         _tn = st.tab.term_nuevo(si, cols, rows)
         _ti = st.tab.titulo_set(si, d"Terminal")
         _a = st.tab.set_fww(si, 0)
