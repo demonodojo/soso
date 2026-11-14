@@ -1,0 +1,42 @@
+import "../../../user/sal/escritorio/escena.sal"
+
+# La sombra sigue las esquinas redondeadas y no pinta lo que tapa la ventana.
+fn main() -> Int ! alloc
+    w = 64
+    h = 64
+    len = w * h * 4
+    own = bytes_new(len)
+    a = bytes_ptr(own)
+    fondo = color_rgb(240, 240, 240)
+    _f = rellenar_rect(a, len, w, h, w, 4, 0, 0, 0, w, h, fondo)
+    cap = 4
+    e = esc_nueva(cap)
+    # Ventana 16..48 × 12..40, radio 8, sombra 2 px abajo y 8 de difuminado.
+    n = esc_sombra(e, cap, 0, 16, 12, 48, 40, 8, 2, 8, color_rgb(0, 0, 0), 128)
+    _x = esc_cpu_ejecutar(a, len, w, h, w, 4, 0, e, cap, n)
+    if n != 1
+        1
+    elsif pixel_leer(a, len, w, 4, 0, 30, 20) != fondo
+        # Bajo la ventana no se toca: el marco va encima.
+        2
+    elsif pixel_leer(a, len, w, 4, 0, 30, 41) == fondo
+        3
+    elsif pixel_leer(a, len, w, 4, 0, 17, 39) == fondo
+        # En el hueco de la esquina redondeada sí hay sombra.
+        4
+    elsif pixel_leer(a, len, w, 4, 0, 53, 26) == fondo
+        # A 5 px del lado derecho hay sombra...
+        5
+    elsif pixel_leer(a, len, w, 4, 0, 53, 47) != fondo
+        # ...pero no a 5 px en diagonal de la esquina: ahí la forma es curva.
+        6
+    elsif pixel_leer(a, len, w, 4, 0, 2, 2) != fondo
+        7
+    elsif esc_dist_rrect4(10, 26, 16, 12, 48, 40, 8) != 22
+        # El centro del píxel 10 está a 5,5 px del lado izquierdo: 22 cuartos fuera.
+        8
+    elsif esc_dist_rrect4(30, 13, 16, 12, 48, 40, 8) != 0 - 6
+        # Y el del píxel 30, fila 13, a 1,5 px por dentro del lado de arriba.
+        9
+    else
+        0

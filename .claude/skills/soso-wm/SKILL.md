@@ -27,6 +27,7 @@ skill **`soso-comp`**.
 | Bucle eventos | `wm.sal`, `ventanas.sal`, `tabla.sal` |
 | Terminal | `term.sal`, `superficie.sal`, `fuente.sal` |
 | Tema / escala | `tema.sal`, `fuentes.sal`, `zoom.sal` |
+| Letra TrueType | `ttf.sal` (tablas, rasterizado, caché), `fuentes.sal` (cachés por nivel), `rootfs/lib/fonts/DejaVuSans{,Mono}.ttf` |
 | Protocolo 32 B | `proto.sal` ↔ `crates/soso-wm-proto` |
 | Cliente demo | `demo-cliente.sal` |
 | Explorador ficheros | `soso-files.sal`, `files_path.sal` → `/bin/soso-files` |
@@ -132,6 +133,25 @@ Ojo: los PNG se leen con la herramienta Read; GTK/Wayland no hace falta para nad
 - `wm_drenar_input` NO debe volcar `st` a la tabla tras procesar la entrada: deshacía cada arrastre.
 - El repintado completo es caro: `fuente_dibujar` relleno por celda y rectángulos redondeados por filas
   (de ~750 ms a ~80 ms por fotograma); no vuelvas a píxel-a-píxel en rutas calientes.
+- Letra: TrueType rasterizada en tiempo de ejecución (`ttf.sal`, algoritmo de font-rs en
+  `Float`; sin libm: `floor`/`ceil`/`abs` a mano). `Fuentes.cargar(nivel)` crea una caché en
+  modo celda de DejaVu Sans Mono (el avance de «M» llena la celda; cajas U+2500–259F
+  estiradas de borde a borde) y su puntero circula como «psf»: `fuente_dibujar` la reconoce
+  por la marca `TTFC`. `Fuentes.ui(nivel)` es DejaVu Sans proporcional (con kerning) para
+  barra, títulos y menús (`wm_texto`, `wm_texto_titulo`), mezclada con lo ya pintado. Cada
+  glifo se rasteriza una vez por caché. Sin los .ttf se cae a las Spleen. Compararlo con
+  FreeType: `python3 tools/ttf-prueba/comparar.py` (PNG en `target/ttf-prueba/`). Ojo: las
+  `spleen-6x12/16x32/32x64` son PSF2 estándar que `fuente.sal` lee mal y `spleen-12x24`
+  está corrupta. En Sal, una expresión que empieza por `(` tras un bloque se lee como
+  llamada al bloque («only direct calls supported»): asígnala antes a una variable.
+- Esquinas suavizadas: la cobertura de un píxel es `rr_cov16` (`superficie.sal`, 0..16);
+  la CPU la aplica por tramos de fila y `lxdde/ports/nouveau/gprim.cu` por píxel, con la
+  misma aritmética entera. Tocar una sin la otra rompe `python3 tools/gpu-prim/validar.py`
+  (dos oráculos: fuente de 1 bit y de cobertura; tiene que dar 0 píxeles distintos) y
+  después hay que regenerar el SASS con `python3 tools/gpu-prim/cubin.py`.
+- Sombra de ventanas: primitiva `esc_k_sombra` (distancia al rectángulo redondeado),
+  sólo en repintado completo. `wm_pintar_marco_s(…, 0)` al repintar una ventana suelta
+  sin fondo: se mezcla con lo que hay debajo y repetirla la oscurece.
 - Romper alineación de offsets en mensajes de 32 B entre Sal y Rust.
 - Pruebas guest que ejecutan `soso-wm` en background (`&`) → timeouts en xtask.
 - Asumir GPU: en QEMU el compositor puede caer a blit CPU/SHM; path VRAM requiere lxdde

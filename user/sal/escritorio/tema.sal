@@ -84,11 +84,12 @@ fn tema_menu_sel(t: Int) -> Int
     else
         color_rgb(56, 72, 104)
 
+# Intensidad máxima de la sombra de las ventanas (pegada al borde; se difumina hacia fuera).
 fn tema_sombra_alfa(t: Int) -> Int
     if t == tema_claro()
-        48
-    else
         72
+    else
+        140
 
 fn tema_boton_cerrar(t: Int) -> Int
     color_rgb(220, 80, 90)

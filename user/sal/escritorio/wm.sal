@@ -5,6 +5,7 @@ import "ventanas.sal"
 import "tabla.sal"
 import "term.sal"
 import "fuente.sal"
+import "ttf.sal"
 import "lanzador.sal"
 import "comp_proto.sal"
 import "wm_prims.sal"
@@ -816,7 +817,29 @@ fn wm_color_menu(st: &mut Estado) -> Int ! alloc
 fn wm_color_menu_sel(st: &mut Estado) -> Int ! alloc
     tema_menu_sel(wm_tema_id(st))
 
+# Letra TrueType proporcional de la interfaz (barra, títulos, menús), o 0 si no hay.
+fn wm_ui(st: &mut Estado) -> Int ! io, alloc
+    st.fuentes.ui(wm_escala_wm(st))
+
+# Arriba de una línea de texto de la interfaz para una fila de celda que empieza en `y`.
+fn wm_ui_y(st: &mut Estado, h: Int, y: Int) -> Int ! alloc
+    y + (wm_gh_wm(st) - ttf_alto(h)) / 2
+
+# Ancho en píxeles de `s` con la letra de la interfaz (o en celdas, sin TrueType).
+fn wm_texto_ancho(st: &mut Estado, s: &String) -> Int ! io, alloc
+    h = wm_ui(st)
+    if h != 0
+        ttf_texto_ancho(h, s)
+    else
+        str_len(s) * wm_gw_wm(st)
+
+# Texto de la interfaz en la fila de celda (x, y). Con TrueType se mezcla con lo que ya hay
+# pintado debajo (`bg` sólo cuenta para la letra de celdas).
 fn wm_texto(st: &mut Estado, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int, s: String, x: Int, y: Int, fg: Int, bg: Int) -> Int ! io, alloc
+    h = wm_ui(st)
+    if h != 0
+        _t = ttf_texto(h, &s, compos, clen, stride, bpp, fmt, x, wm_ui_y(st, h, y), 0, fg, -1)
+        return 0
     psf = wm_psf_wm(st)
     plen = wm_psf_len_wm(st)
     gw = wm_gw_wm(st)
@@ -869,7 +892,8 @@ fn wm_pintar_barra(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, st
                 ly = ly + 1
             _b2 = wm_esc_rr(st, compos, clen, sw, sh, stride, bpp, fmt, x0, ty, x0 + bw, ty + gh + 4, esc_radios(radio, radio, 0, 0), bg)
         txt = lanz_boton_texto(i)
-        tx = x0 + lanz_margen(gw)
+        # Centrado en el botón: con letra proporcional el texto ocupa menos que sus celdas.
+        tx = x0 + (bw - wm_texto_ancho(st, &txt)) / 2
         _t = wm_texto(st, compos, clen, stride, bpp, fmt, txt, tx, ty + 2, wm_color_texto_barra(st), bg)
         i = i + 1
     _lv = wm_pintar_lista_ventanas(st, compos, clen, sw, sh, stride, bpp, fmt)
@@ -1379,7 +1403,7 @@ fn wm_repintar_ventana_vis(st: &mut Estado, i: Int, compos: Int, clen: Int, sw: 
     shm = st.shm_ptr
     slen = cw * ch * 4
     if wm_es_ss(st, i) == 0
-        _m = wm_pintar_marco(compos, clen, sw, sh, stride, bpp, fmt, wx, wy, ww, wh, st, i)
+        _m = wm_pintar_marco_s(compos, clen, sw, sh, stride, bpp, fmt, wx, wy, ww, wh, st, i, 0)
         _b = wm_blit_cliente(st, compos, clen, stride, bpp, fmt, wx, wy, cw, ch, shm, slen, 0, 0, cw, ch)
     else
         _b = wm_blit_cliente_pantalla(compos, clen, stride, bpp, fmt, wx, wy, cw, ch, shm, slen, 0, 0, cw, ch)
@@ -1399,8 +1423,31 @@ fn wm_titulo_largo(st: &mut Estado, i: Int) -> Int ! alloc
             j = j + 1
     n
 
-# Título del panel `m` en (x, y), como mucho `maxc` caracteres; si no cabe, termina en «...».
+# Título del panel `m` como String (los bytes UTF-8 del título, sin los espacios del final).
+fn wm_titulo_str(st: &mut Estado, m: Int) -> String ! alloc
+    n = wm_titulo_largo(st, m)
+    if n <= 0
+        d""
+    else
+        b = bytes_new(n)
+        j = 0
+        while j < n
+            bytes_set_u8(b, j, st.tab.titulo_byte(m, j))
+            j = j + 1
+        bytes_to_str(b)
+
+# Ancho en píxeles del título del panel `m`.
+fn wm_titulo_ancho(st: &mut Estado, m: Int) -> Int ! io, alloc
+    t = wm_titulo_str(st, m)
+    wm_texto_ancho(st, &t)
+
+# Título del panel `m` en (x, y), en el hueco de `maxc` celdas; si no cabe, termina en «…».
 fn wm_texto_titulo(st: &mut Estado, m: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int, x: Int, y: Int, maxc: Int, col: Int, bg: Int) -> Int ! io, alloc
+    h = wm_ui(st)
+    if h != 0
+        t = wm_titulo_str(st, m)
+        _t = ttf_texto(h, &t, compos, clen, stride, bpp, fmt, x, wm_ui_y(st, h, y), maxc * wm_gw_wm(st), col, -1)
+        return 0
     psf = wm_psf_wm(st)
     plen = wm_psf_len_wm(st)
     gw = wm_gw_wm(st)
@@ -1605,8 +1652,7 @@ fn wm_pintar_marco_titulo(st: &mut Estado, i: Int, compos: Int, clen: Int, sw: I
     cnt = st.tab.grupo_n(i)
     act = st.tab.grupo_panel_activo(i)
     if cnt <= 1
-        nn = wm_titulo_largo(st, act)
-        cx = wx + (ww - nn * gw) / 2
+        cx = wx + (ww - min(wm_titulo_ancho(st, act), 16 * gw)) / 2
         izq = wx + 14
         if cx < izq
             cx = izq
@@ -1670,7 +1716,21 @@ fn wm_esc_botones(st: &mut Estado, e: Int, cap: Int, n0: Int, wx: Int, wy: Int, 
         k = k + 1
     n
 
+# Desplazamiento vertical y extensión (px) de la sombra de las ventanas.
+fn wm_sombra_dy() -> Int
+    4
+
+fn wm_sombra_ext(foco: Int) -> Int
+    if foco != 0
+        18
+    else
+        12
+
 fn wm_pintar_marco(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, wx: Int, wy: Int, ww: Int, wh: Int, st: &mut Estado, i0: Int) -> Int ! io, alloc
+    wm_pintar_marco_s(compos, clen, sw, sh, stride, bpp, fmt, wx, wy, ww, wh, st, i0, 1)
+
+# `sombra` = 0 al repintar sólo una ventana sin repintar antes el fondo (título, creación).
+fn wm_pintar_marco_s(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, wx: Int, wy: Int, ww: Int, wh: Int, st: &mut Estado, i0: Int, sombra: Int) -> Int ! io, alloc
     i = st.tab.grupo_cab(i0)
     gw = wm_gw_wm(st)
     gh = wm_gh_wm(st)
@@ -1689,16 +1749,15 @@ fn wm_pintar_marco(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: I
     cap = wm_escena_cap()
     n = 0
     if gmode == 0
-        # Sombra suave: tres capas cada vez más anchas y tenues, algo desplazadas hacia abajo.
+        # Sombra difusa con la forma de la ventana (esquinas incluidas), algo hacia abajo;
+        # la ventana con foco la proyecta más amplia. Sólo sobre un fondo recién pintado:
+        # se mezcla con lo que haya debajo y repetirla la oscurecería.
         if maxim == 0
-            sa = tema_sombra_alfa(tema) / 3
-            neg = color_rgb(0, 0, 0)
-            n = esc_anillo(e, cap, n, wx - 1, wy + 1, wx + ww + 1, wy + wh + 5, wx, wy, wx + ww, wy + wh, neg, sa)
-            n = esc_anillo(e, cap, n, wx - 3, wy + 1, wx + ww + 3, wy + wh + 8, wx, wy, wx + ww, wy + wh, neg, sa)
-            n = esc_anillo(e, cap, n, wx - 5, wy + 2, wx + ww + 5, wy + wh + 11, wx, wy, wx + ww, wy + wh, neg, sa)
-            # Bajo las esquinas redondeadas también debe haber sombra.
-            n = esc_solido(e, cap, n, wx, wy + wh - radio, wx + radio, wy + wh, neg, sa * 2)
-            n = esc_solido(e, cap, n, wx + ww - radio, wy + wh - radio, wx + ww, wy + wh, neg, sa * 2)
+            if sombra != 0
+                if foco != 0
+                    n = esc_sombra(e, cap, n, wx, wy, wx + ww, wy + wh, radio, wm_sombra_dy(), wm_sombra_ext(1), color_rgb(0, 0, 0), tema_sombra_alfa(tema))
+                else
+                    n = esc_sombra(e, cap, n, wx, wy, wx + ww, wy + wh, radio, wm_sombra_dy(), wm_sombra_ext(0), color_rgb(0, 0, 0), tema_sombra_alfa(tema) * 3 / 4)
         if maxim != 0
             radio = 0
         # Borde de 1 px y cuerpo: las cuatro esquinas redondeadas (abajo y a la derecha hay

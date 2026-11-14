@@ -13,20 +13,25 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 W, H = 128, 96
 
 
-def oraculo():
+# (oráculo, bytes de la fuente): la rejilla con la fuente de 1 bit y con la de cobertura.
+ORACULOS = [("oraculo.sal", 96), ("oraculo_cob.sal", 32 + 8 * 64)]
+
+
+def oraculo(nombre, psf_len):
     sal = REPO.parent / "sal" / "target" / "release" / "sal"
     env = dict(os.environ, SAL_SDK=str(REPO / "target" / "sal" / "sdk"))
-    exe = pathlib.Path("/tmp/gprim-oraculo")
-    r = subprocess.run([str(sal), "build", "--release", str(REPO / "tools/gpu-prim/oraculo.sal"), "-o", str(exe)],
+    exe = pathlib.Path("/tmp") / ("gprim-" + nombre.removesuffix(".sal"))
+    r = subprocess.run([str(sal), "build", "--release", str(REPO / "tools/gpu-prim" / nombre), "-o", str(exe)],
                        env=env, capture_output=True, text=True)
     if r.returncode:
         sys.exit(r.stderr or r.stdout)
     datos = subprocess.run([str(exe)], capture_output=True, check=True).stdout
     npix = W * H * 4
-    extra = 96 + 36 * 12  # fuente sintética + celdas de la rejilla
+    extra = psf_len + 36 * 12  # fuente sintética + celdas de la rejilla
     nprim = (len(datos) - npix - extra) // 64
     ini = nprim * 64
-    return datos[:ini], datos[ini:ini + npix], nprim, datos[ini + npix:ini + npix + 96], datos[ini + npix + 96:]
+    return (datos[:ini], datos[ini:ini + npix], nprim, datos[ini + npix:ini + npix + psf_len],
+            datos[ini + npix + psf_len:])
 
 
 def ptx():
@@ -66,14 +71,18 @@ def gpu(prims, nprim, ptx_bytes, psf, celdas):
 
 
 def main():
-    prims, cpu, n, psf, celdas = oraculo()
-    g = gpu(prims, n, ptx(), psf, celdas)
-    malos = [(i % W, i // W) for i in range(W * H) if cpu[i * 4:i * 4 + 4] != g[i * 4:i * 4 + 4]]
-    print(f"{n} primitivas, {W}x{H}: {len(malos)} píxeles distintos entre CPU (Sal) y GPU")
-    for x, y in malos[:8]:
-        o = (y * W + x) * 4
-        print(f"  ({x},{y}) cpu={cpu[o:o+4].hex()} gpu={g[o:o+4].hex()}")
-    return 1 if malos else 0
+    codigo = ptx()
+    fallos = 0
+    for nombre, psf_len in ORACULOS:
+        prims, cpu, n, psf, celdas = oraculo(nombre, psf_len)
+        g = gpu(prims, n, codigo, psf, celdas)
+        malos = [(i % W, i // W) for i in range(W * H) if cpu[i * 4:i * 4 + 4] != g[i * 4:i * 4 + 4]]
+        print(f"{nombre}: {n} primitivas, {W}x{H}: {len(malos)} píxeles distintos entre CPU (Sal) y GPU")
+        for x, y in malos[:8]:
+            o = (y * W + x) * 4
+            print(f"  ({x},{y}) cpu={cpu[o:o+4].hex()} gpu={g[o:o+4].hex()}")
+        fallos += bool(malos)
+    return 1 if fallos else 0
 
 
 if __name__ == "__main__":

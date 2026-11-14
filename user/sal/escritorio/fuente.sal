@@ -1,5 +1,6 @@
 import "mate.sal"
 import "superficie.sal"
+import "ttf.sal"
 
 fn psf2_magic() -> Int
     2253043058
@@ -38,6 +39,14 @@ fn psf2_headersize(ptr: Int, len: Int) -> Int ! alloc
 
 fn psf2_tabla_off() -> Int
     32
+
+# Bit 1 de flags: glifos de cobertura de 8 bits (gw*gh bytes, 0 fondo .. 255 tinta),
+# como los sosomono-*.psf2 que genera scripts/fuentes-aa.py. Sin él, mapas de 1 bit.
+fn psf2_cobertura(ptr: Int, len: Int) -> Int ! alloc
+    if (psf2_flags(ptr, len) & 2) != 0
+        1
+    else
+        0
 
 # Puntuación tipográfica que la fuente no trae -> su equivalente ASCII.
 fn fuente_cp_ascii(cp: Int) -> Int
@@ -147,6 +156,10 @@ fn psf2_glifo_byte(ptr: Int, len: Int, cp: Int, row: Int, col: Int) -> Int ! all
             0
         else
             psf = bytes_view_mem(ptr, len)
+            if psf2_cobertura(ptr, len) != 0
+                if bytes_get_u8(psf, off + row * gw + col) >= 128
+                    return 1
+                return 0
             byte_i = row * ((gw + 7) / 8) + col / 8
             bit = 7 - mod_pos(col, 8)
             v = bytes_get_u8(psf, off + byte_i)
@@ -156,7 +169,39 @@ fn psf2_glifo_byte(ptr: Int, len: Int, cp: Int, row: Int, col: Int) -> Int ! all
             else
                 0
 
+# Glifo de cobertura: cada píxel mezcla tinta y fondo según su byte. Los bordes
+# suavizados son los únicos que pagan la mezcla; tinta plena y fondo van directos.
+fn fuente_dibujar_cob(psf_ptr: Int, psf_len: Int, off: Int, pix_ptr: Int, pix_len: Int, stride: Int, alto: Int, bpp: Int, fmt: Int, fg: Int, bg: Int, cx: Int, cy: Int, gw: Int, gh: Int) -> Int ! alloc
+    if bpp != 4
+        0
+    else
+        psf = bytes_view_mem(psf_ptr, psf_len)
+        pix = bytes_view_mem(pix_ptr, pix_len)
+        tinta = pixel_u32_le(fg, fmt)
+        x0 = max(0, cx)
+        x1 = min(stride, cx + gw)
+        y0 = max(0, cy)
+        y1 = min(alto, cy + gh)
+        py = y0
+        while py < y1
+            fila = off + (py - cy) * gw
+            px = x0
+            while px < x1
+                a = bytes_get_u8(psf, fila + px - cx)
+                if a != 0
+                    o = pix_idx(stride, bpp, px, py)
+                    if a >= 255
+                        bytes_set_u32(pix, o, tinta)
+                    else
+                        bytes_set_u32(pix, o, pixel_u32_le(mezclar_rgb(fg, bg, a), fmt))
+                px = px + 1
+            py = py + 1
+        0
+
+# `psf_ptr` es una .psf2 o una caché TTF en modo celda (ttf.sal), que se reconoce por su marca.
 fn fuente_dibujar(psf_ptr: Int, psf_len: Int, pix_ptr: Int, pix_len: Int, stride: Int, bpp: Int, fmt: Int, cp: Int, fg: Int, bg: Int, cx: Int, cy: Int) -> Int ! alloc
+    if ttf_es_cache(psf_ptr, psf_len) != 0
+        return ttf_celda(psf_ptr, pix_ptr, pix_len, stride, bpp, fmt, cp, fg, bg, cx, cy)
     if psf2_magic_ok(psf_ptr, psf_len) == 0
         1
     else
@@ -169,6 +214,8 @@ fn fuente_dibujar(psf_ptr: Int, psf_len: Int, pix_ptr: Int, pix_len: Int, stride
             if cp != 0
                 off = psf2_offset_glifo(psf_ptr, psf_len, cp)
                 if off >= 0
+                    if psf2_cobertura(psf_ptr, psf_len) != 0
+                        return fuente_dibujar_cob(psf_ptr, psf_len, off, pix_ptr, pix_len, stride, alto, bpp, fmt, fg, bg, cx, cy, gw, gh)
                     psf = bytes_view_mem(psf_ptr, psf_len)
                     bpr = (gw + 7) / 8
                     row = 0

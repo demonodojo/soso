@@ -23,12 +23,20 @@ pub mod kind {
     pub const NADA: u32 = 0;
     pub const SOLIDO: u32 = 1;
     pub const DEGRADADO: u32 = 2;
+    /// Rectángulo redondeado (radios por esquina, borde opcional); el arco se suaviza: la
+    /// cobertura del píxel (0..16, `rr_cov16` en superficie.sal) escala el alfa.
     pub const RRECT: u32 = 3;
     pub const ANILLO: u32 = 4;
     /// Rejilla de celdas de texto (G2/G4): ix0 columnas, iy0 filas, ix1/iy1 tamaño de celda,
     /// radios = bytes por glifo, borde_c = tamaño de la cabecera de la fuente PSF2, flags = primera
     /// celda en el búfer de celdas (3 palabras por celda: glifo|0xFFFFFFFF, tinta, fondo).
+    /// Si la fuente lleva el bit 1 en sus flags (u32 @12), los glifos son de cobertura de 8 bits
+    /// (ancho × alto bytes) y cada byte mezcla tinta y fondo.
     pub const REJILLA: u32 = 5;
+    /// Sombra difusa de una ventana redondeada: ix0..iy1 = ventana, radios (8 bits bajos) = radio
+    /// de sus esquinas, borde_w = extensión del difuminado, flags = desplazamiento vertical,
+    /// x0..y1 = caja de la sombra, color0 + alfa. No pinta lo que la ventana cubre del todo.
+    pub const SOMBRA: u32 = 6;
 }
 
 /// Desplazamientos (bytes) de los campos dentro de una primitiva.
@@ -109,6 +117,7 @@ mod tests {
         assert_eq!(off::FLAGS + 4, PRIM_BYTES);
         assert_eq!(HEADER_LEN, 48);
         assert_eq!(kind::REJILLA, 5);
+        assert_eq!(kind::SOMBRA, 6);
     }
 
     #[test]

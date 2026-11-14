@@ -1,0 +1,84 @@
+import "../../../user/sal/escritorio/ttf.sal"
+
+# Rasterizador TrueType y su caché (se ejecuta desde la raíz del repo).
+fn main() -> Int ! io, alloc
+    fm = ttf_cargar_fichero(d"rootfs/lib/fonts/DejaVuSansMono.ttf")
+    fs = ttf_cargar_fichero(d"rootfs/lib/fonts/DejaVuSans.ttf")
+    if fm == 0
+        return 1
+    if fs == 0
+        return 2
+    h = ttf_cache_celda(fm, ttf_fichero_len(fm), 8, 16)
+    if h == 0
+        return 3
+    if ttf_es_cache(h, ttf_h_len()) == 0
+        return 4
+    if ttf_gid(h, 65) == 0
+        return 5
+    # Un carácter que la fuente no trae da el glifo 0.
+    if ttf_gid(h, 57344) != 0
+        return 6
+    w = 16
+    alto = 16
+    len = w * alto * 4
+    own = bytes_new(len)
+    pix = bytes_ptr(own)
+    blanco = color_rgb(255, 255, 255)
+    negro = color_rgb(0, 0, 0)
+    _a = ttf_celda(h, pix, len, w, 4, 0, 73, blanco, negro, 0, 0)
+    _b = ttf_celda(h, pix, len, w, 4, 0, 73, blanco, negro, 8, 0)
+    if ttf_rasterizados(h) != 1
+        # La segunda «I» sale de la caché.
+        return 7
+    # El trazo vertical de la «I» está en el centro de la celda, entre la base y la altura de las mayúsculas.
+    if pixel_leer(pix, len, w, 4, 0, 3, 8) == negro
+        if pixel_leer(pix, len, w, 4, 0, 4, 8) == negro
+            return 8
+    if pixel_leer(pix, len, w, 4, 0, 0, 0) != negro
+        return 9
+    # Dibujos de caja de borde a borde: «─» toca los dos lados de la celda.
+    _c = ttf_celda(h, pix, len, w, 4, 0, 9472, blanco, negro, 0, 0)
+    toca_izq = 0
+    toca_der = 0
+    y = 0
+    while y < 16
+        if pixel_leer(pix, len, w, 4, 0, 0, y) != negro
+            toca_izq = 1
+        if pixel_leer(pix, len, w, 4, 0, 7, y) != negro
+            toca_der = 1
+        y = y + 1
+    if toca_izq == 0
+        return 10
+    if toca_der == 0
+        return 11
+    # Proporcional con kerning: «AV» es más estrecho que «A» + «V».
+    u = ttf_cache_libre(fs, ttf_fichero_len(fs), 13)
+    if u == 0
+        return 12
+    sav = d"AV"
+    sa = d"A"
+    sv = d"V"
+    av = ttf_texto_ancho(u, &sav)
+    a1 = ttf_texto_ancho(u, &sa)
+    v1 = ttf_texto_ancho(u, &sv)
+    if av >= a1 + v1
+        return 13
+    # «i» es más estrecha que «m».
+    si = d"i"
+    sm = d"m"
+    if ttf_texto_ancho(u, &si) >= ttf_texto_ancho(u, &sm)
+        return 14
+    # Cortado con «…»: no se pasa del ancho pedido.
+    w2 = 120
+    alto2 = 20
+    len2 = w2 * alto2 * 4
+    own2 = bytes_new(len2)
+    pix2 = bytes_ptr(own2)
+    _f = rellenar_rect(pix2, len2, w2, alto2, w2, 4, 0, 0, 0, w2, alto2, negro)
+    largo = d"Un título bastante largo para caber"
+    usado = ttf_texto(u, &largo, pix2, len2, w2, 4, 0, 0, 0, 80, blanco, -1)
+    if usado > 80
+        return 15
+    if usado < 60
+        return 16
+    0

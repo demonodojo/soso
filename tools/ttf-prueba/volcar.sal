@@ -1,0 +1,89 @@
+import "../../user/sal/escritorio/soso.sal"
+import "../../user/sal/escritorio/ttf.sal"
+
+# Rasteriza con ttf.sal y vuelca el resultado a stdout como imagen gris en bruto:
+# u32 ancho, u32 alto y después ancho × alto bytes (un canal: el verde del píxel).
+# Lo usa tools/ttf-prueba/comparar.py para compararlo con FreeType.
+#   argv[1] = ruta del .ttf, argv[2] = modo («celda» o «libre»), argv[3] = gw o px, argv[4] = gh
+
+fn volcar(pix: Int, len: Int, w: Int, h: Int) -> Int ! io, alloc
+    cab = bytes_new(8)
+    bytes_set_u32(cab, 0, w)
+    bytes_set_u32(cab, 4, h)
+    _c = write_fd(1, bytes_ptr(cab), 8)
+    fila = bytes_new(w)
+    src = bytes_view_mem(pix, len)
+    y = 0
+    while y < h
+        x = 0
+        while x < w
+            bytes_set_u8(fila, x, bytes_get_u8(src, (y * w + x) * 4 + 1))
+            x = x + 1
+        _w = write_fd(1, bytes_ptr(fila), w)
+        y = y + 1
+    0
+
+fn entero(s: String) -> Int ! alloc
+    v = 0
+    j = 0
+    while j < str_len(s)
+        v = v * 10 + str_char(s, j) - 48
+        j = j + 1
+    v
+
+fn main() -> Int ! io, alloc
+    fp = ttf_cargar_fichero(argv(1))
+    flen = ttf_fichero_len(fp)
+    modo = argv(2)
+    a = entero(argv(3))
+    b = entero(argv(4))
+    lineas = list_new[String]()
+    list_push(&mut lineas, d"jmdiez@soso:~$ ls -la /etc")
+    list_push(&mut lineas, d"Ventana: «Terminal» — ñandú, acción")
+    list_push(&mut lineas, d"┌──┬──┐ █▓▒░ {}[]() => != gjpqy Il1|O0")
+    list_push(&mut lineas, d"└──┴──┘ AVATAR Tava WAVE ¿¡ áéíóú ÁÉÍÓÚ")
+    if str_eq(modo, d"celda") != 0
+        h = ttf_cache_celda(fp, flen, a, b)
+        if h == 0
+            return 3
+        cols = 40
+        w = cols * a
+        alto = 4 * b
+        len = w * alto * 4
+        pix = bytes_ptr(bytes_new(len))
+        _f = rellenar_rect(pix, len, w, alto, w, 4, 0, 0, 0, w, alto, 0)
+        r = 0
+        while r < 4
+            s = list_get(&lineas, r)
+            st = utf8_inicio()
+            col = 0
+            j = 0
+            while j < str_len(s)
+                st = utf8_feed(st, str_char(s, j))
+                if utf8_pendiente(st) == 0
+                    if col < cols
+                        _d = ttf_celda(h, pix, len, w, 4, 0, st, color_rgb(255, 255, 255), 0, col * a, r * b)
+                    col = col + 1
+                    st = utf8_inicio()
+                j = j + 1
+            r = r + 1
+        volcar(pix, len, w, alto)
+    else
+        h = ttf_cache_libre(fp, flen, a)
+        if h == 0
+            return 3
+        lh = ttf_alto(h)
+        w = 0
+        r = 0
+        while r < 4
+            w = max(w, ttf_texto_ancho(h, &list_get(&lineas, r)) + 4)
+            r = r + 1
+        alto = 4 * lh
+        len = w * alto * 4
+        pix = bytes_ptr(bytes_new(len))
+        _f = rellenar_rect(pix, len, w, alto, w, 4, 0, 0, 0, w, alto, 0)
+        r = 0
+        while r < 4
+            _t = ttf_texto(h, &list_get(&lineas, r), pix, len, w, 4, 0, 2, r * lh, 0, color_rgb(255, 255, 255), -1)
+            r = r + 1
+        volcar(pix, len, w, alto)

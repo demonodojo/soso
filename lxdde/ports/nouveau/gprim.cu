@@ -10,18 +10,7 @@
 #define K_RRECT 3
 #define K_ANILLO 4
 #define K_REJILLA 5
-
-__device__ __forceinline__ int rr_inset(int radio, int d) {
-    int k = 0;
-    if (d < radio) {
-        int dy = radio - d;
-        while (k < radio) {
-            int dx = radio - k;
-            if (dx * dx + dy * dy > radio * radio) k++; else break;
-        }
-    }
-    return k;
-}
+#define K_SOMBRA 6
 
 __device__ __forceinline__ int imin(int a, int b) { return a < b ? a : b; }
 __device__ __forceinline__ int imax(int a, int b) { return a > b ? a : b; }
@@ -50,21 +39,62 @@ __device__ __forceinline__ void poner(unsigned* px, unsigned rgb, int alfa, int 
     else if (alfa > 0) { *px = a_palabra(mezclar(rgb, de_palabra(*px, fmt), alfa), fmt); }
 }
 
-// ¿(x,y) cae dentro del rectángulo x0..x1 × y0..y1 con esas esquinas redondeadas?
-__device__ __forceinline__ bool en_rrect(int x, int y, int x0, int y0, int x1, int y1,
-                                         int rtl, int rtr, int rbr, int rbl) {
+__device__ __forceinline__ int iclamp(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+// Las funciones de cobertura copian las de user/sal/escritorio/superficie.sal (rr_isqrt,
+// rr_esquina_cov, rr_cov16) y escena.sal (esc_dist_rrect4, esc_sombra_alfa) operación a
+// operación, en enteros: el resultado tiene que ser el mismo píxel a píxel.
+__device__ __forceinline__ long long rr_isqrt(long long v) {
+    if (v <= 0) return 0;
+    long long x = v, y = (x + 1) / 2;
+    while (y < x) { x = y; y = (x + v / x) / 2; }
+    return x;
+}
+
+__device__ __forceinline__ int rr_esquina_cov(int dx16, int dy16, int r) {
+    long long d = rr_isqrt((long long)dx16 * dx16 + (long long)dy16 * dy16);
+    return iclamp((int)(r * 16 + 8 - d), 0, 16);
+}
+
+// Cobertura 0..16 de (x,y) por el rectángulo redondeado (radios ya recortados).
+__device__ __forceinline__ int rr_cov16(int x, int y, int x0, int y0, int x1, int y1,
+                                        int a, int b, int c, int d) {
+    if (x < x0 || x >= x1 || y < y0 || y >= y1) return 0;
+    int px = x * 16 + 8, py = y * 16 + 8;
+    if (x - x0 < a && y - y0 < a) return rr_esquina_cov((x0 + a) * 16 - px, (y0 + a) * 16 - py, a);
+    if (x1 - 1 - x < b && y - y0 < b) return rr_esquina_cov(px - (x1 - b) * 16, (y0 + b) * 16 - py, b);
+    if (x1 - 1 - x < c && y1 - 1 - y < c) return rr_esquina_cov(px - (x1 - c) * 16, py - (y1 - c) * 16, c);
+    if (x - x0 < d && y1 - 1 - y < d) return rr_esquina_cov((x0 + d) * 16 - px, py - (y1 - d) * 16, d);
+    return 16;
+}
+
+// Igual, recortando antes los radios al rectángulo (rr_radio_ok).
+__device__ __forceinline__ int rrect_cov16(int x, int y, int x0, int y0, int x1, int y1,
+                                           int rtl, int rtr, int rbr, int rbl) {
     int w = x1 - x0, h = y1 - y0;
-    if (w <= 0 || h <= 0) return false;
-    if (x < x0 || x >= x1 || y < y0 || y >= y1) return false;
+    if (w <= 0 || h <= 0) return 0;
     int m = imin(w / 2, h / 2);
-    int a = imin(rtl, m), b = imin(rtr, m), c = imin(rbr, m), d = imin(rbl, m);
-    int fila = y - y0;
-    int il = 0, ir = 0;
-    if (fila < a) il = rr_inset(a, fila);
-    if (h - 1 - fila < d) il = imax(il, rr_inset(d, h - 1 - fila));
-    if (fila < b) ir = rr_inset(b, fila);
-    if (h - 1 - fila < c) ir = imax(ir, rr_inset(c, h - 1 - fila));
-    return x >= x0 + il && x < x1 - ir;
+    return rr_cov16(x, y, x0, y0, x1, y1, imin(rtl, m), imin(rtr, m), imin(rbr, m), imin(rbl, m));
+}
+
+__device__ __forceinline__ int dist_rrect4(int px, int py, int x0, int y0, int x1, int y1, int r) {
+    int p = px * 4 + 2, q = py * 4 + 2, r4 = r * 4;
+    int ax = x0 * 4 + r4, bx = x1 * 4 - r4, ay = y0 * 4 + r4, by = y1 * 4 - r4;
+    int dx = imax(imax(ax - p, p - bx), 0);
+    int dy = imax(imax(ay - q, q - by), 0);
+    if (dx > 0 && dy > 0) return (int)rr_isqrt((long long)dx * dx + (long long)dy * dy) - r4;
+    if (dx > 0) return dx - r4;
+    if (dy > 0) return dy - r4;
+    return 0 - imin(imin(p - x0 * 4, x1 * 4 - p), imin(q - y0 * 4, y1 * 4 - q));
+}
+
+__device__ __forceinline__ int sombra_alfa(int d4, int ext, int alfa) {
+    int dentro = ext * 4 / 3;
+    long long span = ext * 4 + dentro;
+    long long u = span - (d4 + dentro);
+    if (u <= 0) return 0;
+    if (u >= span) return alfa;
+    return (int)((long long)alfa * u * u * (3 * span - 2 * u) / (span * span * span));
 }
 
 // Bloques de una dimensión (el lanzador de soso fija ntid = (256,1,1)): x = columna, y = fila.
@@ -101,19 +131,32 @@ extern "C" __global__ void gprim_rt(unsigned* rt, int pitch_px, int ancho, int a
                 *px = a_palabra(c, fmt);
             }
         } else if (kind == K_RRECT) {
+            // Bordes de esquina suavizados: la cobertura escala el alfa (rellenar_rrect4).
             unsigned rd = (unsigned)p[8];
             int rtl = rd & 255, rtr = (rd >> 8) & 255, rbr = (rd >> 16) & 255, rbl = (rd >> 24) & 255;
             int bw = p[10];
             if (x < 0 || x >= ancho || y < 0 || y >= alto) continue;
             if (bw > 0) {
-                if (en_rrect(x, y, x0, y0, x1, y1, rtl, rtr, rbr, rbl))
-                    *px = a_palabra((unsigned)p[9] & 0xFFFFFF, fmt);
-                if (en_rrect(x, y, x0 + bw, y0 + bw, x1 - bw, y1 - bw,
-                             imax(0, rtl - bw), imax(0, rtr - bw), imax(0, rbr - bw), imax(0, rbl - bw)))
-                    poner(px, c0, alfa, fmt);
-            } else if (en_rrect(x, y, x0, y0, x1, y1, rtl, rtr, rbr, rbl)) {
-                poner(px, c0, alfa, fmt);
+                int cb = rrect_cov16(x, y, x0, y0, x1, y1, rtl, rtr, rbr, rbl);
+                poner(px, (unsigned)p[9] & 0xFFFFFF, 255 * cb / 16, fmt);
+                int ci = rrect_cov16(x, y, x0 + bw, y0 + bw, x1 - bw, y1 - bw,
+                                     imax(0, rtl - bw), imax(0, rtr - bw), imax(0, rbr - bw), imax(0, rbl - bw));
+                poner(px, c0, alfa * ci / 16, fmt);
+            } else {
+                int cv = rrect_cov16(x, y, x0, y0, x1, y1, rtl, rtr, rbr, rbl);
+                poner(px, c0, alfa * cv / 16, fmt);
             }
+        } else if (kind == K_SOMBRA) {
+            // Sombra difusa de una ventana redondeada; no toca lo que la ventana cubre del todo.
+            int wx0 = p[11], wy0 = p[12], wx1 = p[13], wy1 = p[14];
+            int ext = p[10], dy = p[15];
+            if (ext <= 0) continue;
+            if (x < imax(0, x0) || x >= imin(ancho, x1) || y < imax(0, y0) || y >= imin(alto, y1)) continue;
+            int rr = (int)((unsigned)p[8] & 255);
+            int r = imin(rr, imin((wx1 - wx0) / 2, (wy1 - wy0) / 2));
+            if (rr_cov16(x, y, wx0, wy0, wx1, wy1, r, r, r, r) >= 16) continue;
+            int a = sombra_alfa(dist_rrect4(x, y, wx0, wy0 + dy, wx1, wy1 + dy, r), ext, alfa);
+            if (a > 0) poner(px, c0, a, fmt);
         } else if (kind == K_REJILLA) {
             // Rejilla de celdas de texto: fondo opaco por celda y tinta donde el glifo tiene bit.
             int cols = p[11], filas = p[12], gw = p[13], gh = p[14], bpg = p[8], hdr = p[9], c0i = p[15];
@@ -123,9 +166,16 @@ extern "C" __global__ void gprim_rt(unsigned* rt, int pitch_px, int ancho, int a
                 const unsigned* c = celdas + (size_t)(c0i + cy * cols + cx) * 3;
                 *px = a_palabra(c[2] & 0xFFFFFF, fmt);
                 if (c[0] != 0xFFFFFFFFu) {
-                    int bpr = (gw + 7) / 8;
-                    unsigned v = psf[hdr + c[0] * bpg + row * bpr + col / 8];
-                    if ((v >> (7 - (col & 7))) & 1) *px = a_palabra(c[1] & 0xFFFFFF, fmt);
+                    if (psf[12] & 2) {
+                        // Glifos de cobertura de 8 bits (sosomono-*.psf2): mezcla tinta y fondo.
+                        unsigned v = psf[hdr + c[0] * bpg + row * gw + col];
+                        if (v >= 255) *px = a_palabra(c[1] & 0xFFFFFF, fmt);
+                        else if (v > 0) *px = a_palabra(mezclar(c[1] & 0xFFFFFF, c[2] & 0xFFFFFF, (int)v), fmt);
+                    } else {
+                        int bpr = (gw + 7) / 8;
+                        unsigned v = psf[hdr + c[0] * bpg + row * bpr + col / 8];
+                        if ((v >> (7 - (col & 7))) & 1) *px = a_palabra(c[1] & 0xFFFFFF, fmt);
+                    }
                 }
             }
         } else if (kind == K_ANILLO) {

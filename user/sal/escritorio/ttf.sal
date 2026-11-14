@@ -1,0 +1,1136 @@
+import "mate.sal"
+import "superficie.sal"
+import "utf8.sal"
+
+# Fuentes TrueType en tiempo de ejecución: lectura de las tablas (cmap, glyf/loca, hmtx,
+# head, hhea, maxp, kern), rasterizado con cobertura (el algoritmo de font-rs: áreas con
+# signo acumuladas por fila) y caché de glifos por tamaño. Cada glifo se rasteriza la
+# primera vez que se pide y se guarda; las siguientes veces sólo se copia.
+#
+# Una caché es un bloque de cabecera (`ttf_h_len()` bytes) cuyo puntero hace de «fuente»
+# en el WM. Dos modos:
+#   celda  — cada glifo ocupa exactamente una celda gw × gh (terminal y texto en rejilla);
+#            el tamaño se elige para que el avance de la fuente monoespaciada llene la celda.
+#   libre  — glifos ajustados a su caja con su avance y kerning (texto proporcional).
+# Los offsets 16 (alto) y 20 (ancho) coinciden con los de las .psf2 de fuente.sal.
+
+fn ttf_magic() -> Int
+    1128682580
+
+fn ttf_h_len() -> Int
+    1024
+
+fn ttf_modo_celda() -> Int
+    0
+
+fn ttf_modo_libre() -> Int
+    1
+
+# Campos i64 de la cabecera.
+fn ttf_o_ptr() -> Int
+    64
+
+fn ttf_o_len() -> Int
+    72
+
+fn ttf_o_modo() -> Int
+    80
+
+fn ttf_o_upem() -> Int
+    88
+
+fn ttf_o_nglifos() -> Int
+    96
+
+fn ttf_o_loca() -> Int
+    104
+
+fn ttf_o_locfmt() -> Int
+    112
+
+fn ttf_o_glyf() -> Int
+    120
+
+fn ttf_o_hmtx() -> Int
+    128
+
+fn ttf_o_nhm() -> Int
+    136
+
+fn ttf_o_cmap() -> Int
+    144
+
+fn ttf_o_cmapfmt() -> Int
+    152
+
+fn ttf_o_kern() -> Int
+    160
+
+fn ttf_o_kern_n() -> Int
+    168
+
+fn ttf_o_asc() -> Int
+    176
+
+fn ttf_o_desc() -> Int
+    184
+
+# Escala (píxeles por unidad de la fuente) × 2^20, para guardarla como entero.
+fn ttf_o_escala() -> Int
+    192
+
+# Línea base desde arriba de la celda o de la línea, en 1/256 de píxel.
+fn ttf_o_base() -> Int
+    200
+
+fn ttf_o_tabla() -> Int
+    208
+
+fn ttf_o_arena() -> Int
+    216
+
+fn ttf_o_usado() -> Int
+    224
+
+fn ttf_o_cap() -> Int
+    232
+
+fn ttf_o_pts() -> Int
+    240
+
+fn ttf_o_pts_cap() -> Int
+    248
+
+fn ttf_o_ends() -> Int
+    256
+
+fn ttf_o_ends_cap() -> Int
+    264
+
+fn ttf_o_npts() -> Int
+    272
+
+fn ttf_o_nends() -> Int
+    280
+
+fn ttf_o_asc_px() -> Int
+    288
+
+fn ttf_o_desc_px() -> Int
+    296
+
+# Escala vertical (× 2^20) y base de los dibujos de caja, estirados a la celda entera.
+fn ttf_o_caja_escala() -> Int
+    304
+
+fn ttf_o_caja_base() -> Int
+    312
+
+# Glifos rasterizados (estadística para las pruebas).
+fn ttf_o_rasterizados() -> Int
+    320
+
+# Tabla cp → glifo para cp < 256 (u16; 65535 = sin calcular).
+fn ttf_o_ascii() -> Int
+    512
+
+# Una entrada por glifo: puntero al mapa (i64; 0 = sin rasterizar, -1 = vacío), ancho,
+# alto (u32) y desplazamientos x, y (u32 con sesgo de 32768) respecto a la pluma y la base.
+fn ttf_entrada() -> Int
+    24
+
+fn ttf_escala_uno() -> Int
+    1048576
+
+fn ttf_get(h: Int, o: Int) -> Int ! alloc
+    bytes_get_i64(bytes_view_mem(h, ttf_h_len()), o)
+
+fn ttf_set(h: Int, o: Int, v: Int) -> Int ! alloc
+    b = bytes_view_mem(h, ttf_h_len())
+    bytes_set_i64(b, o, v)
+    0
+
+# ---- Lectura big-endian -------------------------------------------------------
+
+fn ttf_be16(b: &Bytes, o: Int) -> Int
+    (bytes_get_u8(b, o) << 8) | bytes_get_u8(b, o + 1)
+
+fn ttf_bes16(b: &Bytes, o: Int) -> Int
+    v = ttf_be16(b, o)
+    if v >= 32768
+        v - 65536
+    else
+        v
+
+fn ttf_be32(b: &Bytes, o: Int) -> Int
+    (ttf_be16(b, o) << 16) | ttf_be16(b, o + 2)
+
+fn ttf_s8(v: Int) -> Int
+    if v >= 128
+        v - 256
+    else
+        v
+
+# Offset de la tabla `tag` (big-endian como entero), o -1.
+fn ttf_tabla(b: &Bytes, len: Int, tag: Int) -> Int
+    if len < 12
+        -1
+    else
+        n = ttf_be16(b, 4)
+        r = -1
+        i = 0
+        while i < n
+            e = 12 + 16 * i
+            if e + 16 <= len
+                if ttf_be32(b, e) == tag
+                    r = ttf_be32(b, e + 8)
+            i = i + 1
+        if r >= len
+            -1
+        else
+            r
+
+# ---- Flotantes sin libm (el destino soso no la tiene) ----------------------------
+
+fn ttf_floor(v: Float) -> Int
+    i = float_to_int(v)
+    if int_to_float(i) > v
+        i - 1
+    else
+        i
+
+fn ttf_ceil(v: Float) -> Int
+    i = float_to_int(v)
+    if int_to_float(i) < v
+        i + 1
+    else
+        i
+
+fn ttf_fabs(v: Float) -> Float
+    if v < 0.0
+        0.0 - v
+    else
+        v
+
+fn ttf_fmin(a: Float, b: Float) -> Float
+    if a < b
+        a
+    else
+        b
+
+fn ttf_fmax(a: Float, b: Float) -> Float
+    if a > b
+        a
+    else
+        b
+
+fn ttf_isqrt(v: Int) -> Int
+    if v <= 0
+        0
+    else
+        x = v
+        y = (x + 1) / 2
+        while y < x
+            x = y
+            y = (x + v / x) / 2
+        x
+
+# ---- cmap, hmtx, loca, kern ------------------------------------------------------
+
+fn ttf_cmap_buscar(b: &Bytes, off: Int, fmt: Int, cp: Int) -> Int
+    if off < 0
+        0
+    elsif fmt == 12
+        n = ttf_be32(b, off + 12)
+        lo = 0
+        hi = n - 1
+        g = 0
+        while lo <= hi
+            mid = (lo + hi) / 2
+            e = off + 16 + 12 * mid
+            if cp < ttf_be32(b, e)
+                hi = mid - 1
+            elsif cp > ttf_be32(b, e + 4)
+                lo = mid + 1
+            else
+                g = ttf_be32(b, e + 8) + cp - ttf_be32(b, e)
+                lo = hi + 1
+        g
+    elsif fmt == 4
+        if cp > 65535
+            0
+        else
+            segx2 = ttf_be16(b, off + 6)
+            n = segx2 / 2
+            lo = 0
+            hi = n - 1
+            seg = -1
+            while lo <= hi
+                mid = (lo + hi) / 2
+                if ttf_be16(b, off + 14 + 2 * mid) < cp
+                    lo = mid + 1
+                else
+                    seg = mid
+                    hi = mid - 1
+            if seg < 0
+                0
+            else
+                ini = ttf_be16(b, off + 16 + segx2 + 2 * seg)
+                if cp < ini
+                    0
+                else
+                    delta = ttf_be16(b, off + 16 + 2 * segx2 + 2 * seg)
+                    rpos = off + 16 + 3 * segx2 + 2 * seg
+                    roff = ttf_be16(b, rpos)
+                    if roff == 0
+                        (cp + delta) & 65535
+                    else
+                        g = ttf_be16(b, rpos + roff + 2 * (cp - ini))
+                        if g == 0
+                            0
+                        else
+                            (g + delta) & 65535
+    else
+        0
+
+fn ttf_avance_u(b: &Bytes, hmtx: Int, nhm: Int, gid: Int) -> Int
+    if nhm <= 0
+        0
+    elsif gid < nhm
+        ttf_be16(b, hmtx + 4 * gid)
+    else
+        ttf_be16(b, hmtx + 4 * (nhm - 1))
+
+fn ttf_loca(b: &Bytes, loca: Int, locfmt: Int, gid: Int) -> Int
+    if locfmt == 0
+        ttf_be16(b, loca + 2 * gid) * 2
+    else
+        ttf_be32(b, loca + 4 * gid)
+
+# Ajuste de kerning entre dos glifos, en unidades de la fuente (tabla kern, formato 0).
+fn ttf_kern_u(b: &Bytes, kp: Int, n: Int, izq: Int, der: Int) -> Int
+    if kp <= 0
+        0
+    else
+        clave = (izq << 16) | der
+        lo = 0
+        hi = n - 1
+        r = 0
+        while lo <= hi
+            mid = (lo + hi) / 2
+            e = kp + 6 * mid
+            k = (ttf_be16(b, e) << 16) | ttf_be16(b, e + 2)
+            if k < clave
+                lo = mid + 1
+            elsif k > clave
+                hi = mid - 1
+            else
+                r = ttf_bes16(b, e + 4)
+                lo = hi + 1
+        r
+
+# ---- Creación de la caché ----------------------------------------------------------
+
+# Lee un .ttf entero a un búfer que vive hasta el fin del proceso. Devuelve el puntero
+# (la longitud, con `ttf_fichero_len`) o 0.
+fn ttf_cargar_fichero(ruta: String) -> Int ! io, alloc
+    s = read_file(ruta)
+    n = str_len(s)
+    if n < 12
+        0
+    else
+        # Fuga intencional: las cachés guardan el puntero.
+        ptr = bytes_ptr(bytes_new(n + 8))
+        v = bytes_view_mem(ptr, n + 8)
+        bytes_set_i64(v, 0, n)
+        str_bytes_copy(v, 8, s)
+        ptr + 8
+
+fn ttf_fichero_len(ptr: Int) -> Int ! alloc
+    if ptr <= 0
+        0
+    else
+        bytes_get_i64(bytes_view_mem(ptr - 8, 8), 0)
+
+fn ttf_bloque(n: Int) -> Int ! alloc
+    # Fuga intencional: vive lo que la caché.
+    p = bytes_ptr(bytes_new(n))
+    b = bytes_view_mem(p, n)
+    bytes_fill(b, 0, n, 0)
+    p
+
+# Cabecera común a los dos modos; 0 si el fichero no es un TrueType utilizable.
+fn ttf_nueva(fp: Int, flen: Int, modo: Int) -> Int ! alloc
+    if fp <= 0
+        0
+    elsif flen < 12
+        0
+    else
+        b = bytes_view_mem(fp, flen)
+        head = ttf_tabla(&b, flen, 1751474532)
+        hhea = ttf_tabla(&b, flen, 1751672161)
+        maxp = ttf_tabla(&b, flen, 1835104368)
+        loca = ttf_tabla(&b, flen, 1819239265)
+        glyf = ttf_tabla(&b, flen, 1735162214)
+        hmtx = ttf_tabla(&b, flen, 1752003704)
+        cmap = ttf_tabla(&b, flen, 1668112752)
+        if head < 0
+            0
+        elsif hhea < 0
+            0
+        elsif maxp < 0
+            0
+        elsif loca < 0
+            0
+        elsif glyf < 0
+            0
+        elsif hmtx < 0
+            0
+        elsif cmap < 0
+            0
+        else
+            h = ttf_bloque(ttf_h_len())
+            hb = bytes_view_mem(h, ttf_h_len())
+            bytes_set_u32(hb, 0, ttf_magic())
+            bytes_set_i64(hb, ttf_o_ptr(), fp)
+            bytes_set_i64(hb, ttf_o_len(), flen)
+            bytes_set_i64(hb, ttf_o_modo(), modo)
+            bytes_set_i64(hb, ttf_o_upem(), ttf_be16(&b, head + 18))
+            bytes_set_i64(hb, ttf_o_locfmt(), ttf_bes16(&b, head + 50))
+            ng = ttf_be16(&b, maxp + 4)
+            bytes_set_i64(hb, ttf_o_nglifos(), ng)
+            bytes_set_i64(hb, ttf_o_loca(), loca)
+            bytes_set_i64(hb, ttf_o_glyf(), glyf)
+            bytes_set_i64(hb, ttf_o_hmtx(), hmtx)
+            bytes_set_i64(hb, ttf_o_nhm(), ttf_be16(&b, hhea + 34))
+            bytes_set_i64(hb, ttf_o_asc(), ttf_bes16(&b, hhea + 4))
+            bytes_set_i64(hb, ttf_o_desc(), ttf_bes16(&b, hhea + 6))
+            # cmap: Unicode completo (3,10 / 0,4: formato 12) o BMP (3,1 / 0,x: formato 4).
+            nt = ttf_be16(&b, cmap + 2)
+            mejor = -1
+            mfmt = 0
+            mpunt = 0
+            i = 0
+            while i < nt
+                e = cmap + 4 + 8 * i
+                plat = ttf_be16(&b, e)
+                enc = ttf_be16(&b, e + 2)
+                so = cmap + ttf_be32(&b, e + 4)
+                fmt = ttf_be16(&b, so)
+                p = 0
+                if fmt == 12
+                    if plat == 3
+                        if enc == 10
+                            p = 3
+                    if plat == 0
+                        p = 3
+                if fmt == 4
+                    if plat == 3
+                        if enc == 1
+                            p = 2
+                    if plat == 0
+                        p = 2
+                if p > mpunt
+                    mpunt = p
+                    mejor = so
+                    mfmt = fmt
+                i = i + 1
+            bytes_set_i64(hb, ttf_o_cmap(), mejor)
+            bytes_set_i64(hb, ttf_o_cmapfmt(), mfmt)
+            # kern formato 0 (horizontal): pares ordenados para búsqueda binaria.
+            kern = ttf_tabla(&b, flen, 1801810542)
+            bytes_set_i64(hb, ttf_o_kern(), 0)
+            if kern >= 0
+                if ttf_be16(&b, kern) == 0
+                    if ttf_be16(&b, kern + 2) >= 1
+                        cov = ttf_be16(&b, kern + 4 + 4)
+                        if (cov & 1) != 0
+                            if (cov >> 8) == 0
+                                bytes_set_i64(hb, ttf_o_kern_n(), ttf_be16(&b, kern + 4 + 6))
+                                bytes_set_i64(hb, ttf_o_kern(), kern + 4 + 14)
+            # Espacio de trabajo para los puntos de un glifo (compuestos incluidos).
+            mp = max(ttf_be16(&b, maxp + 6), ttf_be16(&b, maxp + 10)) + 64
+            mc = max(ttf_be16(&b, maxp + 8), ttf_be16(&b, maxp + 12)) + 16
+            bytes_set_i64(hb, ttf_o_pts(), ttf_bloque(mp * 24))
+            bytes_set_i64(hb, ttf_o_pts_cap(), mp)
+            bytes_set_i64(hb, ttf_o_ends(), ttf_bloque(mc * 8))
+            bytes_set_i64(hb, ttf_o_ends_cap(), mc)
+            bytes_set_i64(hb, ttf_o_tabla(), ttf_bloque(ng * ttf_entrada()))
+            bytes_set_i64(hb, ttf_o_arena(), 0)
+            bytes_set_i64(hb, ttf_o_usado(), 0)
+            bytes_set_i64(hb, ttf_o_cap(), 0)
+            bytes_fill(hb, ttf_o_ascii(), 512, 255)
+            h
+
+fn ttf_es_cache(p: Int, len: Int) -> Int ! alloc
+    if p <= 0
+        0
+    elsif len < ttf_h_len()
+        0
+    elsif bytes_get_u32(bytes_view_mem(p, 4), 0) == ttf_magic()
+        1
+    else
+        0
+
+fn ttf_escala_f(h: Int) -> Float ! alloc
+    int_to_float(ttf_get(h, ttf_o_escala())) / int_to_float(ttf_escala_uno())
+
+fn ttf_gid(h: Int, cp: Int) -> Int ! alloc
+    fp = ttf_get(h, ttf_o_ptr())
+    flen = ttf_get(h, ttf_o_len())
+    b = bytes_view_mem(fp, flen)
+    if cp >= 0
+        if cp < 256
+            hb = bytes_view_mem(h, ttf_h_len())
+            g = bytes_get_u16(hb, ttf_o_ascii() + 2 * cp)
+            if g == 65535
+                g = ttf_cmap_buscar(&b, ttf_get(h, ttf_o_cmap()), ttf_get(h, ttf_o_cmapfmt()), cp)
+                bytes_set_u16(hb, ttf_o_ascii() + 2 * cp, g)
+            return g
+    if cp < 0
+        0
+    else
+        ttf_cmap_buscar(&b, ttf_get(h, ttf_o_cmap()), ttf_get(h, ttf_o_cmapfmt()), cp)
+
+fn ttf_avance_gid_u(h: Int, gid: Int) -> Int ! alloc
+    fp = ttf_get(h, ttf_o_ptr())
+    b = bytes_view_mem(fp, ttf_get(h, ttf_o_len()))
+    ttf_avance_u(&b, ttf_get(h, ttf_o_hmtx()), ttf_get(h, ttf_o_nhm()), gid)
+
+# Caché en modo celda: glifos de gw × gh. El tamaño hace que el avance de la «M» llene
+# la celda (sin pasarse de alto), y la línea queda centrada con la base en un píxel entero.
+fn ttf_cache_celda(fp: Int, flen: Int, gw: Int, gh: Int) -> Int ! alloc
+    h = ttf_nueva(fp, flen, ttf_modo_celda())
+    if h != 0
+        hb = bytes_view_mem(h, ttf_h_len())
+        bytes_set_u32(hb, 16, gh)
+        bytes_set_u32(hb, 20, gw)
+        bytes_set_u32(hb, 24, gw * gh)
+        asc = ttf_get(h, ttf_o_asc())
+        desc = ttf_get(h, ttf_o_desc())
+        adv = ttf_avance_gid_u(h, ttf_gid(h, 77))
+        if adv <= 0
+            adv = ttf_get(h, ttf_o_upem()) / 2
+        lin = asc - desc
+        esc = gw * ttf_escala_uno() / adv
+        if lin * esc > gh * ttf_escala_uno()
+            esc = gh * ttf_escala_uno() / lin
+        _e = ttf_set(h, ttf_o_escala(), esc)
+        alto_lin = lin * esc * 256 / ttf_escala_uno()
+        base = (gh * 256 - alto_lin) / 2 + asc * esc * 256 / ttf_escala_uno()
+        base = ((base + 128) / 256) * 256
+        _b = ttf_set(h, ttf_o_base(), base)
+        caja = gh * ttf_escala_uno() / lin
+        _c = ttf_set(h, ttf_o_caja_escala(), caja)
+        _d = ttf_set(h, ttf_o_caja_base(), asc * caja * 256 / ttf_escala_uno())
+    h
+
+# Caché en modo libre a `px` píxeles por em. alto (@16) es la altura de línea.
+fn ttf_cache_libre(fp: Int, flen: Int, px: Int) -> Int ! alloc
+    h = ttf_nueva(fp, flen, ttf_modo_libre())
+    if h != 0
+        upem = ttf_get(h, ttf_o_upem())
+        esc = px * ttf_escala_uno() / upem
+        _e = ttf_set(h, ttf_o_escala(), esc)
+        asc = ttf_get(h, ttf_o_asc())
+        desc = ttf_get(h, ttf_o_desc())
+        asc_px = (asc * esc + ttf_escala_uno() - 1) / ttf_escala_uno()
+        desc_px = ((0 - desc) * esc + ttf_escala_uno() - 1) / ttf_escala_uno()
+        _a = ttf_set(h, ttf_o_asc_px(), asc_px)
+        _d = ttf_set(h, ttf_o_desc_px(), desc_px)
+        _b = ttf_set(h, ttf_o_base(), asc_px * 256)
+        hb = bytes_view_mem(h, ttf_h_len())
+        bytes_set_u32(hb, 16, asc_px + desc_px)
+        bytes_set_u32(hb, 20, (ttf_avance_gid_u(h, ttf_gid(h, 110)) * esc + ttf_escala_uno() / 2) / ttf_escala_uno())
+    h
+
+fn ttf_alto(h: Int) -> Int ! alloc
+    bytes_get_u32(bytes_view_mem(h, ttf_h_len()), 16)
+
+fn ttf_ancho_celda(h: Int) -> Int ! alloc
+    bytes_get_u32(bytes_view_mem(h, ttf_h_len()), 20)
+
+fn ttf_asc_px(h: Int) -> Int ! alloc
+    ttf_get(h, ttf_o_asc_px())
+
+# ---- Puntos de un glifo ----------------------------------------------------------
+
+# Añade los contornos del glifo `gid` al espacio de trabajo, transformados por la matriz
+# (ta, tb, tc, td en F2Dot14) y el desplazamiento (tdx, tdy) en unidades de la fuente.
+fn ttf_puntos(h: Int, b: &Bytes, gid: Int, ta: Int, tb: Int, tc: Int, td: Int, tdx: Int, tdy: Int, prof: Int) -> Int ! alloc
+    ng = ttf_get(h, ttf_o_nglifos())
+    if gid < 0
+        return 0
+    if gid >= ng
+        return 0
+    loca = ttf_get(h, ttf_o_loca())
+    lf = ttf_get(h, ttf_o_locfmt())
+    g0 = ttf_loca(b, loca, lf, gid)
+    g1 = ttf_loca(b, loca, lf, gid + 1)
+    if g1 <= g0
+        return 0
+    g = ttf_get(h, ttf_o_glyf()) + g0
+    nc = ttf_bes16(b, g)
+    pcap = ttf_get(h, ttf_o_pts_cap())
+    ecap = ttf_get(h, ttf_o_ends_cap())
+    pv = bytes_view_mem(ttf_get(h, ttf_o_pts()), pcap * 24)
+    ev = bytes_view_mem(ttf_get(h, ttf_o_ends()), ecap * 8)
+    np0 = ttf_get(h, ttf_o_npts())
+    ne0 = ttf_get(h, ttf_o_nends())
+    if nc > 0
+        npts = ttf_be16(b, g + 10 + 2 * (nc - 1)) + 1
+        if np0 + npts > pcap
+            return 0
+        if ne0 + nc > ecap
+            return 0
+        i = 0
+        while i < nc
+            bytes_set_i64(ev, (ne0 + i) * 8, np0 + ttf_be16(b, g + 10 + 2 * i))
+            i = i + 1
+        il = ttf_be16(b, g + 10 + 2 * nc)
+        p = g + 12 + 2 * nc + il
+        # Banderas (con repetición): se guardan provisionalmente en la casilla del flag.
+        k = 0
+        while k < npts
+            f = bytes_get_u8(b, p)
+            p = p + 1
+            bytes_set_i64(pv, (np0 + k) * 24 + 16, f)
+            k = k + 1
+            if (f & 8) != 0
+                r = bytes_get_u8(b, p)
+                p = p + 1
+                while r > 0
+                    if k < npts
+                        bytes_set_i64(pv, (np0 + k) * 24 + 16, f)
+                        k = k + 1
+                    r = r - 1
+        x = 0
+        k = 0
+        while k < npts
+            f = bytes_get_i64(pv, (np0 + k) * 24 + 16)
+            if (f & 2) != 0
+                d = bytes_get_u8(b, p)
+                p = p + 1
+                if (f & 16) == 0
+                    d = 0 - d
+                x = x + d
+            elsif (f & 16) == 0
+                x = x + ttf_bes16(b, p)
+                p = p + 2
+            bytes_set_i64(pv, (np0 + k) * 24, x)
+            k = k + 1
+        y = 0
+        k = 0
+        while k < npts
+            f = bytes_get_i64(pv, (np0 + k) * 24 + 16)
+            if (f & 4) != 0
+                d = bytes_get_u8(b, p)
+                p = p + 1
+                if (f & 32) == 0
+                    d = 0 - d
+                y = y + d
+            elsif (f & 32) == 0
+                y = y + ttf_bes16(b, p)
+                p = p + 2
+            bytes_set_i64(pv, (np0 + k) * 24 + 8, y)
+            k = k + 1
+        # Transformación del componente (identidad para un glifo simple).
+        k = 0
+        while k < npts
+            o = (np0 + k) * 24
+            px = bytes_get_i64(pv, o)
+            py = bytes_get_i64(pv, o + 8)
+            bytes_set_i64(pv, o, (ta * px + tc * py) / 16384 + tdx)
+            bytes_set_i64(pv, o + 8, (tb * px + td * py) / 16384 + tdy)
+            bytes_set_i64(pv, o + 16, bytes_get_i64(pv, o + 16) & 1)
+            k = k + 1
+        _a = ttf_set(h, ttf_o_npts(), np0 + npts)
+        _b = ttf_set(h, ttf_o_nends(), ne0 + nc)
+        0
+    elsif nc < 0
+        if prof < 8
+            p = g + 10
+            seguir = 1
+            while seguir != 0
+                fl = ttf_be16(b, p)
+                gi = ttf_be16(b, p + 2)
+                p = p + 4
+                a1 = 0
+                a2 = 0
+                if (fl & 1) != 0
+                    a1 = ttf_bes16(b, p)
+                    a2 = ttf_bes16(b, p + 2)
+                    p = p + 4
+                else
+                    a1 = ttf_s8(bytes_get_u8(b, p))
+                    a2 = ttf_s8(bytes_get_u8(b, p + 1))
+                    p = p + 2
+                dx = 0
+                dy = 0
+                # Sin ARGS_ARE_XY_VALUES son índices de puntos a casar: se ignoran.
+                if (fl & 2) != 0
+                    dx = a1
+                    dy = a2
+                ma = 16384
+                mb = 0
+                mc = 0
+                md = 16384
+                if (fl & 8) != 0
+                    ma = ttf_bes16(b, p)
+                    md = ma
+                    p = p + 2
+                elsif (fl & 64) != 0
+                    ma = ttf_bes16(b, p)
+                    md = ttf_bes16(b, p + 2)
+                    p = p + 4
+                elsif (fl & 128) != 0
+                    ma = ttf_bes16(b, p)
+                    mb = ttf_bes16(b, p + 2)
+                    mc = ttf_bes16(b, p + 4)
+                    md = ttf_bes16(b, p + 6)
+                    p = p + 8
+                na = (ta * ma + tc * mb) / 16384
+                nb = (tb * ma + td * mb) / 16384
+                ncc = (ta * mc + tc * md) / 16384
+                nd = (tb * mc + td * md) / 16384
+                ndx = (ta * dx + tc * dy) / 16384 + tdx
+                ndy = (tb * dx + td * dy) / 16384 + tdy
+                _r = ttf_puntos(h, b, gi, na, nb, ncc, nd, ndx, ndy, prof + 1)
+                if (fl & 32) == 0
+                    seguir = 0
+        0
+    else
+        0
+
+# ---- Rasterizado (font-rs) --------------------------------------------------------
+
+fn ttf_acc_sumar(a: &mut List[Float], i: Int, v: Float) -> Int
+    if i >= 0
+        if i < list_len(a)
+            list_set(a, i, list_get(a, i) + v)
+    0
+
+# Segmento de (x0, y0) a (x1, y1), en píxeles, sobre el acumulador de w × h.
+fn ttf_linea(a: &mut List[Float], w: Int, h: Int, ax: Float, ay: Float, bx: Float, by: Float) -> Int
+    if ttf_fabs(ay - by) <= 0.000001
+        return 0
+    dir = 1.0
+    x0 = ax
+    y0 = ay
+    x1 = bx
+    y1 = by
+    if ay > by
+        dir = -1.0
+        x0 = bx
+        y0 = by
+        x1 = ax
+        y1 = ay
+    dxdy = (x1 - x0) / (y1 - y0)
+    x = x0
+    yi = 0
+    if y0 < 0.0
+        x = x - y0 * dxdy
+    else
+        yi = ttf_floor(y0)
+    yf = min(h, ttf_ceil(y1))
+    while yi < yf
+        ini = yi * w
+        dy = ttf_fmin(int_to_float(yi + 1), y1) - ttf_fmax(int_to_float(yi), y0)
+        xn = x + dxdy * dy
+        d = dy * dir
+        xa = x
+        xb = xn
+        if xn < x
+            xa = xn
+            xb = x
+        x0i = ttf_floor(xa)
+        x0f = int_to_float(x0i)
+        x1i = ttf_ceil(xb)
+        if x1i <= x0i + 1
+            xmf = 0.5 * (x + xn) - x0f
+            _p = ttf_acc_sumar(a, ini + x0i, d - d * xmf)
+            _q = ttf_acc_sumar(a, ini + x0i + 1, d * xmf)
+        else
+            s = 1.0 / (xb - xa)
+            fr0 = xa - x0f
+            a0 = 0.5 * s * (1.0 - fr0) * (1.0 - fr0)
+            fr1 = xb - int_to_float(x1i) + 1.0
+            am = 0.5 * s * fr1 * fr1
+            _r = ttf_acc_sumar(a, ini + x0i, d * a0)
+            if x1i == x0i + 2
+                _t = ttf_acc_sumar(a, ini + x0i + 1, d * (1.0 - a0 - am))
+            else
+                a1 = s * (1.5 - fr0)
+                _u = ttf_acc_sumar(a, ini + x0i + 1, d * (a1 - a0))
+                xi = x0i + 2
+                while xi < x1i - 1
+                    _v = ttf_acc_sumar(a, ini + xi, d * s)
+                    xi = xi + 1
+                a2 = a1 + int_to_float(x1i - x0i - 3) * s
+                _w = ttf_acc_sumar(a, ini + x1i - 1, d * (1.0 - a2 - am))
+            _z = ttf_acc_sumar(a, ini + x1i, d * am)
+        x = xn
+        yi = yi + 1
+    0
+
+# Curva cuadrática aplanada: tantos segmentos como pida su curvatura (error < 1/16 px).
+fn ttf_cuad(a: &mut List[Float], w: Int, h: Int, x0: Float, y0: Float, cx: Float, cy: Float, x1: Float, y1: Float) -> Int
+    dev = ttf_fabs(x0 - 2.0 * cx + x1) + ttf_fabs(y0 - 2.0 * cy + y1)
+    n = 1 + ttf_isqrt(float_to_int(dev * 4.0))
+    if n > 32
+        n = 32
+    px = x0
+    py = y0
+    i = 1
+    nf = int_to_float(n)
+    while i <= n
+        t = int_to_float(i) / nf
+        u = 1.0 - t
+        qx = u * u * x0 + 2.0 * u * t * cx + t * t * x1
+        qy = u * u * y0 + 2.0 * u * t * cy + t * t * y1
+        _l = ttf_linea(a, w, h, px, py, qx, qy)
+        px = qx
+        py = qy
+        i = i + 1
+    0
+
+# X de un punto en el lienzo: recortada a [0, w) (el área a la izquierda sigue contando).
+fn ttf_cx(v: Float, w: Int) -> Float
+    lim = int_to_float(w) - 0.0001
+    if v < 0.0
+        0.0
+    elsif v > lim
+        lim
+    else
+        v
+
+# Rasteriza `gid` en un mapa de cobertura w × h (bytes en `out`, desde `oo`). El punto
+# (fx, fy) de la fuente cae en (ox + fx·sx, oy − fy·sy) píxeles.
+fn ttf_rasterizar(h: Int, gid: Int, w: Int, alto: Int, ox: Float, oy: Float, sx: Float, sy: Float, out: &mut Bytes, oo: Int) -> Int ! alloc
+    fp = ttf_get(h, ttf_o_ptr())
+    b = bytes_view_mem(fp, ttf_get(h, ttf_o_len()))
+    _n = ttf_set(h, ttf_o_npts(), 0)
+    _e = ttf_set(h, ttf_o_nends(), 0)
+    _p = ttf_puntos(h, &b, gid, 16384, 0, 0, 16384, 0, 0, 0)
+    npts = ttf_get(h, ttf_o_npts())
+    nends = ttf_get(h, ttf_o_nends())
+    pv = bytes_view_mem(ttf_get(h, ttf_o_pts()), ttf_get(h, ttf_o_pts_cap()) * 24)
+    ev = bytes_view_mem(ttf_get(h, ttf_o_ends()), ttf_get(h, ttf_o_ends_cap()) * 8)
+    a = list_new[Float]()
+    k = 0
+    while k < w * alto + 4
+        list_push(&mut a, 0.0)
+        k = k + 1
+    c = 0
+    ini = 0
+    while c < nends
+        fin = bytes_get_i64(&ev, c * 8)
+        if fin >= npts
+            fin = npts - 1
+        if fin - ini >= 1
+            # Punto de arranque: el primero si está sobre la curva, si no el último, si no
+            # el medio de los dos.
+            sxi = 0.0
+            syi = 0.0
+            desde = ini
+            hasta = fin
+            on0 = bytes_get_i64(&pv, ini * 24 + 16)
+            onf = bytes_get_i64(&pv, fin * 24 + 16)
+            x0p = ttf_cx(ox + int_to_float(bytes_get_i64(&pv, ini * 24)) * sx, w)
+            y0p = oy - int_to_float(bytes_get_i64(&pv, ini * 24 + 8)) * sy
+            xfp = ttf_cx(ox + int_to_float(bytes_get_i64(&pv, fin * 24)) * sx, w)
+            yfp = oy - int_to_float(bytes_get_i64(&pv, fin * 24 + 8)) * sy
+            if on0 != 0
+                sxi = x0p
+                syi = y0p
+                desde = ini + 1
+            elsif onf != 0
+                sxi = xfp
+                syi = yfp
+                hasta = fin - 1
+            else
+                sxi = 0.5 * (x0p + xfp)
+                syi = 0.5 * (y0p + yfp)
+            curx = sxi
+            cury = syi
+            hayc = 0
+            ctx = 0.0
+            cty = 0.0
+            i = desde
+            while i <= hasta
+                o = i * 24
+                qx = ttf_cx(ox + int_to_float(bytes_get_i64(&pv, o)) * sx, w)
+                qy = oy - int_to_float(bytes_get_i64(&pv, o + 8)) * sy
+                if bytes_get_i64(&pv, o + 16) != 0
+                    if hayc != 0
+                        _q = ttf_cuad(&mut a, w, alto, curx, cury, ctx, cty, qx, qy)
+                    else
+                        _l = ttf_linea(&mut a, w, alto, curx, cury, qx, qy)
+                    curx = qx
+                    cury = qy
+                    hayc = 0
+                else
+                    if hayc != 0
+                        mx = 0.5 * (ctx + qx)
+                        my = 0.5 * (cty + qy)
+                        _m = ttf_cuad(&mut a, w, alto, curx, cury, ctx, cty, mx, my)
+                        curx = mx
+                        cury = my
+                    ctx = qx
+                    cty = qy
+                    hayc = 1
+                i = i + 1
+            if hayc != 0
+                _f = ttf_cuad(&mut a, w, alto, curx, cury, ctx, cty, sxi, syi)
+            else
+                _g = ttf_linea(&mut a, w, alto, curx, cury, sxi, syi)
+        ini = fin + 1
+        c = c + 1
+    # Acumulado: la cobertura de cada píxel es la suma de las áreas a su izquierda.
+    acc = 0.0
+    k = 0
+    while k < w * alto
+        acc = acc + list_get(&a, k)
+        v = ttf_fabs(acc)
+        cv = float_to_int(v * 255.0 + 0.5)
+        if cv > 255
+            cv = 255
+        # Un poco más de peso a los bordes: mezclar en sRGB adelgaza los trazos finos.
+        cv = cv + cv * (255 - cv) / 765
+        bytes_set_u8(out, oo + k, cv)
+        k = k + 1
+    _r = ttf_set(h, ttf_o_rasterizados(), ttf_get(h, ttf_o_rasterizados()) + 1)
+    0
+
+# ---- Arena y entradas de la caché ------------------------------------------------
+
+fn ttf_reservar(h: Int, n: Int) -> Int ! alloc
+    usado = ttf_get(h, ttf_o_usado())
+    cap = ttf_get(h, ttf_o_cap())
+    ar = ttf_get(h, ttf_o_arena())
+    if ar == 0
+        ar = -1
+    if ar < 0
+        cap = 0
+    if usado + n > cap
+        tam = max(65536, n)
+        ar = ttf_bloque(tam)
+        _a = ttf_set(h, ttf_o_arena(), ar)
+        _c = ttf_set(h, ttf_o_cap(), tam)
+        usado = 0
+    _u = ttf_set(h, ttf_o_usado(), usado + n)
+    ar + usado
+
+fn ttf_ent(h: Int) -> Bytes ! alloc
+    bytes_view_mem(ttf_get(h, ttf_o_tabla()), ttf_get(h, ttf_o_nglifos()) * ttf_entrada())
+
+# Glifo `gid` en la caché (lo rasteriza si hace falta). `cp` decide si es un dibujo de caja.
+fn ttf_asegurar(h: Int, gid: Int, cp: Int) -> Int ! alloc
+    ng = ttf_get(h, ttf_o_nglifos())
+    if gid < 0
+        return 0
+    if gid >= ng
+        return 0
+    t = ttf_ent(h)
+    e = gid * ttf_entrada()
+    if bytes_get_i64(&t, e) != 0
+        return 0
+    esc = ttf_escala_f(h)
+    if ttf_get(h, ttf_o_modo()) == ttf_modo_celda()
+        hb = bytes_view_mem(h, ttf_h_len())
+        gw = bytes_get_u32(hb, 20)
+        gh = bytes_get_u32(hb, 16)
+        sy = esc
+        oy = int_to_float(ttf_get(h, ttf_o_base())) / 256.0
+        if cp >= 9472
+            if cp <= 9631
+                # Cajas y bloques: de borde a borde de la celda, para que enlacen.
+                sy = int_to_float(ttf_get(h, ttf_o_caja_escala())) / int_to_float(ttf_escala_uno())
+                oy = int_to_float(ttf_get(h, ttf_o_caja_base())) / 256.0
+        adv = int_to_float(ttf_avance_gid_u(h, gid)) * esc
+        ox = (int_to_float(gw) - adv) * 0.5
+        if cp >= 9472
+            if cp <= 9631
+                ox = 0.0
+        p = ttf_reservar(h, gw * gh)
+        out = bytes_view_mem(p, gw * gh)
+        _r = ttf_rasterizar(h, gid, gw, gh, ox, oy, esc, sy, &mut out, 0)
+        bytes_set_i64(&mut t, e, p)
+        bytes_set_u32(&mut t, e + 8, gw)
+        bytes_set_u32(&mut t, e + 12, gh)
+        bytes_set_u32(&mut t, e + 16, 32768)
+        bytes_set_u32(&mut t, e + 20, 32768)
+    else
+        # Caja del glifo (cabecera de glyf) escalada, con un píxel de margen.
+        fp = ttf_get(h, ttf_o_ptr())
+        b = bytes_view_mem(fp, ttf_get(h, ttf_o_len()))
+        g0 = ttf_loca(&b, ttf_get(h, ttf_o_loca()), ttf_get(h, ttf_o_locfmt()), gid)
+        g1 = ttf_loca(&b, ttf_get(h, ttf_o_loca()), ttf_get(h, ttf_o_locfmt()), gid + 1)
+        if g1 <= g0
+            bytes_set_i64(&mut t, e, -1)
+            return 0
+        g = ttf_get(h, ttf_o_glyf()) + g0
+        bx0 = ttf_floor(int_to_float(ttf_bes16(&b, g + 2)) * esc) - 1
+        by0 = ttf_floor(int_to_float(ttf_bes16(&b, g + 4)) * esc) - 1
+        bx1 = ttf_ceil(int_to_float(ttf_bes16(&b, g + 6)) * esc) + 1
+        by1 = ttf_ceil(int_to_float(ttf_bes16(&b, g + 8)) * esc) + 1
+        w = bx1 - bx0
+        hh = by1 - by0
+        if w <= 0
+            bytes_set_i64(&mut t, e, -1)
+            return 0
+        if hh <= 0
+            bytes_set_i64(&mut t, e, -1)
+            return 0
+        if w * hh > 1048576
+            bytes_set_i64(&mut t, e, -1)
+            return 0
+        p = ttf_reservar(h, w * hh)
+        out = bytes_view_mem(p, w * hh)
+        _r = ttf_rasterizar(h, gid, w, hh, int_to_float(0 - bx0), int_to_float(by1), esc, esc, &mut out, 0)
+        bytes_set_i64(&mut t, e, p)
+        bytes_set_u32(&mut t, e + 8, w)
+        bytes_set_u32(&mut t, e + 12, hh)
+        bytes_set_u32(&mut t, e + 16, 32768 + bx0)
+        bytes_set_u32(&mut t, e + 20, 32768 - by1)
+    0
+
+fn ttf_rasterizados(h: Int) -> Int ! alloc
+    ttf_get(h, ttf_o_rasterizados())
+
+# ---- Dibujo ------------------------------------------------------------------------
+
+# Mezcla un mapa de cobertura w × h en (x, y): con `bg` >= 0 la tinta se mezcla con ese
+# color; con `bg` < 0, con lo que ya hay en el píxel (texto sobre degradados o imágenes).
+fn ttf_pegar(bm: Int, w: Int, h: Int, pix_ptr: Int, pix_len: Int, stride: Int, bpp: Int, fmt: Int, x: Int, y: Int, fg: Int, bg: Int) -> Int ! alloc
+    if bpp != 4
+        return 0
+    if bm <= 0
+        return 0
+    alto = pix_len / (stride * bpp)
+    src = bytes_view_mem(bm, w * h)
+    pix = bytes_view_mem(pix_ptr, pix_len)
+    tinta = pixel_u32_le(fg, fmt)
+    x0 = max(0, x)
+    x1 = min(stride, x + w)
+    y0 = max(0, y)
+    y1 = min(alto, y + h)
+    py = y0
+    while py < y1
+        fila = (py - y) * w - x
+        px = x0
+        while px < x1
+            a = bytes_get_u8(&src, fila + px)
+            if a != 0
+                o = pix_idx(stride, bpp, px, py)
+                if a >= 255
+                    bytes_set_u32(&mut pix, o, tinta)
+                else
+                    fondo = bg
+                    if fondo < 0
+                        fondo = pixel_leer(pix_ptr, pix_len, stride, bpp, fmt, px, py)
+                    bytes_set_u32(&mut pix, o, pixel_u32_le(mezclar_rgb(fg, fondo, a), fmt))
+            px = px + 1
+        py = py + 1
+    0
+
+# Una celda: fondo `bg` y el glifo de `cp` encima (como fuente_dibujar con una .psf2).
+fn ttf_celda(h: Int, pix_ptr: Int, pix_len: Int, stride: Int, bpp: Int, fmt: Int, cp: Int, fg: Int, bg: Int, cx: Int, cy: Int) -> Int ! alloc
+    hb = bytes_view_mem(h, ttf_h_len())
+    gw = bytes_get_u32(hb, 20)
+    gh = bytes_get_u32(hb, 16)
+    alto = pix_len / (stride * bpp)
+    _f = rellenar_rect(pix_ptr, pix_len, stride, alto, stride, bpp, fmt, cx, cy, cx + gw, cy + gh, bg)
+    if cp > 32
+        g = ttf_gid(h, cp)
+        if g == 0
+            g = ttf_gid(h, 63)
+        _a = ttf_asegurar(h, g, cp)
+        t = ttf_ent(h)
+        bm = bytes_get_i64(&t, g * ttf_entrada())
+        if bm > 0
+            _p = ttf_pegar(bm, gw, gh, pix_ptr, pix_len, stride, bpp, fmt, cx, cy, fg, bg)
+    0
+
+# Avance de `cp` tras `prev` (kerning incluido), en 1/256 de píxel. prev < 0: sin anterior.
+fn ttf_avance(h: Int, prev: Int, cp: Int) -> Int ! alloc
+    fp = ttf_get(h, ttf_o_ptr())
+    b = bytes_view_mem(fp, ttf_get(h, ttf_o_len()))
+    g = ttf_gid(h, cp)
+    esc = ttf_get(h, ttf_o_escala())
+    adv = ttf_avance_u(&b, ttf_get(h, ttf_o_hmtx()), ttf_get(h, ttf_o_nhm()), g)
+    if prev >= 0
+        adv = adv + ttf_kern_u(&b, ttf_get(h, ttf_o_kern()), ttf_get(h, ttf_o_kern_n()), ttf_gid(h, prev), g)
+    adv * esc * 256 / ttf_escala_uno()
+
+# Dibuja el glifo de `cp` con la pluma en `pen` (1/256 px) y la base en `base_y`.
+fn ttf_glifo(h: Int, cp: Int, pix_ptr: Int, pix_len: Int, stride: Int, bpp: Int, fmt: Int, pen: Int, base_y: Int, fg: Int, bg: Int) -> Int ! alloc
+    g = ttf_gid(h, cp)
+    _a = ttf_asegurar(h, g, cp)
+    t = ttf_ent(h)
+    e = g * ttf_entrada()
+    bm = bytes_get_i64(&t, e)
+    if bm > 0
+        w = bytes_get_u32(&t, e + 8)
+        hh = bytes_get_u32(&t, e + 12)
+        xo = bytes_get_u32(&t, e + 16) - 32768
+        yo = bytes_get_u32(&t, e + 20) - 32768
+        _p = ttf_pegar(bm, w, hh, pix_ptr, pix_len, stride, bpp, fmt, (pen + 128) / 256 + xo, base_y + yo, fg, bg)
+    0
+
+# Ancho en píxeles del texto UTF-8 `s`.
+fn ttf_texto_ancho(h: Int, s: &String) -> Int ! alloc
+    n = str_len(s)
+    st = utf8_inicio()
+    prev = -1
+    pen = 0
+    j = 0
+    while j < n
+        st = utf8_feed(st, str_char(s, j))
+        if utf8_pendiente(st) == 0
+            pen = pen + ttf_avance(h, prev, st)
+            prev = st
+            st = utf8_inicio()
+        j = j + 1
+    ancho = (pen + 255) / 256
+    ancho
+
+# Dibuja el texto UTF-8 `s` con la línea arriba en `y` (la base va a `ttf_asc_px` debajo).
+# Corta en `max_w` píxeles (0 = sin límite) poniendo «…» al final. Devuelve el ancho usado.
+fn ttf_texto(h: Int, s: &String, pix_ptr: Int, pix_len: Int, stride: Int, bpp: Int, fmt: Int, x: Int, y: Int, max_w: Int, fg: Int, bg: Int) -> Int ! alloc
+    n = str_len(s)
+    base_y = y + ttf_asc_px(h)
+    lim = 0
+    if max_w > 0
+        lim = max_w * 256 - ttf_avance(h, -1, 8230)
+    total = ttf_texto_ancho(h, s)
+    cortar = 0
+    if max_w > 0
+        if total > max_w
+            cortar = 1
+    st = utf8_inicio()
+    prev = -1
+    pen = x * 256
+    j = 0
+    fin = 0
+    while j < n
+        if fin == 0
+            st = utf8_feed(st, str_char(s, j))
+            if utf8_pendiente(st) == 0
+                av = ttf_avance(h, prev, st)
+                if cortar != 0
+                    if pen - x * 256 + av > lim
+                        fin = 1
+                if fin == 0
+                    if prev >= 0
+                        pen = pen + ttf_avance(h, prev, st) - ttf_avance(h, -1, st)
+                    _g = ttf_glifo(h, st, pix_ptr, pix_len, stride, bpp, fmt, pen, base_y, fg, bg)
+                    pen = pen + ttf_avance(h, -1, st)
+                    prev = st
+                st = utf8_inicio()
+        j = j + 1
+    if fin != 0
+        _e = ttf_glifo(h, 8230, pix_ptr, pix_len, stride, bpp, fmt, pen, base_y, fg, bg)
+        pen = pen + ttf_avance(h, -1, 8230)
+    usado = (pen - x * 256 + 255) / 256
+    usado

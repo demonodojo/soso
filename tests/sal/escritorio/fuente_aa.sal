@@ -1,0 +1,46 @@
+import "../../../user/sal/escritorio/fuente.sal"
+
+# Glifo de cobertura (flags bit 1): tinta plena, mezcla a medias y fondo.
+fn main() -> Int ! alloc
+    own = bytes_new(4096)
+    buf = bytes_ptr(own)
+    b = bytes_view_mem(buf, 4096)
+    bytes_set_u32(b, 0, psf2_magic())
+    bytes_set_u32(b, 8, 32)
+    bytes_set_u32(b, 12, 2)
+    bytes_set_u32(b, 16, 4)
+    bytes_set_u32(b, 20, 4)
+    bytes_set_u32(b, 24, 16)
+    bytes_set_u32(b, 28, 128)
+    goff = 32 + 65 * 16
+    bytes_set_u8(b, goff, 255)
+    bytes_set_u8(b, goff + 1, 128)
+    w = 8
+    h = 8
+    len = w * h * 4
+    p_own = bytes_new(len)
+    p = bytes_ptr(p_own)
+    blanco = color_rgb(255, 255, 255)
+    negro = color_rgb(0, 0, 0)
+    _f = rellenar_rect(p, len, w, h, w, 4, 0, 0, 0, w, h, color_rgb(9, 9, 9))
+    _d = fuente_dibujar(buf, 4096, p, len, w, 4, 0, 65, blanco, negro, 2, 2)
+    # Pegado al borde derecho: el glifo se recorta sin salirse del búfer.
+    _e = fuente_dibujar(buf, 4096, p, len, w, 4, 0, 65, blanco, negro, 6, 6)
+    if psf2_cobertura(buf, 4096) == 0
+        1
+    elsif psf2_glifo_byte(buf, 4096, 65, 0, 0) != 1
+        2
+    elsif psf2_glifo_byte(buf, 4096, 65, 0, 2) != 0
+        3
+    elsif pixel_leer(p, len, w, 4, 0, 2, 2) != blanco
+        4
+    elsif pixel_leer(p, len, w, 4, 0, 3, 2) != color_rgb(128, 128, 128)
+        5
+    elsif pixel_leer(p, len, w, 4, 0, 4, 2) != negro
+        6
+    elsif pixel_leer(p, len, w, 4, 0, 1, 1) != color_rgb(9, 9, 9)
+        7
+    elsif pixel_leer(p, len, w, 4, 0, 6, 6) != blanco
+        8
+    else
+        0

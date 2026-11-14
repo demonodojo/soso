@@ -541,11 +541,10 @@ fn main() -> Int ! io, alloc
                     else
                         _pr = st_path_set_str(st, d"/")
                     _ld = files_reload(st)
-                    psf_s = read_file(fuente_ruta(nivel))
-                    psf_n = str_len(psf_s)
-                    psf_buf = bytes_new(psf_n + 1)
-                    str_bytes_copy(psf_buf, 0, psf_s)
-                    psf = bytes_ptr(psf_buf)
+                    # TrueType en celdas (o la .psf2 de reserva), como el terminal del WM.
+                    fu = Fuentes.new()
+                    psf = fu.psf(nivel)
+                    psf_n = fu.psf_len(nivel)
                     _loop = files_bucle(sock, st, psf, psf_n, ptr, slen, cw, ch, stride, bpp, fmt)
                     _x = close_fd(sock)
                     0

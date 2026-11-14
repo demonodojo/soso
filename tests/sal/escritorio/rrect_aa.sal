@@ -1,0 +1,41 @@
+import "../../../user/sal/escritorio/escena.sal"
+
+# Esquinas suavizadas: fuera del arco, fondo; en el arco, mezcla; dentro, color pleno.
+fn main() -> Int ! alloc
+    w = 32
+    h = 32
+    len = w * h * 4
+    own = bytes_new(len)
+    a = bytes_ptr(own)
+    negro = color_rgb(0, 0, 0)
+    blanco = color_rgb(255, 255, 255)
+    _f = rellenar_rect(a, len, w, h, w, 4, 0, 0, 0, w, h, negro)
+    cap = 2
+    e = esc_nueva(cap)
+    n = esc_rrect(e, cap, 0, 0, 0, 20, 20, esc_radios(6, 6, 6, 6), blanco, 255, 0, 0)
+    _x = esc_cpu_ejecutar(a, len, w, h, w, 4, 0, e, cap, n)
+    medio = pixel_leer(a, len, w, 4, 0, 1, 1)
+    if pixel_leer(a, len, w, 4, 0, 0, 0) != negro
+        1
+    elsif medio == negro
+        2
+    elsif medio == blanco
+        3
+    elsif pixel_leer(a, len, w, 4, 0, 5, 0) != blanco
+        # A media altura del arco, pegado al borde de arriba: ya cubierto del todo.
+        4
+    elsif pixel_leer(a, len, w, 4, 0, 10, 10) != blanco
+        5
+    elsif pixel_leer(a, len, w, 4, 0, 20, 10) != negro
+        6
+    elsif rr_cov16(1, 1, 0, 0, 20, 20, 6, 6, 6, 6) != 3
+        # Centro del píxel a 6,36 px del centro del arco (6,6): 3/16.
+        7
+    elsif rr_cov16(18, 18, 0, 0, 20, 20, 6, 6, 6, 6) != rr_cov16(1, 1, 0, 0, 20, 20, 6, 6, 6, 6)
+        # Las cuatro esquinas son simétricas.
+        8
+    elsif medio != color_rgb(47, 47, 47)
+        # 255 * 3 / 16 = 47 de alfa sobre negro.
+        9
+    else
+        0

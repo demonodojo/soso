@@ -42,6 +42,14 @@ fn esc_k_anillo() -> Int
 fn esc_k_rejilla() -> Int
     5
 
+# Sombra difusa de una ventana con esquinas redondeadas (B1, sólo backend CPU).
+# Ventana = ix0..iy1, radio de sus esquinas = radios (8 bits bajos); x0..y1 es la
+# caja que ocupa la sombra. borde_w = extensión del difuminado (px), flags =
+# desplazamiento vertical (px), color0 + alfa = color e intensidad máxima. No
+# pinta lo que la ventana tapa: el marco va encima y es opaco.
+fn esc_k_sombra() -> Int
+    6
+
 fn esc_celda_vacia() -> Int
     4294967295
 
@@ -172,6 +180,20 @@ fn esc_anillo(e: Int, cap: Int, n: Int, x0: Int, y0: Int, x1: Int, y1: Int, ix0:
         _i3 = esc_set(e, cap, n, esc_o_iy1(), iy1)
     m
 
+fn esc_sombra(e: Int, cap: Int, n: Int, wx0: Int, wy0: Int, wx1: Int, wy1: Int, radio: Int, dy: Int, ext: Int, rgb: Int, alfa: Int) -> Int ! alloc
+    m = esc_abrir(e, cap, n, esc_k_sombra(), wx0 - ext, wy0 + dy - ext, wx1 + ext, wy1 + dy + ext)
+    if m > n
+        _c = esc_set(e, cap, n, esc_o_c0(), rgb)
+        _a = esc_set(e, cap, n, esc_o_alfa(), alfa)
+        _r = esc_set(e, cap, n, esc_o_radios(), radio)
+        _w = esc_set(e, cap, n, esc_o_borde_w(), ext)
+        _f = esc_set(e, cap, n, esc_o_flags(), dy)
+        _i0 = esc_set(e, cap, n, esc_o_ix0(), wx0)
+        _i1 = esc_set(e, cap, n, esc_o_iy0(), wy0)
+        _i2 = esc_set(e, cap, n, esc_o_ix1(), wx1)
+        _i3 = esc_set(e, cap, n, esc_o_iy1(), wy1)
+    m
+
 # ---- Backend CPU -------------------------------------------------------------
 
 fn esc_cpu_relleno(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, rgb: Int, alfa: Int) -> Int ! alloc
@@ -184,47 +206,11 @@ fn esc_cpu_relleno(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: 
 
 # Radio efectivo de una esquina para un rectángulo de w × h.
 fn esc_radio_ok(r: Int, w: Int, h: Int) -> Int
-    min(r, min(w / 2, h / 2))
+    rr_radio_ok(r, w, h)
 
-# Píxeles que la fila `d` (contada desde arriba) pierde por la izquierda y por la derecha.
-fn esc_inset_izq(d: Int, h: Int, rtl: Int, rbl: Int) -> Int
-    a = 0
-    if d < rtl
-        a = rr_inset(rtl, d)
-    b = 0
-    if h - 1 - d < rbl
-        b = rr_inset(rbl, h - 1 - d)
-    max(a, b)
-
-fn esc_inset_der(d: Int, h: Int, rtr: Int, rbr: Int) -> Int
-    a = 0
-    if d < rtr
-        a = rr_inset(rtr, d)
-    b = 0
-    if h - 1 - d < rbr
-        b = rr_inset(rbr, h - 1 - d)
-    max(a, b)
-
-# Rectángulo con radios por esquina, fila a fila.
+# Rectángulo con radios por esquina y bordes de esquina suavizados (superficie.sal).
 fn esc_cpu_rrect_relleno(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, rtl: Int, rtr: Int, rbr: Int, rbl: Int, rgb: Int, alfa: Int) -> Int ! alloc
-    w = x1 - x0
-    h = y1 - y0
-    if w <= 0
-        0
-    elsif h <= 0
-        0
-    else
-        a = esc_radio_ok(rtl, w, h)
-        b = esc_radio_ok(rtr, w, h)
-        c = esc_radio_ok(rbr, w, h)
-        d = esc_radio_ok(rbl, w, h)
-        y = 0
-        while y < h
-            il = esc_inset_izq(y, h, a, d)
-            ir = esc_inset_der(y, h, b, c)
-            _r = esc_cpu_relleno(ptr, len, ancho, alto, stride, bpp, fmt, x0 + il, y0 + y, x1 - ir, y0 + y + 1, rgb, alfa)
-            y = y + 1
-        0
+    rellenar_rrect4(ptr, len, ancho, alto, stride, bpp, fmt, x0, y0, x1, y1, rtl, rtr, rbr, rbl, rgb, alfa)
 
 fn esc_cpu_rrect(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: Int, fmt: Int, e: Int, cap: Int, n: Int) -> Int ! alloc
     x0 = esc_get(e, cap, n, esc_o_x0())
@@ -248,8 +234,18 @@ fn esc_cpu_rrect(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: In
     0
 
 
-# Una celda de la rejilla: fondo opaco y, si hay glifo, los píxeles de tinta (como fuente_dibujar).
-fn esc_cpu_celda(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: Int, fmt: Int, cx: Int, cy: Int, gw: Int, gh: Int, psf: Int, psf_len: Int, hdr: Int, bpg: Int, glifo: Int, fg: Int, bg: Int) -> Int ! alloc
+# ¿La fuente de la rejilla trae glifos de cobertura de 8 bits? (flags bit 1, como fuente.sal)
+fn esc_psf_cobertura(psf: Int, psf_len: Int) -> Int ! alloc
+    if psf_len < 16
+        0
+    elsif (bytes_get_u32(bytes_view_mem(psf, psf_len), 12) & 2) != 0
+        1
+    else
+        0
+
+# Una celda de la rejilla: fondo opaco y, si hay glifo, los píxeles de tinta (como
+# fuente_dibujar). Con `cob` != 0 cada byte del glifo mezcla tinta y fondo.
+fn esc_cpu_celda(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: Int, fmt: Int, cx: Int, cy: Int, gw: Int, gh: Int, psf: Int, psf_len: Int, hdr: Int, bpg: Int, glifo: Int, fg: Int, bg: Int, cob: Int) -> Int ! alloc
     _f = rellenar_rect(ptr, len, ancho, alto, stride, bpp, fmt, cx, cy, cx + gw, cy + gh, bg)
     if glifo >= 0
         f = bytes_view_mem(psf, psf_len)
@@ -265,12 +261,99 @@ fn esc_cpu_celda(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: In
                         px = cx + col
                         if px >= 0
                             if px < ancho
-                                v = bytes_get_u8(f, off + row * bpr + col / 8)
-                                if ((v >> (7 - (col & 7))) & 1) != 0
-                                    _p = pixel_escribir(ptr, len, stride, bpp, fmt, px, py, fg)
+                                if cob != 0
+                                    v = bytes_get_u8(f, off + row * gw + col)
+                                    if v >= 255
+                                        _q = pixel_escribir(ptr, len, stride, bpp, fmt, px, py, fg)
+                                    elsif v > 0
+                                        _m = pixel_escribir(ptr, len, stride, bpp, fmt, px, py, mezclar_rgb(fg, bg, v))
+                                else
+                                    v = bytes_get_u8(f, off + row * bpr + col / 8)
+                                    if ((v >> (7 - (col & 7))) & 1) != 0
+                                        _p = pixel_escribir(ptr, len, stride, bpp, fmt, px, py, fg)
                         col = col + 1
             row = row + 1
     0
+
+# Distancia con signo, en cuartos de píxel, del centro del píxel (px, py) al
+# rectángulo redondeado (x0..x1, y0..y1, radio r): negativa dentro.
+fn esc_dist_rrect4(px: Int, py: Int, x0: Int, y0: Int, x1: Int, y1: Int, r: Int) -> Int
+    p = px * 4 + 2
+    q = py * 4 + 2
+    r4 = r * 4
+    ax = x0 * 4 + r4
+    bx = x1 * 4 - r4
+    ay = y0 * 4 + r4
+    by = y1 * 4 - r4
+    dx = max(max(ax - p, p - bx), 0)
+    dy = max(max(ay - q, q - by), 0)
+    if dx > 0
+        if dy > 0
+            return rr_isqrt(dx * dx + dy * dy) - r4
+    if dx > 0
+        dx - r4
+    elsif dy > 0
+        dy - r4
+    else
+        # Dentro de la cruz central: la menor distancia a un lado, negativa.
+        0 - min(min(p - x0 * 4, x1 * 4 - p), min(q - y0 * 4, y1 * 4 - q))
+
+# Alfa de la sombra a distancia `d4` (cuartos de px) del borde de la forma: plena a
+# `ext/3` por dentro, nula a `ext` por fuera; en medio, smoothstep.
+fn esc_sombra_alfa(d4: Int, ext: Int, alfa: Int) -> Int
+    dentro = ext * 4 / 3
+    span = ext * 4 + dentro
+    u = span - (d4 + dentro)
+    if u <= 0
+        0
+    elsif u >= span
+        alfa
+    else
+        alfa * u * u * (3 * span - 2 * u) / (span * span * span)
+
+fn esc_cpu_sombra(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: Int, fmt: Int, e: Int, cap: Int, n: Int) -> Int ! alloc
+    bx0 = max(0, esc_get(e, cap, n, esc_o_x0()))
+    by0 = max(0, esc_get(e, cap, n, esc_o_y0()))
+    bx1 = min(ancho, esc_get(e, cap, n, esc_o_x1()))
+    by1 = min(alto, esc_get(e, cap, n, esc_o_y1()))
+    wx0 = esc_get(e, cap, n, esc_o_ix0())
+    wy0 = esc_get(e, cap, n, esc_o_iy0())
+    wx1 = esc_get(e, cap, n, esc_o_ix1())
+    wy1 = esc_get(e, cap, n, esc_o_iy1())
+    ext = esc_get(e, cap, n, esc_o_borde_w())
+    dy = esc_get(e, cap, n, esc_o_flags())
+    rgb = esc_get(e, cap, n, esc_o_c0())
+    alfa = esc_get(e, cap, n, esc_o_alfa())
+    h = wy1 - wy0
+    r = esc_radio_ok(esc_get(e, cap, n, esc_o_radios()) & 255, wx1 - wx0, h)
+    if ext <= 0
+        0
+    elsif bpp != 4
+        0
+    else
+        y = by0
+        while y < by1
+            # Lo que la ventana tapa del todo en esta fila (sus esquinas suavizadas dejan
+            # ver la sombra a través, como en la GPU: cobertura < 16).
+            cx0 = bx1
+            cx1 = bx1
+            if y >= wy0
+                if y < wy1
+                    cx0 = rr_lleno_izq(ptr, len, ancho, alto, stride, bpp, fmt, y, wx0, wy0, wx1, wy1, r, r, r, r, 0, 0, 0)
+                    cx1 = rr_lleno_der(ptr, len, ancho, alto, stride, bpp, fmt, y, wx0, wy0, wx1, wy1, r, r, r, r, 0, 0, 0)
+            x = bx0
+            while x < bx1
+                if x >= cx0
+                    if x < cx1
+                        x = cx1
+                if x < bx1
+                    a = esc_sombra_alfa(esc_dist_rrect4(x, y, wx0, wy0 + dy, wx1, wy1 + dy, r), ext, alfa)
+                    if a > 0
+                        fondo = pixel_leer(ptr, len, stride, bpp, fmt, x, y)
+                        _p = pixel_escribir(ptr, len, stride, bpp, fmt, x, y, mezclar_rgb(rgb, fondo, a))
+                x = x + 1
+            y = y + 1
+        0
 
 fn esc_cpu_rejilla(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: Int, fmt: Int, e: Int, cap: Int, n: Int, celdas: Int, psf: Int, psf_len: Int) -> Int ! alloc
     x0 = esc_get(e, cap, n, esc_o_x0())
@@ -283,6 +366,7 @@ fn esc_cpu_rejilla(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: 
     hdr = esc_get(e, cap, n, esc_o_borde_c())
     c0 = esc_get(e, cap, n, esc_o_flags())
     cb = bytes_view_mem(celdas, (c0 + cols * filas) * 12)
+    cob = esc_psf_cobertura(psf, psf_len)
     r = 0
     while r < filas
         c = 0
@@ -292,7 +376,7 @@ fn esc_cpu_rejilla(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: 
             gi = -1
             if g != esc_celda_vacia()
                 gi = g
-            _c = esc_cpu_celda(ptr, len, ancho, alto, stride, bpp, fmt, x0 + c * gw, y0 + r * gh, gw, gh, psf, psf_len, hdr, bpg, gi, bytes_get_u32(cb, k + 4), bytes_get_u32(cb, k + 8))
+            _c = esc_cpu_celda(ptr, len, ancho, alto, stride, bpp, fmt, x0 + c * gw, y0 + r * gh, gw, gh, psf, psf_len, hdr, bpg, gi, bytes_get_u32(cb, k + 4), bytes_get_u32(cb, k + 8), cob)
             c = c + 1
         r = r + 1
     0
@@ -330,6 +414,8 @@ fn esc_cpu_ejecutar_r(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bp
             _r = esc_cpu_rrect(ptr, len, ancho, alto, stride, bpp, fmt, e, cap, i)
         if k == esc_k_rejilla()
             _j = esc_cpu_rejilla(ptr, len, ancho, alto, stride, bpp, fmt, e, cap, i, celdas, psf, psf_len)
+        if k == esc_k_sombra()
+            _so = esc_cpu_sombra(ptr, len, ancho, alto, stride, bpp, fmt, e, cap, i)
         if k == esc_k_anillo()
             al = esc_get(e, cap, i, esc_o_alfa())
             c0 = esc_get(e, cap, i, esc_o_c0())

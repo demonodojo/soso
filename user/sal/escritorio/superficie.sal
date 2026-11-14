@@ -182,50 +182,148 @@ fn rect_esquina_redonda_ok(x: Int, y: Int, x0: Int, y0: Int, x1: Int, y1: Int, r
                         ok = 0
         ok
 
-# Píxeles que se saltan por lado en la fila `d` (0 = la del borde) de una esquina de radio `radio`.
-fn rr_inset(radio: Int, d: Int) -> Int
-    k = 0
-    if d < radio
-        dy = radio - d
-        seguir = 1
-        while seguir != 0
-            if k >= radio
-                seguir = 0
-            else
-                dx = radio - k
-                if dx * dx + dy * dy > radio * radio
-                    k = k + 1
-                else
-                    seguir = 0
-    k
-
-# Rectángulo con las esquinas de arriba redondeadas. Por filas: sólo las `radio`
-# filas de la esquina necesitan cálculo; el resto es un único relleno.
-fn rellenar_rect_redondeado(ptr: Int, len: Int, ancho: Int, alto: Int, stride_px: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, radio: Int, rgb: Int) -> Int ! alloc
-    r = min(radio, min((x1 - x0) / 2, y1 - y0))
-    if r <= 0
-        rellenar_rect(ptr, len, ancho, alto, stride_px, bpp, fmt, x0, y0, x1, y1, rgb)
+# Raíz cuadrada entera (por defecto). Basta para distancias de unos cientos de px.
+fn rr_isqrt(v: Int) -> Int
+    if v <= 0
+        0
     else
-        d = 0
-        while d < r
-            k = rr_inset(r, d)
-            _f = rellenar_rect(ptr, len, ancho, alto, stride_px, bpp, fmt, x0 + k, y0 + d, x1 - k, y0 + d + 1, rgb)
-            d = d + 1
-        rellenar_rect(ptr, len, ancho, alto, stride_px, bpp, fmt, x0, y0 + r, x1, y1, rgb)
+        x = v
+        y = (x + 1) / 2
+        while y < x
+            x = y
+            y = (x + v / x) / 2
+        x
+
+# Cobertura (0..16) de un píxel de esquina: (dx16, dy16) va del centro del píxel al
+# centro del arco, en dieciseisavos de píxel. Mitad de cobertura con el centro sobre el arco.
+fn rr_esquina_cov(dx16: Int, dy16: Int, r: Int) -> Int
+    clamp(r * 16 + 8 - rr_isqrt(dx16 * dx16 + dy16 * dy16), 0, 16)
+
+# Cobertura (0..16) del píxel (x, y) por el rectángulo x0..x1 × y0..y1 con radios ya
+# recortados por `rr_radio_ok`. Definición por píxel que comparten la CPU (por tramos)
+# y el kernel de GPU (lxdde/ports/nouveau/gprim.cu): tiene que dar lo mismo en los dos.
+fn rr_cov16(x: Int, y: Int, x0: Int, y0: Int, x1: Int, y1: Int, a: Int, b: Int, c: Int, d: Int) -> Int
+    if x < x0
+        0
+    elsif x >= x1
+        0
+    elsif y < y0
+        0
+    elsif y >= y1
+        0
+    else
+        px = x * 16 + 8
+        py = y * 16 + 8
+        if x - x0 < a
+            if y - y0 < a
+                return rr_esquina_cov((x0 + a) * 16 - px, (y0 + a) * 16 - py, a)
+        if x1 - 1 - x < b
+            if y - y0 < b
+                return rr_esquina_cov(px - (x1 - b) * 16, (y0 + b) * 16 - py, b)
+        if x1 - 1 - x < c
+            if y1 - 1 - y < c
+                return rr_esquina_cov(px - (x1 - c) * 16, py - (y1 - c) * 16, c)
+        if x - x0 < d
+            if y1 - 1 - y < d
+                return rr_esquina_cov((x0 + d) * 16 - px, py - (y1 - d) * 16, d)
+        16
+
+# Un píxel con alfa, recortado a la superficie (misma regla que esc_cpu_relleno).
+fn pixel_alfa(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: Int, fmt: Int, x: Int, y: Int, rgb: Int, alfa: Int) -> Int ! alloc
+    if x < 0
+        0
+    elsif x >= ancho
+        0
+    elsif y < 0
+        0
+    elsif y >= alto
+        0
+    elsif alfa >= 255
+        pixel_escribir(ptr, len, stride, bpp, fmt, x, y, rgb)
+    elsif alfa <= 0
+        0
+    else
+        pixel_escribir(ptr, len, stride, bpp, fmt, x, y, mezclar_rgb(rgb, pixel_leer(ptr, len, stride, bpp, fmt, x, y), alfa))
+
+# Radio de la esquina izquierda (o derecha) que toca la fila `f` de un rectángulo de alto h.
+fn rr_radio_fila(f: Int, h: Int, arriba: Int, abajo: Int) -> Int
+    if f < arriba
+        arriba
+    elsif h - 1 - f < abajo
+        abajo
+    else
+        0
+
+# Primer x (desde x0) que el rectángulo cubre del todo en la fila y; pinta los parciales
+# de la esquina izquierda si `pinta` != 0.
+fn rr_lleno_izq(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: Int, fmt: Int, y: Int, x0: Int, y0: Int, x1: Int, y1: Int, a: Int, b: Int, c: Int, d: Int, rgb: Int, alfa: Int, pinta: Int) -> Int ! alloc
+    rl = rr_radio_fila(y - y0, y1 - y0, a, d)
+    k = 0
+    while k < rl
+        cov = rr_cov16(x0 + k, y, x0, y0, x1, y1, a, b, c, d)
+        if cov >= 16
+            rl = k
+        else
+            if pinta != 0
+                if cov > 0
+                    _p = pixel_alfa(ptr, len, ancho, alto, stride, bpp, fmt, x0 + k, y, rgb, alfa * cov / 16)
+            k = k + 1
+    x0 + k
+
+# Igual por la derecha: devuelve el x final (exclusivo) del tramo cubierto del todo.
+fn rr_lleno_der(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: Int, fmt: Int, y: Int, x0: Int, y0: Int, x1: Int, y1: Int, a: Int, b: Int, c: Int, d: Int, rgb: Int, alfa: Int, pinta: Int) -> Int ! alloc
+    rl = rr_radio_fila(y - y0, y1 - y0, b, c)
+    k = 0
+    while k < rl
+        cov = rr_cov16(x1 - 1 - k, y, x0, y0, x1, y1, a, b, c, d)
+        if cov >= 16
+            rl = k
+        else
+            if pinta != 0
+                if cov > 0
+                    _p = pixel_alfa(ptr, len, ancho, alto, stride, bpp, fmt, x1 - 1 - k, y, rgb, alfa * cov / 16)
+            k = k + 1
+    x1 - k
+
+# Radio efectivo de una esquina para un rectángulo de w × h.
+fn rr_radio_ok(r: Int, w: Int, h: Int) -> Int
+    min(r, min(w / 2, h / 2))
+
+# Rectángulo con radios por esquina (sin recortar) y bordes de esquina suavizados, fila a
+# fila: los píxeles parciales del arco se mezclan uno a uno y el resto es un tramo.
+fn rellenar_rrect4(ptr: Int, len: Int, ancho: Int, alto: Int, stride: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, rtl: Int, rtr: Int, rbr: Int, rbl: Int, rgb: Int, alfa: Int) -> Int ! alloc
+    w = x1 - x0
+    h = y1 - y0
+    if w <= 0
+        0
+    elsif h <= 0
+        0
+    elsif alfa <= 0
+        0
+    else
+        a = rr_radio_ok(rtl, w, h)
+        b = rr_radio_ok(rtr, w, h)
+        c = rr_radio_ok(rbr, w, h)
+        d = rr_radio_ok(rbl, w, h)
+        y = max(y0, 0)
+        yf = min(y1, alto)
+        while y < yf
+            ls = rr_lleno_izq(ptr, len, ancho, alto, stride, bpp, fmt, y, x0, y0, x1, y1, a, b, c, d, rgb, alfa, 1)
+            rs = rr_lleno_der(ptr, len, ancho, alto, stride, bpp, fmt, y, x0, y0, x1, y1, a, b, c, d, rgb, alfa, 1)
+            if alfa >= 255
+                _r = rellenar_rect(ptr, len, ancho, alto, stride, bpp, fmt, ls, y, rs, y + 1, rgb)
+            else
+                _t = rellenar_rect_alfa(ptr, len, ancho, alto, stride, bpp, fmt, ls, y, rs, y + 1, rgb, alfa)
+            y = y + 1
+        0
+
+# Rectángulo con las esquinas de arriba redondeadas (y suavizadas).
+fn rellenar_rect_redondeado(ptr: Int, len: Int, ancho: Int, alto: Int, stride_px: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, radio: Int, rgb: Int) -> Int ! alloc
+    rellenar_rrect4(ptr, len, ancho, alto, stride_px, bpp, fmt, x0, y0, x1, y1, radio, radio, 0, 0, rgb, 255)
 
 # Igual con las cuatro esquinas redondeadas.
 fn rellenar_rect_redondeado4(ptr: Int, len: Int, ancho: Int, alto: Int, stride_px: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, radio: Int, rgb: Int) -> Int ! alloc
-    r = min(radio, min((x1 - x0) / 2, (y1 - y0) / 2))
-    if r <= 0
-        rellenar_rect(ptr, len, ancho, alto, stride_px, bpp, fmt, x0, y0, x1, y1, rgb)
-    else
-        d = 0
-        while d < r
-            k = rr_inset(r, d)
-            _a = rellenar_rect(ptr, len, ancho, alto, stride_px, bpp, fmt, x0 + k, y0 + d, x1 - k, y0 + d + 1, rgb)
-            _b = rellenar_rect(ptr, len, ancho, alto, stride_px, bpp, fmt, x0 + k, y1 - 1 - d, x1 - k, y1 - d, rgb)
-            d = d + 1
-        rellenar_rect(ptr, len, ancho, alto, stride_px, bpp, fmt, x0, y0 + r, x1, y1 - r, rgb)
+    rellenar_rrect4(ptr, len, ancho, alto, stride_px, bpp, fmt, x0, y0, x1, y1, radio, radio, radio, radio, rgb, 255)
 
 # Capa de sombra: el rectángulo expandido (ex0..ey1) menos la ventana (wx0..wy1), en cuatro tiras.
 fn sombra_anillo(ptr: Int, len: Int, ancho: Int, alto: Int, stride_px: Int, bpp: Int, fmt: Int, ex0: Int, ey0: Int, ex1: Int, ey1: Int, wx0: Int, wy0: Int, wx1: Int, wy1: Int, rgb: Int, alfa: Int) -> Int ! alloc

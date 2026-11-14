@@ -1,0 +1,25 @@
+import "../../user/sal/escritorio/soso.sal"
+import "../../user/sal/escritorio/gprim_prueba_escena.sal"
+
+# Variante de oraculo.sal con la fuente de cobertura de 8 bits en la rejilla.
+# Oráculo CPU de la escena de primitivas: escribe en stdout las N primitivas (64 B cada una)
+# y después el buffer de píxeles resultante (128 x 96, BGR, 4 B por píxel), la fuente y las celdas.
+# Lo usa tools/gpu-prim/validar.py para comprobar el kernel de GPU contra este backend.
+
+fn main() -> Int ! io, alloc
+    w = gprim_prueba_w()
+    h = gprim_prueba_h()
+    cap = gprim_prueba_cap()
+    e = esc_nueva(cap)
+    n = gprim_prueba_construir_bpg(e, 64)
+    psf_own = psf_sintetica_cob()
+    psf = bytes_ptr(psf_own)
+    cel_own = gprim_prueba_celdas()
+    cel = bytes_ptr(cel_own)
+    pix = bytes_ptr(bytes_new(w * h * 4))
+    _x = esc_cpu_ejecutar_r(pix, w * h * 4, w, h, w, 4, 1, e, cap, n, cel, psf, gprim_prueba_psf_cob_len())
+    _w1 = write_fd(1, e, n * esc_prim_bytes())
+    _w2 = write_fd(1, pix, w * h * 4)
+    _w3 = write_fd(1, psf, gprim_prueba_psf_cob_len())
+    _w4 = write_fd(1, cel, gprim_prueba_ncells() * 12)
+    0
