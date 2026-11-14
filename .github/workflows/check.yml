@@ -131,6 +131,10 @@ jobs:
           sudo apt-get clean
           df -h /
       - name: test-usb / test-install / test-update
+        env:
+          # Con dos QEMU TCG a la vez el xHCI pierde transferencias por timeout
+          # de 5 s (falló el escenario nec-usb-xhci); igual que en los shards.
+          SOSO_TEST_JOBS: "1"
         run: |
           cargo xtask test-usb
           cargo xtask test-install
