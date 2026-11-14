@@ -143,42 +143,55 @@ fn ensure_linux(root: &Path) {
     fs::create_dir_all(tar.parent().unwrap()).ok();
     if !tar.exists() {
         println!("lx-build: descargando Linux {LINUX_VERSION}…");
+        // Descarga a un temporal y renombra: otras compilaciones en paralelo
+        // veían el fichero a medias y lo extraían truncado.
+        let part = tar.with_extension(format!("xz.{}.part", std::process::id()));
         let status = Command::new("curl")
-            .args(["-fL", LINUX_URL, "-o"])
-            .arg(&tar)
+            .args(["-fL", "--retry", "3", "--retry-delay", "2", LINUX_URL, "-o"])
+            .arg(&part)
             .status()
             .expect("curl");
         if !status.success() {
+            let _ = fs::remove_file(&part);
             eprintln!("lx-build: fallo descargando {LINUX_URL}");
             exit(1);
         }
+        if let Err(e) = fs::rename(&part, &tar) {
+            let _ = fs::remove_file(&part);
+            eprintln!("lx-build: no se pudo publicar {}: {e}", tar.display());
+            exit(1);
+        }
     }
-    fs::create_dir_all(&linux_dir).ok();
+    // Extrae a un directorio temporal propio y publica con `rename`.
+    let temp = root.join(format!(
+        "target/lxdde/linux-{LINUX_VERSION}.extraccion-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&temp);
+    fs::create_dir_all(&temp).ok();
     println!("lx-build: extrayendo tarball…");
     let status = Command::new("tar")
         .args(["-xJf"])
         .arg(&tar)
         .arg("-C")
-        .arg(linux_dir.parent().unwrap())
+        .arg(&temp)
         .arg("--strip-components=1")
         .arg(format!("linux-{LINUX_VERSION}/"))
         .status()
         .expect("tar");
-    if !status.success() {
-        // tar sin strip: extraer completo y renombrar
-        let status = Command::new("tar")
-            .args(["-xJf", tar.to_str().unwrap(), "-C", linux_dir.parent().unwrap().to_str().unwrap()])
-            .status()
-            .expect("tar fallback");
-        if !status.success() {
+    if !status.success() || !temp.join("Makefile").exists() {
+        let _ = fs::remove_dir_all(&temp);
+        let _ = fs::remove_file(&tar);
+        eprintln!("lx-build: fallo extrayendo {}", tar.display());
+        exit(1);
+    }
+    let destino = root.join("lxdde/linux");
+    let _ = fs::create_dir_all(destino.parent().unwrap());
+    if fs::rename(&temp, &destino).is_err() {
+        let _ = fs::remove_dir_all(&temp);
+        if !destino.join("Makefile").exists() {
+            eprintln!("lx-build: no se pudo publicar {}", destino.display());
             exit(1);
-        }
-        let extracted = linux_dir
-            .parent()
-            .unwrap()
-            .join(format!("linux-{LINUX_VERSION}"));
-        if extracted.exists() {
-            let _ = fs::rename(extracted, &linux_dir);
         }
     }
 }

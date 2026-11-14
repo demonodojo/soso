@@ -3717,10 +3717,12 @@ fn ssh_fd3_log(key: &Path, ssh_port: u16) -> Result<(), String> {
 fn ssh_sesion(key: &Path, ssh_port: u16) -> Result<(), String> {
     let token = "soso_ssh_ok_42";
     // Acaba en `halt`: aquí la sesión no se cierra porque salga la shell, sino
-    // porque el guest se apaga y se lleva la conexión por delante. Vale igual para
-    // esperar al cliente, y de paso deja de ser una carrera contra un sleep de 4 s.
+    // porque el guest se apaga y se lleva la conexión por delante. Por eso se
+    // espera al cierre de la sesión y no a un marcador: con `-tt` el eco de la
+    // propia orden repite el token antes de ejecutarla, y cortar ahí mataba al
+    // cliente antes de que llegara el `halt` (carrera de 3 s, roja en TCG).
     let guion = format!("echo {token} > /tmp/xtask.txt\ncat /tmp/xtask.txt\nhalt\n");
-    let texto = ssh_guion_hasta(key, ssh_port, &guion, Duration::from_secs(60), token)?;
+    let texto = ssh_guion(key, ssh_port, &guion, Duration::from_secs(60))?;
     if texto.contains(token) {
         Ok(())
     } else {
