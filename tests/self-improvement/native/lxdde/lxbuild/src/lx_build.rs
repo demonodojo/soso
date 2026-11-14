@@ -7,6 +7,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const LINUX_VERSION: &str = "6.6.32";
 const LINUX_URL: &str =
@@ -133,6 +134,17 @@ fn port_needs_linux(root: &Path, ports: &[String]) -> bool {
     false
 }
 
+/// Sufijo único por llamada: hay compilaciones en hilos del mismo proceso.
+fn sufijo_unico() -> String {
+    static SECUENCIA: AtomicU64 = AtomicU64::new(0);
+    let n = SECUENCIA.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{n}-{nanos}", std::process::id())
+}
+
 fn ensure_linux(root: &Path) {
     let linux_dir = linux_root(root);
     let marker = linux_dir.join("Makefile");
@@ -145,7 +157,7 @@ fn ensure_linux(root: &Path) {
         println!("lx-build: descargando Linux {LINUX_VERSION}…");
         // Descarga a un temporal y renombra: otras compilaciones en paralelo
         // veían el fichero a medias y lo extraían truncado.
-        let part = tar.with_extension(format!("xz.{}.part", std::process::id()));
+        let part = tar.with_extension(format!("xz.{}.part", sufijo_unico()));
         let status = Command::new("curl")
             .args(["-fL", "--retry", "3", "--retry-delay", "2", LINUX_URL, "-o"])
             .arg(&part)
@@ -158,14 +170,17 @@ fn ensure_linux(root: &Path) {
         }
         if let Err(e) = fs::rename(&part, &tar) {
             let _ = fs::remove_file(&part);
-            eprintln!("lx-build: no se pudo publicar {}: {e}", tar.display());
-            exit(1);
+            // Otra compilación del mismo proceso pudo publicarlo antes.
+            if !tar.exists() {
+                eprintln!("lx-build: no se pudo publicar {}: {e}", tar.display());
+                exit(1);
+            }
         }
     }
     // Extrae a un directorio temporal propio y publica con `rename`.
     let temp = root.join(format!(
         "target/lxdde/linux-{LINUX_VERSION}.extraccion-{}",
-        std::process::id()
+        sufijo_unico()
     ));
     let _ = fs::remove_dir_all(&temp);
     fs::create_dir_all(&temp).ok();

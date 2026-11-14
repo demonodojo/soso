@@ -1234,6 +1234,11 @@ pub fn out_dir() -> PathBuf {
 }
 
 pub fn ensure_live_image() {
+    // `test-usb` lanza varios escenarios en hilos y todos piden la imagen:
+    // sin serializar, varios `run()` escriben la misma imagen y compilan
+    // `liblxdde.a` a la vez.
+    static CERROJO: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guarda = CERROJO.lock().unwrap_or_else(|e| e.into_inner());
     let p = live_image_path();
     if !p.exists() {
         run();
