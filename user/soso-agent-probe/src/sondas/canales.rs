@@ -26,6 +26,8 @@ const YO: &str = "/bin/soso-agent-probe";
 /// bloquea varias veces y el lector tiene que volver muchas.
 const GRANDE: usize = 64 * 1024;
 const PUERTO: u16 = 9471;
+/// Plazo para que el servidor de eco llegue a escuchar (emulado puede tardar segundos).
+const ESPERA_ESCUCHA_MS: u64 = 15_000;
 
 fn anotar(casos: &mut Vec<Caso>, c: Caso) {
     // Una observación —`Caso::observacion`, sin `esperado`— **no es un
@@ -144,9 +146,10 @@ pub fn ejecutar() -> Vec<Caso> {
         &[],
         [abi::FD_SERIAL_TTY, abi::FD_SERIAL_TTY, abi::FD_SERIAL_TTY, abi::FD_KERNEL_LOG],
     );
-    // Un respiro para que llegue a `tcp_listen`: conectar antes daría
-    // ECONNREFUSED y mediría la carrera, no el socket.
-    sys::sleep_ms(400);
+    // El hijo tarda en llegar a `tcp_listen`, y cuánto depende de la máquina:
+    // con KVM sobran 400 ms, emulado (TCG, el runner de CI) no. Conectar antes
+    // da ECONNREFUSED, así que `conectar` reintenta mientras nadie escuche: así
+    // se mide el socket y no la carrera con el arranque del servidor.
 
     let addr = abi::SockAddr {
         addr: [127, 0, 0, 1],
@@ -158,7 +161,7 @@ pub fn ejecutar() -> Vec<Caso> {
     // fallo que el puerto local por índice de ranura producía: la segunda
     // moría en TIME_WAIT.
     for i in 0..2 {
-        let fd = sys::tcp_connect(&addr, 5_000);
+        let fd = conectar(&addr);
         if fd < 0 {
             vueltas.push(format!("conexión {i}: {}", errno(fd)));
             continue;
@@ -190,6 +193,21 @@ pub fn ejecutar() -> Vec<Caso> {
     );
 
     casos
+}
+
+/// `tcp_connect` que espera a que alguien escuche: reintenta mientras la
+/// respuesta sea ECONNREFUSED, hasta [`ESPERA_ESCUCHA_MS`]. Cualquier otro
+/// error se devuelve en el acto.
+fn conectar(addr: &abi::SockAddr) -> i64 {
+    let mut esperado = 0;
+    loop {
+        let fd = sys::tcp_connect(addr, 5_000);
+        if fd != -abi::ECONNREFUSED || esperado >= ESPERA_ESCUCHA_MS {
+            return fd;
+        }
+        sys::sleep_ms(100);
+        esperado += 100;
+    }
 }
 
 /// Subcomando auxiliar: escupe [`GRANDE`] bytes por stdout y **sale sin
