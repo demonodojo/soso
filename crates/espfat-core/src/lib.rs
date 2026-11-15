@@ -306,8 +306,12 @@ impl<S: Sectores> Volumen<S> {
             return self.localizar(nombre, ext, tam as usize);
         }
 
-        let destino = self.buscar_run(necesarios)?.ok_or(FatError::SinEspacio)?;
+        /* El hueco de directorio va **antes** de elegir el run de datos:
+         * ampliar la raíz consume un clúster, y si se elige primero el del
+         * fichero ambos acaban apuntando al mismo sitio (fichero enlazado con
+         * el directorio). */
         let (lba, off) = self.hueco_directorio()?;
+        let destino = self.buscar_run(necesarios)?.ok_or(FatError::SinEspacio)?;
         self.marcar_cadena(destino, necesarios)?;
         self.rellenar(destino, 0, tam)?;
         self.crear_entrada(lba, off, nombre, ext, destino, tam)?;
@@ -651,7 +655,20 @@ impl<S: Sectores> Volumen<S> {
                 }
                 let siguiente = self.leer_fat(cluster)?;
                 if self.p.fin_de_cadena(siguiente) || siguiente < 2 {
-                    return Err(FatError::RaizLlena);
+                    /* Linux `fat_add_cluster` (fs/fat/inode.c): un directorio
+                     * lleno se amplía con un clúster más, no se da por
+                     * perdido. Rendirse aquí dejaba una ESP con la raíz llena
+                     * —aunque fuera de entradas inservibles— sin poder reponer
+                     * `SOSOKRN.MET` ni ningún otro hueco de la transacción. */
+                    let nuevo = self.buscar_run(1)?.ok_or(FatError::SinEspacio)?;
+                    /* A ceros primero, luego la cadena y por último el enlace:
+                     * un corte en cualquier punto deja como mucho un clúster
+                     * perdido (lo recoge `fsck`), nunca un directorio con
+                     * entradas basura ni un enlace a un clúster libre. */
+                    self.rellenar(nuevo, 0, self.p.bytes_por_cluster())?;
+                    self.marcar_cadena(nuevo, 1)?;
+                    self.escribir_fat(cluster, nuevo)?;
+                    return Ok((self.p.cluster_to_lba(nuevo)?, 0));
                 }
                 cluster = siguiente;
                 vueltas += 1;

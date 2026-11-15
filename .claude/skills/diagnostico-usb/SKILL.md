@@ -2,8 +2,8 @@
 name: diagnostico-usb
 description: >-
   Lee la ESP del USB live de soso (SOSOLOG/SOSODRV), compara fallos con Linux,
-  actualiza docs/hw-matrix.json y prepara un plan de corrección.
-  Usar con /diagnostico-usb.
+  actualiza docs/hw-matrix.json y prepara un plan de corrección. Úsala al
+  diagnosticar un arranque real con fallos de driver, GPU o WiFi.
 ---
 
 # Diagnóstico del USB live
@@ -30,7 +30,7 @@ host/placa). Ejemplo de calidad: la sección *Orden de corrección* de
 - montar la ESP, copiar SOSOLOG, clasificar líneas, comparar con Linux,
   escribir el informe, actualizar la matriz
 
-Eso lo hace este comando en silencio. En modo Plan no pidas aprobación para
+Eso lo hace esta skill en silencio. En modo Plan no pidas aprobación para
 analizar; analiza (lectura USB, código, Linux) y el plan que creas **es** el
 de corrección. Si el modo es solo lectura, no escribas JSON/markdown todavía:
 el plan son los cambios de código; matriz e informe van como últimos ítems
@@ -39,7 +39,7 @@ de registro de ese mismo plan, no como receta previa.
 No cambies a Agent solo para «planear el análisis».
 
 Antes de actuar, lee estas skills (en este orden):
-`.cursor/skills/soso-live/SKILL.md`, `.cursor/skills/soso-dev/SKILL.md`,
+`.claude/skills/soso-live/SKILL.md`, `.claude/skills/soso-dev/SKILL.md`,
 y si el log toca GPU o WiFi también `soso-gpu` y `soso-wifi`.
 
 ## Restricciones
@@ -189,7 +189,7 @@ Falcon, scan real).
 ## 4. Matriz hardware (obligatorio)
 
 Entregable: `docs/hw-matrix.json` editado en esta misma ejecución. El agente
-**sí** puede escribir ese JSON (no pide sudo). Sin este paso el comando falla.
+**sí** puede escribir ese JSON (no pide sudo). Sin este paso la skill falla.
 
 Mapa PCI del `SOSODRV` → `--id` (una pasada `parse-logs` por cada id presente):
 

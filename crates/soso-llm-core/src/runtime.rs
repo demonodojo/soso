@@ -153,7 +153,7 @@ enum Especulativo {
     /// No se pudo (modelo o estado no aptos): el bucle sigue por el camino token a token.
     NoAplica,
     /// Hecho: el estado está en el último token aceptado.
-    Hecho { ofrecidos: usize, aceptados: usize, replanificado: bool },
+    Hecho { ofrecidos: usize, aceptados: usize, replanificado: bool, pendiente: Option<u32> },
     /// Parada (token de parada aceptado o cancelación): el bucle termina.
     Parar,
 }
@@ -1053,14 +1053,19 @@ impl Runtime {
         self.bloque_posible(k + 1, gpu)
     }
 
-    /// Posición más probable (argmax) tras cada uno de los `n` primeros estados de `hs_bloque`.
+    /// Muestrea los primeros estados de `hs_bloque` hasta el primer desacierto.
+    /// Con temperatura, el token discrepante se conserva para el siguiente paso:
+    /// así se consume exactamente la misma secuencia de muestras que sin borrador.
     ///
     /// En CPU, un solo `matvec` por lotes sobre la cabeza de logits (lee sus pesos una vez). Con GPU se hace un
     /// matvec por vector, el mismo kernel que `logits_gpu`, para que el token elegido no dependa de si se
     /// especuló.
-    fn argmax_posiciones(
+    fn muestrear_posiciones(
         &mut self,
         n: usize,
+        drafts: &[u32],
+        sampler: &mut crate::sample::Sampler,
+        stops: &[u32],
         source: &mut impl TensorSource,
         parallel: Option<&dyn RowParallel>,
         gpu: &mut Option<&mut dyn crate::gpu::GpuDispatch>,
@@ -1094,7 +1099,9 @@ impl Runtime {
                     matvec_view_par(&view, vocab, h, &self.scratch.residual, &mut self.logits_buf, par)?;
                 }
                 self.softcap_logits();
-                salida.push(Self::argmax(&self.logits_buf));
+                let t = if sampler.temp > 0.0 { sampler.sample(&self.logits_buf) } else { Self::argmax(&self.logits_buf) };
+                salida.push(t);
+                if sampler.temp > 0.0 && (t != drafts[j] || stops.contains(&t)) { break; }
             }
             return Ok(salida);
         }
@@ -1128,7 +1135,9 @@ impl Runtime {
                     *v = cap * libm::tanhf(*v / cap);
                 }
             }
-            salida.push(Self::argmax(fila));
+            let t = if sampler.temp > 0.0 { sampler.sample(fila) } else { Self::argmax(fila) };
+            salida.push(t);
+            if sampler.temp > 0.0 && (t != drafts[j] || stops.contains(&t)) { break; }
         }
         Ok(salida)
     }
@@ -1173,7 +1182,7 @@ impl Runtime {
 
     /// Verifica `drafts` (continuación propuesta tras `next`) con **un** forward de `[next, d1..dk]`.
     ///
-    /// El estado tras `next` predice `d1`; el de `d1`, `d2`; etc. Se acepta el prefijo en el que el argmax
+    /// El estado tras `next` predice `d1`; el de `d1`, `d2`; etc. Se acepta el prefijo en el que la muestra
     /// coincide con el borrador. Los K/V de lo rechazado se recortan y el estado oculto queda en el último
     /// aceptado, así que el siguiente muestreo del bucle sale del mismo punto que con el camino token a token:
     /// con las mismas operaciones por token (bit a bit, T82) la secuencia generada es idéntica, con un
@@ -1184,6 +1193,7 @@ impl Runtime {
         source: &mut impl TensorSource,
         next: u32,
         drafts: &[u32],
+        sampler: &mut crate::sample::Sampler,
         remaining: &mut usize,
         tokens: &mut Vec<u32>,
         stops: &[u32],
@@ -1203,10 +1213,14 @@ impl Runtime {
             return Ok(Especulativo::Parar);
         }
         let pos0 = self.pos;
+        // `forward_bloque` carga embeddings y modifica K/V capa a capa antes de
+        // poder recibir una cancelación. Conservar el estado comprometido hasta
+        // que el bloque haya terminado de calcularse.
+        let hidden0 = self.hidden.clone();
         let mut bloque: Vec<u32> = Vec::with_capacity(k + 1);
         bloque.push(next);
         bloque.extend_from_slice(drafts);
-        if !self.forward_bloque(
+        let bloque_completo = self.forward_bloque(
             source,
             &bloque,
             parallel,
@@ -1217,12 +1231,20 @@ impl Runtime {
             true,
             cluster,
             Some(tokens),
-        )? {
-            return Ok(Especulativo::Parar);
+        );
+        if !matches!(bloque_completo, Ok(true)) {
+            self.truncar_kv(pos0);
+            self.hidden.copy_from_slice(&hidden0);
+            return match bloque_completo {
+                Ok(false) => Ok(Especulativo::Parar),
+                Err(()) => Err(()),
+                Ok(true) => unreachable!(),
+            };
         }
         self.forwards_decode += 1;
-        let previstos = self.argmax_posiciones(k, source, parallel, gpu)?;
+        let previstos = self.muestrear_posiciones(k, drafts, sampler, stops, source, parallel, gpu)?;
         let mut aceptados = previstos.iter().zip(drafts).take_while(|(p, d)| p == d).count();
+        let pendiente = if sampler.temp > 0.0 { previstos.get(aceptados).copied() } else { None };
         let mut parar = false;
         for j in 0..aceptados {
             if !ledger.accept_sample(drafts[j], stops, tokens, observer) {
@@ -1239,7 +1261,7 @@ impl Runtime {
         if parar {
             return Ok(Especulativo::Parar);
         }
-        Ok(Especulativo::Hecho { ofrecidos: k, aceptados, replanificado })
+        Ok(Especulativo::Hecho { ofrecidos: k, aceptados, replanificado, pendiente })
     }
 
     /// Prefill del prompt: prefetch del siguiente embed mientras se calcula
@@ -2047,6 +2069,7 @@ impl Runtime {
             return Ok((tokens, ledger.into_report()));
         }
         let dec_gpu = cluster.is_none() && self.decode_gpu_posible(gpu);
+        let mut pendiente = None;
         while remaining > 0 {
             if self.planner.is_none() && self.pos >= self.manifest.max_seq as usize {
                 ledger.note_context_limit();
@@ -2058,17 +2081,22 @@ impl Runtime {
                 break;
             }
             let t0 = self.ahora_ms();
-            let logits = self.logits_gpu(source, parallel, gpu)?;
-            let next = match restr.as_deref_mut() {
-                Some(r) => sampler.sample_restringido(logits, r),
-                None => sampler.sample(logits),
+            let next = match pendiente.take() {
+                Some(t) => t,
+                None => {
+                    let logits = self.logits_gpu(source, parallel, gpu)?;
+                    match restr.as_deref_mut() {
+                        Some(r) => sampler.sample_restringido(logits, r),
+                        None => sampler.sample(logits),
+                    }
+                }
             };
             if !ledger.accept_sample(next, &stop_token_ids, &mut tokens, observer) {
                 break;
             }
             avanzar_restriccion(&mut restr, next);
             remaining -= 1;
-            let mut drafts = if greedy && self.borrador_activo && !dec_gpu {
+            let mut drafts = if (greedy || restr.is_none()) && self.borrador_activo && !dec_gpu {
                 crate::attn::prompt_lookup_draft(&tokens, remaining.min(8))
             } else {
                 alloc::vec::Vec::new()
@@ -2081,6 +2109,7 @@ impl Runtime {
                     source,
                     next,
                     &drafts[..k],
+                    sampler,
                     &mut remaining,
                     &mut tokens,
                     &stop_token_ids,
@@ -2092,12 +2121,13 @@ impl Runtime {
                     &mut restr,
                     cluster,
                 )? {
-                    Especulativo::Hecho { ofrecidos, aceptados, .. } => {
+                    Especulativo::Hecho { ofrecidos, aceptados, pendiente: token, .. } => {
+                        pendiente = token;
                         self.anotar_ronda(t0, ofrecidos + 1, ofrecidos, aceptados);
                         continue;
                     }
                     Especulativo::Parar => break,
-                    Especulativo::NoAplica => {}
+                    Especulativo::NoAplica => { if !greedy { drafts.clear(); } }
                 }
             }
             if let Some(&d0) = drafts.first() {
@@ -2283,6 +2313,7 @@ impl Runtime {
         self.guardar_instantanea_gdn(prompt);
         let greedy = sampler.temp <= 0.0;
         let mut remaining = options.max_new;
+        let mut pendiente = None;
         if cancel_slot.as_mut().is_some_and(|g| {
             g.checkpoint(observer, &mut ledger, GenCheckpoint::BeforeDecode)
         }) {
@@ -2302,17 +2333,22 @@ impl Runtime {
                 pl.begin_token();
             }
             let t0 = self.ahora_ms();
-            let logits = self.logits_gpu(source, parallel, gpu)?;
-            let next = match restr.as_deref_mut() {
-                Some(r) => sampler.sample_restringido(logits, r),
-                None => sampler.sample(logits),
+            let next = match pendiente.take() {
+                Some(t) => t,
+                None => {
+                    let logits = self.logits_gpu(source, parallel, gpu)?;
+                    match restr.as_deref_mut() {
+                        Some(r) => sampler.sample_restringido(logits, r),
+                        None => sampler.sample(logits),
+                    }
+                }
             };
             if !ledger.accept_sample(next, &stop_token_ids, &mut tokens, observer) {
                 break;
             }
             avanzar_restriccion(&mut restr, next);
             remaining -= 1;
-            let mut drafts = if greedy && self.borrador_activo {
+            let mut drafts = if (greedy || restr.is_none()) && self.borrador_activo {
                 let (max_d, min_n, max_n, hint) = self
                     .planner
                     .as_ref()
@@ -2336,6 +2372,7 @@ impl Runtime {
                     source,
                     next,
                     &drafts[..k],
+                    sampler,
                     &mut remaining,
                     &mut tokens,
                     &stop_token_ids,
@@ -2347,7 +2384,8 @@ impl Runtime {
                     &mut restr,
                     cluster,
                 )? {
-                    Especulativo::Hecho { ofrecidos, aceptados, replanificado } => {
+                    Especulativo::Hecho { ofrecidos, aceptados, replanificado, pendiente: token } => {
+                        pendiente = token;
                         self.anotar_ronda(t0, ofrecidos + 1, ofrecidos, aceptados);
                         if replanificado {
                             if let Some(pl) = self.planner.as_mut() {
@@ -2365,7 +2403,7 @@ impl Runtime {
                         continue;
                     }
                     Especulativo::Parar => break,
-                    Especulativo::NoAplica => {}
+                    Especulativo::NoAplica => { if !greedy { drafts.clear(); } }
                 }
             }
             if let Some(&d0) = drafts.first() {

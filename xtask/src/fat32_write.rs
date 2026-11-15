@@ -422,39 +422,70 @@ fn delete_named_with_lfn(
     offsets: &[u64],
     name11: &[u8; 11],
 ) -> Result<(u32, u32), String> {
-    let chk = lfn_checksum(name11);
-    let mut found = None;
+    // Todo el directorio en memoria: hay que mirar hacia atrás desde la
+    // entrada corta, y el tramo puede cruzar de un sector al siguiente.
+    let mut secs: Vec<(u64, [u8; 512])> = Vec::new();
     for &off in offsets {
         let mut sec = [0u8; 512];
         read_at(f, off, &mut sec)?;
-        let mut dirty = false;
-        for i in 0..16 {
-            let e = &mut sec[i * 32..i * 32 + 32];
-            if e[0] == 0x00 {
-                break;
-            }
-            if e[0] == 0xE5 {
-                continue;
-            }
-            if e[11] == 0x0F && e[13] == chk {
-                e[0] = 0xE5;
-                dirty = true;
-                continue;
-            }
-            if &e[0..11] == name11 && e[11] & 0x10 == 0 {
-                let hi = u16::from_le_bytes([e[20], e[21]]) as u32;
-                let lo = u16::from_le_bytes([e[26], e[27]]) as u32;
-                let size = u32::from_le_bytes([e[28], e[29], e[30], e[31]]);
-                found = Some(((hi << 16) | lo, size));
-                e[0] = 0xE5;
-                dirty = true;
-            }
+        secs.push((off, sec));
+    }
+    let nslots = secs.len() * 16;
+
+    let mut idx = None;
+    for i in 0..nslots {
+        let e = &secs[i / 16].1[(i % 16) * 32..(i % 16) * 32 + 32];
+        if e[0] == 0x00 {
+            break;
         }
-        if dirty {
-            write_at(f, off, &sec)?;
+        if e[0] == 0xE5 {
+            continue;
+        }
+        if &e[0..11] == name11 && e[11] & 0x10 == 0 {
+            idx = Some(i);
+            break;
         }
     }
-    found.ok_or_else(|| format!("fichero {:?} no encontrado", ascii(name11)))
+    let i = idx.ok_or_else(|| format!("fichero {:?} no encontrado", ascii(name11)))?;
+
+    let e = &secs[i / 16].1[(i % 16) * 32..(i % 16) * 32 + 32];
+    let hi = u16::from_le_bytes([e[20], e[21]]) as u32;
+    let lo = u16::from_le_bytes([e[26], e[27]]) as u32;
+    let size = u32::from_le_bytes([e[28], e[29], e[30], e[31]]);
+
+    /* Las LFN de un nombre van **siempre** en un tramo contiguo justo delante
+     * de su entrada 8.3, así que se borran por posición. Mirar el `checksum`
+     * —como se hacía antes— dejaba vivas las que ya no casaban con el nombre:
+     * huérfanas que nadie reclama y que el `espfat` del kernel cuenta como
+     * ocupadas, hasta dejar la raíz «llena» con cuatro entradas dentro
+     * (HP, 2026-11-15: `no pude reponer SOSOKRN.MET (RaizLlena)`). */
+    let mut j = i;
+    let mut borradas = 0usize;
+    while j > 0 {
+        j -= 1;
+        let eo = (j % 16) * 32;
+        let e = &mut secs[j / 16].1[eo..eo + 32];
+        if e[0] == 0xE5 || e[11] != 0x0F {
+            break;
+        }
+        e[0] = 0xE5;
+        borradas += 1;
+        if borradas >= 20 {
+            break;
+        }
+    }
+    let eo = (i % 16) * 32;
+    secs[i / 16].1[eo] = 0xE5;
+
+    let mut tocados = std::collections::BTreeSet::new();
+    tocados.insert(i / 16);
+    for k in 0..borradas {
+        tocados.insert((i - 1 - k) / 16);
+    }
+    for si in tocados {
+        write_at(f, secs[si].0, &secs[si].1)?;
+    }
+    Ok(((hi << 16) | lo, size))
 }
 
 /// Borra un fichero de la raíz, para poder fabricar en las pruebas una ESP
@@ -1859,6 +1890,119 @@ mod tests {
         let got = read_root_file(&path, 0, b"SOSOHASHTXT").unwrap();
         assert_eq!(&got[..12], b"version=test");
         assert_eq!(got.len(), 4096);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn sectores_raiz(f: &mut std::fs::File) -> Result<Vec<u64>, String> {
+        let vol = read_vol(f, 0)?;
+        let mut fat = vec![0u8; (vol.spf * vol.bps) as usize];
+        read_at(f, vol.base + vol.reserved * vol.bps, &mut fat)?;
+        Ok(dir_sector_offsets(&vol, &fat, root_start_cluster(&vol)))
+    }
+
+    /// Entradas LFN vivas en la raíz (attr 0x0F y no borradas), cuenten o no
+    /// con la entrada corta que les toca.
+    fn contar_lfn_vivas(f: &mut std::fs::File) -> Result<usize, String> {
+        let offsets = sectores_raiz(f)?;
+        let mut n = 0usize;
+        for off in offsets {
+            let mut sec = [0u8; 512];
+            read_at(f, off, &mut sec)?;
+            for i in 0..16 {
+                let e = &sec[i * 32..i * 32 + 32];
+                if e[0] == 0x00 {
+                    return Ok(n);
+                }
+                if e[0] != 0xE5 && e[11] == 0x0F {
+                    n += 1;
+                }
+            }
+        }
+        Ok(n)
+    }
+
+    #[test]
+    fn reescribir_el_lfn_reclama_la_entrada_huerfana() {
+        // Estado real del stick (HP, 2026-11-15): delante de `KERNEL~1` hay
+        // una LFN viva cuyo checksum ya no casa, así que nadie se la lleva.
+        // Se contaba como ocupada y la raíz acabó sin hueco para SOSOKRN.MET.
+        let mkfs = ["mkfs.vfat", "/usr/sbin/mkfs.vfat"]
+            .into_iter()
+            .find(|p| Command::new(p).arg("-V").output().is_ok());
+        let Some(mkfs) = mkfs else {
+            eprintln!("reescribir_el_lfn: sin mkfs.vfat, omito");
+            return;
+        };
+        let path = std::env::temp_dir().join(format!("soso-fat-huerfana-{}", std::process::id()));
+        {
+            let f = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&path)
+                .unwrap();
+            f.set_len(8 * 1024 * 1024).unwrap();
+        }
+        assert!(Command::new(mkfs)
+            .args(["-F", "32"])
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+
+        let mut small = vec![0x7f, b'E', b'L', b'F'];
+        small.resize(4096, 0xAA);
+        write_root_file(&path, 0, b"KERNEL~1", b"   ", &small).unwrap();
+        ensure_kernel_lfn(&path, 0).unwrap();
+
+        // Estropear el checksum de la LFN: pasa a ser huérfana.
+        {
+            let mut f = OpenOptions::new().read(true).write(true).open(&path).unwrap();
+            let offsets = sectores_raiz(&mut f).unwrap();
+            let mut sitio = None;
+            'busca: for (si, &off) in offsets.iter().enumerate() {
+                let mut sec = [0u8; 512];
+                read_at(&mut f, off, &mut sec).unwrap();
+                for i in 0..16 {
+                    let e = &sec[i * 32..i * 32 + 32];
+                    if e[0] == 0x00 {
+                        break 'busca;
+                    }
+                    if e[0] != 0xE5 && &e[0..11] == KERNEL_8_3 {
+                        sitio = Some(if i > 0 { (si, i - 1) } else { (si - 1, 15) });
+                        break 'busca;
+                    }
+                }
+            }
+            let (si, i) = sitio.expect("no se encontró KERNEL~1");
+            let mut sec = [0u8; 512];
+            read_at(&mut f, offsets[si], &mut sec).unwrap();
+            let eo = i * 32;
+            assert_eq!(sec[eo + 11], 0x0F, "la entrada anterior debería ser la LFN");
+            sec[eo + 13] ^= 0xFF;
+            write_at(&mut f, offsets[si], &sec).unwrap();
+            assert_eq!(contar_lfn_vivas(&mut f).unwrap(), 1);
+        }
+
+        // Con el checksum roto, el fichero parece no tener nombre largo.
+        let antes = list_dir_entries(&path, 0, &[]).unwrap();
+        assert!(
+            antes.iter().any(|e| e.name11 == KERNEL_8_3 && e.lfn.is_none()),
+            "la LFN huérfana debe quedar descolgada"
+        );
+
+        ensure_kernel_lfn(&path, 0).unwrap();
+
+        let mut f = OpenOptions::new().read(true).open(&path).unwrap();
+        assert_eq!(
+            contar_lfn_vivas(&mut f).unwrap(),
+            1,
+            "la LFN huérfana sigue ocupando un hueco de la raíz"
+        );
+        let despues = list_dir_entries(&path, 0, &[]).unwrap();
+        assert!(despues
+            .iter()
+            .any(|e| e.name11 == KERNEL_8_3 && e.lfn.as_deref() == Some(KERNEL_LFN)));
         let _ = std::fs::remove_file(&path);
     }
 

@@ -993,6 +993,162 @@ fn borrador_por_bloques_respeta_el_limite_de_tokens() {
 }
 
 #[test]
+fn borrador_muestreado_conserva_secuencia_y_estado_con_la_misma_semilla() {
+    use soso_llm_core::{generation::GenerationOptions, sample::Sampler};
+    let prompt = prompt_repetitivo();
+    let mut ofrecidos = 0;
+    let mut aceptados = 0;
+    let mut rechazados = 0;
+    for seed in 1..=30 {
+        for top_p in [0.5, 0.95] {
+            let ejecutar = |activo| {
+                let (mut rt, mut source) = rt_borrador(activo, true);
+                let mut sampler = Sampler::new(0.8, top_p, seed);
+                sampler.top_k = 8;
+                let (tokens, report) = rt.generate_stream_par_with_report(
+                    &mut source, &prompt, GenerationOptions::new(40, vec![]), &mut sampler,
+                    |_| {}, None, &mut None, &mut |_, _| {},
+                ).unwrap();
+                (tokens, report, rt)
+            };
+            let (base, informe_base, a) = ejecutar(false);
+            let (salida, informe, b) = ejecutar(true);
+            assert_eq!(base, salida, "seed={seed}, top_p={top_p}");
+            assert_eq!(informe_base, informe);
+            assert_eq!(estado(&a), estado(&b), "seed={seed}, top_p={top_p}");
+            ofrecidos += b.borrador_ofrecidos;
+            aceptados += b.borrador_aceptados;
+            rechazados += b.borrador_ofrecidos - b.borrador_aceptados;
+        }
+    }
+    assert!(ofrecidos > 0 && aceptados > 0 && rechazados > 0, "ofrecidos={ofrecidos}, aceptados={aceptados}, rechazados={rechazados}");
+}
+
+#[test]
+fn borrador_muestreado_planificado_respeta_paradas_y_estado() {
+    use soso_llm_core::{generation::{GenerationOptions, NoCancelObserver}, plan::MemSnapshot, sample::Sampler};
+    let prompt = prompt_repetitivo();
+    for seed in [3, 11, 27] {
+        let ejecutar = |activo, stops: Vec<u32>| {
+            let (mut rt, mut source) = runtime_planificado();
+            rt.borrador_activo = activo;
+            let mut sampler = Sampler::new(0.8, 0.95, seed);
+            sampler.top_k = 8;
+            let mut obs = NoCancelObserver;
+            let mut mem = || MemSnapshot { total_frames: 100_000, free_frames: 50_000, reclaimable_frames: 0 };
+            let (tokens, report) = rt.generate_stream_planned_observed(
+                &mut source, &prompt, GenerationOptions::new(30, stops), &mut sampler,
+                &mut obs, None, &mut None, reloj_cero, &mut mem, &mut None,
+            ).unwrap();
+            let siguiente = sampler.sample(&[0.0, 0.2, 0.4, 0.6]);
+            (tokens, report, rt, siguiente)
+        };
+        let (completo, _, _, _) = ejecutar(false, vec![]);
+        for stops in [vec![], vec![completo[prompt.len() + 5]]] {
+            let (base, informe_base, a, azar_base) = ejecutar(false, stops.clone());
+            let (salida, informe, b, azar) = ejecutar(true, stops);
+            assert_eq!(base, salida, "seed={seed}");
+            assert_eq!(informe_base, informe);
+            assert_eq!(estado(&a), estado(&b), "seed={seed}");
+            assert_eq!(azar_base, azar, "consumo RNG seed={seed}");
+        }
+    }
+}
+
+#[test]
+fn cancelar_durante_bloque_especulativo_restaura_prefijo_comprometido() {
+    use soso_llm_core::{generation::{GenCheckpoint, GenerationObserver, GenerationOptions, StopReason}, sample::Sampler};
+    #[derive(Default)]
+    struct CancelarBloque { muestras: usize, anterior_muestra: bool, en_bloque: bool, cancelo: bool, antes: bool }
+    impl GenerationObserver for CancelarBloque {
+        fn on_token(&mut self, _: u32) { self.muestras += 1; self.anterior_muestra = true; }
+        fn cancel_at(&mut self, at: GenCheckpoint) -> bool {
+            match at {
+                GenCheckpoint::BeforeSample => {
+                    if self.anterior_muestra && self.muestras > 0 {
+                        self.en_bloque = true;
+                        if self.antes { self.cancelo = true; return true; }
+                    }
+                    self.anterior_muestra = false;
+                }
+                GenCheckpoint::Layer { layer: 1, .. } if self.en_bloque => {
+                    self.cancelo = true;
+                    return true;
+                }
+                _ => { self.anterior_muestra = false; }
+            }
+            false
+        }
+    }
+    let prompt = prompt_repetitivo();
+    let mut ejercitado = false;
+    for seed in 1..=20 {
+        let (mut rt, mut source) = rt_borrador(true, true);
+        let mut obs = CancelarBloque::default();
+        let mut sampler = Sampler::new(0.8, 0.95, seed);
+        sampler.top_k = 8;
+        let (tokens, report) = rt.generate_stream_par_observed(
+            &mut source, &prompt, GenerationOptions::new(40, vec![]), &mut sampler,
+            &mut obs, None, &mut None, &mut None,
+        ).unwrap();
+        if !obs.cancelo { continue; }
+        ejercitado = true;
+        assert_eq!(report.stop, StopReason::Cancelled);
+        assert!(rt.pos <= tokens.len());
+        let (mut previo, mut ps) = rt_borrador(true, true);
+        let mut obs_previo = CancelarBloque { antes: true, ..Default::default() };
+        let mut sampler_previo = Sampler::new(0.8, 0.95, seed);
+        sampler_previo.top_k = 8;
+        let (tokens_previo, _) = previo.generate_stream_par_observed(
+            &mut ps, &prompt, GenerationOptions::new(40, vec![]), &mut sampler_previo,
+            &mut obs_previo, None, &mut None, &mut None,
+        ).unwrap();
+        assert!(obs_previo.cancelo);
+        assert_eq!(tokens, tokens_previo);
+        assert!(estado(&rt) == estado(&previo), "estado dañado seed={seed}, pos={}", rt.pos);
+        let (mut frio, mut fs) = rt_borrador(false, false);
+        rt.borrador_activo = false;
+        let nuevo_prompt = &prompt[..12];
+        let despues = rt.generate(&mut source, nuevo_prompt, 5, None).unwrap();
+        let referencia = frio.generate(&mut fs, nuevo_prompt, 5, None).unwrap();
+        assert_eq!(despues, referencia);
+        break;
+    }
+    assert!(ejercitado, "no se alcanzó la segunda capa de un bloque especulativo");
+}
+
+#[test]
+fn borrador_muestreado_respeta_presupuesto_y_limite_de_contexto() {
+    use soso_llm_core::{generation::{GenerationOptions, StopReason}, sample::Sampler};
+    let prompt = prompt_repetitivo();
+    for (max_seq, max_new) in [(128, 1), (128, 7), (30, 40)] {
+        for seed in [1, 9, 17] {
+            let ejecutar = |activo| {
+                let (mut manifest, index, mapper) = tiny_model_gqa();
+                manifest.max_seq = max_seq;
+                let mut rt = Runtime::new(manifest, index.clone(), 0, 0);
+                rt.borrador_activo = activo;
+                let mut source = MmapTensorSource::new(String::from(BASE), index, mapper);
+                let mut sampler = Sampler::new(0.8, 0.95, seed);
+                sampler.top_k = 8;
+                let (tokens, report) = rt.generate_stream_par_with_report(
+                    &mut source, &prompt, GenerationOptions::new(max_new, vec![]), &mut sampler,
+                    |_| {}, None, &mut None, &mut |_, _| {},
+                ).unwrap();
+                (tokens, report, rt)
+            };
+            let (base, a, rt_a) = ejecutar(false);
+            let (salida, b, rt_b) = ejecutar(true);
+            assert_eq!(base, salida, "max_seq={max_seq}, max_new={max_new}, seed={seed}");
+            assert_eq!(a, b);
+            assert!(estado(&rt_a) == estado(&rt_b));
+            assert!(rt_b.pos <= max_seq as usize);
+            assert_eq!(b.stop, if max_seq == 30 { StopReason::ContextLimit } else { StopReason::Limit });
+        }
+    }
+}
+
+#[test]
 fn borrador_por_bloques_con_planificador_da_lo_mismo() {
     let prompt = prompt_repetitivo();
     let mut salidas = Vec::new();

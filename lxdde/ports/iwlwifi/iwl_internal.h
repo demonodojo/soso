@@ -430,7 +430,9 @@ static inline uint16_t iwl_cpu_to_le16(uint16_t v)
 #define NVM_ACCESS_CMD             0x88 /* LEGACY_GROUP — no usar en init unificado */
 #define NVM_ACCESS_COMPLETE        0x00
 #define NVM_GET_INFO               0x02
-#define PHY_CONFIGURATION_CMD      0x0b
+/* Linux fw/api/commands.h: `PHY_CONFIGURATION_CMD = 0x6a` (enum iwl_legacy_cmds).
+ * 0x0b no existe en ese grupo: el FW no contesta y el comando agota los 2 s. */
+#define PHY_CONFIGURATION_CMD      0x6a
 #define TX_ANT_CONFIGURATION_CMD   0x98 /* LEGACY_GROUP */
 #define MCC_UPDATE_CMD             0xc8 /* LEGACY_GROUP */
 
@@ -482,7 +484,14 @@ static inline uint16_t iwl_cpu_to_le16(uint16_t v)
 
 #define IWL_SCAN_CHANNEL_FLAG_ENABLE_CHAN_ORDER (1u << 5)
 
+/* Linux fw/img.h: `enum iwl_ucode_type`, el índice de `default_calib`. */
+#define IWL_UCODE_REGULAR                       0
+#define IWL_UCODE_INIT                          1
+#define IWL_UCODE_TYPE_MAX                      4
+
 #define IWL_UCODE_TLV_PHY_SKU                  23
+/* Linux fw/file.h: `IWL_UCODE_TLV_DEF_CALIB = 22`. */
+#define IWL_UCODE_TLV_DEF_CALIB                 22
 #define IWL_UCODE_TLV_ENABLED_CAPABILITIES       30
 #define IWL_UCODE_TLV_N_SCAN                     31
 #define IWL_UCODE_TLV_CMD_VERSIONS               48
@@ -1684,15 +1693,37 @@ struct iwl_scan_config_v2 {
     uint32_t reserved3[2];
 } __attribute__((packed));
 
+/* Linux fw/api/config.h: `iwl_calib_ctrl` son **dos** le32 (8 B): qué
+ * calibraciones se lanzan por flujo y por evento. Tener tres campos
+ * (`ucode_control`/`flow_block`) metía 4 B de más y dejaba la calibración a
+ * cero, así que el FW veía un comando de otro tamaño. */
 struct iwl_calib_ctrl {
-    uint32_t ucode_control;
     uint32_t flow_trigger;
-    uint32_t flow_block;
+    uint32_t event_trigger;
 } __attribute__((packed));
 
 struct iwl_phy_cfg_cmd_v1 {
     uint32_t phy_cfg;
     struct iwl_calib_ctrl calib_control;
+} __attribute__((packed));
+
+/* Linux fw/api/config.h: v3 añade los filtros PHY que vienen del ACPI (WRDS).
+ * Sin parser ACPI van a cero, que es lo que hace Linux sin CONFIG_ACPI. */
+struct iwl_phy_specific_cfg {
+    uint32_t filter_cfg_chains[4];
+} __attribute__((packed));
+
+struct iwl_phy_cfg_cmd_v3 {
+    uint32_t phy_cfg;
+    struct iwl_calib_ctrl calib_control;
+    struct iwl_phy_specific_cfg phy_specific_cfg;
+} __attribute__((packed));
+
+/* Linux iwl-drv.c `iwl_set_default_calib` / fw/file.h: TLV DEF_CALIB.
+ * El índice es `enum iwl_ucode_type`. */
+struct iwl_tlv_calib_data {
+    uint32_t ucode_type;
+    struct iwl_calib_ctrl calib;
 } __attribute__((packed));
 
 /* `struct iwl_fw_cmd_version` (fw/api/cmdhdr.h): el cuarto byte es la versión

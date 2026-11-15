@@ -12,6 +12,33 @@ use soso_llm_core::tokenizer::{StreamDecoder, Tokenizer};
 use sosomodel::index::TensorIndex;
 use sosomodel::manifest::Manifest;
 use std::io::Write;
+use soso_llm_core::generation::{GenCheckpoint, GenerationObserver, GenerationOptions};
+
+struct Medidor<'a> {
+    inicio: std::time::Instant,
+    prefill: Option<std::time::Duration>,
+    tiempos: Vec<std::time::Duration>,
+    dec: &'a mut StreamDecoder,
+    tokenizer: &'a Tokenizer,
+}
+
+impl GenerationObserver for Medidor<'_> {
+    fn on_token(&mut self, t: u32) {
+        self.tiempos.push(self.inicio.elapsed());
+        let s = self.dec.push(self.tokenizer, t);
+        if !s.is_empty() {
+            print!("{s}");
+            let _ = std::io::stdout().flush();
+        }
+    }
+
+    fn cancel_at(&mut self, at: GenCheckpoint) -> bool {
+        if matches!(at, GenCheckpoint::BeforeDecode) {
+            self.prefill = Some(self.inicio.elapsed());
+        }
+        false
+    }
+}
 
 /// FileMapper host: lee el fichero completo y filtra el puntero (leak
 /// consciente: proceso corto).
@@ -174,6 +201,7 @@ fn main() {
     );
 
     let mut rt = Runtime::new(manifest, index.clone(), 0, 0);
+    rt.borrador_activo = std::env::var_os("SOSO_NO_DRAFT").is_none();
     rt.validate_shapes().expect("shapes inválidas");
     let base_source = MmapTensorSource::new(format!("{dir}/shards"), index.clone(), StdMapper);
     let mut source = if std::env::var("SOSO_SYNC_STAGING").is_ok() {
@@ -251,32 +279,32 @@ fn main() {
     let mut sampler = Sampler::new(temp, top_p, seed);
     let mut dec = StreamDecoder::new();
     let t0 = std::time::Instant::now();
+    let mut medidor = Medidor { inicio: t0, prefill: None, tiempos: Vec::new(), dec: &mut dec, tokenizer: &tokenizer };
     if std::env::var("SOSO_PLANNER").is_ok() {
         // El mismo camino que usa `soso-llm` en la máquina.
         let mut gpu: Option<&mut dyn soso_llm_core::gpu::GpuDispatch> = None;
-        let r = rt.generate_stream_planned(
+        let r = rt.generate_stream_planned_observed(
             &mut source,
             &prompt_tokens,
-            max_new,
-            tokenizer.eos(),
+            GenerationOptions::from_eos(max_new, tokenizer.eos()),
             &mut sampler,
-            |t| {
-                let s = dec.push(&tokenizer, t);
-                if !s.is_empty() {
-                    print!("{s}");
-                    let _ = std::io::stdout().flush();
-                }
-            },
+            &mut medidor,
             None,
             &mut gpu,
             reloj_ms,
-            mem_snapshot,
+            &mut mem_snapshot,
+            &mut None,
         );
         let dt = t0.elapsed().as_secs_f64();
         match r {
-            Ok(t) => {
+            Ok((t, _)) => {
                 let generated = t.len().saturating_sub(prompt_tokens.len());
                 eprintln!("\nplanificado: {} tokens ({} nuevos)", t.len(), generated);
+                eprintln!("borrador: {} ofrecidos, {} aceptados", rt.borrador_ofrecidos, rt.borrador_aceptados);
+                if let Some(ttft) = medidor.tiempos.first() {
+                    eprintln!("primer token: {:.3} s", ttft.as_secs_f64());
+                }
+                informar_medicion(&medidor, &rt, prompt_tokens.len(), generated, dt);
                 if generated > 0 && dt > 0.0 {
                     eprintln!(
                         "rendimiento: {:.2} tok/s ({:.0} ms/token)",
@@ -327,27 +355,51 @@ fn main() {
     }
 
     let tokens = rt
-        .generate_stream(
+        .generate_stream_par_observed(
             &mut source,
             &prompt_tokens,
-            max_new,
-            tokenizer.eos(),
+            GenerationOptions::from_eos(max_new, tokenizer.eos()),
             &mut sampler,
-            |t| {
-                let s = dec.push(&tokenizer, t);
-                print!("{s}");
-                std::io::stdout().flush().ok();
-            },
+            &mut medidor,
+            None,
+            &mut None,
+            &mut None,
         )
         .expect("generate falló");
-    println!("{}", dec.finish());
+    let (tokens, _) = tokens;
     let dt = t0.elapsed().as_secs_f32();
     let generated = tokens.len() - prompt_tokens.len();
     eprintln!(
         "{} tokens ({} nuevos) en {dt:.1}s ({:.2} tok/s)",
         tokens.len(),
         generated,
-        tokens.len() as f32 / dt
+        generated as f32 / dt
     );
+    if let Some(ttft) = medidor.tiempos.first() {
+        eprintln!("primer token: {:.3} s", ttft.as_secs_f64());
+    }
+    eprintln!("borrador: {} ofrecidos, {} aceptados", rt.borrador_ofrecidos, rt.borrador_aceptados);
+    informar_medicion(&medidor, &rt, prompt_tokens.len(), generated, dt as f64);
+    drop(medidor);
+    println!("{}", dec.finish());
     eprintln!("tokens: {:?}", &tokens[prompt_tokens.len()..]);
+}
+
+fn informar_medicion(m: &Medidor<'_>, rt: &Runtime, prompt: usize, generated: usize, total_s: f64) {
+    let intervalos: Vec<f64> = m.tiempos.windows(2).map(|w| (w[1] - w[0]).as_secs_f64()).collect();
+    let decode_s = m.tiempos.first().zip(m.tiempos.last()).map(|(a, b)| (*b - *a).as_secs_f64());
+    let mut ordenados = intervalos.clone();
+    ordenados.sort_by(f64::total_cmp);
+    let percentil = |p: usize| ordenados.get((ordenados.len() * p).div_ceil(100).saturating_sub(1)).copied();
+    let registro = serde_json::json!({
+        "prompt_tokens": prompt, "generated_tokens": generated, "total_s": total_s,
+        "prefill_s": m.prefill.map(|t| t.as_secs_f64()),
+        "ttft_s": m.tiempos.first().map(|t| t.as_secs_f64()),
+        "decode_tokens_s": decode_s.filter(|&s| s > 0.0 && m.tiempos.len() > 1)
+            .map(|s| (m.tiempos.len() - 1) as f64 / s),
+        "inter_token_p50_s": percentil(50), "inter_token_p95_s": percentil(95),
+        "decode_forwards": rt.forwards_decode, "draft_offered": rt.borrador_ofrecidos,
+        "draft_accepted": rt.borrador_aceptados, "draft_enabled": rt.borrador_activo,
+    });
+    eprintln!("medicion: {registro}");
 }

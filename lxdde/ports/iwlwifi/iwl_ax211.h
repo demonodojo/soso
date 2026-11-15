@@ -31,6 +31,8 @@ struct iwl_ax211_priv {
     uint8_t channel;
 
     struct iwl_fw_image fw;
+    /* Calibración por defecto de cada imagen (TLV DEF_CALIB); la usa PHY_CFG. */
+    struct iwl_calib_ctrl default_calib[IWL_UCODE_TYPE_MAX];
     const uint8_t *iml;
     unsigned long iml_len;
     /* Fichero PNVM crudo (TLV); la sección se elige tras ALIVE por sku_id. */

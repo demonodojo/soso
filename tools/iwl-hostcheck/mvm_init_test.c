@@ -13,17 +13,27 @@ int g_fast_ack;
 int g_doorbell_n;
 int g_block_pnvm;
 int g_init_too_early;
+int g_init_complete_on_phy;
 
 static struct {
     uint8_t group;
     uint8_t id;
+    uint16_t len;
+    uint8_t payload[32];
 } g_sent[16];
 static int g_sent_n;
+
+static uint32_t sent_le32(int i, unsigned off)
+{
+    const uint8_t *p = g_sent[i].payload + off;
+
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
 int iwl_trans_send_cmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
                        const void *payload, uint16_t pay_len)
 {
-    (void)payload;
-    (void)pay_len;
 
     if ((iwl->sku_id[0] || iwl->sku_id[1] || iwl->sku_id[2]) &&
         group == SYSTEM_GROUP && id == INIT_EXTENDED_CFG_CMD &&
@@ -34,11 +44,24 @@ int iwl_trans_send_cmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
     if (g_sent_n < (int)(sizeof(g_sent) / sizeof(g_sent[0]))) {
         g_sent[g_sent_n].group = group;
         g_sent[g_sent_n].id = id;
+        g_sent[g_sent_n].len = pay_len;
+        memset(g_sent[g_sent_n].payload, 0, sizeof(g_sent[g_sent_n].payload));
+        if (payload && pay_len) {
+            unsigned n = pay_len < sizeof(g_sent[g_sent_n].payload)
+                             ? pay_len
+                             : (unsigned)sizeof(g_sent[g_sent_n].payload);
+            memcpy(g_sent[g_sent_n].payload, payload, n);
+        }
         g_sent_n++;
     }
 
     /* Como `send_cmd_wait` drenando RX: INIT_COMPLETE puede llegar tras NVM_ACCESS. */
     if (group == REGULATORY_AND_NVM_GROUP && id == NVM_ACCESS_COMPLETE) {
+        iwl->init_complete = 1;
+    }
+    /* Familia 8000: el FW emite INIT_COMPLETE_NOTIF al aceptar PHY_CFG. */
+    if (g_init_complete_on_phy && group == LEGACY_GROUP &&
+        id == PHY_CONFIGURATION_CMD) {
         iwl->init_complete = 1;
     }
 
@@ -234,5 +257,107 @@ int mvm_init_hostcheck(void)
         return -1;
     }
     puts("OK: doorbell PNVM y luego INIT_EXTENDED_CFG (tras 0xFE)");
+
+    /* Familia 8000 (8265): Linux manda TX_ANT y después PHY_CFG, los dos del
+     * LEGACY_GROUP (wire LONG_GROUP). El id de PHY_CFG es 0x6a en Linux 6.6
+     * (fw/api/commands.h); 0x0b no existe y el FW no contesta. */
+    if (PHY_CONFIGURATION_CMD != 0x6a) {
+        fprintf(stderr, "PHY_CONFIGURATION_CMD=0x%02x (Linux: 0x6a)\n",
+                (unsigned)PHY_CONFIGURATION_CMD);
+        return -1;
+    }
+    memset(&g_test, 0, sizeof(g_test));
+    g_test.alive = 1;
+    g_test.family = IWL_DEVICE_FAMILY_8000;
+    g_test.phy_sku = 0x00330018u;
+    g_test.n_scan_channels = 52;
+    g_sent_n = 0;
+    g_fast_ack = 1;
+    g_poll_calls = 0;
+    g_nvm_fail = 0;
+    g_init_complete_on_phy = 1;
+    if (iwl_mvm_run_init(&g_test) != 0) {
+        fprintf(stderr, "init 8000 falló con ack del FW\n");
+        return -1;
+    }
+    if (g_sent_n < 2 || g_sent[0].group != LEGACY_GROUP ||
+        g_sent[0].id != TX_ANT_CONFIGURATION_CMD) {
+        fprintf(stderr, "8000 no empezó por TX_ANT (n=%d grp=%u id=0x%02x)\n",
+                g_sent_n, g_sent_n ? g_sent[0].group : 0,
+                g_sent_n ? g_sent[0].id : 0);
+        return -1;
+    }
+    if (g_sent[1].group != LEGACY_GROUP || g_sent[1].id != PHY_CONFIGURATION_CMD) {
+        fprintf(stderr, "8000 no siguió con PHY_CFG (grp=%u id=0x%02x)\n",
+                g_sent[1].group, g_sent[1].id);
+        return -1;
+    }
+    if (!g_test.radio_ready || !g_test.nvm_ready) {
+        fprintf(stderr, "8000 no dejó radio/NVM listos\n");
+        return -1;
+    }
+    puts("OK: 8000 manda TX_ANT y PHY_CFG grp=0 id=0x6a (Linux)");
+
+    /* Payload de PHY_CFG como `iwl_send_phy_cfg_cmd`: v1 = phy_cfg + 8 B de
+     * calibración; phy_cfg reescribe las cadenas del PHY_SKU con las antenas
+     * válidas (stub: tx=rx=1) → 0x00330018 & 0xFF00FFFF | 1<<16 | 1<<20. */
+    memset(&g_test, 0, sizeof(g_test));
+    g_test.alive = 1;
+    g_test.family = IWL_DEVICE_FAMILY_8000;
+    g_test.phy_sku = 0x00330018u;
+    g_test.default_calib[IWL_UCODE_REGULAR].flow_trigger = 0x00000004u;
+    g_test.default_calib[IWL_UCODE_REGULAR].event_trigger = 0x00c00000u;
+    g_sent_n = 0;
+    g_fast_ack = 1;
+    g_poll_calls = 0;
+    g_init_complete_on_phy = 1;
+    if (iwl_mvm_run_init(&g_test) != 0) {
+        fprintf(stderr, "init 8000 falló (payload v1)\n");
+        return -1;
+    }
+    if (g_sent_n < 2 || g_sent[1].len != 12) {
+        fprintf(stderr, "PHY_CFG v1 debe medir 12 B (len=%u)\n",
+                g_sent_n < 2 ? 0u : (unsigned)g_sent[1].len);
+        return -1;
+    }
+    if (sent_le32(1, 0) != 0x00110018u) {
+        fprintf(stderr, "PHY_CFG phy_cfg=0x%08x (Linux: 0x00110018)\n",
+                (unsigned)sent_le32(1, 0));
+        return -1;
+    }
+    if (sent_le32(1, 4) != 0x00000004u || sent_le32(1, 8) != 0x00c00000u) {
+        fprintf(stderr, "PHY_CFG calib flow=0x%08x event=0x%08x\n",
+                (unsigned)sent_le32(1, 4), (unsigned)sent_le32(1, 8));
+        return -1;
+    }
+    puts("OK: PHY_CFG v1 12 B con phy_cfg de antenas y DEF_CALIB de la imagen");
+
+    /* cmd_ver 3 → payload v3 de 28 B (filtros PHY a cero: no hay ACPI). */
+    memset(&g_test, 0, sizeof(g_test));
+    g_test.alive = 1;
+    g_test.family = IWL_DEVICE_FAMILY_8000;
+    g_test.phy_sku = 0x00330018u;
+    g_test.cmd_ver_count = 1;
+    g_test.cmd_ver[0].cmd = PHY_CONFIGURATION_CMD;
+    g_test.cmd_ver[0].group = LONG_GROUP;
+    g_test.cmd_ver[0].version = 3;
+    g_sent_n = 0;
+    g_fast_ack = 1;
+    g_poll_calls = 0;
+    g_init_complete_on_phy = 1;
+    if (iwl_mvm_run_init(&g_test) != 0) {
+        fprintf(stderr, "init 8000 falló (payload v3)\n");
+        return -1;
+    }
+    if (g_sent_n < 2 || g_sent[1].len != 28) {
+        fprintf(stderr, "PHY_CFG v3 debe medir 28 B (len=%u)\n",
+                g_sent_n < 2 ? 0u : (unsigned)g_sent[1].len);
+        return -1;
+    }
+    if (sent_le32(1, 0) != 0x00110018u) {
+        fprintf(stderr, "PHY_CFG v3 phy_cfg=0x%08x\n", (unsigned)sent_le32(1, 0));
+        return -1;
+    }
+    puts("OK: PHY_CFG v3 28 B cuando cmd_ver=3");
     return 0;
 }

@@ -36,9 +36,26 @@ static int iwl_pnvm_load(struct iwl_ax211_priv *iwl)
     return -1;
 }
 
+/* Linux `iwl_mvm_get_phy_config` (mvm/mvm.h): el `phy_config` del firmware
+ * (aquí `phy_sku`, TLV PHY_SKU) con los campos de cadenas reescritos según las
+ * antenas válidas. `trans_cfg->extra_phy_cfg_flags` de cfg/8000.c es 0. */
+static uint32_t iwl_mvm_phy_cfg_8000(struct iwl_ax211_priv *iwl)
+{
+    uint32_t phy_config = ~(FW_PHY_CFG_TX_CHAIN | FW_PHY_CFG_RX_CHAIN);
+    uint32_t valid_tx = iwl_mvm_valid_tx_ant(iwl);
+    uint32_t valid_rx = iwl_mvm_valid_rx_ant(iwl);
+
+    phy_config |= (valid_tx << FW_PHY_CFG_TX_CHAIN_POS) |
+                  (valid_rx << FW_PHY_CFG_RX_CHAIN_POS);
+    return iwl->phy_sku & phy_config;
+}
+
 static int iwl_mvm_run_init_8000(struct iwl_ax211_priv *iwl)
 {
-    struct iwl_phy_cfg_cmd_v1 phy;
+    /* v1 es el prefijo de v3: se manda uno u otro según la versión del TLV. */
+    struct iwl_phy_cfg_cmd_v3 phy;
+    uint16_t phy_len;
+    int ver;
     int t;
 
     if (!iwl->alive)
@@ -58,10 +75,25 @@ static int iwl_mvm_run_init_8000(struct iwl_ax211_priv *iwl)
         }
     }
 
+    /* Linux `iwl_send_phy_cfg_cmd` (mvm/fw.c): phy_cfg de las antenas, la
+     * calibración por defecto de la imagen **en curso** —aquí la RT, porque el
+     * transporte ya cargó el ucode regular— y tamaño según `cmd_ver`. */
+    ver = iwl_fw_cmd_ver(iwl, LEGACY_GROUP, PHY_CONFIGURATION_CMD);
     memset(&phy, 0, sizeof(phy));
-    phy.phy_cfg = iwl->phy_sku;
+    phy.phy_cfg = iwl_cpu_to_le32(iwl_mvm_phy_cfg_8000(iwl));
+    phy.calib_control.flow_trigger =
+        iwl_cpu_to_le32(iwl->default_calib[IWL_UCODE_REGULAR].flow_trigger);
+    phy.calib_control.event_trigger =
+        iwl_cpu_to_le32(iwl->default_calib[IWL_UCODE_REGULAR].event_trigger);
+    phy_len = (ver == 3) ? (uint16_t)sizeof(struct iwl_phy_cfg_cmd_v3)
+                         : (uint16_t)sizeof(struct iwl_phy_cfg_cmd_v1);
+    lx_printk("iwl_mvm: PHY_CFG ver=%d len=%u phy_cfg=0x%08x calib flow=0x%x event=0x%x\n",
+              ver, (unsigned)phy_len,
+              (unsigned)iwl_mvm_phy_cfg_8000(iwl),
+              (unsigned)iwl->default_calib[IWL_UCODE_REGULAR].flow_trigger,
+              (unsigned)iwl->default_calib[IWL_UCODE_REGULAR].event_trigger);
     if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, PHY_CONFIGURATION_CMD, &phy,
-                                (uint16_t)sizeof(phy), 2000) != 0) {
+                                phy_len, 2000) != 0) {
         lx_printk("iwl_mvm: PHY_CFG 8000 falló\n");
         return -1;
     }

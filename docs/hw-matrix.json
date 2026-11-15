@@ -14281,55 +14281,59 @@
       "firmware": {},
       "artefactos": {},
       "git": {
-        "commit": "e2c42f400",
-        "commit_corto": "e2c42f400",
-        "version": "0.2.2",
-        "dirty": true,
-        "cambios_locales": "run7: FH OK (INT≠0x08000000) pero ALIVE INIT falla SB1=0x3; host añade tx_init 31 colas+SCD_GP_CTRL pre-INIT, PCI 0x41=0, wait_alive ACK FH_RX/ALIVE (pendiente reflash)"
+        "commit": "5902f927a",
+        "commit_corto": "5902f927a",
+        "version": "0.3.28",
+        "dirty": false,
+        "cambios_locales": "kernel del USB escrito con --only kernel desde HEAD 5902f927a; ESP flasheada 2026-11-05 (0.3.28, 886e8bb0d-dirty)"
       },
       "perfil_drivers": "live-usb + iwlwifi",
       "arranques_consecutivos_ok": 0,
       "sesion_sostenida": {
         "status": "ok",
-        "nota": "sosh pid=2; WiFi probe OK pero ALIVE falló; rtl8169 DOWN. sosh≠ALIVE.",
-        "fecha": "2026-09-16"
+        "nota": "sosh alcanzado (pid 1 /bin/init). Sin red: ni WiFi ni ethernet; no hay sesión sostenida que acreditar.",
+        "fecha": "2026-11-15"
       },
       "wifi": {
         "alive": {
-          "status": "fail",
-          "nota": "run7 flush#24: timeout ALIVE INIT INT=0 SB1=0x3 SB2=0x29f6 rb_hw=0 LOAD_ST=0xffffffff; FH chunks OK; falta tx_init 31 colas pre-INIT (corregido host, sin reflash)",
-          "fecha": "2026-09-16"
+          "status": "ok",
+          "nota": "run 2026-11-15 flush#32: UCODE_ALIVE_NTFY en INIT y en RT, también tras cada recarga (irecover). alive=true.",
+          "fecha": "2026-11-15"
         },
         "init_complete": {
           "status": "fail",
-          "nota": "sin ALIVE RT; MVM no llega a INIT_COMPLETE",
-          "fecha": "2026-09-16"
+          "nota": "sin INIT_COMPLETE_NOTIF: tras ALIVE RT se manda PHY_CFG y el FW no contesta (timeout 2000 ms); init MVM incompleto.",
+          "fecha": "2026-11-15"
         },
         "mvm_ready": {
           "status": "fail",
-          "nota": "phase=fw_start alive=false",
-          "fecha": "2026-09-16"
+          "nota": "iwlwifi start rc=-1 phase=alive alive=true; 3 recuperaciones seguidas fallidas (mismo timeout).",
+          "fecha": "2026-11-15"
         },
         "scan": {
           "status": "fail",
-          "nota": "wifi scan: firmware no arrancó (phase=fw_start); sin BSS",
-          "fecha": "2026-09-16"
+          "nota": "sosh: wifi scan: error de E/S (transporte MVM abajo, no \"ninguna red\").",
+          "fecha": "2026-11-15"
         },
         "assoc_wpa2": {
-          "status": "pendiente"
+          "status": "fail",
+          "nota": "PSK derivada para Rutilo; fallo AUTH+ASSOC 802.11 (nunca hubo scan ni RX/TX de 802.11).",
+          "fecha": "2026-11-15"
         },
         "dhcp": {
-          "status": "pendiente",
-          "nota": "sin WiFi; rtl8169 DOWN sin cable — no es DHCP WiFi",
-          "fecha": "2026-09-16"
+          "status": "fail",
+          "nota": "sin lease: WiFi sin assoc y rtl8169 enlace DOWN (sin cable). No es DHCP de LxWifi.",
+          "fecha": "2026-11-15"
         },
         "ssh": {
-          "status": "pendiente",
-          "nota": "sin IP",
-          "fecha": "2026-09-15"
+          "status": "fail",
+          "nota": "sin IP en ningún backend; solo sosh por framebuffer/PS2.",
+          "fecha": "2026-11-15"
         },
         "reconexion": {
-          "status": "pendiente"
+          "status": "fail",
+          "nota": "3 recuperaciones seguidas fallidas; \"no se insiste\".",
+          "fecha": "2026-11-15"
         }
       },
       "gpu": {
@@ -14359,7 +14363,10 @@
         "target/usb-diagnostic-2026-09-16-eve/SOSODRV.txt",
         "target/usb-diagnostic-2026-09-16/SOSOLOG.txt",
         "target/usb-diagnostic-2026-09-16/SOSODRV.txt",
-        "target/usb-diagnostic-2026-09-15/SOSOLOG-parse.txt"
+        "target/usb-diagnostic-2026-09-15/SOSOLOG-parse.txt",
+        "target/usb-diagnostic-2026-11-15/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-11-15/SOSODRV.txt",
+        "target/usb-diagnostic-2026-11-15/ESP-listado.txt"
       ],
       "historial": [
         {
@@ -14450,10 +14457,107 @@
           "campana_gpu": false,
           "flushes": 1,
           "fecha": "2026-09-15"
+        },
+        {
+          "log_hash": "f50a66eaa6920a89ee808091f4c608d39b45b8f39ff4280b9a90c1c763b7888a",
+          "kernel": "soso 0.3.28 (5902f927a)",
+          "identidad_conocida": true,
+          "artefactos": {},
+          "pci": [
+            "8086:5917",
+            "1c5c:1527",
+            "8086:9d2f",
+            "8086:9d71",
+            "8086:24fd",
+            "10ec:8168",
+            "8086:5914",
+            "8086:1903",
+            "8086:9d31",
+            "8086:9d60",
+            "8086:9d61",
+            "8086:9d3a",
+            "8086:9d03",
+            "8086:9d14",
+            "8086:9d15",
+            "8086:9d18",
+            "8086:9d1b",
+            "8086:9d4e",
+            "8086:9d21",
+            "8086:9d23",
+            "10ec:522a",
+            "048d:1234"
+          ],
+          "wifi": {
+            "alive": {
+              "status": "ok",
+              "nota": "run 2026-11-15 flush#32: UCODE_ALIVE_NTFY en INIT y en RT, también tras cada recarga (irecover). alive=true.",
+              "fecha": "2026-11-15"
+            },
+            "init_complete": {
+              "status": "fail",
+              "nota": "sin INIT_COMPLETE_NOTIF: tras ALIVE RT se manda PHY_CFG y el FW no contesta (timeout 2000 ms); init MVM incompleto.",
+              "fecha": "2026-11-15"
+            },
+            "mvm_ready": {
+              "status": "fail",
+              "nota": "iwlwifi start rc=-1 phase=alive alive=true; 3 recuperaciones seguidas fallidas (mismo timeout).",
+              "fecha": "2026-11-15"
+            },
+            "scan": {
+              "status": "fail",
+              "nota": "sosh: wifi scan: error de E/S (transporte MVM abajo, no \"ninguna red\").",
+              "fecha": "2026-11-15"
+            },
+            "assoc_wpa2": {
+              "status": "fail",
+              "nota": "PSK derivada para Rutilo; fallo AUTH+ASSOC 802.11 (nunca hubo scan ni RX/TX de 802.11).",
+              "fecha": "2026-11-15"
+            },
+            "dhcp": {
+              "status": "fail",
+              "nota": "sin lease: WiFi sin assoc y rtl8169 enlace DOWN (sin cable). No es DHCP de LxWifi.",
+              "fecha": "2026-11-15"
+            },
+            "ssh": {
+              "status": "fail",
+              "nota": "sin IP en ningún backend; solo sosh por framebuffer/PS2.",
+              "fecha": "2026-11-15"
+            },
+            "reconexion": {
+              "status": "fail",
+              "nota": "3 recuperaciones seguidas fallidas; \"no se insiste\".",
+              "fecha": "2026-11-15"
+            }
+          },
+          "gpu": {
+            "gsp_rpc": {
+              "status": "pendiente"
+            },
+            "vram_pool": {
+              "status": "pendiente"
+            },
+            "ce_readback": {
+              "status": "pendiente"
+            },
+            "compute_cpu_gpu": {
+              "status": "pendiente"
+            },
+            "carga_real": {
+              "status": "pendiente"
+            },
+            "apagado_limpio": {
+              "status": "pendiente"
+            }
+          },
+          "userspace": true,
+          "campana_wifi": false,
+          "campana_gpu": false,
+          "flushes": 1,
+          "fecha": "2026-11-15"
         }
       ],
-      "notas": "run7 flush#24 @408s: FH fixes OK (11 chunks, INT=0) pero ALIVE INIT falla SecBoot SB1=0x3. Host: tx_init 31 colas+SCD_GP_CTRL pre-INIT, PCI retry 0x41=0, wait_alive ISR+kick dumps. Hostcheck OK; pendiente reflash. Ver docs/DIAGNOSTICO-HP-2026-09-16.md",
-      "actualizado": "2026-09-16"
+      "notas": "2026-11-15 flush#32 uptime 259211 ms, kbd sc=222: soso 0.3.28 (5902f927a) en el HP (iGPU 8086:5917, nvme 1c5c:1527, rtl8169 DOWN). WiFi 8265: probe OK, ALIVE OK (INIT+RT), y MUERE en PHY_CFG: soso manda grupo LONG id 0x0b; Linux 6.6 usa PHY_CONFIGURATION_CMD=0x6a (fw/api/commands.h:308) — el FW no contesta y la cola queda envenenada (3 recover, scan E/S). ESP: updslot no pudo reponer SOSOKRN.MET (RaizLlena) → recuperación OTA limitada; la raíz de la ESP tiene entradas basura/orfandas. rtl8169 DOWN (phystatus 0x84, sin cable). docs/DIAGNOSTICO-HP-2026-11-15.md. Copia target/usb-diagnostic-2026-11-15/.",
+      "actualizado": "2026-11-15"
     }
   ]
 }

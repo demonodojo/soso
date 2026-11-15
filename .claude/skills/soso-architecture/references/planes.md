@@ -30,6 +30,7 @@ el alcance: consultar o editar documentación no inicia su implementación.
 | Entregas generales y pendientes | [PLAN_ASTRA.md](../../../../PLAN_ASTRA.md); comprobar su revisión e IDs actuales |
 | Actualizaciones de instalaciones y logs en sosofs | [PLAN-ACTUALIZACIONES.md](../../../../docs/PLAN-ACTUALIZACIONES.md), entregas U0–U8; transición legacy y recuperación conjunta kernel/rootfs |
 | Inferencia y modelos grandes | [PLAN-MODELOS-GRANDES.md](../../../../PLAN-MODELOS-GRANDES.md); distinguir etapas históricas de pendientes reales |
+| Optimizaciones de inferencia portadas de DSUF | [PLAN-INFERENCIA-ULTRAFAST.md](../../../../docs/PLAN-INFERENCIA-ULTRAFAST.md), fases F0–F8 (especulación exacta, KV 4 bits, snapshot de KV, kernels AOT) |
 | GPU nativa y VRAM | [L6-native-autonomy.md](../../../../docs/L6-native-autonomy.md), gates enlazados y [PLAN-VRAM-16G-ROG.md](../../../../docs/PLAN-VRAM-16G-ROG.md) |
 | Gráficos 3D y juegos nativos | [PLAN-GRAFICOS-JUEGOS.md](../../../../docs/PLAN-GRAFICOS-JUEGOS.md) (H1–F8; motor 3D NVIDIA + `soso-gfx`); scanout HDMI [PLAN-NVDISPLAY.md](../../../../docs/PLAN-NVDISPLAY.md) (N0–N8) |
 | Steam Deck / ath11k | [PLAN-STEAMDECK.md](../../../../docs/PLAN-STEAMDECK.md) |
@@ -164,8 +165,13 @@ con fecha y enlaces; no imponer otro catálogo a todo el repositorio.
 
 ## Dónde editar las skills
 
-Fuente del proyecto: `.claude/skills/`. Comprobar `ls -ld .agents/skills
+Fuente de las skills: `.claude/skills/`. Comprobar `ls -ld .agents/skills
 .cursor/skills`: en este checkout ambos son enlaces a `../.claude/skills`.
+No hay directorio de comandos de usuario: los flujos que antes eran comandos de
+Cursor (`diagnostico-usb`, `publicar-release`) viven ahora como skills en
+`.claude/skills/` y se invocan con `/skill:<nombre>` (Freebuff y Codebuff sólo
+exponen comandos propios más `/skill:<nombre>`; no leen `.cursor/commands` ni
+`.agents/commands`).
 Editar la fuente una sola vez; no copiar sobre el destino ni sustituir los
 symlinks. Si en otro checkout son copias reales, comparar antes de sincronizar
 solo los archivos cambiados, preservando modificaciones independientes.

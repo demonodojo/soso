@@ -133,6 +133,27 @@ int iwl_fw_parse_tlv(struct iwl_ax211_priv *iwl, const uint8_t *fw, unsigned lon
                           (unsigned)iwl->fw_valid_rx_ant);
             }
             break;
+        case IWL_UCODE_TLV_DEF_CALIB:
+            /* Linux `iwl_set_default_calib` (iwl-drv.c): qué calibraciones
+             * lanza PHY_CFG. Sin este TLV el comando va con 0 y el FW no
+             * arranca las calibraciones de la imagen. */
+            if (length >= sizeof(struct iwl_tlv_calib_data)) {
+                const struct iwl_tlv_calib_data *dc =
+                    (const struct iwl_tlv_calib_data *)pos;
+                uint32_t t = le32((const uint8_t *)&dc->ucode_type);
+
+                if (t < IWL_UCODE_TYPE_MAX) {
+                    iwl->default_calib[t].flow_trigger =
+                        le32((const uint8_t *)&dc->calib.flow_trigger);
+                    iwl->default_calib[t].event_trigger =
+                        le32((const uint8_t *)&dc->calib.event_trigger);
+                    lx_printk("iwl_fw: DEF_CALIB tipo=%u flow=0x%x event=0x%x\n",
+                              (unsigned)t,
+                              (unsigned)iwl->default_calib[t].flow_trigger,
+                              (unsigned)iwl->default_calib[t].event_trigger);
+                }
+            }
+            break;
         case IWL_UCODE_TLV_N_SCAN:
             if (length >= 1) {
                 iwl->n_scan_channels = pos[0];
