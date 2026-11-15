@@ -7,6 +7,14 @@
 
 #define IWL_AX211_MAX_SCAN 32
 #define IWL_AX211_SSID_MAX 32
+#define IWL_PHY_DB_MAX_ENTRIES 64
+
+struct iwl_phy_db_entry {
+    uint8_t *data;
+    uint16_t size;
+    uint16_t type;
+    uint16_t group;
+};
 
 struct iwl_ax211_tfd {
     uint64_t addr;
@@ -31,6 +39,10 @@ struct iwl_ax211_priv {
     uint8_t channel;
 
     struct iwl_fw_image fw;
+    uint8_t fw_8000_cached;
+    /* Bloques DMA de paginación del ucode 8000; se reutilizan al recuperar. */
+    void *paging_cpu[33];
+    uint64_t paging_dma[33];
     /* Calibración por defecto de cada imagen (TLV DEF_CALIB); la usa PHY_CFG. */
     struct iwl_calib_ctrl default_calib[IWL_UCODE_TYPE_MAX];
     const uint8_t *iml;
@@ -84,6 +96,9 @@ struct iwl_ax211_priv {
     void *tx_ring_cpu[IWL_8000_NUM_QUEUES];
     uint64_t tx_ring_dma[IWL_8000_NUM_QUEUES];
     uint8_t tx_preload_ready;
+    void *fw_8000_chunk_cpu;
+    uint64_t fw_8000_chunk_dma;
+    uint32_t fw_8000_chunk_size;
     void *ict_cpu;
     uint64_t ict_dma;
     void *iml_cpu;
@@ -151,6 +166,11 @@ struct iwl_ax211_priv {
     uint32_t nvm_chan_flags[IWL_NUM_CHANNELS];
     int scan_cfg_sent;
     int init_complete;
+    /* Resultados de calibración INIT conservados hasta su envío a RT. */
+    struct iwl_phy_db_entry phy_db[IWL_PHY_DB_MAX_ENTRIES];
+    unsigned phy_db_count;
+    int phy_db_collecting;
+    int phy_db_error;
     int pnvm_complete;
     uint32_t sku_id[3];
     int radio_ready;

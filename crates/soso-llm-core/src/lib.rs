@@ -20,6 +20,8 @@ pub mod gpu;
 pub mod moe_gpu;
 pub mod sched;
 pub mod kv;
+pub mod kv_fp4;
+pub mod kvsnap;
 pub mod layer;
 pub mod parallel;
 pub mod quant;

@@ -602,6 +602,13 @@ int iwl_mvm_up_minimal(struct iwl_ax211_priv *iwl)
         return -1;
     }
 
+    if (iwl->family == IWL_DEVICE_FAMILY_8000 &&
+        iwl_mvm_phy_db_apply_8000(iwl) != 0) {
+        lx_printk("iwl_mvm: PHY DB 8000 no aplicada\n");
+        iwl->radio_ready = 0;
+        return -1;
+    }
+
     if (iwl_configure_rxq(iwl) != 0) {
         lx_printk("iwl_mvm: configure_rxq falló — abort up\n");
         return -1;

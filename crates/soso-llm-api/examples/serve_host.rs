@@ -16,7 +16,7 @@ use soso_llm_core::conversation::ModelProfile;
 
 fn usage() -> ! {
     eprintln!(
-        "uso: serve_host --model-dir <dir> --profile <profile.json> [--port <n>]\n\
+        "uso: serve_host --model-dir <dir> --profile <profile.json> [--port <n>] [--kv-cache-dir <dir> --kv-cache-max-mib <n>]\n\
          token: variable SOSO_LLM_API_KEY (obligatoria)"
     );
     std::process::exit(2);
@@ -26,11 +26,15 @@ fn main() {
     let mut model_dir: Option<String> = None;
     let mut profile_path: Option<String> = None;
     let mut port: u16 = 7422;
+    let mut kv_dir: Option<String> = None;
+    let mut kv_max_mib: usize = 256;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--model-dir" => model_dir = args.next(),
             "--profile" => profile_path = args.next(),
+            "--kv-cache-dir" => kv_dir = args.next(),
+            "--kv-cache-max-mib" => kv_max_mib = args.next().and_then(|v| v.parse().ok()).filter(|&n| n > 0).unwrap_or_else(|| usage()),
             "--port" => {
                 port = args
                     .next()
@@ -86,6 +90,20 @@ fn main() {
             }
             Err(e) => eprintln!("serve_host: sin GPU ({e}); sigo en CPU"),
         }
+    }
+    if let Some(dir) = kv_dir {
+        let max = kv_max_mib.checked_mul(1024 * 1024).unwrap_or_else(|| usage());
+        let ejecutable = soso_llm_api::identidad_kv::hash_fichero(std::path::Path::new("/proc/self/exe"))
+            .unwrap_or_else(|e| { eprintln!("identidad del ejecutable: {e}"); std::process::exit(1); });
+        let mut identidad = ejecutable.to_vec();
+        identidad.extend_from_slice(std::env::consts::ARCH.as_bytes());
+        identidad.extend_from_slice(std::env::var("HILOS").unwrap_or_default().as_bytes());
+        #[cfg(target_arch = "x86_64")]
+        identidad.extend_from_slice(&[std::arch::is_x86_feature_detected!("avx2") as u8,
+                                      std::arch::is_x86_feature_detected!("fma") as u8]);
+        backend.habilitar_cache_kv(std::path::Path::new(&dir), &identidad, max)
+            .unwrap_or_else(|e| { eprintln!("caché KV: {e}"); std::process::exit(1); });
+        eprintln!("serve_host: caché KV privada activa en {dir} (máximo {kv_max_mib} MiB)");
     }
     // Muestreo por defecto de las peticiones que no lo traen (los Qwen3.x recomiendan top_p 0,8 y top_k 20; llama.cpp los aplica solo).
     if let Some(p) = std::env::var("SOSO_TOP_P").ok().and_then(|v| v.parse::<f32>().ok()) {

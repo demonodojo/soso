@@ -146,6 +146,7 @@ pub fn forward_mla_attn<S: TensorSource>(
     }
 
     kv.append_mla_latent(&s.up[..kv_rank]);
+    if kv.fp4_error { return Err(()); }
     let seq = kv.tokens(kv_rank);
     s.attn_out.fill(0.0);
     for head in 0..heads {
@@ -285,6 +286,7 @@ pub fn forward_kda_attn<S: TensorSource>(
         rope_inplace(&mut s.k[head * head_dim..(head + 1) * head_dim], pos, theta);
     }
     kv.append_f16(&s.k[..kv_dim], &s.v[..kv_dim]);
+    if kv.fp4_error { return Err(()); }
     let seq = kv.tokens(kv_dim);
     s.attn_out.fill(0.0);
     for head in 0..heads {
@@ -537,6 +539,7 @@ pub fn forward_gated_attn<S: TensorSource>(
 
     let t_attn0 = tick(clock_ms);
     kv.append_f16(&s.k[..kv_dim], &s.v[..kv_dim]);
+    if kv.fp4_error { return Err(()); }
     let seq = kv.tokens(kv_dim);
     if kv.dtype == crate::kv::KvDtype::F16 {
         // Kernel por grupos GQA (AVX2, repartido entre hilos): el camino de siempre para el resto de modelos.

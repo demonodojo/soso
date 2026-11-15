@@ -620,6 +620,7 @@ fn atencion_bloque<S: TensorSource>(
     let seq_antes = kv.tokens(kv_dim);
     for i in 0..n {
         kv.append_f16(&k[i * kv_dim..(i + 1) * kv_dim], &v[i * kv_dim..(i + 1) * kv_dim]);
+        if kv.fp4_error { return Err(()); }
     }
     perfil_marca(&mut tp, FASE_ROPE_KV);
     let mut attn = vec![0.0f32; n * q_dim];

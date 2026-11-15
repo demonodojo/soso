@@ -117,6 +117,18 @@ int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t i
 }
 
 int g_nvm_fail;
+int g_phy_bad;
+int g_phy_send;
+int iwl_phy_db_valid(const struct iwl_ax211_priv *iwl)
+{ (void)iwl; return !g_phy_bad; }
+int iwl_phy_db_send(struct iwl_ax211_priv *iwl)
+{ (void)iwl; g_phy_send++; return g_phy_bad ? -1 : 0; }
+int iwl_mvm_nvm_read_8000(struct iwl_ax211_priv *iwl)
+{
+    if (g_nvm_fail || !iwl->phy_db_collecting) return -1;
+    iwl->nvm_ready = 1;
+    return 0;
+}
 
 int iwl_mvm_nvm_get_info_mac(struct iwl_ax211_priv *iwl)
 {
@@ -276,7 +288,7 @@ int mvm_init_hostcheck(void)
     g_poll_calls = 0;
     g_nvm_fail = 0;
     g_init_complete_on_phy = 1;
-    if (iwl_mvm_run_init(&g_test) != 0) {
+    if (iwl_mvm_calibrate_8000(&g_test) != 0) {
         fprintf(stderr, "init 8000 falló con ack del FW\n");
         return -1;
     }
@@ -292,7 +304,7 @@ int mvm_init_hostcheck(void)
                 g_sent[1].group, g_sent[1].id);
         return -1;
     }
-    if (!g_test.radio_ready || !g_test.nvm_ready) {
+    if (g_test.radio_ready || !g_test.nvm_ready || !g_test.init_complete) {
         fprintf(stderr, "8000 no dejó radio/NVM listos\n");
         return -1;
     }
@@ -305,13 +317,13 @@ int mvm_init_hostcheck(void)
     g_test.alive = 1;
     g_test.family = IWL_DEVICE_FAMILY_8000;
     g_test.phy_sku = 0x00330018u;
-    g_test.default_calib[IWL_UCODE_REGULAR].flow_trigger = 0x00000004u;
-    g_test.default_calib[IWL_UCODE_REGULAR].event_trigger = 0x00c00000u;
+    g_test.default_calib[IWL_UCODE_INIT].flow_trigger = 0x00000004u;
+    g_test.default_calib[IWL_UCODE_INIT].event_trigger = 0x00c00000u;
     g_sent_n = 0;
     g_fast_ack = 1;
     g_poll_calls = 0;
     g_init_complete_on_phy = 1;
-    if (iwl_mvm_run_init(&g_test) != 0) {
+    if (iwl_mvm_calibrate_8000(&g_test) != 0) {
         fprintf(stderr, "init 8000 falló (payload v1)\n");
         return -1;
     }
@@ -345,7 +357,7 @@ int mvm_init_hostcheck(void)
     g_fast_ack = 1;
     g_poll_calls = 0;
     g_init_complete_on_phy = 1;
-    if (iwl_mvm_run_init(&g_test) != 0) {
+    if (iwl_mvm_calibrate_8000(&g_test) != 0) {
         fprintf(stderr, "init 8000 falló (payload v3)\n");
         return -1;
     }
@@ -359,5 +371,32 @@ int mvm_init_hostcheck(void)
         return -1;
     }
     puts("OK: PHY_CFG v3 28 B cuando cmd_ver=3");
+
+    /* No publicar radio cuando falla NVM, falta calibración o no llega INIT_COMPLETE. */
+    memset(&g_test, 0, sizeof(g_test));
+    g_test.alive = 1;
+    g_test.family = IWL_DEVICE_FAMILY_8000;
+    g_nvm_fail = 1;
+    if (!iwl_mvm_calibrate_8000(&g_test) || g_test.radio_ready || g_test.nvm_ready)
+        return -1;
+    g_nvm_fail = 0;
+    g_phy_bad = 1;
+    if (!iwl_mvm_calibrate_8000(&g_test) || g_test.radio_ready || g_test.nvm_ready)
+        return -1;
+    g_phy_bad = 0;
+    g_init_complete_on_phy = 0;
+    if (!iwl_mvm_calibrate_8000(&g_test) || g_test.radio_ready || g_test.nvm_ready)
+        return -1;
+    g_init_complete_on_phy = 1;
+    if (iwl_mvm_calibrate_8000(&g_test) || iwl_mvm_run_init(&g_test))
+        return -1;
+    g_test.default_calib[IWL_UCODE_REGULAR].flow_trigger = 0x87654321;
+    g_sent_n = 0;
+    g_phy_send = 0;
+    if (iwl_mvm_phy_db_apply_8000(&g_test) || g_phy_send != 1 ||
+        g_sent_n != 1 || g_sent[0].id != PHY_CONFIGURATION_CMD ||
+        sent_le32(0, 4) != 0x87654321)
+        return -1;
+    puts("OK: INIT 8000 falla cerrado y RT recibe PHY DB antes de PHY_CFG regular");
     return 0;
 }

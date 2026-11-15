@@ -49,14 +49,14 @@ los modelos que carga soso.
 | Pieza | Estado en soso | Ruta |
 |-------|----------------|------|
 | Decode especulativo | Sí: PLD n-grama con autotune de `n` y tope de borrador, verificación por bloque (`borrador_por_bloques`) y política de longitud por coste | `crates/soso-llm-core/src/{plan,runtime,especulativo}.rs` |
-| Exactitud del especulativo | Sólo **greedy**: el borrador se compara con el argmax; sin test estadístico | `runtime.rs::filtrar_borrador` |
+| Exactitud del especulativo | Greedy y muestreo con temperatura en bloques sin restricciones; falta validación estadística y de GPU | `runtime.rs::especular_en_bloque` |
 | KV | f16 o **int8** por token (KIVI-lite) + expulsión H2O; KV residente en GPU con rebobinado por `pos0` | `kv.rs`, `cuda/capa.rs` (`kv_preparar`) |
 | Atención de decode | Tiled/online-softmax en CPU (AVX2) y kernel de atención con KV residente en GPU | `attn.rs`, `cuda/capa.rs` |
 | Weights | MXFP4/Q4_K/Q8_0 en CPU y GPU; MoE con gate/up Q4_K y down Q8_0 | `gemm.rs`, `layer.rs`, `moe_gpu.rs`, `cuda/capa/moe.rs` |
 | Muestreo | En host; por token baja la fila de logits completa por PCIe y sube la fila de embedding | `cuda/decode.rs` (DtoH de `LOGITS`), `sample.rs` |
 | Snapshot de KV | Sólo prefijo **de CPU** para failover (`KevPrefixSnapshot`); el KV de GPU no se persiste | `kev.rs`, `runtime.rs` |
 | Clúster | Pipeline por capas en estrella, journal con `prefix_hash`, transporte TCP | `pipeline.rs`, `cluster/{nodo,estrella}.rs` |
-| Kernels GPU | 3 PTX **versionados** generados con NVRTC (`.target sm_80`, CUDA 12.8); sin fuentes `.cu` en el árbol, sin variantes por arquitectura | `crates/soso-llm-api/cuda/*.ptx`, `cuda.rs` |
+| Kernels GPU | 3 PTX versionados (`.target sm_80`); fuentes `.cu` y cabeceras en `lxdde/ports/nouveau`, AOT experimental opcional | `crates/soso-llm-api/cuda/*.ptx`, `cuda.rs` |
 
 Conclusión: el hueco real no es «añadir especulación» (ya la hay) sino
 **(a)** hacerla exacta con muestreo, **(b)** dejar de mover logits y filas K/V al
@@ -111,7 +111,54 @@ y `cargo test -p soso-llm-core --features std --lib generation::tests --offline`
 terminaron con código 0. `nvidia-smi` devolvió 9 por falta de controlador;
 queda pendiente validar CUDA y placa. Próximo paso: pruebas secuenciales y
 repetidas con modelo real, condiciones de memoria controladas y cálculo de
-throughput de decode, más instrumentación de transferencias y servicio.
+throughput de decode y medición de transferencias.
+
+**Servicio host:** `SOSO_BENCH_JSON=1` en `serve_host` emite en stderr una
+línea `[soso] medicion:` por petición con JSON: tokens del prompt, prefijo KV
+efectivamente reutilizado, tokens procesados en prefill, TTFT, throughput y
+percentiles entre entregas, duración total y deltas de forwards/borrador. Los
+tiempos incluyen la entrega al cliente; no son tiempos de kernel. No modifica
+la respuesta HTTP. Pruebas host: `cargo test -p soso-llm-api --features std
+--lib tests_medidor --offline` (1/1), `cargo test -p soso-llm-core --features
+std --test generate prefijo --offline` (5/5), y `cargo test -p soso-llm-api
+--features std --test host_service --offline` (5/5; fuera del sandbox porque
+necesita sockets locales). Falta incorporar estas métricas al banco reproducible
+y medir bytes de transferencia; no se cierra F0.
+
+**Transferencias del decode CUDA:** con `SOSO_BENCH_JSON=1`, el servidor
+incluye `cuda_decode_transferencias`: pasos de decode residente y bytes de
+embedding y control hacia GPU, logits y filas KV hacia host. Son deltas por
+petición y cuentan copias CUDA explícitas exitosas. No incluyen prefill,
+pesos, expertos, copias asíncronas ni tráfico dentro de grafos, por lo que no
+son el total HtoD/DtoH de la petición. El cálculo de deltas se probó en host y
+compilan `serve_host` y el guest sin `std`; `nvidia-smi` devuelve código 9
+porque el controlador no está operativo, así que falta probar los contadores
+en una GPU real y completar la instrumentación del resto de las transferencias.
+
+**Banco host CPU:** compilar `cargo build --release -p soso-llm-core --features
+std --example hostrun --offline` y ejecutar `python3 scripts/bench-inferencia.py
+target/tiny-q4k-model --rondas 5 --calentamiento 1 --salida
+target/bench-ultrafast/tiny-q4k.json`. Alterna el orden de las variantes,
+exige igualdad de IDs incluso en calentamiento, registra mediciones individuales,
+medianas, parámetros, hash de ejecutable/manifiesto/índice e inventario de
+shards. El inventario no certifica el contenido de los pesos. Limita cada
+proceso por tiempo y rechaza por defecto modelos que superen el 70 % de memoria
+disponible (hostrun copia los shards). No compara modelos ni entornos distintos.
+
+En Intel Core Ultra 7 255HX, fixture sintético `tiny-q4k` de dos capas, prompt
+de 29 tokens y 32 generados, una pasada de calentamiento, cinco rondas, sin
+planificador: mediana de decode 1808 tok/s con borrador y 1770 sin él; 17 frente
+a 32 forwards, y 15/15 tokens propuestos aceptados en cada ronda. Con
+`SOSO_PLANNER=1`, temperatura 0,8 y tres rondas: 1709 frente a 1773 tok/s,
+18 frente a 32 forwards de mediana. Estos ejemplos comprueban el banco; son
+demasiado pequeños y sensibles al ruido para justificar una decisión de
+rendimiento. Artefactos en `target/bench-ultrafast/`, comando adicional:
+`SOSO_PLANNER=1 python3 scripts/bench-inferencia.py target/tiny-q4k-model
+--rondas 3 --calentamiento 1 --temperatura 0.8 --salida
+target/bench-ultrafast/tiny-q4k-planificado.json`. Ejecutable SHA-256
+`fc28369b378c3051643e7ad52fd06546b0cd0243050260c1c78b8d4c7159ba67`;
+manifiesto `a89eaf44c6293db1ff64cf3764b27ef70cf252ada5703179b7dbfaddf57c8b1f`,
+índice `975c53da96495c105e4f8ee9b8a8d44e6641ae621d496f6b97ddd0a13cf26148`.
 
 - Instrumentar por paso: `ms/paso`, tokens/paso, aceptación por posición (ya hay
   `borrador_ofrecidos`/`borrador_aceptados` en `runtime.rs` y `pld_accepted`/
@@ -137,15 +184,30 @@ residual. Consume las mismas muestras que la ejecución sin borrador. Si no se
 puede verificar por bloques o hay restricciones, el muestreo usa el camino
 previo. Las pruebas sintéticas comparan secuencia, informe y estado del KV en
 30 semillas con top-k/top-p, y la ruta planificada con paradas y estado RNG.
-Faltan validación estadística independiente, cancelación y límites con
-temperatura, mediciones con modelo real, y evidencia de GPU. No se declara F1
+Faltan mediciones con modelo real y evidencia de GPU. No se declara F1
 cerrada ni se atribuye una mejora de rendimiento sin esas comprobaciones.
 Evidencia host: `cargo test -p soso-llm-core --features std --test generate
---offline` (26/26, código 0) y `cargo check -p soso-llm-core
---no-default-features --offline` (código 0). Siguiente paso: pruebas de
-cancelación y límites de contexto con temperatura, y comparar rendimiento con
+--offline` (28/28, código 0), `cargo test -p soso-llm-core --features std
+--test generation_cancel --offline` (8/8, código 0) y `cargo check -p soso-llm-core
+--no-default-features --offline` (código 0). Pruebas adicionales cubren la
+cancelación dentro del bloque, restauración del KV y reutilización del runtime,
+y límites de contexto y presupuesto con temperatura. El estado oculto y KV
+parcial se restauran también si falla el forward. Falta comparar rendimiento con
 un modelo real. La ruta queda habilitada cuando ya está habilitado el borrador;
 `borrador_activo = false` conserva el camino anterior.
+
+**Oráculo estadístico:** `tests/especulativo_exacto.rs` construye un modelo
+f32 pequeño cuya distribución teórica independiente por token es 0,5/0,3/0,2.
+Para 20 000 semillas mezcladas compara cada secuencia de dos tokens con y sin
+borrador y contrasta las frecuencias contra la distribución teórica, con
+aceptaciones y rechazos efectivos. En release, `top_p=1` produjo χ²=6,724
+(8 grados; umbral 32), 10 029 propuestas y 4 990 aceptadas; `top_p=0,7`
+produjo χ²=0,667 (3 grados; umbral 22), 12 508 propuestas y 7 786 aceptadas.
+Comando: `cargo test --release -p soso-llm-core --features std --test
+especulativo_exacto --offline --locked -- --nocapture` (código 0). El oráculo
+no sustituye pruebas de calidad con otros modelos ni valida GPU. Al ejecutar
+esta prueba se corrigió también la reserva Q8_K del prefill para anchos f32 que
+no son múltiplos de 256.
 
 - Portar la contabilidad de `decode_cache.rs` a `runtime.rs`: separar
   `emitido` / `comprometido` / `aceptado`, con las tres invariantes del original
@@ -184,6 +246,34 @@ sincronizaciones por paso, `ms/paso` medido antes/después en el escenario (ii);
 
 ### F3 — KV de 4 bits por grupos (1-2 semanas)
 
+**Exploración (2026-11-15):** `kv_fp4.rs` implementa un códec experimental
+E2M1 por grupos de 32 con escala f32 y 16 bytes de datos (20 bytes por grupo),
+validación de tamaño, finitud, escala y relleno antes de decodificar. Su formato
+no es el MXFP4 sintético de pesos. `SOSO_KV_FP4_ANALIZAR=1` en `hostrun` analiza las filas f16 de KV
+ya generadas sin alterarlas y muestra bytes y error. En `tiny-q4k` sintético,
+prompt «hola hola hola hola hola hola», 32 tokens: 62 464 valores, 124 928
+bytes f16 frente a 39 040 bytes FP4 (incluidas escalas), RMSE relativo 7,57 %,
+error absoluto máximo 130,17 sobre magnitud máxima 782; cero capas descartadas.
+La prueba no mide calidad de respuesta ni predice el error de un modelo real.
+El códec pasa `cargo test -p soso-llm-core --features std --lib kv_fp4
+--offline` (4/4) y `cargo check -p soso-llm-core --no-default-features
+--offline`. Próximo paso: banco con KV de modelo real, error por capa y
+comparación de calidad antes de activar el formato. F3 sigue abierta.
+
+**Integración CPU experimental:** `KvDtype::F4` almacena filas por grupos y la
+atención genérica lee rangos sin reservar una fila temporal. `hostrun` lo activa
+solo con `SOSO_KV_FP4=1` para GQA denso sin ventana ni planificador; f16 sigue
+por defecto. Una entrada no finita marca fallo y aborta el paso. Se han probado
+recorte, expulsión, H2O, rechazo de NaN, prefill por bloques y atención frente a
+un softmax independiente de filas decodificadas. En `tiny-q4k` sintético, con
+29 tokens de prompt y 32 de salida, los IDs generados coincidieron con f16;
+no demuestra calidad en modelos reales. `cargo test -p soso-llm-core --features
+std --test generate kv_fp4_generacion --offline --locked`, `cargo test -p
+soso-llm-core --features std --test attn_rutas atencion_fp4 --offline --locked`,
+`cargo test -p soso-llm-core --features std --lib kv --offline --locked`
+(13/13) y `cargo check -p soso-llm-core --no-default-features --offline --locked`
+pasaron. El kernel GPU, modelos reales y comparación de calidad siguen pendientes.
+
 - `kv.rs`: nuevo `KvDtype::F4` con escala por grupo de 32 (e2m1) manteniendo `I8`
   como opción; el dequantizado entra en `attn.rs` y en el kernel de atención.
 - Empaquetado con **flag de validez**: si aparece NaN/inf o un valor fuera de
@@ -198,6 +288,67 @@ top-1 en el 100 % de un banco fijo, y `cargo test -p soso-llm-core --features st
 ### F4 — Snapshot de KV reutilizable en sosofs (2-3 semanas)
 
 La mejora con más impacto para un SO con `/models` persistente y un servidor local.
+
+**En curso (2026-11-15):** `kvsnap.rs` y `Runtime::{exportar_kv,importar_kv}`
+permiten intercambiar en memoria un prefijo completo y comprometido, por ahora
+solo GQA f16 en CPU, sin filas expulsadas ni H2O. La imagen incluye versión,
+identidad de 32 bytes aportada por el consumidor, geometría por capa, tokens,
+estado oculto y SHA-256 de integridad. Se comprueban límites, identidad,
+geometría, tokens y finitud antes de reemplazar el estado. El checksum detecta
+corrupción accidental; no autentica un origen que pueda modificar la imagen.
+El llamante **debe** construir la identidad con el contenido real de los pesos,
+tokenizador y configuración: el hash actual de `index.som` no basta. La prueba sintética
+exporta, importa y compara la continuación con un runtime en frío, y rechaza
+imagen truncada, corrupta o de perfil incorrecto sin mutar el runtime.
+Validación: `cargo test -p soso-llm-core --features std --lib kvsnap --offline
+--locked` (3/3), `cargo test -p soso-llm-core --features std --test generate
+snapshot_kv --offline --locked` (1/1), `cargo check -p soso-llm-core
+--no-default-features --offline --locked` y, desde `user/`, `cargo check
+--locked --offline -p soso-llm` (código 0). Siguiente: identidad fuerte de los
+shards y consumidor persistente con publicación atómica y límites de espacio;
+medir también el coste de copias durante exportación e importación.
+
+**Avance adicional host:** `identidad_kv::calcular` calcula SHA-256 sobre el
+manifiesto, índice, tokenizador y cada shard referenciado, además de una
+identidad de ejecución obligatoria aportada por el llamante. Detecta cambios
+durante la lectura y rechaza rutas o enlaces que salgan de `shards`; el modelo
+debe permanecer inmutable durante la inferencia. `kvstore_host` proporciona
+lectura acotada y escritura temporal, sincronización y renombrado atómico; el
+llamante debe proveer un directorio privado por identidad. Las pruebas cubren
+cambios de pesos/configuración, rutas inválidas, sustitución de archivo y
+corrupción en disco. `cargo test -p soso-llm-api --features std --lib --offline
+--locked`: 10/10; `cargo check -p soso-llm-api --no-default-features --offline
+--locked`: código 0.
+
+**Integración host:** `serve_host --kv-cache-dir DIRECTORIO
+--kv-cache-max-mib N` activa checkpoints CPU para una sola identidad;
+requiere directorio preexistente propio y privado (sin bits de acceso para grupo
+u otros). El límite es 256 MiB por defecto. La identidad incluye hash del
+ejecutable, arquitectura, AVX2/FMA, hilos y contenido del modelo. El modelo debe
+permanecer inmutable mientras se ejecuta el servidor. Solo se importa si el
+prefijo es mejor que la caché en memoria; los errores caen al prefill normal y
+la cancelación no publica. La opción es explícita y no proporciona aislamiento
+entre los clientes que comparten la clave de API: todos deben pertenecer a una
+misma identidad. La imagen puede contener datos de conversación. La prueba
+`SOSO_TEST_MODEL=$PWD/target/tiny-model cargo test -p soso-llm-api --features
+std --test kv_cache_real --offline --locked -- --ignored` acredita reinicio,
+continuación igual a frío y recálculo tras corrupción con modelo sintético;
+no acredita un reinicio de soso ni GPU. El almacén admite 64 imágenes con una
+cuota total, deduplica por contenido y selecciona el mayor prefijo válido. Al
+agotarse la cuota conserva los archivos existentes y deja de guardar: no hay
+evicción automática. Un candado no bloqueante coordina escritores cooperantes;
+los temporales abandonados cuentan en la cuota. La selección lee y valida las
+imágenes secuencialmente. Un archivo corrupto con el mismo nombre se puede
+reemplazar de forma atómica si la cuota permite mantener ambos durante la
+escritura; en caso contrario se conserva el anterior. Las métricas del servicio
+informan de `cache_kv.lectura_s`, `escritura_s` y `restaurada` por petición.
+Una pasada de integración release con `target/tiny-model` reutilizó 9 de 11
+tokens, con lectura/validación de 0,082 ms y prefill de 4,33 ms frente a
+6,59 ms en frío; es una comprobación sintética aislada, no una comparación de
+rendimiento representativa. Las copias, cargas reales y escalado con varias
+instantáneas aún requieren medición.
+Faltan una identidad de usuario verificable, el camino nativo sosofs, soporte GPU/GDN y
+medición del coste de lectura y copias. F4 sigue abierta.
 
 - Tipo `Manifest` en `soso-llm-core` (nuevo `kvsnap.rs`): versión, *fingerprint*
   del perfil (modelo + quant + dtype de KV), tokens, `tail_start`, segmentos,
@@ -234,6 +385,28 @@ caducadas se rechazan; test host sin QEMU para el directorio y E2E con
 `cargo xtask test-distributed-llm`.
 
 ### F6 — Kernels AOT con variantes por arquitectura (1-2 semanas)
+
+**En curso (2026-11-15):** las tres fuentes y sus cabeceras ya existían en
+`lxdde/ports/nouveau`; la afirmación anterior de que faltaban era incorrecta.
+`scripts/build-cuda-aot.py --arch sm_86 --include DIR_CUDA --include DIR_CRT`
+compila los tres cubins con NVRTC sin GPU y genera un manifiesto con hashes de
+fuentes y cubins. `SOSO_CUDA_AOT_DIR=DIR SOSO_CUDA_AOT_SM=sm_86 cargo build
+-p soso-llm-api --features std --example serve_host` los incorpora de forma
+opcional, comprobando hash, arquitectura ELF y símbolos frente al PTX. En
+ejecución, `SOSO_CUDA_AOT=1` solicita AOT solo si la capacidad coincide
+exactamente; ante incapacidad de consulta o rechazo de carga usa PTX. Sin las
+variables de compilación se mantiene el build previo con PTX.
+
+En este host NVRTC 12.6 compiló los tres cubins sm_86 sin GPU (se usaron las
+cabeceras CUDA runtime y CRT de Triton instaladas). La compilación AOT del
+servicio y dos tests de selección/respaldo pasaron; se rechazó un cubin truncado
+por hash, otro con símbolos ausentes aun con hash actualizado y una arquitectura
+incorrecta. `cargo check --offline --locked -p
+soso-llm` desde `user/` pasa. NVRTC 12.6 no admite sm_120; no se han medido
+arranque ni rendimiento y tampoco se ha ejecutado ningún cubin en GPU. Los
+símbolos y hashes no sustituyen la validación numérica o de ABI en hardware.
+La elección AOT permanece desactivada por defecto; F6 sigue abierta para
+versiones y arquitecturas adicionales, comprobación de ABI y medidas.
 
 - Convertir los 3 PTX versionados (`matvec_q4_0`, `matvec_iq`, `gemma_capa`) a
   fuentes `.cu` en el árbol + `build.rs` con `SOSO_SM` (por defecto sm_80; sm_120
@@ -313,8 +486,9 @@ sin un consumidor claro.
    compilar `--no-default-features`; el snapshot usa el hash ya disponible.
 4. **Medir con TCG.** Los escenarios QEMU no sirven para `tok/s`; las cifras de
    velocidad salen del host y de placa, y se anotan con su entorno.
-5. **PTX congelado (F6).** Mientras no haya `.cu` en el árbol, cualquier cambio de
-   kernel exige una herramienta externa; F6 es también deuda técnica.
+5. **Compilador y ABI CUDA (F6).** Los `.cu` existen; regenerar las variantes
+   exige una versión de NVRTC o toolkit que soporte la arquitectura y cabeceras
+   compatibles. La validación de símbolos por sí sola no acredita equivalencia.
 
 ---
 

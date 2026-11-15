@@ -185,6 +185,32 @@ static int check_scd_wide_header(void)
     return 0;
 }
 
+static int check_phy_db(void)
+{
+    struct iwl_ax211_priv iwl;
+    const uint8_t cfg[] = {1, 0, 3, 0, 0x11, 0x22, 0x33};
+    const uint8_t group[] = {4, 0, 3, 0, 2, 0, 0x55};
+    const uint8_t bad[] = {4, 0, 4, 0, 1};
+    memset(&iwl, 0, sizeof(iwl));
+    if (iwl_phy_db_store(&iwl, cfg, sizeof(cfg)) ||
+        iwl_phy_db_store(&iwl, group, sizeof(group)) ||
+        iwl.phy_db_count != 2 || iwl.phy_db[1].group != 2 ||
+        iwl.phy_db[0].data[2] != 0x33)
+        return -1;
+    if (iwl_phy_db_store(&iwl, cfg, sizeof(cfg)) || iwl.phy_db_count != 2)
+        return -1;
+    if (!iwl_phy_db_store(&iwl, bad, sizeof(bad)) || !iwl.phy_db_error ||
+        !iwl_phy_db_send(&iwl))
+        return -1;
+    iwl.family = IWL_DEVICE_FAMILY_8000;
+    iwl.tx_8000_ready = 1;
+    iwl.tx_preload_ready = 1;
+    if (iwl_trans_recover(&iwl) || iwl.phy_db_count || iwl.phy_db_error ||
+        iwl.tx_8000_ready || iwl.tx_preload_ready)
+        return -1;
+    return 0;
+}
+
 int main(void)
 {
     struct iwl_tx_ant_cfg_cmd ant;
@@ -232,6 +258,11 @@ int main(void)
         return -1;
     }
 
+    if (check_phy_db() != 0) {
+        fprintf(stderr, "PHY DB no conserva/rechaza secciones correctamente\n");
+        return -1;
+    }
+    puts("OK: PHY DB conserva y reemplaza secciones; rechaza datos truncados");
     puts("OK: LEGACY HCMD (TX_ANT/SF/PHY/MAC) wide 8 B + DEF_ID grp=1, "
          "MAC 148 B filter@52 qos@56; SCD grp=5 ver_hdr=0");
     return 0;

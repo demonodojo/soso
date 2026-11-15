@@ -184,6 +184,8 @@ pub struct Runtime {
     /// nueva puede reutilizar sin repetir el prefill (T22). Vacío cuando la caché
     /// no es fiable (cancelación, planificador, otra generación en curso).
     cached_tokens: Vec<u32>,
+    /// Prefijo realmente reutilizado por la última generación, tras comprobar su KV.
+    pub ultimo_prefijo_reutilizado: usize,
     /// Instantáneas del estado de las capas Gated DeltaNet al final de cada prompt (las más recientes primero). El estado
     /// recurrente no se puede recortar como un KV: para reutilizar un prefijo hay que volver a un punto guardado.
     gdn_instantaneas: Vec<InstantaneaGdn>,
@@ -267,6 +269,7 @@ impl Runtime {
                 .collect(),
             pos: 0,
             cached_tokens: Vec::new(),
+            ultimo_prefijo_reutilizado: 0,
             gdn_instantaneas: Vec::new(),
             proxima_marca_gdn: Self::INTERVALO_INSTANTANEAS_GDN,
             block: None,
@@ -481,6 +484,22 @@ impl Runtime {
         self.backend
     }
 
+    /// Habilita el KV experimental E2M1 antes de comenzar una secuencia.
+    /// Por ahora solo modelos GQA densos sin ventana ni planificador: el camino
+    /// de atención genérico ejecuta la descompresión en CPU.
+    pub fn activar_kv_fp4_experimental(&mut self) -> Result<(), ()> {
+        if self.pos != 0 || self.planner.is_some() || self.manifest.num_experts != 0
+            || (0..self.manifest.num_layers).any(|l| {
+                let spec = self.manifest.layer(l).cloned().unwrap_or_default();
+                spec.attn_kind != AttnKind::Gqa || crate::gemma::es_capa_gemma(spec.flags)
+                    || self.manifest.layer_window(l) != 0
+            }) {
+            return Err(());
+        }
+        self.kv = (0..self.manifest.num_layers).map(|l| make_layer_kv(&self.manifest, l, 0, crate::kv::KvDtype::F4)).collect();
+        Ok(())
+    }
+
     /// Recorta el KV local a `pos` tokens (rollback tras borrador rechazado o failover).
     pub fn truncar_kv(&mut self, pos: usize) {
         for l in 0..self.kv.len() {
@@ -502,6 +521,77 @@ impl Runtime {
         if let Some(pl) = self.planner.as_mut() {
             pl.reset_moe_hints();
         }
+    }
+
+    /// Geometría admitida por la versión inicial del snapshot: KV clásico f16
+    /// en CPU, sin ventanas expulsadas, MLA, GDN ni estado H2O acumulado.
+    fn dimensiones_snapshot(&self) -> Result<Vec<usize>, crate::kvsnap::Error> {
+        use crate::kvsnap::Error;
+        if self.kv.len() != self.manifest.num_layers as usize
+            || self.planner.as_ref().is_some_and(|p| p.use_h2o() || self.manifest.num_experts > 0) {
+            return Err(Error::EstadoNoCompatible);
+        }
+        self.kv.iter().enumerate().map(|(l, kv)| {
+            let tipo = self.manifest.layer(l as u32).map(|s| s.attn_kind).unwrap_or(AttnKind::Gqa);
+            if tipo != AttnKind::Gqa || kv.dtype != crate::kv::KvDtype::F16 || kv.en_gpu || kv.mla_latent || kv.dropped != 0
+                || kv.mass.iter().any(|&m| m != 0.0) {
+                return Err(Error::EstadoNoCompatible);
+            }
+            self.kv_dim_recortable(l).filter(|&d| d > 0).ok_or(Error::EstadoNoCompatible)
+        }).collect()
+    }
+
+    /// Exporta solo un estado completo y comprometido. El llamante debe calcular
+    /// `perfil` a partir del contenido de pesos y de toda la configuración relevante.
+    pub fn exportar_kv(&self, perfil: &[u8; 32], max_bytes: usize) -> Result<Vec<u8>, crate::kvsnap::Error> {
+        use crate::kvsnap::{self, Capa, Error, Snapshot};
+        let dims = self.dimensiones_snapshot()?;
+        if self.cached_tokens.len() != self.pos || self.pos == 0 || self.pos > self.manifest.max_seq as usize
+            || self.hidden.len() != self.manifest.hidden_dim as usize {
+            return Err(Error::EstadoNoCompatible);
+        }
+        if kvsnap::bytes_necesarios(self.pos, self.hidden.len(), &dims).is_none_or(|n| n > max_bytes) {
+            return Err(Error::Longitud);
+        }
+        let capas = self.kv.iter().map(|kv| Capa { k: kv.k_f16.clone(), v: kv.v_f16.clone() }).collect();
+        kvsnap::codificar(&Snapshot { tokens: self.cached_tokens.clone(), hidden: self.hidden.clone(), capas }, perfil, &dims, max_bytes)
+    }
+
+    /// Valida toda la imagen antes de reemplazar el estado; un error no lo modifica.
+    pub fn importar_kv(&mut self, imagen: &[u8], perfil: &[u8; 32], max_bytes: usize) -> Result<(), crate::kvsnap::Error> {
+        use crate::kvsnap;
+        let dims = self.dimensiones_snapshot()?;
+        let snap = kvsnap::decodificar(imagen, perfil, &dims, self.manifest.max_seq as usize,
+            self.manifest.vocab_size as usize, self.manifest.hidden_dim as usize, max_bytes)?;
+        let pos = snap.tokens.len();
+        let mut capas = Vec::with_capacity(snap.capas.len());
+        for c in snap.capas {
+            let mut kv = LayerKv::new();
+            kv.k_f16 = c.k;
+            kv.v_f16 = c.v;
+            kv.mass.resize(pos, 0.0);
+            capas.push(kv);
+        }
+        self.reset_sequence();
+        self.kv = capas;
+        self.hidden = snap.hidden;
+        self.pos = pos;
+        self.cached_tokens = snap.tokens;
+        Ok(())
+    }
+
+    /// Evalúa el prefijo recuperable tras validar la imagen completa, sin
+    /// modificar el runtime. El último token del prompt siempre se recalcula.
+    pub fn prefijo_imagen_kv(&self, imagen: &[u8], perfil: &[u8; 32], prompt: &[u32], max_bytes: usize) -> Result<usize, crate::kvsnap::Error> {
+        let dims = self.dimensiones_snapshot()?;
+        let snap = crate::kvsnap::decodificar(imagen, perfil, &dims, self.manifest.max_seq as usize,
+            self.manifest.vocab_size as usize, self.manifest.hidden_dim as usize, max_bytes)?;
+        Ok(snap.tokens.iter().zip(prompt).take_while(|(a, b)| a == b).count().min(prompt.len().saturating_sub(1)))
+    }
+
+    /// Prefijo actualmente recuperable en memoria, tras comprobar su validez.
+    pub fn prefijo_kv_en_memoria(&self, prompt: &[u32]) -> usize {
+        self.prefijo_reutilizable(prompt)
     }
 
     /// Copia posición, oculto y caché KV/GDN tras codificar el estado Kev.
@@ -2038,6 +2128,7 @@ impl Runtime {
             self.decode_gpu_preparar(source, gpu);
         }
         let ya = self.begin_sequence_reusing(prompt);
+        self.ultimo_prefijo_reutilizado = ya;
         sync_cluster_prefijo(cluster, ya)?;
         let mut ledger = GenerationLedger::new(prompt.len());
         let mut cancel = GenCancel::default();
@@ -2284,6 +2375,7 @@ impl Runtime {
             return Err(());
         }
         let ya = self.begin_sequence_reusing(prompt);
+        self.ultimo_prefijo_reutilizado = ya;
         sync_cluster_prefijo(cluster, ya)?;
         self.reloj = Some(clock_ms);
         if let Some(pl) = self.planner.as_mut() {

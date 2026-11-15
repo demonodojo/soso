@@ -559,9 +559,19 @@ static int check_doorbell_full_pointer(void)
             return -1;
         }
         seq = iwl.cmd_slot_seq[i % IWL_CMD_QUEUE_SIZE];
-        if (slot_of(seq) != i % IWL_CMD_QUEUE_SIZE) {
-            fprintf(stderr, "envío %u no usó la ranura %u\n", i, i % IWL_CMD_QUEUE_SIZE);
+        if (slot_of(seq) != i % IWL_CMD_QUEUE_SIZE || SEQ_TO_INDEX(seq) != (i & 0xffu)) {
+            fprintf(stderr, "envío %u: secuencia 0x%04x no identifica el TFD %u\n",
+                    i, seq, i & 0xffu);
             return -1;
+        }
+        if (i >= 32 && i < 256) {
+            uint16_t vieja = (uint16_t)(QUEUE_TO_SEQ(IWL_MVM_DQA_CMD_QUEUE) |
+                                        INDEX_TO_SEQ(i - 32));
+            rx_resp(&iwl, SYSTEM_GROUP, INIT_EXTENDED_CFG_CMD, vieja, NULL, 0);
+            if (iwl_trans_cmd_space(&iwl) != IWL_CMD_QUEUE_SIZE - 2u) {
+                fprintf(stderr, "envío %u aceptó una respuesta de hace 32 comandos\n", i);
+                return -1;
+            }
         }
         rx_resp(&iwl, SYSTEM_GROUP, INIT_EXTENDED_CFG_CMD, seq, NULL, 0);
         if (iwl_trans_cmd_space(&iwl) != IWL_CMD_QUEUE_SIZE - 1u) {
@@ -569,7 +579,7 @@ static int check_doorbell_full_pointer(void)
             return -1;
         }
     }
-    puts("OK: 300 HCMD con doorbell de puntero completo (vuelta a 256, ranura a 32)");
+    puts("OK: 300 HCMD con secuencia y doorbell completos; rechaza respuestas antiguas");
     return 0;
 }
 

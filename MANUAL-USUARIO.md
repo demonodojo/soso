@@ -1867,6 +1867,17 @@ cargo run --release -p soso-llm-core --features std --example hostrun -- \
   target/mi-modelo "a" 1
 ```
 
+El servidor de desarrollo `serve_host` admite `--kv-cache-dir DIRECTORIO` y
+`--kv-cache-max-mib N` para conservar un prefijo entre reinicios en CPU. Crea
+antes el directorio privado para una sola identidad (`chmod 700`) y mantén
+inmutables los archivos del modelo mientras esté arrancado. La opción está
+desactivada por defecto; la caché contiene datos de las conversaciones y solo
+debe usarse con clientes que compartan esa identidad. Guarda hasta 64
+instantáneas, con un límite total predeterminado de 256 MiB. Cuando se llena,
+conserva las existentes y no guarda nuevas; si no se puede usar una instantánea,
+la petición se recalcula. Las arquitecturas sin soporte siguen su camino habitual; la opción
+requiere CPU y no se puede habilitar con CUDA activa.
+
 Después arranca con la variable `SOSO_MODELS_DIR` apuntando al modelo
 convertido (la imagen de modelos se reconstruye automáticamente):
 

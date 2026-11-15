@@ -705,6 +705,56 @@ fn cuanto_prefijo_se_reutiliza() {
     assert_eq!(ya, p1.len() - 1);
 }
 
+#[test]
+fn metricas_cuentan_solo_prefijo_efectivamente_reutilizado() {
+    let (manifest, index, mapper) = tiny_model_gqa();
+    let mut rt = Runtime::new(manifest, index.clone(), 0, 0);
+    let mut source = MmapTensorSource::new(String::from(BASE), index, mapper);
+    let p = [3, 4, 5, 6, 7, 8];
+    rt.generate(&mut source, &p, 3, None).unwrap();
+    assert_eq!(rt.ultimo_prefijo_reutilizado, 0);
+    rt.generate(&mut source, &p, 2, None).unwrap();
+    assert_eq!(rt.ultimo_prefijo_reutilizado, p.len() - 1);
+    rt.generate(&mut source, &[99, 4, 5], 2, None).unwrap();
+    assert_eq!(rt.ultimo_prefijo_reutilizado, 0);
+}
+
+#[test]
+fn snapshot_kv_se_restaura_y_rechaza_corrupcion_sin_mutar() {
+    use soso_llm_core::kvsnap::Error;
+    let (mut rt, mut source) = rt_borrador(false, false);
+    let prompt = [3, 4, 5, 6, 7, 8];
+    let anterior = rt.generate(&mut source, &prompt, 4, None).unwrap();
+    let perfil = [7u8; 32];
+    let bytes = rt.exportar_kv(&perfil, 1_000_000).unwrap();
+    let mut nuevo_prompt = anterior.clone();
+    nuevo_prompt.extend_from_slice(&[9, 10]);
+    assert_eq!(rt.prefijo_imagen_kv(&bytes, &perfil, &nuevo_prompt, 1_000_000).unwrap(), rt.pos);
+    assert_eq!(rt.prefijo_imagen_kv(&bytes, &perfil, &[200, 9], 1_000_000).unwrap(), 0);
+    assert_eq!(rt.prefijo_imagen_kv(&bytes, &perfil, &prompt, 1_000_000).unwrap(), prompt.len() - 1);
+    assert_eq!(rt.exportar_kv(&perfil, bytes.len() - 1).err(), Some(Error::Longitud));
+    let (mut restaurado, mut destino) = rt_borrador(false, false);
+    let original = estado(&restaurado);
+    assert_eq!(restaurado.importar_kv(&bytes, &[8; 32], 1_000_000), Err(Error::Incompatible));
+    assert!(estado(&restaurado) == original);
+    let mut corrupto = bytes.clone();
+    let ultimo_dato = corrupto.len() - 33;
+    corrupto[ultimo_dato] ^= 1;
+    assert_eq!(restaurado.importar_kv(&corrupto, &perfil, 1_000_000), Err(Error::Integridad));
+    assert!(estado(&restaurado) == original);
+    assert_eq!(restaurado.importar_kv(&bytes[..bytes.len() - 1], &perfil, 1_000_000), Err(Error::Longitud));
+    assert!(estado(&restaurado) == original);
+    restaurado.importar_kv(&bytes, &perfil, 1_000_000).unwrap();
+    assert!(estado(&restaurado) == estado(&rt));
+    let mut siguiente = anterior;
+    siguiente.extend_from_slice(&[9, 10]);
+    let caliente = restaurado.generate(&mut destino, &siguiente, 5, None).unwrap();
+    assert!(restaurado.ultimo_prefijo_reutilizado >= prompt.len());
+    let (mut frio, mut fsrc) = rt_borrador(false, false);
+    let limpio = frio.generate(&mut fsrc, &siguiente, 5, None).unwrap();
+    assert_eq!(caliente, limpio);
+}
+
 // Lo mismo por la ruta con planificador, que es la del servidor del guest.
 fn reloj_cero() -> u64 {
     0
@@ -766,6 +816,7 @@ fn reutilizar_prefijo_con_planificador_da_lo_mismo_que_en_frio() {
     let mut p2 = t1.clone();
     p2.extend_from_slice(&[9, 10, 11]);
     let caliente = generar_planificado(&mut rt, &mut source, &p2, 4);
+    assert!(rt.ultimo_prefijo_reutilizado >= p1.len());
     let (mut frio, mut fsrc) = runtime_planificado();
     assert_eq!(caliente, generar_planificado(&mut frio, &mut fsrc, &p2, 4));
 
@@ -965,6 +1016,38 @@ fn borrador_por_bloques_da_los_mismos_tokens_y_el_mismo_estado() {
         rt_b.forwards_decode,
         rt_1.forwards_decode
     );
+}
+
+#[test]
+fn kv_fp4_generacion_por_bloques_y_token_a_token_coinciden() {
+    let prompt = prompt_repetitivo();
+    let ejecutar = |bloques| {
+        let (mut rt, mut source) = rt_borrador(false, false);
+        rt.activar_kv_fp4_experimental().unwrap();
+        rt.prefill_por_bloques = bloques;
+        let salida = rt.generate(&mut source, &prompt, 8, None).unwrap();
+        (salida, rt)
+    };
+    let (a, rt_a) = ejecutar(false);
+    let (b, rt_b) = ejecutar(true);
+    assert_eq!(a, b);
+    assert!(rt_a.kv.iter().all(|kv| kv.dtype == soso_llm_core::KvDtype::F4 && !kv.fp4_error));
+    assert!(rt_b.tokens_en_bloque > 0);
+    assert_eq!(rt_a.pos, rt_b.pos);
+    for (x, y) in rt_a.kv.iter().zip(&rt_b.kv) { assert_eq!(x.bytes_kv(), y.bytes_kv()); }
+    let d = rt_a.manifest.effective_num_kv_heads(0) as usize * rt_a.manifest.effective_head_dim(0) as usize;
+    let f16_bytes = rt_a.kv[0].tokens(d) * d * 4;
+    assert!(rt_a.kv[0].bytes_kv() < f16_bytes);
+}
+
+#[test]
+fn kv_fp4_falla_en_forward_si_aparece_nan() {
+    let (mut rt, mut source) = rt_borrador(false, false);
+    rt.activar_kv_fp4_experimental().unwrap();
+    rt.embed_token(3, &mut source).unwrap();
+    rt.hidden[0] = f32::NAN;
+    assert!(rt.forward_step(&mut source).is_err());
+    assert!(rt.kv.iter().any(|kv| kv.fp4_error));
 }
 
 #[test]

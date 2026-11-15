@@ -12,6 +12,20 @@
 void lx_printk(const char *fmt, ...) { (void)fmt; }
 void lx_mdelay(unsigned int ms) { (void)ms; }
 void lx_udelay(unsigned int us) { (void)us; }
+static int paging_fixture;
+static unsigned paging_calls;
+static uint32_t paging_command[36];
+
+int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
+                            const void *payload, uint16_t len, int timeout)
+{
+    (void)iwl; (void)timeout;
+    if (!paging_fixture || group != LONG_GROUP || id != 0x4f || len != sizeof(paging_command))
+        return -1;
+    memcpy(paging_command, payload, len);
+    paging_calls++;
+    return 0;
+}
 
 void *lx_kmalloc(unsigned long size, unsigned gfp)
 {
@@ -19,15 +33,19 @@ void *lx_kmalloc(unsigned long size, unsigned gfp)
     return malloc(size);
 }
 
-void lx_kfree(const void *p) { free((void *)p); }
+void lx_kfree(void *p) { free((void *)p); }
 
 void *lx_dma_alloc_coherent(void *dev, size_t size, uint64_t *dma, unsigned gfp)
 {
     (void)dev;
     (void)gfp;
     void *p = aligned_alloc(4096, (size + 4095u) & ~(size_t)4095u);
-    if (p && dma)
-        *dma = (uint64_t)(uintptr_t)p;
+    if (p && dma) {
+        static uint64_t fake_dma = 0x100000;
+        *dma = paging_fixture ? fake_dma : (uint64_t)(uintptr_t)p;
+        if (paging_fixture)
+            fake_dma += (size + 4095u) & ~(uint64_t)4095u;
+    }
     return p;
 }
 
@@ -367,6 +385,36 @@ static int real_8265(const char *path)
            (unsigned)plan_init.n_chunks,
            (unsigned)plan_rt.cpu1_secs, (unsigned)plan_rt.cpu2_secs,
            (unsigned)plan_rt.n_chunks, plan_rt.chunks[0].dst);
+    paging_fixture = 1;
+    paging_calls = 0;
+    if (iwl.fw.paging_mem_size != 0x27000 || iwl_trans_8000_paging(&iwl) ||
+        paging_calls != 1 || paging_command[0] != 0x307 || paging_command[1] != 15 ||
+        paging_command[2] != 5 || !paging_command[3] || !paging_command[8]) {
+        fprintf(stderr, "FALLO: paging real 8265 (size=%x calls=%u flags=%x blocks=%u)\n",
+                iwl.fw.paging_mem_size, paging_calls, paging_command[0], paging_command[2]);
+        return -1;
+    }
+    for (i = 0; i < (unsigned)iwl.fw.rt_n; i++)
+        if (le32_at(iwl.fw.rt[i].data) == IWL_PAGING_SEPARATOR)
+            break;
+    if (i + 2 >= (unsigned)iwl.fw.rt_n ||
+        memcmp(iwl.paging_cpu[0], iwl.fw.rt[i + 1].data + 4,
+               iwl.fw.rt[i + 1].len - 4) ||
+        memcmp(iwl.paging_cpu[5], iwl.fw.rt[i + 2].data + 4 + 4 * 32768,
+               7 * 4096)) {
+        fprintf(stderr, "FALLO: contenido CSS/paging no coincide con el ucode\n");
+        return -1;
+    }
+    iwl.fw.rt[i + 2].len--;
+    if (iwl_trans_8000_paging(&iwl) == 0 || paging_calls != 1) {
+        fprintf(stderr, "FALLO: paging truncado aceptado\n");
+        return -1;
+    }
+    iwl.fw.rt[i + 2].len++;
+    for (i = 0; i < 6; i++)
+        free(iwl.paging_cpu[i]);
+    puts("OK: paging real 8265: CSS + 5 bloques, último de 7 páginas y HCMD 0x4f");
+    paging_fixture = 0;
     free(fw);
     return 0;
 }

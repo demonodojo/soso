@@ -50,77 +50,60 @@ static uint32_t iwl_mvm_phy_cfg_8000(struct iwl_ax211_priv *iwl)
     return iwl->phy_sku & phy_config;
 }
 
-static int iwl_mvm_run_init_8000(struct iwl_ax211_priv *iwl)
+static int iwl_mvm_phy_cfg_8000_send(struct iwl_ax211_priv *iwl, unsigned image)
 {
-    /* v1 es el prefijo de v3: se manda uno u otro según la versión del TLV. */
     struct iwl_phy_cfg_cmd_v3 phy;
-    uint16_t phy_len;
-    int ver;
-    int t;
-
-    if (!iwl->alive)
-        return -1;
-
-    iwl->init_complete = 0;
-
-    {
-        struct iwl_tx_ant_cfg_cmd ant;
-
-        memset(&ant, 0, sizeof(ant));
-        ant.valid = iwl_mvm_valid_tx_ant(iwl);
-        if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, TX_ANT_CONFIGURATION_CMD, &ant,
-                                    (uint16_t)sizeof(ant), 2000) != 0) {
-            lx_printk("iwl_mvm: TX_ANT 8000 falló\n");
-            return -1;
-        }
-    }
-
-    /* Linux `iwl_send_phy_cfg_cmd` (mvm/fw.c): phy_cfg de las antenas, la
-     * calibración por defecto de la imagen **en curso** —aquí la RT, porque el
-     * transporte ya cargó el ucode regular— y tamaño según `cmd_ver`. */
-    ver = iwl_fw_cmd_ver(iwl, LEGACY_GROUP, PHY_CONFIGURATION_CMD);
+    uint16_t len;
+    int ver = iwl_fw_cmd_ver(iwl, LEGACY_GROUP, PHY_CONFIGURATION_CMD);
     memset(&phy, 0, sizeof(phy));
     phy.phy_cfg = iwl_cpu_to_le32(iwl_mvm_phy_cfg_8000(iwl));
-    phy.calib_control.flow_trigger =
-        iwl_cpu_to_le32(iwl->default_calib[IWL_UCODE_REGULAR].flow_trigger);
-    phy.calib_control.event_trigger =
-        iwl_cpu_to_le32(iwl->default_calib[IWL_UCODE_REGULAR].event_trigger);
-    phy_len = (ver == 3) ? (uint16_t)sizeof(struct iwl_phy_cfg_cmd_v3)
-                         : (uint16_t)sizeof(struct iwl_phy_cfg_cmd_v1);
-    lx_printk("iwl_mvm: PHY_CFG ver=%d len=%u phy_cfg=0x%08x calib flow=0x%x event=0x%x\n",
-              ver, (unsigned)phy_len,
-              (unsigned)iwl_mvm_phy_cfg_8000(iwl),
-              (unsigned)iwl->default_calib[IWL_UCODE_REGULAR].flow_trigger,
-              (unsigned)iwl->default_calib[IWL_UCODE_REGULAR].event_trigger);
-    if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, PHY_CONFIGURATION_CMD, &phy,
-                                phy_len, 2000) != 0) {
-        lx_printk("iwl_mvm: PHY_CFG 8000 falló\n");
-        return -1;
-    }
+    phy.calib_control.flow_trigger = iwl_cpu_to_le32(iwl->default_calib[image].flow_trigger);
+    phy.calib_control.event_trigger = iwl_cpu_to_le32(iwl->default_calib[image].event_trigger);
+    len = ver == 3 ? sizeof(struct iwl_phy_cfg_cmd_v3) : sizeof(struct iwl_phy_cfg_cmd_v1);
+    return iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, PHY_CONFIGURATION_CMD, &phy, len, 2000);
+}
 
-    for (t = 0; t < 600; t++) {
+/* INIT ALIVE: collect NVM and PHY_DB before stopping the INIT image. */
+int iwl_mvm_calibrate_8000(struct iwl_ax211_priv *iwl)
+{
+    struct iwl_tx_ant_cfg_cmd ant;
+    int t;
+    if (!iwl->alive)
+        return -1;
+    iwl_phy_db_clear(iwl);
+    iwl->init_complete = 0;
+    iwl->radio_ready = 0;
+    iwl->phy_db_collecting = 1;
+    if (iwl_mvm_nvm_read_8000(iwl) != 0)
+        goto fail;
+    memset(&ant, 0, sizeof(ant));
+    ant.valid = iwl_mvm_valid_tx_ant(iwl);
+    if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, TX_ANT_CONFIGURATION_CMD,
+                                &ant, sizeof(ant), 2000) != 0 ||
+        iwl_mvm_phy_cfg_8000_send(iwl, IWL_UCODE_INIT) != 0)
+        goto fail;
+    for (t = 0; t < 600 && !iwl->init_complete && !iwl->phy_db_error; t++) {
         iwl_trans_poll(iwl);
-        if (iwl->init_complete)
-            break;
         iwl_mdelay_locked(10);
     }
-    if (!iwl->init_complete) {
-        lx_printk("iwl_mvm: timeout INIT_COMPLETE_NOTIF (8000)\n");
-        return -1;
-    }
+    iwl->phy_db_collecting = 0;
+    if (!iwl->init_complete || !iwl_phy_db_valid(iwl))
+        goto fail;
+    lx_printk("iwl_mvm: INIT 8000 calibración completa (%u secciones)\n", iwl->phy_db_count);
+    return 0;
+fail:
+    iwl->phy_db_collecting = 0;
+    iwl->nvm_ready = 0;
+    lx_printk("iwl_mvm: INIT 8000 calibración falló\n");
+    return -1;
+}
 
-    iwl->radio_ready = 1;
-    if (iwl_mvm_nvm_get_info_mac(iwl) != 0) {
-        iwl->radio_ready = 0;
-        iwl->nvm_ready = 0;
-        lx_printk("iwl_mvm: NVM_EXT/NVM_GET_INFO falló (8000)\n");
+/* RT: Linux envía la PHY DB recogida en INIT antes de PHY_CFG de RT. */
+int iwl_mvm_phy_db_apply_8000(struct iwl_ax211_priv *iwl)
+{
+    if (iwl_phy_db_send(iwl) != 0 ||
+        iwl_mvm_phy_cfg_8000_send(iwl, IWL_UCODE_REGULAR) != 0)
         return -1;
-    }
-    iwl->nvm_ready = 1;
-    lx_printk("iwl_mvm: init 8000 listo (phy_sku=0x%08x n_scan=%u tx=0x%x rx=0x%x)\n",
-              (unsigned)iwl->phy_sku, (unsigned)iwl->n_scan_channels,
-              (unsigned)iwl_mvm_valid_tx_ant(iwl),
-              (unsigned)iwl_mvm_valid_rx_ant(iwl));
     return 0;
 }
 
@@ -135,7 +118,7 @@ int iwl_mvm_run_init(struct iwl_ax211_priv *iwl)
     }
 
     if (iwl->family == IWL_DEVICE_FAMILY_8000)
-        return iwl_mvm_run_init_8000(iwl);
+        return iwl->nvm_ready && iwl->init_complete ? (iwl->radio_ready = 1, 0) : -1;
 
     if (iwl_pnvm_load(iwl) != 0) {
         return -1;

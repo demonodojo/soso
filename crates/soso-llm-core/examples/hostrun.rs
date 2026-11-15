@@ -227,6 +227,10 @@ fn main() {
         );
         rt.set_planner(planner);
     }
+    if std::env::var_os("SOSO_KV_FP4").is_some() {
+        rt.activar_kv_fp4_experimental().expect("KV FP4 experimental requiere modelo GQA denso sin ventana ni planificador");
+        eprintln!("KV FP4 experimental activado");
+    }
 
     // "@bos" = prompt de un solo token BOS (RoPE identidad en pos 0)
     let prompt_tokens = if prompt == "@bos" {
@@ -304,7 +308,8 @@ fn main() {
                 if let Some(ttft) = medidor.tiempos.first() {
                     eprintln!("primer token: {:.3} s", ttft.as_secs_f64());
                 }
-                informar_medicion(&medidor, &rt, prompt_tokens.len(), generated, dt);
+                informar_medicion(&medidor, &rt, prompt_tokens.len(), &t[prompt_tokens.len()..], dt);
+                if std::env::var_os("SOSO_KV_FP4_ANALIZAR").is_some() { analizar_kv_fp4(&rt); }
                 if generated > 0 && dt > 0.0 {
                     eprintln!(
                         "rendimiento: {:.2} tok/s ({:.0} ms/token)",
@@ -379,20 +384,73 @@ fn main() {
         eprintln!("primer token: {:.3} s", ttft.as_secs_f64());
     }
     eprintln!("borrador: {} ofrecidos, {} aceptados", rt.borrador_ofrecidos, rt.borrador_aceptados);
-    informar_medicion(&medidor, &rt, prompt_tokens.len(), generated, dt as f64);
+    informar_medicion(&medidor, &rt, prompt_tokens.len(), &tokens[prompt_tokens.len()..], dt as f64);
+    if std::env::var_os("SOSO_KV_FP4_ANALIZAR").is_some() { analizar_kv_fp4(&rt); }
     drop(medidor);
     println!("{}", dec.finish());
     eprintln!("tokens: {:?}", &tokens[prompt_tokens.len()..]);
 }
 
-fn informar_medicion(m: &Medidor<'_>, rt: &Runtime, prompt: usize, generated: usize, total_s: f64) {
+/// Estima el error del códec sobre el KV real sin alterar la caché utilizada.
+fn analizar_kv_fp4(rt: &Runtime) {
+    let mut elementos = 0usize;
+    let mut bytes = 0usize;
+    let mut descartadas = 0usize;
+    let mut max_error = 0.0f64;
+    let mut suma = 0.0f64;
+    let mut cuadrados = 0.0f64;
+    let mut cuadrados_referencia = 0.0f64;
+    let mut max_referencia = 0.0f64;
+    for (l, kv) in rt.kv.iter().enumerate() {
+        let dim = rt.manifest.effective_num_kv_heads(l as u32) as usize
+            * rt.manifest.effective_head_dim(l as u32) as usize;
+        if kv.dtype != soso_llm_core::KvDtype::F16 || kv.en_gpu || kv.mla_latent || dim == 0
+            || kv.k_f16.len() % dim != 0 || kv.v_f16.len() != kv.k_f16.len() {
+            descartadas += 1;
+            continue;
+        }
+        for fila in kv.k_f16.chunks(dim).chain(kv.v_f16.chunks(dim)) {
+            let valores: Vec<f32> = fila.iter().map(|&x| soso_llm_core::f16::f16_to_f32(x)).collect();
+            let datos = match soso_llm_core::kv_fp4::codificar(&valores) {
+                Ok(v) => v,
+                Err(e) => { eprintln!("kv_fp4: capa {l}: {e:?}"); return; }
+            };
+            let mut salida = vec![0.0; dim];
+            if let Err(e) = soso_llm_core::kv_fp4::decodificar(&datos, &mut salida) {
+                eprintln!("kv_fp4: capa {l}: {e:?}"); return;
+            }
+            bytes += datos.len();
+            elementos += dim;
+            for (a, b) in valores.iter().zip(salida.iter()) {
+                let error = (*a as f64 - *b as f64).abs();
+                max_error = max_error.max(error);
+                suma += error;
+                cuadrados += error * error;
+                cuadrados_referencia += (*a as f64) * (*a as f64);
+                max_referencia = max_referencia.max((*a as f64).abs());
+            }
+        }
+    }
+    let registro = serde_json::json!({
+        "elementos": elementos, "bytes_f16": elementos * 2, "bytes_fp4": bytes,
+        "capas_descartadas": descartadas,
+        "error_absoluto_max": (elementos > 0).then_some(max_error),
+        "error_absoluto_medio": (elementos > 0).then(|| suma / elementos as f64),
+        "rmse": (elementos > 0).then(|| (cuadrados / elementos as f64).sqrt()),
+        "referencia_abs_max": (elementos > 0).then_some(max_referencia),
+        "rmse_relativo": (cuadrados_referencia > 0.0).then(|| (cuadrados / cuadrados_referencia).sqrt()),
+    });
+    eprintln!("kv_fp4: {registro}");
+}
+
+fn informar_medicion(m: &Medidor<'_>, rt: &Runtime, prompt: usize, generados: &[u32], total_s: f64) {
     let intervalos: Vec<f64> = m.tiempos.windows(2).map(|w| (w[1] - w[0]).as_secs_f64()).collect();
     let decode_s = m.tiempos.first().zip(m.tiempos.last()).map(|(a, b)| (*b - *a).as_secs_f64());
     let mut ordenados = intervalos.clone();
     ordenados.sort_by(f64::total_cmp);
     let percentil = |p: usize| ordenados.get((ordenados.len() * p).div_ceil(100).saturating_sub(1)).copied();
     let registro = serde_json::json!({
-        "prompt_tokens": prompt, "generated_tokens": generated, "total_s": total_s,
+        "prompt_tokens": prompt, "generated_tokens": generados.len(), "generated_ids": generados, "total_s": total_s,
         "prefill_s": m.prefill.map(|t| t.as_secs_f64()),
         "ttft_s": m.tiempos.first().map(|t| t.as_secs_f64()),
         "decode_tokens_s": decode_s.filter(|&s| s > 0.0 && m.tiempos.len() > 1)

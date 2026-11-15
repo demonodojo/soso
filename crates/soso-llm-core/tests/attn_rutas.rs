@@ -44,3 +44,37 @@ fn rutas_de_atencion_equivalentes_con_gqa() {
         assert!(e < 1e-3, "{tokens} tokens: error máximo {e}");
     }
 }
+
+#[test]
+fn atencion_fp4_coincide_con_softmax_de_filas_decodificadas() {
+    let (n, dim, cabezas) = (13usize, 33usize, 2usize);
+    let ancho = dim * cabezas;
+    let mut kv = LayerKv::with_capacity_dtype(n, ancho, KvDtype::F4);
+    let mut semilla = 123u64;
+    for _ in 0..n {
+        let k: Vec<f32> = (0..ancho).map(|_| lcg(&mut semilla)).collect();
+        let v: Vec<f32> = (0..ancho).map(|_| lcg(&mut semilla)).collect();
+        kv.append(&k, &v);
+    }
+    for cabeza in 0..cabezas {
+        let q: Vec<f32> = (0..dim).map(|_| lcg(&mut semilla)).collect();
+        let mut salida = vec![0.0; dim];
+        attention_decode_kv(&q, &kv, dim, ancho, cabeza, n, &mut salida, None, false, 0);
+        let mut k = vec![0.0; dim];
+        let mut v = vec![0.0; dim];
+        let mut scores = Vec::new();
+        for t in 0..n {
+            kv.load_k_head(t, cabeza, dim, ancho, &mut k);
+            scores.push(q.iter().zip(&k).map(|(a, b)| a * b).sum::<f32>() / (dim as f32).sqrt());
+        }
+        let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let pesos: Vec<f32> = scores.iter().map(|x| (x - max).exp()).collect();
+        let masa: f32 = pesos.iter().sum();
+        let mut referencia = vec![0.0; dim];
+        for t in 0..n {
+            kv.load_v_head(t, cabeza, dim, ancho, &mut v);
+            for i in 0..dim { referencia[i] += pesos[t] / masa * v[i]; }
+        }
+        assert!(salida.iter().zip(referencia).all(|(a, b)| (a - b).abs() < 1e-5));
+    }
+}

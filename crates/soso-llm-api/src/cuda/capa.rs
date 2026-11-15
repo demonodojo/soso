@@ -14,7 +14,7 @@ use std::ffi::{CString, c_int, c_void};
 use soso_llm_core::gemma::{EXPULSION_DISPARO, EXPULSION_HOLGURA};
 use soso_llm_core::gpu::GemmaCapa;
 
-use super::{Api, CuFunction, CuModule, CudaGpu, NT, Peso, ck};
+use super::{Api, CuFunction, CudaGpu, NT, Peso, ck};
 use sosomodel::layout::{DTYPE_Q4_0, DTYPE_Q4_K, DTYPE_Q8_0};
 
 const PTX_CAPA: &str = include_str!("../../cuda/gemma_capa.ptx");
@@ -171,14 +171,9 @@ impl Estado {
         self.rechazadas.insert(layer);
     }
 
-    pub(super) fn nueva(api: &Api) -> Result<Estado, String> {
+    pub(super) fn nueva(api: &Api, cubin: Option<&[u8]>) -> Result<Estado, String> {
         unsafe {
-            let c = CString::new(PTX_CAPA).map_err(|_| "PTX con NUL".to_string())?;
-            let mut m: CuModule = std::ptr::null_mut();
-            ck(
-                (api.module_load)(&mut m, c.as_ptr() as *const c_void),
-                "cuModuleLoadData(gemma_capa)",
-            )?;
+            let m = super::cargar_modulo(api, PTX_CAPA, cubin, "gemma_capa")?;
             let f = |n: &str| -> Result<CuFunction, String> {
                 let c = CString::new(n).unwrap();
                 let mut f: CuFunction = std::ptr::null_mut();

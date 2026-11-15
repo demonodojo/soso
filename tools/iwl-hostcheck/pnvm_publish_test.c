@@ -73,7 +73,7 @@ void *lx_kmalloc(unsigned long size, unsigned gfp)
     return malloc(size);
 }
 
-void lx_kfree(const void *p) { free((void *)p); }
+void lx_kfree(void *p) { free((void *)p); }
 
 void *lx_dma_alloc_coherent(void *dev, size_t size, uint64_t *dma, unsigned gfp)
 {

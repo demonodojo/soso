@@ -1,4 +1,4 @@
-//! KV cache: f16 (default) o int8 per-token (KIVI-lite) + eviction H2O.
+//! KV cache: f16 (default), int8 per-token y E2M1 experimental + eviction H2O.
 //!
 //! - **KIVI** (KV cache quantization): escala por token, int8 simétrico → ~2×
 //!   menos RAM que f16 con pérdida acotada en decode.
@@ -13,6 +13,8 @@ pub enum KvDtype {
     F16,
     /// int8 + escala f32 por token (K/V por separado).
     I8,
+    /// E2M1 experimental, escala f32 por cada 32 valores de cada fila.
+    F4,
 }
 
 /// Cache K/V de una capa.
@@ -26,6 +28,11 @@ pub struct LayerKv {
     pub v_f16: Vec<u16>,
     pub k_i8: Vec<i8>,
     pub v_i8: Vec<i8>,
+    k_f4: Vec<u8>,
+    v_f4: Vec<u8>,
+    /// Marca un fallo de cuantización; los ejecutores deben abortar el paso.
+    pub fp4_error: bool,
+    fp4_dim: usize,
     /// Escala por token: valor_real ≈ i8 * scale.
     pub k_scale: Vec<f32>,
     pub v_scale: Vec<f32>,
@@ -66,6 +73,7 @@ impl LayerKv {
                 v_f16: Vec::with_capacity(n),
                 k_i8: Vec::new(),
                 v_i8: Vec::new(),
+                k_f4: Vec::new(), v_f4: Vec::new(), fp4_error: false, fp4_dim: 0,
                 k_scale: Vec::new(),
                 v_scale: Vec::new(),
                 mass: Vec::with_capacity(tokens),
@@ -83,6 +91,7 @@ impl LayerKv {
                 v_f16: Vec::new(),
                 k_i8: Vec::with_capacity(n),
                 v_i8: Vec::with_capacity(n),
+                k_f4: Vec::new(), v_f4: Vec::new(), fp4_error: false, fp4_dim: 0,
                 k_scale: Vec::with_capacity(tokens),
                 v_scale: Vec::with_capacity(tokens),
                 mass: Vec::with_capacity(tokens),
@@ -92,6 +101,13 @@ impl LayerKv {
                 en_gpu: false,
                 gpu_pos: 0,
                 gpu_kv_filas: 0,
+            },
+            KvDtype::F4 => Self {
+                dtype, mla_latent: false, k_f16: Vec::new(), v_f16: Vec::new(),
+                k_i8: Vec::new(), v_i8: Vec::new(), k_f4: Vec::new(), v_f4: Vec::new(),
+                fp4_error: false, fp4_dim: 0, k_scale: Vec::new(), v_scale: Vec::new(),
+                mass: Vec::with_capacity(tokens), gdn_s: Vec::new(), gdn_conv: Vec::new(),
+                dropped: 0, en_gpu: false, gpu_pos: 0, gpu_kv_filas: 0,
             },
         }
     }
@@ -114,6 +130,10 @@ impl LayerKv {
         self.v_f16.clear();
         self.k_i8.clear();
         self.v_i8.clear();
+        self.k_f4.clear();
+        self.v_f4.clear();
+        self.fp4_error = false;
+        self.fp4_dim = 0;
         self.k_scale.clear();
         self.v_scale.clear();
         self.mass.clear();
@@ -133,12 +153,23 @@ impl LayerKv {
         self.dropped + self.tokens(kv_dim)
     }
 
-    /// Expulsa las `filas` más antiguas (sólo KV f16). Es la ventana deslizante **real** de una capa local:
+    /// Expulsa las `filas` más antiguas (KV f16 o F4). Es la ventana deslizante **real** de una capa local:
     /// RoPE ya se aplicó a K al guardarlo, así que las filas que quedan no cambian.
     pub fn expulsar_delante(&mut self, filas: usize, kv_dim: usize) {
-        if filas == 0 || self.dtype != KvDtype::F16 {
+        if filas == 0 {
             return;
         }
+        if self.dtype == KvDtype::F4 {
+            let filas = filas.min(self.tokens(kv_dim));
+            let stride = crate::kv_fp4::bytes_para(kv_dim).unwrap_or(0);
+            self.k_f4.drain(..filas * stride);
+            if !self.mla_latent { self.v_f4.drain(..filas * stride); }
+            self.mass.drain(..filas);
+            self.dropped += filas;
+            self.gpu_kv_filas = 0;
+            return;
+        }
+        if self.dtype != KvDtype::F16 { return; }
         let n = (filas * kv_dim).min(self.k_f16.len());
         self.k_f16.drain(..n);
         self.v_f16.drain(..n);
@@ -166,6 +197,11 @@ impl LayerKv {
         self.v_f16.truncate(n);
         self.k_i8.truncate(n);
         self.v_i8.truncate(n);
+        if self.dtype == KvDtype::F4 {
+            let stride = crate::kv_fp4::bytes_para(kv_dim).unwrap_or(0);
+            self.k_f4.truncate(tokens.saturating_mul(stride));
+            self.v_f4.truncate(tokens.saturating_mul(stride));
+        }
         self.k_scale.truncate(tokens);
         self.v_scale.truncate(tokens);
         self.mass.truncate(tokens);
@@ -191,7 +227,14 @@ impl LayerKv {
         match self.dtype {
             KvDtype::F16 => self.k_f16.len() / kv_dim,
             KvDtype::I8 => self.k_scale.len(),
+            KvDtype::F4 => self.mass.len(),
         }
+    }
+
+    /// Bytes usados por K/V, sin incluir capacidad reservada ni masa H2O.
+    pub fn bytes_kv(&self) -> usize {
+        self.k_f16.len() * 2 + self.v_f16.len() * 2 + self.k_i8.len() + self.v_i8.len()
+            + self.k_f4.len() + self.v_f4.len() + (self.k_scale.len() + self.v_scale.len()) * 4
     }
 
     fn quantize_token(x: &[f32]) -> (Vec<i8>, f32) {
@@ -230,6 +273,18 @@ impl LayerKv {
                 self.k_scale.push(ks);
                 self.v_scale.push(vs);
             }
+            KvDtype::F4 => {
+                if k.is_empty() || k.len() != v.len() || (self.fp4_dim != 0 && self.fp4_dim != k.len()) {
+                    self.fp4_error = true; return;
+                }
+                let (Ok(kq), Ok(vq)) = (crate::kv_fp4::codificar(k), crate::kv_fp4::codificar(v)) else {
+                    self.fp4_error = true;
+                    return;
+                };
+                self.k_f4.extend_from_slice(&kq);
+                self.v_f4.extend_from_slice(&vq);
+                self.fp4_dim = k.len();
+            }
         }
         self.mass.push(0.0);
     }
@@ -246,6 +301,13 @@ impl LayerKv {
                 self.k_i8.extend_from_slice(&kq);
                 self.k_scale.push(ks);
             }
+            KvDtype::F4 if c_kv.is_empty() || (self.fp4_dim != 0 && self.fp4_dim != c_kv.len()) => {
+                self.fp4_error = true; return;
+            }
+            KvDtype::F4 => match crate::kv_fp4::codificar(c_kv) {
+                Ok(kq) => { self.k_f4.extend_from_slice(&kq); self.fp4_dim = c_kv.len(); }
+                Err(_) => { self.fp4_error = true; return; }
+            },
         }
         self.mass.push(0.0);
     }
@@ -267,6 +329,10 @@ impl LayerKv {
                 for d in 0..kv_rank {
                     out[d] = self.k_i8[base + d] as f32 * s;
                 }
+            }
+            KvDtype::F4 => {
+                let stride = crate::kv_fp4::bytes_para(kv_rank).unwrap_or(0);
+                crate::kv_fp4::decodificar(&self.k_f4[t * stride..(t + 1) * stride], &mut out[..kv_rank]).expect("KV FP4 válido");
             }
         }
     }
@@ -406,6 +472,21 @@ impl LayerKv {
                 self.k_scale = nks;
                 self.mass = nm;
             }
+            KvDtype::F4 => {
+                let stride = crate::kv_fp4::bytes_para(kv_dim).unwrap_or(0);
+                let mut nk = Vec::with_capacity(idx.len() * stride);
+                let mut nv = Vec::with_capacity(idx.len() * stride);
+                let mut nm = Vec::with_capacity(idx.len());
+                for &t in idx {
+                    let off = t * stride;
+                    nk.extend_from_slice(&self.k_f4[off..off + stride]);
+                    if !self.mla_latent { nv.extend_from_slice(&self.v_f4[off..off + stride]); }
+                    nm.push(self.mass.get(t).copied().unwrap_or(0.0));
+                }
+                self.k_f4 = nk;
+                self.v_f4 = nv;
+                self.mass = nm;
+            }
         }
     }
 
@@ -424,6 +505,11 @@ impl LayerKv {
                     out[d] = self.k_i8[base + d] as f32 * s;
                 }
             }
+            KvDtype::F4 => {
+                let stride = crate::kv_fp4::bytes_para(kv_dim).unwrap_or(0);
+                crate::kv_fp4::decodificar_rango(&self.k_f4[t * stride..(t + 1) * stride], kv_dim,
+                    kv_head * head_dim, &mut out[..head_dim]).expect("KV FP4 válido");
+            }
         }
     }
 
@@ -440,6 +526,11 @@ impl LayerKv {
                 for d in 0..head_dim {
                     out[d] = self.v_i8[base + d] as f32 * s;
                 }
+            }
+            KvDtype::F4 => {
+                let stride = crate::kv_fp4::bytes_para(kv_dim).unwrap_or(0);
+                crate::kv_fp4::decodificar_rango(&self.v_f4[t * stride..(t + 1) * stride], kv_dim,
+                    kv_head * head_dim, &mut out[..head_dim]).expect("KV FP4 válido");
             }
         }
     }
@@ -494,5 +585,44 @@ mod tests {
         assert!(heads.contains(&0));
         assert!(heads.contains(&3));
         assert!(heads.contains(&9));
+    }
+
+    #[test]
+    fn fp4_filas_recorte_y_expulsion_conservan_el_orden() {
+        let mut kv = LayerKv::with_capacity_dtype(8, 33, KvDtype::F4);
+        for t in 0..8 {
+            let mut k = [0.0; 33];
+            k[0] = (t + 1) as f32 * 6.0;
+            k[32] = (t + 1) as f32 * 0.006;
+            kv.append(&k, &k);
+        }
+        assert!(!kv.fp4_error);
+        assert_eq!(kv.tokens(33), 8);
+        kv.expulsar_delante(3, 33);
+        assert_eq!(kv.dropped, 3);
+        assert_eq!(kv.posiciones(33), 8);
+        kv.truncate_tokens(6, 33);
+        assert_eq!(kv.tokens(33), 3);
+        let mut head = [0.0; 1];
+        kv.load_k_head(0, 0, 1, 33, &mut head);
+        assert!((head[0] - 24.0).abs() < 1e-5);
+        kv.load_v_head(2, 32, 1, 33, &mut head);
+        assert!((head[0] - 0.036).abs() < 1e-5);
+        kv.slide_window_h2o(2, 0, 1, 33, false);
+        assert_eq!(kv.tokens(33), 2);
+        kv.load_k_head(0, 0, 1, 33, &mut head);
+        assert!((head[0] - 30.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn fp4_rechaza_entrada_no_finita_sin_anadir_fila() {
+        let mut kv = LayerKv::with_capacity_dtype(2, 2, KvDtype::F4);
+        kv.append(&[1.0, 0.0], &[1.0, 0.0]);
+        kv.append(&[2.0, f32::NAN], &[1.0, 0.0]);
+        assert!(kv.fp4_error);
+        assert_eq!(kv.tokens(2), 1);
+        kv.reset();
+        assert!(!kv.fp4_error);
+        assert_eq!(kv.tokens(2), 0);
     }
 }

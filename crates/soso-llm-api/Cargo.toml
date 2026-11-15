@@ -52,5 +52,8 @@ required-features = ["std"]
 
 [dev-dependencies]
 
+[build-dependencies]
+sha2 = { version = "0.10", default-features = false }
+
 [lib]
 doctest = false

@@ -45,6 +45,10 @@ pub mod host_mmap;
 #[cfg(feature = "std")]
 pub mod host_pool;
 #[cfg(feature = "std")]
+pub mod identidad_kv;
+#[cfg(feature = "std")]
+pub mod kvstore_host;
+#[cfg(feature = "std")]
 pub mod systemone;
 #[cfg(feature = "std")]
 pub mod service;

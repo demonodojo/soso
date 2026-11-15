@@ -6,6 +6,10 @@
 #include <stdint.h>
 
 #define GFP_KERNEL 0
+#define GFP_ATOMIC 0
+
+void *lx_kmalloc(size_t size, unsigned flags);
+void lx_kfree(void *ptr);
 
 void lx_printk(const char *fmt, ...);
 void lx_mdelay(unsigned int ms);

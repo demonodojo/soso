@@ -33,6 +33,7 @@ use sosomodel::layout::{
 const PTX_Q4_0: &str = include_str!("../cuda/matvec_q4_0.ptx");
 /// i-quants y Q5_K residentes tal cual (`matvec_iq.cu`, compilado con NVRTC: `tools/cuda-nvrtc/compilar.py`).
 const PTX_IQ: &str = include_str!("../cuda/matvec_iq.ptx");
+include!(concat!(env!("OUT_DIR"), "/cuda_aot.rs"));
 
 /// Código del decodificador de `iq_matmul_mma` y bytes por fila para un tensor de ese dtype y `cols` columnas.
 fn codigo_mma(dtype: u8, cols: usize) -> Option<(i32, i64)> {
@@ -147,6 +148,7 @@ unsafe extern "C" {
 struct Api {
     init: unsafe extern "C" fn(u32) -> CuResult,
     device_get: unsafe extern "C" fn(*mut c_int, c_int) -> CuResult,
+    device_get_attribute: Option<unsafe extern "C" fn(*mut c_int, c_int, c_int) -> CuResult>,
     primary_retain: unsafe extern "C" fn(*mut CuCtx, c_int) -> CuResult,
     ctx_set_current: unsafe extern "C" fn(CuCtx) -> CuResult,
     mem_alloc: unsafe extern "C" fn(*mut u64, usize) -> CuResult,
@@ -234,6 +236,7 @@ impl Api {
         Ok(Api {
             init: simbolo(lib, "cuInit")?,
             device_get: simbolo(lib, "cuDeviceGet")?,
+            device_get_attribute: simbolo(lib, "cuDeviceGetAttribute").ok(),
             primary_retain: simbolo(lib, "cuDevicePrimaryCtxRetain")?,
             ctx_set_current: simbolo(lib, "cuCtxSetCurrent")?,
             mem_alloc: simbolo(lib, "cuMemAlloc_v2")?,
@@ -376,6 +379,60 @@ pub struct CudaGpu {
     dec: Option<decode::DecodeDev>,
 }
 
+fn elegir_aot(solicitado: bool, compilado: u32, dispositivo: Option<u32>) -> bool {
+    solicitado && compilado != 0 && dispositivo == Some(compilado)
+}
+
+#[cfg(test)]
+mod pruebas_aot {
+    use super::{cargar_con_respaldo, elegir_aot};
+
+    #[test]
+    fn solo_usa_arquitectura_exacta_con_opcion_explicita() {
+        assert!(elegir_aot(true, 86, Some(86)));
+        assert!(!elegir_aot(false, 86, Some(86)));
+        assert!(!elegir_aot(true, 86, Some(120)));
+        assert!(!elegir_aot(true, 86, None));
+        assert!(!elegir_aot(true, 0, Some(0)));
+    }
+
+    #[test]
+    fn usa_ptx_si_cubin_falta_o_el_driver_lo_rechaza() {
+        assert_eq!(cargar_con_respaldo(Some(&[1]), |_| Ok(1), || Ok(2)).unwrap(), 1);
+        assert_eq!(cargar_con_respaldo(Some(&[1]), |_| Err("fallo".into()), || Ok(2)).unwrap(), 2);
+        assert_eq!(cargar_con_respaldo(None, |_| panic!("sin cubin"), || Ok(2)).unwrap(), 2);
+        assert!(cargar_con_respaldo::<()>(Some(&[1]), |_| Err("cubin".into()), || Err("ptx".into())).is_err());
+    }
+}
+
+fn cargar_con_respaldo<T>(cubin: Option<&[u8]>, mut aot: impl FnMut(&[u8]) -> Result<T, String>,
+                          ptx: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    if let Some(bytes) = cubin {
+        if let Ok(modulo) = aot(bytes) { return Ok(modulo); }
+    }
+    ptx()
+}
+
+/// Carga cubin solo tras comprobar su arquitectura; si el driver lo rechaza,
+/// conserva la ruta PTX. La presencia de los símbolos se verifica al compilar.
+unsafe fn cargar_modulo(api: &Api, ptx: &str, cubin: Option<&[u8]>, nombre: &str) -> Result<CuModule, String> {
+    cargar_con_respaldo(cubin, |bytes| {
+        let mut modulo: CuModule = std::ptr::null_mut();
+        if unsafe { (api.module_load)(&mut modulo, bytes.as_ptr() as *const c_void) } == 0 {
+            eprintln!("cuda: {nombre} cargado AOT sm_{AOT_SM}");
+            Ok(modulo)
+        } else {
+            eprintln!("cuda: {nombre} AOT rechazado por el driver; usando PTX");
+            Err("cubin rechazado".into())
+        }
+    }, || {
+        let c = CString::new(ptx).map_err(|_| "PTX con NUL".to_string())?;
+        let mut modulo: CuModule = std::ptr::null_mut();
+        ck(unsafe { (api.module_load)(&mut modulo, c.as_ptr() as *const c_void) }, "cuModuleLoadData")?;
+        Ok(modulo)
+    })
+}
+
 unsafe impl Send for CudaGpu {}
 
 impl CudaGpu {
@@ -402,16 +459,15 @@ impl CudaGpu {
                 "cuDevicePrimaryCtxRetain",
             )?;
             ck((api.ctx_set_current)(ctx), "cuCtxSetCurrent")?;
-            let cargar = |ptx: &str| -> Result<CuModule, String> {
-                let c = CString::new(ptx).map_err(|_| "PTX con NUL".to_string())?;
-                let mut m: CuModule = std::ptr::null_mut();
-                ck(
-                    (api.module_load)(&mut m, c.as_ptr() as *const c_void),
-                    "cuModuleLoadData",
-                )?;
-                Ok(m)
-            };
-            let m4 = cargar(PTX_Q4_0)?;
+            let mut major = 0;
+            let mut minor = 0;
+            let dispositivo = api.device_get_attribute.and_then(|f| {
+                if f(&mut major, 75, dev) == 0 && f(&mut minor, 76, dev) == 0 && major >= 0 && (0..10).contains(&minor) {
+                    Some((major as u32) * 10 + minor as u32)
+                } else { None }
+            });
+            let aot = elegir_aot(std::env::var_os("SOSO_CUDA_AOT").is_some(), AOT_SM, dispositivo);
+            let m4 = cargar_modulo(&api, PTX_Q4_0, if aot { AOT_Q4 } else { None }, "matvec_q4_0")?;
             let func = |m: CuModule, n: &str| -> Result<CuFunction, String> {
                 let c = CString::new(n).unwrap();
                 let mut f: CuFunction = std::ptr::null_mut();
@@ -424,7 +480,7 @@ impl CudaGpu {
             let f_matvec_q4 = func(m4, "matvec_q4_0r")?;
             let f_matmul_q4 = func(m4, "matmul_q4_0r8")?;
             let f_gemm_q4 = func(m4, "gemm_q4_0_tc")?;
-            let mod_iq = cargar(PTX_IQ)?;
+            let mod_iq = cargar_modulo(&api, PTX_IQ, if aot { AOT_IQ } else { None }, "matvec_iq")?;
             let f_iq = func(mod_iq, "iq_matvec")?;
             func(mod_iq, "iq_gateup_n")?;
             func(mod_iq, "iq_down_n")?;
@@ -470,7 +526,7 @@ impl CudaGpu {
             let f_down_multi = func(mod_iq, "iq_down_mma")?;
             let (mut libre, mut total) = (0usize, 0usize);
             ck((api.mem_info)(&mut libre, &mut total), "cuMemGetInfo")?;
-            let capa = capa::Estado::nueva(&api)?;
+            let capa = capa::Estado::nueva(&api, if aot { AOT_CAPA } else { None })?;
             let mut stream: *mut c_void = std::ptr::null_mut();
             let grafo = if std::env::var("SOSO_CUDA_GRAFOS").as_deref() == Ok("0") {
                 None

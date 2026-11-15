@@ -109,6 +109,14 @@ int iwl_fw_parse_tlv(struct iwl_ax211_priv *iwl, const uint8_t *fw, unsigned lon
             if (append_sec_init(&iwl->fw, pos, length))
                 return -1;
             break;
+        case IWL_UCODE_TLV_PAGING:
+            if (length != 4)
+                return -1;
+            iwl->fw.paging_mem_size = le32(pos);
+            if (iwl->fw.paging_mem_size > 32u * 32768u ||
+                (iwl->fw.paging_mem_size & 4095u))
+                return -1;
+            break;
         case IWL_UCODE_TLV_IML: {
             uint8_t *buf = lx_kmalloc(length, GFP_KERNEL);
             if (!buf)

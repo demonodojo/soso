@@ -222,6 +222,60 @@ pub struct CpuBackend {
     tabla_bytes: Arc<TablaBytes>,
     /// Prompt de la petición anterior (sólo para el diagnóstico de cuánto prefijo se comparte).
     ultimo_prompt: Vec<u32>,
+    cache_kv: Option<CacheKvHost>,
+    model_dir: std::path::PathBuf,
+}
+
+struct CacheKvHost {
+    directorio: std::path::PathBuf,
+    perfil: [u8; 32],
+    max_bytes: usize,
+}
+
+impl CacheKvHost {
+    fn recuperar(&self, rt: &mut Runtime, prompt: &[u32]) -> Result<bool, String> {
+        let candidatos = crate::kvstore_host::listar(&self.directorio).map_err(|e| e.to_string())?;
+        let mut mejor = rt.prefijo_kv_en_memoria(prompt);
+        let mut elegida = None;
+        for ruta in candidatos {
+            let imagen = match crate::kvstore_host::leer(&ruta, self.max_bytes) {
+                Ok(i) => i,
+                Err(_) => continue,
+            };
+            let prefijo = match rt.prefijo_imagen_kv(&imagen, &self.perfil, prompt, self.max_bytes) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            if prefijo > mejor {
+                mejor = prefijo;
+                elegida = Some(imagen);
+            }
+        }
+        let Some(imagen) = elegida else { return Ok(false); };
+        rt.importar_kv(&imagen, &self.perfil, self.max_bytes)
+            .map_err(|e| format!("restaurar KV: {e:?}"))?;
+        Ok(true)
+    }
+
+    fn guardar(&self, rt: &Runtime) -> Result<(), String> {
+        let imagen = rt.exportar_kv(&self.perfil, self.max_bytes).map_err(|e| format!("exportar KV: {e:?}"))?;
+        crate::kvstore_host::guardar_multiple(&self.directorio, &imagen, self.max_bytes).map_err(|e| e.to_string())
+    }
+}
+
+impl CpuBackend {
+    /// Habilita una caché persistente para una única identidad en un directorio
+    /// privado ya existente. `ejecucion` debe identificar binario y opciones que
+    /// afecten el KV; los archivos del modelo deben permanecer inmutables.
+    pub fn habilitar_cache_kv(&mut self, directorio: &std::path::Path,
+                              ejecucion: &[u8], max_bytes: usize) -> Result<(), String> {
+        if self.gpu.is_some() || max_bytes == 0 { return Err("la caché requiere CPU y límite positivo".into()); }
+        crate::kvstore_host::verificar_directorio_privado(directorio).map_err(|e| e.to_string())?;
+        let directorio = directorio.canonicalize().map_err(|e| e.to_string())?;
+        let perfil = crate::identidad_kv::calcular(&self.model_dir, ejecucion).map_err(|e| e.to_string())?;
+        self.cache_kv = Some(CacheKvHost { directorio, perfil, max_bytes });
+        Ok(())
+    }
 }
 
 pub fn load_cpu_backend(model_dir: &str, profile: ModelProfile) -> Result<CpuBackend, LoadError> {
@@ -280,6 +334,8 @@ pub fn load_cpu_backend(model_dir: &str, profile: ModelProfile) -> Result<CpuBac
     let tabla_bytes = Arc::new(tokenizer.tabla_bytes());
     Ok(CpuBackend {
         ultimo_prompt: Vec::new(),
+        cache_kv: None,
+        model_dir: std::path::PathBuf::from(model_dir),
         rt,
         parallel: None,
         gpu: None,
@@ -311,6 +367,70 @@ fn reloj_ms() -> u64 {
     ORIGEN.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
+/// Observa sin alterar la entrega ni los puntos de cancelación del cliente.
+struct MedidorGeneracion<'a> {
+    destino: &'a mut dyn GenerationObserver,
+    inicio: std::time::Instant,
+    inicio_generacion: std::time::Instant,
+    activo: bool,
+    prefill: Option<std::time::Duration>,
+    tokens: Vec<std::time::Duration>,
+}
+
+#[derive(Default)]
+struct MedicionCache {
+    lectura_s: Option<f64>,
+    escritura_s: Option<f64>,
+    restaurada: bool,
+}
+
+impl GenerationObserver for MedidorGeneracion<'_> {
+    fn on_token(&mut self, token: u32) {
+        if self.activo { self.tokens.push(self.inicio.elapsed()); }
+        self.destino.on_token(token);
+    }
+
+    fn cancel_at(&mut self, at: GenCheckpoint) -> bool {
+        if self.activo && matches!(at, GenCheckpoint::BeforeDecode) {
+            self.prefill = Some(self.inicio_generacion.elapsed());
+        }
+        self.destino.cancel_at(at)
+    }
+}
+
+impl MedidorGeneracion<'_> {
+    fn json(&self, rt: &Runtime, prompt: usize, inicio: (u64, u64, u64), gpu: Option<(soso_llm_core::gpu::GpuStats, soso_llm_core::gpu::GpuStats)>, cache: Option<&MedicionCache>) -> serde_json::Value {
+        let mut intervalos: Vec<f64> = self.tokens.windows(2)
+            .map(|w| (w[1] - w[0]).as_secs_f64()).collect();
+        intervalos.sort_by(f64::total_cmp);
+        let percentil = |p: usize| intervalos.get((intervalos.len() * p).div_ceil(100).saturating_sub(1)).copied();
+        let decode_s = self.tokens.first().zip(self.tokens.last()).map(|(a, b)| (*b - *a).as_secs_f64());
+        serde_json::json!({
+            "prompt_tokens": prompt,
+            "reused_prompt_tokens": rt.ultimo_prefijo_reutilizado,
+            "prefill_tokens": prompt.saturating_sub(rt.ultimo_prefijo_reutilizado),
+            "generated_tokens": self.tokens.len(),
+            "prefill_s": self.prefill.map(|d| d.as_secs_f64()),
+            "ttft_s": self.tokens.first().map(|d| d.as_secs_f64()),
+            "decode_tokens_s": decode_s.filter(|&s| s > 0.0 && self.tokens.len() > 1)
+                .map(|s| (self.tokens.len() - 1) as f64 / s),
+            "inter_token_p50_s": percentil(50), "inter_token_p95_s": percentil(95),
+            "total_s": self.inicio.elapsed().as_secs_f64(),
+            "decode_forwards": rt.forwards_decode.saturating_sub(inicio.0),
+            "draft_offered": rt.borrador_ofrecidos.saturating_sub(inicio.1),
+            "draft_accepted": rt.borrador_aceptados.saturating_sub(inicio.2),
+            "cache_kv": cache.map(|c| serde_json::json!({"lectura_s": c.lectura_s, "escritura_s": c.escritura_s, "restaurada": c.restaurada})),
+            "cuda_decode_transferencias": gpu.map(|(a, b)| serde_json::json!({
+                "pasos": b.decode_pasos.saturating_sub(a.decode_pasos),
+                "embed_htod_bytes": b.decode_embed_up.saturating_sub(a.decode_embed_up),
+                "control_htod_bytes": b.decode_control_up.saturating_sub(a.decode_control_up),
+                "logits_dtoh_bytes": b.decode_logits_down.saturating_sub(a.decode_logits_down),
+                "kv_dtoh_bytes": b.decode_kv_down.saturating_sub(a.decode_kv_down),
+            })),
+        })
+    }
+}
+
 impl ChatBackend for CpuBackend {
     fn backend_name(&self) -> &'static str {
         "host-cpu"
@@ -335,6 +455,19 @@ impl ChatBackend for CpuBackend {
         prepared: &PreparedChatCompletion,
         observer: &mut dyn GenerationObserver,
     ) -> Result<(Vec<u32>, GenerationReport), ()> {
+        let t_inicio = std::time::Instant::now();
+        let mut medicion_cache = self.cache_kv.as_ref().filter(|_| self.gpu.is_none()).map(|_| MedicionCache::default());
+        if self.gpu.is_none() {
+            if let Some(cache) = &self.cache_kv {
+                let inicio = std::time::Instant::now();
+                let resultado = cache.recuperar(&mut self.rt, prompt_ids);
+                if let Some(m) = medicion_cache.as_mut() {
+                    m.lectura_s = Some(inicio.elapsed().as_secs_f64());
+                    m.restaurada = matches!(resultado, Ok(true));
+                }
+                if let Err(e) = resultado { eprintln!("[soso] caché KV no reutilizada: {e}"); }
+            }
+        }
         let stops = self.profile.stop_token_ids.clone();
         // Con herramientas declaradas, la llamada que escriba el modelo sólo puede ser una bien formada de la
         // familia (nombre declarado, claves del esquema, JSON/etiquetas cerradas). Fuera de una llamada el
@@ -352,9 +485,9 @@ impl ChatBackend for CpuBackend {
             prepared.top_p as f32,
             seed,
         );
+        let gpu_previo = self.gpu.as_ref().map(|g| g.stats());
         let mut gpu: Option<&mut dyn soso_llm_core::gpu::GpuDispatch> =
             self.gpu.as_mut().map(|b| &mut **b as &mut dyn soso_llm_core::gpu::GpuDispatch);
-        let t_inicio = std::time::Instant::now();
         let perfilar = std::env::var_os("SOSO_PERFIL").is_some();
         if perfilar {
             fn reloj_ns() -> u64 {
@@ -372,16 +505,36 @@ impl ChatBackend for CpuBackend {
             prepared.max_new_tokens
         );
         self.ultimo_prompt = prompt_ids.to_vec();
+        let previo = (self.rt.forwards_decode, self.rt.borrador_ofrecidos, self.rt.borrador_aceptados);
+        let mut medidor = MedidorGeneracion {
+            destino: observer, inicio: t_inicio, inicio_generacion: std::time::Instant::now(),
+            activo: std::env::var_os("SOSO_BENCH_JSON").is_some(),
+            prefill: None, tokens: Vec::new(),
+        };
         let (secuencia, report) = self.rt.generate_stream_par_observed(
             &mut self.source,
             prompt_ids,
             options,
             &mut sampler,
-            observer,
+            &mut medidor,
             self.parallel.as_deref().map(|p| p as &dyn soso_llm_core::parallel::RowParallel),
             &mut gpu,
             &mut None,
         )?;
+        if self.gpu.is_none() && !matches!(report.stop, soso_llm_core::generation::StopReason::Cancelled) {
+            if let Some(cache) = &self.cache_kv {
+                let inicio = std::time::Instant::now();
+                let resultado = cache.guardar(&self.rt);
+                if let Some(m) = medicion_cache.as_mut() { m.escritura_s = Some(inicio.elapsed().as_secs_f64()); }
+                if let Err(e) = resultado {
+                    eprintln!("[soso] caché KV no guardada: {e}");
+                }
+            }
+        }
+        if medidor.activo {
+            let gpu_posterior = self.gpu.as_ref().map(|g| g.stats());
+            eprintln!("[soso] medicion: {}", medidor.json(&self.rt, prompt_ids.len(), previo, gpu_previo.zip(gpu_posterior), medicion_cache.as_ref()));
+        }
         // `ChatBackend` devuelve sólo lo generado. El runtime devuelve la secuencia
         // entera (prompt + generación): sin recortarla el parser de llamadas leía el
         // prompt, con sus `<tool_call>` de ejemplo, como si fuera la salida del modelo.
@@ -899,5 +1052,111 @@ mod tests_gramatica {
         assert!(!razonamiento_abierto(&tok, &ids("<|im_start|>assistant\n<think>\nlisto\n</think>\n")));
         assert!(!razonamiento_abierto(&tok, &ids("<|im_start|>assistant\n")));
         assert!(!razonamiento_abierto(&tok, &[]));
+    }
+}
+
+#[cfg(test)]
+mod tests_medidor {
+    use super::*;
+
+    #[derive(Default)]
+    struct Obs { tokens: Vec<u32>, checkpoints: usize }
+    impl GenerationObserver for Obs {
+        fn on_token(&mut self, t: u32) { self.tokens.push(t); }
+        fn cancel_at(&mut self, _: GenCheckpoint) -> bool { self.checkpoints += 1; self.checkpoints == 2 }
+    }
+
+    #[test]
+    fn medidor_reenvia_tokens_y_cancelacion_y_emite_deltas() {
+        let mut destino = Obs::default();
+        let mut rt = Runtime::new(Manifest::tiny("prueba"), TensorIndex::default(), 0, 0);
+        rt.ultimo_prefijo_reutilizado = 3;
+        rt.forwards_decode = 9;
+        rt.borrador_ofrecidos = 7;
+        rt.borrador_aceptados = 4;
+        let mut m = MedidorGeneracion { destino: &mut destino, inicio: std::time::Instant::now(), inicio_generacion: std::time::Instant::now(), activo: true, prefill: None, tokens: Vec::new() };
+        assert!(!m.cancel_at(GenCheckpoint::BeforeDecode));
+        m.on_token(42);
+        assert!(m.cancel_at(GenCheckpoint::BeforeSample));
+        let mut antes = soso_llm_core::gpu::GpuStats::default();
+        antes.decode_logits_down = 100;
+        let mut despues = antes;
+        despues.decode_logits_down += 512;
+        despues.decode_embed_up += 16;
+        despues.decode_pasos += 1;
+        let cm = MedicionCache { lectura_s: Some(0.02), escritura_s: Some(0.03), restaurada: true };
+        let j = m.json(&rt, 5, (5, 2, 1), Some((antes, despues)), Some(&cm));
+        assert_eq!(j["reused_prompt_tokens"], 3);
+        assert_eq!(j["prefill_tokens"], 2);
+        assert_eq!(j["generated_tokens"], 1);
+        assert_eq!(j["decode_forwards"], 4);
+        assert_eq!(j["draft_offered"], 5);
+        assert_eq!(j["draft_accepted"], 3);
+        assert!(j["prefill_s"].is_number());
+        assert!(j["decode_tokens_s"].is_null());
+        assert_eq!(j["cuda_decode_transferencias"]["logits_dtoh_bytes"], 512);
+        assert_eq!(j["cuda_decode_transferencias"]["embed_htod_bytes"], 16);
+        assert_eq!(j["cuda_decode_transferencias"]["pasos"], 1);
+        assert_eq!(j["cache_kv"]["restaurada"], true);
+        assert_eq!(j["cache_kv"]["lectura_s"], 0.02);
+        drop(m);
+        assert_eq!(destino.tokens, [42]);
+        assert_eq!(destino.checkpoints, 2);
+    }
+
+    #[test]
+    fn cache_recupera_solo_prefijo_mejor_y_tolera_archivo_corrupto() {
+        use soso_llm_core::kvsnap::{self, Capa, Snapshot};
+        let dir = std::env::temp_dir().join(format!("soso-cache-servicio-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::create_dir(&dir).unwrap();
+        let cache = CacheKvHost { directorio: dir.clone(), perfil: [7; 32], max_bytes: 4 * 1024 * 1024 };
+        let manifest = Manifest::tiny("fixture");
+        let dims: Vec<usize> = (0..manifest.num_layers).map(|l| manifest.effective_num_kv_heads(l) as usize * manifest.effective_head_dim(l) as usize).collect();
+        let tokens = vec![3, 4, 5];
+        let capas = dims.iter().map(|d| Capa { k: vec![0; tokens.len() * d], v: vec![0; tokens.len() * d] }).collect();
+        let s = Snapshot { tokens: tokens.clone(), hidden: vec![0.0; manifest.hidden_dim as usize], capas };
+        let bytes = kvsnap::codificar(&s, &cache.perfil, &dims, cache.max_bytes).unwrap();
+        let mut primero = Runtime::new(manifest.clone(), TensorIndex::default(), 0, 0);
+        primero.importar_kv(&bytes, &cache.perfil, cache.max_bytes).unwrap();
+        cache.guardar(&primero).unwrap();
+        let mut segundo = Runtime::new(manifest, TensorIndex::default(), 0, 0);
+        assert!(!cache.recuperar(&mut segundo, &[99, 98]).unwrap());
+        assert_eq!(segundo.pos, 0);
+        assert!(cache.recuperar(&mut segundo, &[3, 4, 5, 6]).unwrap());
+        assert_eq!(segundo.prefijo_kv_en_memoria(&[3, 4, 5, 6]), 3);
+        assert!(!cache.recuperar(&mut segundo, &[3, 4, 5, 6]).unwrap());
+        let mut roto = bytes;
+        let n = roto.len();
+        roto[n - 33] ^= 1;
+        let ruta = crate::kvstore_host::listar(&dir).unwrap().pop().unwrap();
+        std::fs::write(ruta, roto).unwrap();
+        assert!(!cache.recuperar(&mut segundo, &[3, 4, 5, 6]).unwrap());
+        assert_eq!(segundo.prefijo_kv_en_memoria(&[3, 4, 5, 6]), 3);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cache_elige_prefijo_mas_largo_entre_conversaciones() {
+        use soso_llm_core::kvsnap::{self, Capa, Snapshot};
+        let dir = std::env::temp_dir().join(format!("soso-cache-multiple-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::create_dir(&dir).unwrap();
+        let cache = CacheKvHost { directorio: dir.clone(), perfil: [7; 32], max_bytes: 4 * 1024 * 1024 };
+        let manifest = Manifest::tiny("fixture");
+        let dims: Vec<usize> = (0..manifest.num_layers).map(|l| manifest.effective_num_kv_heads(l) as usize * manifest.effective_head_dim(l) as usize).collect();
+        for tokens in [vec![3, 4], vec![9, 8, 7], vec![3, 4, 5, 6]] {
+            let capas = dims.iter().map(|d| Capa { k: vec![0; tokens.len() * d], v: vec![0; tokens.len() * d] }).collect();
+            let s = Snapshot { tokens, hidden: vec![0.0; manifest.hidden_dim as usize], capas };
+            let bytes = kvsnap::codificar(&s, &cache.perfil, &dims, cache.max_bytes).unwrap();
+            let mut rt = Runtime::new(manifest.clone(), TensorIndex::default(), 0, 0);
+            rt.importar_kv(&bytes, &cache.perfil, cache.max_bytes).unwrap();
+            cache.guardar(&rt).unwrap();
+        }
+        assert_eq!(crate::kvstore_host::listar(&dir).unwrap().len(), 3);
+        let mut rt = Runtime::new(manifest, TensorIndex::default(), 0, 0);
+        assert!(cache.recuperar(&mut rt, &[3, 4, 5, 6, 7]).unwrap());
+        assert_eq!(rt.prefijo_kv_en_memoria(&[3, 4, 5, 6, 7]), 4);
+        assert!(cache.recuperar(&mut rt, &[9, 8, 7, 1]).unwrap());
+        assert_eq!(rt.prefijo_kv_en_memoria(&[9, 8, 7, 1]), 3);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -2,6 +2,8 @@
 
 mod estrella;
 mod nodo;
+pub mod directorio;
+pub mod kv_transfer;
 
 pub use estrella::{Conector, EstrellaConfig, EstrellaHead, EnlaceRemoto, HandshakeCaps};
 pub use estrella::PendingEnlace;

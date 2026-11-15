@@ -381,6 +381,8 @@ static inline uint32_t tfd_queue_cb_size(unsigned qsize)
 
 #define UCODE_ALIVE_NTFY           0x1
 #define INIT_COMPLETE_NOTIF        0x4
+#define CALIB_RES_NOTIF_PHY_DB     0x6b
+#define PHY_DB_CMD                 0x6c
 #define REPLY_RX_PHY_CMD           0xc0
 #define REPLY_RX_MPDU_CMD          0xc1
 /* fw/api/mac.h `struct iwl_missed_beacons_notif` (v3 y v4 comparten offsets). */
@@ -847,6 +849,7 @@ struct iwl_fw_rt_section {
 };
 
 struct iwl_fw_image {
+    uint32_t paging_mem_size;
     struct iwl_fw_section inst;
     struct iwl_fw_section data;
     struct iwl_fw_section init;
@@ -2001,6 +2004,7 @@ int iwl_fw_parse_tlv(struct iwl_ax211_priv *iwl, const uint8_t *fw, unsigned lon
 int iwl_trans_gen2_start(struct iwl_ax211_priv *iwl);
 int iwl_trans_gen3_start(struct iwl_ax211_priv *iwl);
 int iwl_trans_8000_start(struct iwl_ax211_priv *iwl);
+int iwl_trans_8000_paging(struct iwl_ax211_priv *iwl);
 void iwl_trans_8000_drain(struct iwl_ax211_priv *iwl);
 int iwl_trans_8000_fw_alive(struct iwl_ax211_priv *iwl);
 int iwl_trans_8000_alloc_hcmd(struct iwl_ax211_priv *iwl);
@@ -2094,6 +2098,12 @@ int iwl_trans_pnvm_publish(struct iwl_ax211_priv *iwl);
 void iwl_trans_pnvm_doorbell(struct iwl_ax211_priv *iwl);
 int iwl_fw_pnvm_select(struct iwl_ax211_priv *iwl, struct iwl_pnvm_image *out);
 int iwl_mvm_run_init(struct iwl_ax211_priv *iwl);
+int iwl_mvm_calibrate_8000(struct iwl_ax211_priv *iwl);
+int iwl_mvm_phy_db_apply_8000(struct iwl_ax211_priv *iwl);
+void iwl_phy_db_clear(struct iwl_ax211_priv *iwl);
+int iwl_phy_db_store(struct iwl_ax211_priv *iwl, const uint8_t *data, unsigned len);
+int iwl_phy_db_valid(const struct iwl_ax211_priv *iwl);
+int iwl_phy_db_send(struct iwl_ax211_priv *iwl);
 int iwl_mvm_up_minimal(struct iwl_ax211_priv *iwl);
 int iwl_mvm_phy_ctxt_changed(struct iwl_ax211_priv *iwl, uint8_t channel);
 int iwl_mvm_binding_update(struct iwl_ax211_priv *iwl);
@@ -2101,6 +2111,8 @@ int iwl_mvm_binding_send(struct iwl_ax211_priv *iwl, uint32_t action);
 uint8_t iwl_mvm_scan_rx_ant(struct iwl_ax211_priv *iwl);
 int iwl_mvm_nvm_read_mac(struct iwl_ax211_priv *iwl);
 int iwl_mvm_nvm_get_info_mac(struct iwl_ax211_priv *iwl);
+int iwl_mvm_nvm_read_8000(struct iwl_ax211_priv *iwl);
+uint32_t iwl_trans_8000_read_prph(struct iwl_ax211_priv *iwl, uint32_t addr);
 int iwl_mvm_send_tx_ant_cfg(struct iwl_ax211_priv *iwl);
 int iwl_mvm_send_scan_cfg(struct iwl_ax211_priv *iwl);
 int iwl_mvm_init_mcc(struct iwl_ax211_priv *iwl);

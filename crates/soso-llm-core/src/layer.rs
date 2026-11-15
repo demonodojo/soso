@@ -727,8 +727,11 @@ impl BlockScratch {
         }
     }
 
-    /// Reserva el buffer Q8_K para `n` vectores de `cols` elementos (múltiplo de 256).
+    /// Reserva para el mayor ancho posible, redondeado a un bloque Q8_K.
+    /// Los tensores f32 pueden tener dimensiones que no son múltiplo de 256;
+    /// solo los tensores Q4_K necesitan realmente usar este buffer.
     pub fn ensure_q8k(&mut self, n: usize, cols: usize) {
+        let cols = cols.div_ceil(crate::q8k::Q8_K_BLOCK_ELEMS) * crate::q8k::Q8_K_BLOCK_ELEMS;
         let need = crate::q8k::q8k_buffer_len(n, cols);
         if self.q8k_x.len() < need {
             self.q8k_x.resize(need, 0);
@@ -1193,6 +1196,7 @@ impl<'a> LayerExecutor<'a> {
             crate::gemma::expulsar_si_hace_falta(kv, ventana, kv_dim);
         }
         kv.append_f16(&s.k[..kv_dim], &s.v[..kv_dim]);
+        if kv.fp4_error { return Err(()); }
         let seq = kv.tokens(kv_dim);
         let t_ini = if ventana > 0 { seq.saturating_sub(ventana) } else { 0 };
         let _ = pos;
@@ -1550,6 +1554,7 @@ impl<'a> LayerExecutor<'a> {
                 &bs.k[i * kv_dim..(i + 1) * kv_dim],
                 &bs.v[i * kv_dim..(i + 1) * kv_dim],
             );
+            if kv.fp4_error { return Err(()); }
         }
         perfil_marca(&mut t_perfil, FASE_ROPE_KV);
         // Atención causal: el token i ve `seq_antes + i + 1` posiciones. Con KV f16 y sin masa de

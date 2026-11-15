@@ -28,9 +28,9 @@ san_enabled() {
 build() {
     local name="$1"
     shift
-    cc "${CFLAGS_COMMON[@]}" -o "$out/$name" "$@"
+    cc "${CFLAGS_COMMON[@]}" -o "$out/$name" "$@" "$root/tools/iwl-hostcheck/alloc_weak.c"
     if san_enabled; then
-        cc "${CFLAGS_COMMON[@]}" "${SAN_FLAGS[@]}" -o "$out/$name-san" "$@"
+        cc "${CFLAGS_COMMON[@]}" "${SAN_FLAGS[@]}" -o "$out/$name-san" "$@" "$root/tools/iwl-hostcheck/alloc_weak.c"
     fi
 }
 
@@ -69,6 +69,16 @@ build load_8000 \
     "$src/iwl_trans_8000.c"
 echo "=== iwl carga FH 8000 hostcheck ==="
 run load_8000 "$fwdir/iwlwifi-8265-36.ucode"
+
+cc "${CFLAGS_COMMON[@]}" -ffunction-sections -fdata-sections -Wl,--gc-sections \
+    -o "$out/nvm_8000" "$root/tools/iwl-hostcheck/nvm_8000_test.c" \
+    "$src/iwl_mvm_nvm.c" "$root/tools/iwl-hostcheck/alloc_weak.c"
+if san_enabled; then
+    cc "${CFLAGS_COMMON[@]}" "${SAN_FLAGS[@]}" -ffunction-sections -fdata-sections -Wl,--gc-sections \
+        -o "$out/nvm_8000-san" "$root/tools/iwl-hostcheck/nvm_8000_test.c" \
+        "$src/iwl_mvm_nvm.c" "$root/tools/iwl-hostcheck/alloc_weak.c"
+fi
+run nvm_8000
 
 build hostcheck \
     "$root/tools/iwl-hostcheck/main.c" \
@@ -163,10 +173,10 @@ echo "=== iwl MCC / política de canales hostcheck ==="
 run mcc_chan
 
 cc "${CFLAGS_COMMON[@]}" -DIWL_HOSTCHECK_SRAM_BYTES=65536 \
-    -o "$out/fw_errlog" "$root/tools/iwl-hostcheck/fw_errlog_test.c"
+    -o "$out/fw_errlog" "$root/tools/iwl-hostcheck/fw_errlog_test.c" "$root/tools/iwl-hostcheck/alloc_weak.c"
 if san_enabled; then
     cc "${CFLAGS_COMMON[@]}" "${SAN_FLAGS[@]}" -DIWL_HOSTCHECK_SRAM_BYTES=65536 \
-        -o "$out/fw_errlog-san" "$root/tools/iwl-hostcheck/fw_errlog_test.c"
+        -o "$out/fw_errlog-san" "$root/tools/iwl-hostcheck/fw_errlog_test.c" "$root/tools/iwl-hostcheck/alloc_weak.c"
 fi
 echo "=== iwl volcado error firmware hostcheck ==="
 run fw_errlog

@@ -109,6 +109,114 @@ int iwl_mvm_nvm_read_mac(struct iwl_ax211_priv *iwl)
     return -1;
 }
 
+/* 8265: Linux mvm/nvm.c lee secciones NVM_ACCESS del ucode INIT.
+ * Se usan chunks de 256 para que la respuesta quepa en cmd_resp. */
+int iwl_mvm_nvm_read_8000(struct iwl_ax211_priv *iwl)
+{
+    /* cfg/8000.c: OTP_LOW_IMAGE_SIZE_32K es el límite total de la NVM. */
+    const unsigned max_nvm = 32u * 1024u;
+    uint8_t *buf = lx_kmalloc(max_nvm, GFP_KERNEL);
+    uint8_t override[6] = {0};
+    unsigned section, off, total = 0, present = 0, i;
+    uint32_t version = 0, radio = 0, lar = 0;
+    int rc = -1;
+
+    if (!buf)
+        return -1;
+    iwl->nvm_ready = 0;
+    for (section = 0; section < 13; section++) {
+        off = 0;
+        for (;;) {
+            struct iwl_nvm_access_cmd cmd;
+            const struct iwl_nvm_access_resp *resp;
+            unsigned status, got, roff;
+            memset(&cmd, 0, sizeof(cmd));
+            cmd.type = iwl_cpu_to_le16((uint16_t)section);
+            cmd.offset = iwl_cpu_to_le16((uint16_t)off);
+            cmd.length = iwl_cpu_to_le16(256);
+            if (iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, NVM_ACCESS_CMD,
+                                        &cmd, sizeof(cmd), 2000) != 0)
+                goto out;
+            if (iwl->cmd_resp_trunc || iwl->cmd_resp_len < sizeof(*resp))
+                goto out;
+            resp = (const struct iwl_nvm_access_resp *)iwl->cmd_resp;
+            status = iwl_le16_to_cpu(resp->status);
+            got = iwl_le16_to_cpu(resp->length);
+            roff = iwl_le16_to_cpu(resp->offset);
+            if (status == 1)
+                break;
+            if (status || roff != off || got > 256 ||
+                got > iwl->cmd_resp_len - sizeof(*resp) ||
+                off + got > max_nvm || total + off + got > max_nvm)
+                goto out;
+            memcpy(buf + off, resp->data, got);
+            off += got;
+            if (got < 256)
+                break;
+        }
+        if (!off)
+            continue;
+        total += off;
+        present |= 1u << section;
+        if (section == 1 && off < 10)
+            goto out;
+        if (section == 1)
+            version = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) |
+                      ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
+        if (section == 3) {
+            unsigned laroff = (version < 0xe39 ? 0x4c7u : 0x507u) * 2u;
+            if (off < 2 * IWL_NUM_CHANNELS_V1 || off < laroff + 2)
+                goto out;
+            for (i = 0; i < IWL_NUM_CHANNELS_V1; i++)
+                iwl->nvm_chan_flags[i] = buf[2*i] | ((uint32_t)buf[2*i+1] << 8);
+            iwl->nvm_n_channels = IWL_NUM_CHANNELS_V1;
+            lar = (buf[laroff] | ((unsigned)buf[laroff+1] << 8)) & 7u;
+        }
+        if (section == 11 && off >= 8)
+            memcpy(override, buf + 2, 6);
+        if (section == 12 && off < 8)
+            goto out;
+        if (section == 12)
+            radio = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) |
+                    ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
+    }
+    if ((present & ((1u << 1) | (1u << 3) | (1u << 12))) !=
+        ((1u << 1) | (1u << 3) | (1u << 12)) ||
+        !(present & ((1u << 10) | (1u << 11))))
+        goto out;
+    if (iwl_mac_valid_unicast(override) &&
+        !(override[0] == 0x02 && override[1] == 0xcc && override[2] == 0xaa &&
+          override[3] == 0xff && override[4] == 0xee && override[5] == 0)) {
+        memcpy(iwl->mac, override, 6);
+    } else {
+        if (!(present & (1u << 10)))
+            goto out;
+        uint32_t a = iwl_trans_8000_read_prph(iwl, 0xa03080);
+        uint32_t b = iwl_trans_8000_read_prph(iwl, 0xa03084);
+        iwl->mac[0] = a >> 24; iwl->mac[1] = a >> 16;
+        iwl->mac[2] = a >> 8; iwl->mac[3] = a;
+        iwl->mac[4] = b >> 8; iwl->mac[5] = b;
+    }
+    if (!iwl_mac_valid_unicast(iwl->mac))
+        goto out;
+    iwl->valid_tx_ant = (radio >> 24) & 15;
+    iwl->valid_rx_ant = (radio >> 28) & 15;
+    iwl->lar_enabled = lar != 0;
+    iwl->chan_src = IWL_CHAN_SRC_NVM;
+    iwl->nvm_ready = 1;
+    rc = 0;
+    lx_printk("iwl_mvm: NVM 8000 versión=0x%x secciones=0x%x LAR=%u\n",
+              (unsigned)version, present, (unsigned)iwl->lar_enabled);
+out:
+    lx_kfree(buf);
+    if (rc) {
+        iwl->nvm_n_channels = 0;
+        iwl->chan_src = 0;
+        lx_printk("iwl_mvm: NVM 8000 inválida o lectura fallida\n");
+    }
+    return rc;
+}
+
 /* `iwl_flip_hw_address` + `iwl_set_hw_address_from_csr` (iwl-nvm-parse.c). */
 static void iwl_flip_hw_address(uint32_t mac_addr0, uint32_t mac_addr1, uint8_t *dest)
 {

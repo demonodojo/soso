@@ -223,6 +223,9 @@ QEMU nic: `SOSO_QEMU_NIC=vfio:<BDF>` + `SOSO_LXDDE_MODE=iwlwifi`.
   TFD ya reutilizado es indistinguible de la legítima; `iwl_trans_tx_reclaim`
   sólo puede ignorar las que apuntan por detrás de la cabeza, igual que
   `iwl_txq_reclaim` de Linux. No pidas más al driver.
+- **Secuencia HCMD:** identifica el índice de 8 bits del TFD, no el índice
+  módulo 32 de los búferes HCMD. El banco verifica 300 comandos y descarta
+  respuestas atrasadas de una vuelta de búferes.
 - **Hostcheck antes de gastar un ciclo VFIO.** Compila `iwl_fw.c` en host contra
   los `.ucode` del rootfs; afirma lmac/umac de `SEC_RT`, CMD_VERSIONS/PHY_SKU,
   doorbell `qid<<16` (`0x00000001`, cola HCMD=0), secuencia `QUEUE_TO_SEQ|INDEX_TO_SEQ`, y
@@ -237,6 +240,14 @@ QEMU nic: `SOSO_QEMU_NIC=vfio:<BDF>` + `SOSO_LXDDE_MODE=iwlwifi`.
 - **Init MVM tras ALIVE (2026-09-09).** `iwl_mvm_run_init()`: INIT_EXTENDED_CFG
   (`init_flags=1<<IWL_INIT_NVM` = 2) → NVM_ACCESS_COMPLETE → PHY_CFG sólo gen3 →
   esperar `INIT_COMPLETE_NOTIF` antes de scan. Sin INIT_COMPLETE no marcar radio lista.
+- **8265 / familia 8000 (2026-11-15, pendiente de placa).** La imagen INIT
+  lee NVM con `NVM_ACCESS_CMD`, calibra con TX_ANT y PHY_CFG de INIT y recoge
+  las secciones PHY DB hasta `INIT_COMPLETE_NOTIF`; RT recibe PHY DB y PHY_CFG
+  de RT. El firmware 8265-36 exige además `FW_PAGING_BLOCK_CMD`: CSS y cinco
+  bloques DMA con 39 páginas en total. El hostcheck usa el ucode real y cubre
+  su contenido, lectura NVM, límites, fallo de calibración y
+  recuperación, pero no acredita scan, asociación ni DHCP físicos. Ver
+  `docs/DIAGNOSTICO-HP-2026-11-15-FLUSH34.md`.
 - **Scan UMAC v14–17.** Estructura completa v17 (2112 B). Versiones
   explícitas 6 y 14–17; el resto se rechaza. Flags V2, no los BIT(2)/BIT(5)
   viejos. Canales desde perfil NVM/MCC (activo/pasivo); fallback 2.4+5.

@@ -17,6 +17,7 @@ soso-audio = { path = "../soso-audio", features = ["std"] }
 [dependencies]
 sosomodel = { path = "../sosomodel" }
 libm = "0.2"
+sha2 = { version = "0.10", default-features = false }
 serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 

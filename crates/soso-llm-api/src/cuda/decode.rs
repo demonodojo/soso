@@ -787,8 +787,10 @@ impl CudaGpu {
         }
         let f32b = |v: &[f32]| unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 4) };
         self.subir(bf(b::HID), f32b(embed))?;
+        self.stats.decode_embed_up = self.stats.decode_embed_up.saturating_add((embed.len() * 4) as u64);
         let dyn_host = [pos as i32, pos as i32 + 1, 0, 0];
         self.subir(bf(b::DYN), unsafe { std::slice::from_raw_parts(dyn_host.as_ptr() as *const u8, 16) })?;
+        self.stats.decode_control_up = self.stats.decode_control_up.saturating_add(16);
         let nsplit = (pos + 1).div_ceil(CHUNK).min(MAX_SPLIT).next_power_of_two().min(MAX_SPLIT);
         let usar_grafos = self.grafo.is_some() && std::env::var("SOSO_DECODE_SIN_GRAFO").is_err();
         let (mut desde, mut comb) = (0usize, None::<usize>);
@@ -920,8 +922,10 @@ impl CudaGpu {
             }
         }
         ck(unsafe { (self.api.dtoh)(logits.as_mut_ptr() as *mut c_void, bf(b::LOGITS), d.vocab * 4) }, "cuMemcpyDtoH")?;
+        self.stats.decode_logits_down = self.stats.decode_logits_down.saturating_add((d.vocab * 4) as u64);
         if d.n_attn > 0 {
             ck(unsafe { (self.api.dtoh)(kv_rows.as_mut_ptr() as *mut c_void, bf(b::KST), kv_rows.len() * 2) }, "cuMemcpyDtoH")?;
+            self.stats.decode_kv_down = self.stats.decode_kv_down.saturating_add((kv_rows.len() * 2) as u64);
         }
         if perfil && d.pin_total > 0 {
             eprintln!("[dec] caché de expertos: {:.1} % de aciertos ({} accesos)", 100.0 * d.pin_hits as f64 / d.pin_total as f64, d.pin_total);
@@ -930,6 +934,7 @@ impl CudaGpu {
             eprintln!("[dec] pos {pos}: total {:.1} ms, gpu {:.1} ms en {nseg} segmentos, cpu {:.1} ms (bajar {:.2}, expertos {:.2}, subir {:.2})", t_ini.elapsed().as_secs_f64() * 1e3, t_gpu * 1e3, t_cpu * 1e3, t_bajar * 1e3, t_calc * 1e3, t_subir * 1e3);
         }
         self.stats.launches += 1;
+        self.stats.decode_pasos = self.stats.decode_pasos.saturating_add(1);
         Ok(true)
     }
 

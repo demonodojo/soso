@@ -58,9 +58,15 @@ static int iwl_load_firmware_files(struct iwl_ax211_priv *iwl)
             "iwlwifi-8265-34.ucode",
             0
         };
+        /* Los segmentos son copias persistentes: reutilizarlos tras recover
+         * evita filtrar el ucode y duplicar CMD_VERSIONS en cada intento. */
+        if (iwl->fw_8000_cached)
+            return 0;
         for (int i = 0; iwl8265[i]; i++) {
-            if (iwl_try_ucode(iwl, iwl8265[i]) == 0)
+            if (iwl_try_ucode(iwl, iwl8265[i]) == 0) {
+                iwl->fw_8000_cached = 1;
                 return 0;
+            }
         }
         return -1;
     }
@@ -181,7 +187,7 @@ int iwl_ax211_start_firmware(void)
     if (!iwl->probed || !iwl->mmio)
         return -1;
     if (iwl->alive)
-        return 0;
+        return iwl->mvm_up_done ? 0 : -1;
 
     lx_printk("iwlwifi: start_firmware\n");
     iwl_set_phase(iwl, "fw_load");
@@ -194,15 +200,18 @@ int iwl_ax211_start_firmware(void)
     if (iwl->family == IWL_DEVICE_FAMILY_8000) {
         if (iwl_trans_8000_start(iwl) != 0) {
             lx_printk("iwlwifi: arranque firmware 8000 falló\n");
+            iwl->cmd_needs_recover = 1;
             return -1;
         }
         iwl_set_phase(iwl, "alive");
         if (iwl_mvm_run_init(iwl) != 0) {
             lx_printk("iwlwifi: init MVM incompleto\n");
+            iwl->cmd_needs_recover = 1;
             return -1;
         }
         if (iwl_mvm_up_minimal(iwl) != 0) {
             lx_printk("iwlwifi: up MVM incompleto\n");
+            iwl->cmd_needs_recover = 1;
             return -1;
         }
         iwl_trans_enable_runtime_ints(iwl);

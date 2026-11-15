@@ -21,6 +21,13 @@ pub struct GpuStats {
     pub total_ns: u64,
     pub bytes_up: u64,
     pub bytes_down: u64,
+    /// Transferencias explícitas por token del decode residente CUDA. No incluyen
+    /// pesos, prefill, expertos ni tráfico interno de grafos CUDA.
+    pub decode_embed_up: u64,
+    pub decode_control_up: u64,
+    pub decode_logits_down: u64,
+    pub decode_kv_down: u64,
+    pub decode_pasos: u64,
     /// Expertos MoE servidos desde el pool de VRAM / traídos desde RAM (capas «en flujo»).
     pub flujo_aciertos: u64,
     pub flujo_fallos: u64,

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Compila un .cu a PTX con NVRTC (libnvrtc.so.12 del paquete `nvidia-cuda-nvrtc` de pip), sin nvcc ni Docker.
+"""Compila un .cu a PTX o cubin con NVRTC, sin nvcc ni GPU.
 
-Uso: compilar.py KERNEL.cu SALIDA.ptx [-I DIR]...   (NVRTC_LIB=/ruta/libnvrtc.so.12 para fijar la biblioteca)
-NVRTC no trae las cabeceras de CUDA (cuda_fp16.h…): los kernels que se compilen así no deben incluirlas.
+Uso: compilar.py KERNEL.cu SALIDA [-I DIR]... [--arch compute_80|sm_86] [--cubin]
+NVRTC_LIB fija la biblioteca. Para includes CUDA se necesita un directorio de cabeceras con -I.
 """
-import ctypes, glob, os, sys
+import argparse, ctypes, glob, os, sys
 
 def buscar():
     if os.environ.get("NVRTC_LIB"):
@@ -18,16 +18,18 @@ def buscar():
     sys.exit("no encuentro libnvrtc.so.12 (define NVRTC_LIB)")
 
 def main():
-    a = sys.argv[1:]
-    if len(a) < 2:
-        sys.exit(__doc__)
-    src, out, incs = a[0], a[1], []
-    i = 2
-    while i < len(a):
-        if a[i] == "-I":
-            incs.append(a[i + 1]); i += 2
-        else:
-            i += 1
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("src")
+    parser.add_argument("out")
+    parser.add_argument("-I", dest="incs", action="append", default=[])
+    parser.add_argument("--arch", default="compute_80")
+    parser.add_argument("--cubin", action="store_true")
+    args = parser.parse_args()
+    src, out, incs = args.src, args.out, args.incs
+    if args.cubin and not args.arch.startswith("sm_"):
+        parser.error("--cubin requiere --arch sm_NN")
+    if not args.cubin and not args.arch.startswith("compute_"):
+        parser.error("PTX requiere --arch compute_NN")
     lib = ctypes.CDLL(buscar())
     prog = ctypes.c_void_p()
     texto = open(src).read().encode()
@@ -44,7 +46,8 @@ def main():
     texto = inlinear(texto.decode(), os.path.dirname(os.path.abspath(src))).encode()
     r = lib.nvrtcCreateProgram(ctypes.byref(prog), texto, os.path.basename(src).encode(), 0, None, None)
     assert r == 0, f"nvrtcCreateProgram {r}"
-    opts = [b"--gpu-architecture=compute_80", b"-default-device", b"--std=c++14"]
+    opts = [f"--gpu-architecture={args.arch}".encode(), b"-default-device", b"--std=c++14"]
+    opts.extend(f"-I{d}".encode() for d in incs)
     arr = (ctypes.c_char_p * len(opts))(*opts)
     r = lib.nvrtcCompileProgram(prog, len(opts), arr)
     n = ctypes.c_size_t()
@@ -55,10 +58,19 @@ def main():
         sys.stderr.write(log.value.decode())
     if r != 0:
         sys.exit(f"nvrtcCompileProgram falló ({r})")
-    lib.nvrtcGetPTXSize(prog, ctypes.byref(n))
-    ptx = ctypes.create_string_buffer(n.value)
-    lib.nvrtcGetPTX(prog, ptx)
-    open(out, "wb").write(ptx.value + b"\0" if False else ptx.value)
-    print(f"{out}: {len(ptx.value)} bytes")
+    get_size = lib.nvrtcGetCUBINSize if args.cubin else lib.nvrtcGetPTXSize
+    get_data = lib.nvrtcGetCUBIN if args.cubin else lib.nvrtcGetPTX
+    r = get_size(prog, ctypes.byref(n))
+    if r != 0:
+        sys.exit(f"nvrtcGetSize falló ({r})")
+    buf = ctypes.create_string_buffer(n.value)
+    r = get_data(prog, buf)
+    if r != 0:
+        sys.exit(f"nvrtcGetData falló ({r})")
+    data = buf.raw if args.cubin else buf.value
+    with open(out, "wb") as f:
+        f.write(data)
+    lib.nvrtcDestroyProgram(ctypes.byref(prog))
+    print(f"{out}: {len(data)} bytes ({args.arch})")
 
 main()

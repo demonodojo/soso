@@ -13,6 +13,107 @@ extern void *memset(void *dst, int c, unsigned long n);
 
 static void iwl_trans_pnvm_free_dma(struct iwl_ax211_priv *iwl);
 
+void iwl_phy_db_clear(struct iwl_ax211_priv *iwl)
+{
+    unsigned i;
+    for (i = 0; i < iwl->phy_db_count; i++)
+        lx_kfree(iwl->phy_db[i].data);
+    memset(iwl->phy_db, 0, sizeof(iwl->phy_db));
+    iwl->phy_db_count = 0;
+    iwl->phy_db_error = 0;
+    iwl->phy_db_collecting = 0;
+}
+
+int iwl_phy_db_store(struct iwl_ax211_priv *iwl, const uint8_t *data, unsigned len)
+{
+    unsigned type, size, group = 0, i;
+    uint8_t *copy;
+    struct iwl_phy_db_entry *entry;
+
+    if (!data || len < 4)
+        goto invalid;
+    type = data[0] | ((unsigned)data[1] << 8);
+    size = data[2] | ((unsigned)data[3] << 8);
+    if ((type != 1 && type != 2 && type != 4 && type != 5) ||
+        size > len - 4 || size > IWL_CMD_SLOT_SIZE - 12 || !size)
+        goto invalid;
+    if (type == 4 || type == 5) {
+        if (size < 2)
+            goto invalid;
+        group = data[4] | ((unsigned)data[5] << 8);
+        if (group >= IWL_PHY_DB_MAX_ENTRIES)
+            goto invalid;
+    }
+    for (i = 0; i < iwl->phy_db_count; i++)
+        if (iwl->phy_db[i].type == type && iwl->phy_db[i].group == group)
+            break;
+    if (i == IWL_PHY_DB_MAX_ENTRIES)
+        goto invalid;
+    copy = lx_kmalloc(size, GFP_ATOMIC);
+    if (!copy)
+        goto invalid;
+    memcpy(copy, data + 4, size);
+    entry = &iwl->phy_db[i];
+    if (i == iwl->phy_db_count)
+        iwl->phy_db_count++;
+    else
+        lx_kfree(entry->data);
+    entry->data = copy;
+    entry->size = (uint16_t)size;
+    entry->type = (uint16_t)type;
+    entry->group = (uint16_t)group;
+    return 0;
+invalid:
+    iwl->phy_db_error = 1;
+    return -1;
+}
+
+int iwl_phy_db_valid(const struct iwl_ax211_priv *iwl)
+{
+    unsigned i, mandatory = 0;
+    if (!iwl || iwl->phy_db_error)
+        return 0;
+    for (i = 0; i < iwl->phy_db_count; i++)
+        if (iwl->phy_db[i].type == 1 || iwl->phy_db[i].type == 2)
+            mandatory |= 1u << iwl->phy_db[i].type;
+    return mandatory == ((1u << 1) | (1u << 2));
+}
+
+int iwl_phy_db_send(struct iwl_ax211_priv *iwl)
+{
+    unsigned type, group, i;
+    uint8_t *payload;
+    int rc;
+
+    if (!iwl_phy_db_valid(iwl))
+        return -1;
+    for (type = 1; type <= 5; type++) {
+        if (type == 3)
+            continue;
+        for (group = 0; group < IWL_PHY_DB_MAX_ENTRIES; group++) {
+            for (i = 0; i < iwl->phy_db_count; i++) {
+                struct iwl_phy_db_entry *e = &iwl->phy_db[i];
+                if (e->type != type || e->group != group)
+                    continue;
+                payload = lx_kmalloc((unsigned)e->size + 4, GFP_KERNEL);
+                if (!payload)
+                    return -1;
+                payload[0] = (uint8_t)type;
+                payload[1] = (uint8_t)(type >> 8);
+                payload[2] = (uint8_t)e->size;
+                payload[3] = (uint8_t)(e->size >> 8);
+                memcpy(payload + 4, e->data, e->size);
+                rc = iwl_trans_send_cmd_wait(iwl, LEGACY_GROUP, PHY_DB_CMD,
+                                             payload, e->size + 4, 2000);
+                lx_kfree(payload);
+                if (rc)
+                    return -1;
+            }
+        }
+    }
+    return 0;
+}
+
 static uint32_t iwl_read32(struct iwl_ax211_priv *iwl, uint32_t off)
 {
     return iwl->mmio[off / 4];
@@ -785,6 +886,11 @@ int iwl_trans_recover(struct iwl_ax211_priv *iwl)
 
     if (!iwl)
         return -1;
+    if (iwl->family == IWL_DEVICE_FAMILY_8000) {
+        iwl_phy_db_clear(iwl);
+        iwl->tx_8000_ready = 0;
+        iwl->tx_preload_ready = 0;
+    }
     for (i = 0; i < IWL_CMD_QUEUE_SIZE; i++) {
         iwl->cmd_slot_state[i] = IWL_SLOT_FREE;
         iwl->cmd_slot_seq[i] = 0;
@@ -1367,6 +1473,12 @@ static void handle_gen2_rx(struct iwl_ax211_priv *iwl, const uint8_t *buf, unsig
     if (group == LEGACY_GROUP && cmd == INIT_COMPLETE_NOTIF) {
         iwl->init_complete = 1;
         lx_printk("iwl_mvm: INIT_COMPLETE_NOTIF\n");
+        return;
+    }
+    if (group == LEGACY_GROUP && cmd == CALIB_RES_NOTIF_PHY_DB &&
+        iwl->family == IWL_DEVICE_FAMILY_8000 && iwl->phy_db_collecting) {
+        if (iwl_phy_db_store(iwl, data, (unsigned)pay) != 0)
+            lx_printk("iwl_mvm: PHY DB inválida o sin memoria\n");
         return;
     }
     if (cmd == SCAN_COMPLETE_UMAC &&
@@ -2477,7 +2589,10 @@ static int send_hcmd(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t id,
         memset(tfd, 0, sizeof(*tfd));
     }
 
-    seq = (uint16_t)(QUEUE_TO_SEQ(iwl->cmd_qid) | INDEX_TO_SEQ(slot));
+    /* El índice de la secuencia identifica el TFD en el anillo de 256,
+     * no la ranura de 32 buffers que lo respalda (Linux pcie/tx.c). */
+    seq = (uint16_t)(QUEUE_TO_SEQ(iwl->cmd_qid) |
+                     INDEX_TO_SEQ(iwl->cmd_write & 0xffu));
     /* Linux `iwl_trans_send_cmd` (`iwl-trans.c`): con cabecera wide, los HCMD del
      * LEGACY_GROUP (API grp=0) salen con group_id=LONG_GROUP (DEF_ID). */
     {

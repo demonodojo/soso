@@ -258,6 +258,11 @@ static uint32_t iwl_read_prph(struct iwl_ax211_priv *iwl, uint32_t addr)
     return v;
 }
 
+uint32_t iwl_trans_8000_read_prph(struct iwl_ax211_priv *iwl, uint32_t addr)
+{
+    return iwl_read_prph(iwl, addr);
+}
+
 static void iwl_write_direct32(struct iwl_ax211_priv *iwl, uint32_t off, uint32_t val)
 {
     if (iwl_grab_nic_access(iwl) != 0)
@@ -807,6 +812,60 @@ static int iwl_8000_reinit_for_rt(struct iwl_ax211_priv *iwl)
     return iwl_8000_start_hw(iwl);
 }
 
+/* Linux fw/paging.c: CSS (4 KiB) y bloques de ocho páginas (32 KiB). */
+int iwl_trans_8000_paging(struct iwl_ax211_priv *iwl)
+{
+    struct {
+        uint32_t flags, block_size, block_num, addr[33];
+    } cmd;
+    const struct iwl_fw_rt_section *css, *image;
+    unsigned pages, blocks, last, i, copied = 0;
+    int s;
+    uint32_t size = iwl->fw.paging_mem_size;
+
+    if (!size)
+        return 0;
+    if ((size & 4095u) || size > 32u * 32768u)
+        return -1;
+    for (s = 0; s < iwl->fw.rt_n; s++) {
+        const struct iwl_fw_rt_section *sec = &iwl->fw.rt[s];
+        if (sec->data && sec->len >= 4 && le32_u(sec->data) == IWL_PAGING_SEPARATOR)
+            break;
+    }
+    if (s + 2 >= iwl->fw.rt_n)
+        return -1;
+    css = &iwl->fw.rt[s + 1];
+    image = &iwl->fw.rt[s + 2];
+    if (!css->data || css->len < 4 || css->len - 4 > 4096 ||
+        !image->data || image->len < 4 || image->len - 4 != size)
+        return -1;
+    pages = size / 4096;
+    blocks = (pages + 7) / 8;
+    last = pages - (blocks - 1) * 8;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.flags = iwl_cpu_to_le32((1u << 9) | (1u << 8) | last);
+    cmd.block_size = iwl_cpu_to_le32(15);
+    cmd.block_num = iwl_cpu_to_le32(blocks);
+    for (i = 0; i <= blocks; i++) {
+        unsigned cap = i ? 32768u : 4096u;
+        unsigned len = i ? ((size - copied < cap) ? size - copied : cap) : css->len - 4;
+        if (!iwl->paging_cpu[i])
+            iwl->paging_cpu[i] = lx_dma_alloc_coherent(0, cap, &iwl->paging_dma[i], GFP_KERNEL);
+        if (!iwl->paging_cpu[i] || (iwl->paging_dma[i] & 4095u) ||
+            (iwl->paging_dma[i] >> 12) > 0xffffffffu)
+            return -1;
+        memset(iwl->paging_cpu[i], 0, cap);
+        memcpy(iwl->paging_cpu[i], i ? image->data + 4 + copied : css->data + 4, len);
+        if (i)
+            copied += len;
+        cmd.addr[i] = iwl_cpu_to_le32((uint32_t)(iwl->paging_dma[i] >> 12));
+    }
+    if (iwl_trans_send_cmd_wait(iwl, LONG_GROUP, 0x4f, &cmd, sizeof(cmd), 2000) != 0)
+        return -1;
+    lx_printk("iwl_trans: paging 8000 listo (%u bloques, %u páginas finales)\n", blocks, last);
+    return 0;
+}
+
 int iwl_trans_8000_start(struct iwl_ax211_priv *iwl)
 {
     struct iwl_8000_load_plan plan_init;
@@ -835,10 +894,21 @@ int iwl_trans_8000_start(struct iwl_ax211_priv *iwl)
         iwl->ict_cpu = lx_dma_alloc_coherent(0, IWL_ICT_SIZE, &iwl->ict_dma,
                                              GFP_KERNEL);
 
-    chunk_cpu = lx_dma_alloc_coherent(0, chunk_sz, &chunk_dma, GFP_KERNEL);
-    if (!chunk_cpu) {
-        chunk_sz = 4096;
+    chunk_cpu = iwl->fw_8000_chunk_cpu;
+    if (chunk_cpu) {
+        chunk_sz = iwl->fw_8000_chunk_size;
+        chunk_dma = iwl->fw_8000_chunk_dma;
+    } else {
         chunk_cpu = lx_dma_alloc_coherent(0, chunk_sz, &chunk_dma, GFP_KERNEL);
+        if (!chunk_cpu) {
+            chunk_sz = 4096;
+            chunk_cpu = lx_dma_alloc_coherent(0, chunk_sz, &chunk_dma, GFP_KERNEL);
+        }
+        if (chunk_cpu) {
+            iwl->fw_8000_chunk_cpu = chunk_cpu;
+            iwl->fw_8000_chunk_dma = chunk_dma;
+            iwl->fw_8000_chunk_size = chunk_sz;
+        }
     }
     if (!chunk_cpu)
         return -1;
@@ -857,9 +927,15 @@ int iwl_trans_8000_start(struct iwl_ax211_priv *iwl)
     if (iwl_8000_run_load(iwl, &plan_init, iwl->fw.sec_init, iwl->fw.sec_init_n,
                           chunk_cpu, chunk_dma, chunk_sz) != 0)
         return -1;
+    if (iwl_trans_8000_alloc_hcmd(iwl) != 0)
+        return -1;
     if (iwl_8000_wait_alive(iwl, "INIT") != 0)
         return -1;
     lx_printk("iwl_trans: INIT ucode ALIVE ok\n");
+
+    iwl_8000_reset_ict(iwl);
+    if (iwl_trans_8000_fw_alive(iwl) != 0 || iwl_mvm_calibrate_8000(iwl) != 0)
+        return -1;
 
     if (iwl_8000_reinit_for_rt(iwl) != 0)
         return -1;
@@ -882,6 +958,10 @@ int iwl_trans_8000_start(struct iwl_ax211_priv *iwl)
     iwl_8000_reset_ict(iwl);
     if (iwl_trans_8000_fw_alive(iwl) != 0) {
         lx_printk("iwl_trans: fw_alive 8000 falló\n");
+        return -1;
+    }
+    if (iwl_trans_8000_paging(iwl) != 0) {
+        lx_printk("iwl_trans: paging 8000 falló\n");
         return -1;
     }
     return 0;
