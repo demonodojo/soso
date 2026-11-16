@@ -4,12 +4,19 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use soso_update_core::{hex_sha256, parse_semver, SemVer};
+use soso_update_core::{SemVer, hex_sha256, parse_semver};
 
-use crate::rutas::{nombre_valido, ruta_destino_sistema, ruta_valida, RutaError};
 use crate::MAX_PACK_SIZE;
+use crate::rutas::{RutaError, nombre_valido, ruta_destino_sistema, ruta_valida};
 
 pub const MANIFEST_MAGIC: &str = "SOSOPKG v1";
+pub const MANIFEST_MAGIC_V2: &str = "SOSOPKG v2";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Dependency {
+    pub nombre: String,
+    pub version: String,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileEntry {
@@ -25,6 +32,7 @@ pub struct Manifest {
     pub version: SemVer,
     pub version_raw: String,
     pub abi: Option<u32>,
+    pub dependencias: Vec<Dependency>,
     /// Instala `bin/*` en `/bin` y el SDK limitado a `lib/sal/*` en `/lib/sal`;
     /// el campo es opcional para conservar compatibilidad con gestores antiguos.
     pub destino_sistema: bool,
@@ -35,10 +43,7 @@ pub struct Manifest {
 pub enum ParseManifestError {
     BadMagic,
     MissingField(&'static str),
-    BadLine {
-        line: usize,
-        field: &'static str,
-    },
+    BadLine { line: usize, field: &'static str },
     BadVersion(String),
     Ruta(RutaError),
     Nombre(RutaError),
@@ -47,7 +52,7 @@ pub enum ParseManifestError {
 impl core::fmt::Display for ParseManifestError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::BadMagic => write!(f, "cabecera incorrecta: se esperaba {MANIFEST_MAGIC}"),
+            Self::BadMagic => write!(f, "cabecera incorrecta: se esperaba SOSOPKG v1 o v2"),
             Self::MissingField(field) => write!(f, "falta el campo {field}"),
             Self::BadLine { line, field } => write!(f, "línea {line}: {field} inválido"),
             Self::BadVersion(v) => write!(f, "version={v:?}: se esperaba major.minor.patch"),
@@ -79,7 +84,10 @@ impl core::fmt::Display for ValidateError {
             Self::SizeMismatch { path } => write!(f, "tamaño no coincide: {path}"),
             Self::MissingInPack { path } => write!(f, "falta en el pack: {path}"),
             Self::AbiIncompatible { esperado, actual } => {
-                write!(f, "abi={esperado} incompatible con el sistema (abi={actual})")
+                write!(
+                    f,
+                    "abi={esperado} incompatible con el sistema (abi={actual})"
+                )
             }
             Self::DuplicatePath { path } => write!(f, "ruta duplicada: {path}"),
             Self::SystemTargetNotAllowed { path } => {
@@ -96,6 +104,8 @@ impl Manifest {
         let mut version_raw = String::new();
         let mut abi: Option<u32> = None;
         let mut destino_sistema = false;
+        let mut formato_v2 = false;
+        let mut dependencias = Vec::new();
         let mut files = Vec::new();
 
         for (index, line) in text.lines().enumerate() {
@@ -106,6 +116,10 @@ impl Manifest {
             if line == MANIFEST_MAGIC {
                 saw_magic = true;
                 continue;
+            } else if line == MANIFEST_MAGIC_V2 {
+                saw_magic = true;
+                formato_v2 = true;
+                continue;
             }
             if !saw_magic {
                 return Err(ParseManifestError::BadMagic);
@@ -115,23 +129,53 @@ impl Manifest {
             } else if let Some(v) = line.strip_prefix("version=") {
                 version_raw = v.trim().into();
             } else if let Some(v) = line.strip_prefix("abi=") {
-                abi = Some(
-                    v.trim()
-                        .parse()
-                        .map_err(|_| ParseManifestError::BadLine {
-                            line: index + 1,
-                            field: "abi",
-                        })?,
-                );
+                abi = Some(v.trim().parse().map_err(|_| ParseManifestError::BadLine {
+                    line: index + 1,
+                    field: "abi",
+                })?);
             } else if let Some(v) = line.strip_prefix("destino=") {
                 destino_sistema = match v.trim() {
                     "sistema" => true,
                     "paquete" => false,
-                    _ => return Err(ParseManifestError::BadLine {
-                        line: index + 1,
-                        field: "destino",
-                    }),
+                    _ => {
+                        return Err(ParseManifestError::BadLine {
+                            line: index + 1,
+                            field: "destino",
+                        });
+                    }
                 };
+            } else if let Some(rest) = line.strip_prefix("dep=") {
+                if !formato_v2 {
+                    return Err(ParseManifestError::BadLine {
+                        line: index + 1,
+                        field: "dependencia requiere SOSOPKG v2",
+                    });
+                }
+                let mut campos = rest.split_whitespace();
+                let nombre_dep = campos.next().unwrap_or("");
+                let version_dep = campos.next().unwrap_or("");
+                if campos.next().is_some()
+                    || nombre_valido(nombre_dep).is_err()
+                    || !crate::version_req::valida(version_dep)
+                {
+                    return Err(ParseManifestError::BadLine {
+                        line: index + 1,
+                        field: "dependencia",
+                    });
+                }
+                if dependencias
+                    .iter()
+                    .any(|d: &Dependency| d.nombre == nombre_dep)
+                {
+                    return Err(ParseManifestError::BadLine {
+                        line: index + 1,
+                        field: "dependencia duplicada",
+                    });
+                }
+                dependencias.push(Dependency {
+                    nombre: nombre_dep.into(),
+                    version: version_dep.into(),
+                });
             } else if let Some(rest) = line.strip_prefix("f ") {
                 let parts: Vec<_> = rest.split_whitespace().collect();
                 if parts.len() < 3 {
@@ -141,12 +185,10 @@ impl Manifest {
                     });
                 }
                 let hash_hex = parts[0].into();
-                let size: u64 = parts[1]
-                    .parse()
-                    .map_err(|_| ParseManifestError::BadLine {
-                        line: index + 1,
-                        field: "tamaño",
-                    })?;
+                let size: u64 = parts[1].parse().map_err(|_| ParseManifestError::BadLine {
+                    line: index + 1,
+                    field: "tamaño",
+                })?;
                 let path = parts[2..].join(" ");
                 ruta_valida(&path).map_err(ParseManifestError::Ruta)?;
                 files.push(FileEntry {
@@ -164,6 +206,12 @@ impl Manifest {
             return Err(ParseManifestError::MissingField("nombre"));
         }
         nombre_valido(&nombre).map_err(ParseManifestError::Nombre)?;
+        if dependencias.iter().any(|d| d.nombre == nombre) {
+            return Err(ParseManifestError::BadLine {
+                line: 0,
+                field: "dependencia cíclica al propio paquete",
+            });
+        }
         if version_raw.is_empty() {
             return Err(ParseManifestError::MissingField("version"));
         }
@@ -174,6 +222,7 @@ impl Manifest {
             version,
             version_raw,
             abi,
+            dependencias,
             destino_sistema,
             files,
         };
@@ -195,7 +244,12 @@ impl Manifest {
     }
 
     pub fn format(&self) -> String {
-        let mut out = format!("{MANIFEST_MAGIC}\n");
+        let magic = if self.dependencias.is_empty() {
+            MANIFEST_MAGIC
+        } else {
+            MANIFEST_MAGIC_V2
+        };
+        let mut out = format!("{magic}\n");
         out.push_str(&format!("nombre={}\n", self.nombre));
         out.push_str(&format!("version={}\n", self.version_raw));
         if let Some(a) = self.abi {
@@ -203,6 +257,9 @@ impl Manifest {
         }
         if self.destino_sistema {
             out.push_str("destino=sistema\n");
+        }
+        for dep in &self.dependencias {
+            out.push_str(&format!("dep={} {}\n", dep.nombre, dep.version));
         }
         for f in &self.files {
             out.push_str(&format!("f {} {} {}\n", f.hash_hex, f.size, f.path));
@@ -230,11 +287,7 @@ impl Manifest {
                     path: f.path.clone(),
                 });
             }
-            if f.hash_hex.len() != 64
-                || !f.hash_hex
-                    .bytes()
-                    .all(|b| b.is_ascii_hexdigit())
-            {
+            if f.hash_hex.len() != 64 || !f.hash_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Err(ValidateError::BadHash {
                     path: f.path.clone(),
                 });
@@ -262,14 +315,17 @@ impl Manifest {
         }
         for f in &self.files {
             let start = f.offset as usize;
-            let end = start.checked_add(f.size as usize).ok_or_else(|| {
-                ValidateError::MissingInPack {
+            let end =
+                start
+                    .checked_add(f.size as usize)
+                    .ok_or_else(|| ValidateError::MissingInPack {
+                        path: f.path.clone(),
+                    })?;
+            let slice = pack
+                .get(start..end)
+                .ok_or_else(|| ValidateError::MissingInPack {
                     path: f.path.clone(),
-                }
-            })?;
-            let slice = pack.get(start..end).ok_or_else(|| ValidateError::MissingInPack {
-                path: f.path.clone(),
-            })?;
+                })?;
             if slice.len() as u64 != f.size {
                 return Err(ValidateError::SizeMismatch {
                     path: f.path.clone(),

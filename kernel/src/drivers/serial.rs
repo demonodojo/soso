@@ -81,8 +81,8 @@ impl RxQueue {
     }
 
     fn push(&mut self, byte: u8) {
-        if byte == 0x03 {
-            crate::task::note_serial_sigint();
+        if let Some(sig) = crate::task::senal_de_tecla(byte) {
+            crate::task::note_serial_signal(sig);
             crate::task::kick_scheduler();
             return;
         }

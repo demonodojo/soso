@@ -17,10 +17,15 @@ previos para poder restaurarlos al desinstalar.
 
 ## Contrato (P0)
 
-Manifiesto `SOSOPKG v1`, índice `SOSOPKG indice v1`, rutas bajo `bin/`,
+Manifiestos `SOSOPKG v1` (sin dependencias) y `SOSOPKG v2` (con `dep=<nombre> <restricción SemVer>`), índice `SOSOPKG indice v1`, rutas bajo `bin/`,
 `share/` y `lib/sal/`, tope 64 MiB. `destino=sistema` instala `bin/*` en `/bin`
-y `lib/sal/*` en `/lib/sal`, además de guardarlos en el árbol privado del
-paquete. Los destinos de sistema quedan limitados a esas dos áreas.
+y `lib/sal/*` en `/lib/sal`,
+además de guardarlos en el árbol privado del paquete. Los destinos de sistema
+quedan limitados a esas dos áreas. El instalador resuelve dependencias del
+índice antes del paquete raíz, comprueba restricciones exactas, comparadores,
+`^`, `~` y conjunciones, y evita borrar o degradar dependencias de paquetes
+instalados. Los gestores anteriores rechazan manifiestos v2 al no reconocer su
+cabecera.
 
 Rutas en disco:
 
@@ -51,13 +56,24 @@ soso-pkg borrar <nombre>
 - **Origen público actual:** `https://raw.githubusercontent.com/demonodojo/soso/main/rootfs/share/paquetes`
   (índice y packs publicados junto al monorepo).
 
+## Paquete `salvi` (aplicación Sal externa)
+
+- Host: `cargo xtask pkg-pack salvi` ejecuta `../salvi/build.sh soso` (necesita el
+  SDK de `cargo xtask sal-build --cross-only`) y publica
+  `rootfs/share/paquetes/salvi/<versión>/` y su fila en `indice.txt`.
+- Sin `destino=sistema` y fuera de la imagen: el usuario lo instala con
+  `soso-pkg instalar salvi`; queda en `/var/paquetes/salvi/` y sosh lo resuelve
+  por `/var/paquetes/comandos`.
+- Prueba en QEMU: `python3 tests/soso_qemu.py` en `salvi` (rootfs propio,
+  `soso-pkg instalar salvi --origen /share/paquetes`).
+
 ## Paquetes con ejecutables del sistema
 
 - `soso-ed`, `soso-pkg`, `soso-wm` y `sal` declaran `destino=sistema`; el gestor
   conserva sus archivos en `/var/paquetes/<nombre>/` y copia los originales en
   `.respaldo/` para restaurarlos al desinstalar.
-- El gestor nuevo activa automáticamente en `/bin` y `/lib/sal` los paquetes de
-  sistema que instaló un gestor anterior bajo `/var/paquetes`.
+- El gestor nuevo activa automáticamente en `/bin` los paquetes de sistema que
+  instaló un gestor anterior bajo `/var/paquetes`.
 - `cargo xtask pkg-pack soso-ed|soso-pkg|soso-wm|sal` genera su manifiesto y
   pack. `sal` incluye compilador, backend LLVM y SDK bajo una sola versión; al
   actualizarlo se renuevan `/bin/sal` y `/lib/sal/` desde ese paquete. Requiere

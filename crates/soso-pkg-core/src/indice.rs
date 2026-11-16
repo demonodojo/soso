@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use soso_update_core::parse_semver;
 
-use crate::rutas::{nombre_valido, RutaError};
+use crate::rutas::{RutaError, nombre_valido};
 
 pub const INDICE_MAGIC: &str = "SOSOPKG indice v1";
 
@@ -59,14 +59,12 @@ impl Indice {
             if !saw_magic {
                 return Err(ParseIndiceError::BadMagic);
             }
-            let rest = line.strip_prefix("p ").ok_or(ParseIndiceError::BadLine {
-                line: index + 1,
-            })?;
+            let rest = line
+                .strip_prefix("p ")
+                .ok_or(ParseIndiceError::BadLine { line: index + 1 })?;
             let parts: Vec<_> = rest.split_whitespace().collect();
             if parts.len() != 6 {
-                return Err(ParseIndiceError::BadLine {
-                    line: index + 1,
-                });
+                return Err(ParseIndiceError::BadLine { line: index + 1 });
             }
             let nombre = parts[0].to_string();
             nombre_valido(&nombre).map_err(ParseIndiceError::Nombre)?;
@@ -101,10 +99,9 @@ impl Indice {
         self.entradas
             .iter()
             .filter(|e| {
-                filtro.map(|f| {
-                    e.nombre.contains(f)
-                        || e.version_raw.contains(f)
-                }).unwrap_or(true)
+                filtro
+                    .map(|f| e.nombre.contains(f) || e.version_raw.contains(f))
+                    .unwrap_or(true)
             })
             .collect()
     }
@@ -129,6 +126,29 @@ impl Indice {
                         best = Some(e);
                     }
                 }
+            }
+        }
+        best
+    }
+
+    /// Versión publicada más nueva que cumple la restricción indicada.
+    pub fn mejor_compatible(&self, nombre: &str, req: &str) -> Option<&EntradaIndice> {
+        let mut best: Option<&EntradaIndice> = None;
+        for e in &self.entradas {
+            if e.nombre != nombre {
+                continue;
+            }
+            let Some(version) = parse_semver(&e.version_raw) else {
+                continue;
+            };
+            if !crate::version_req::satisface(&version, req) {
+                continue;
+            }
+            if best.is_none_or(|b| {
+                parse_semver(&b.version_raw)
+                    .is_some_and(|v| soso_update_core::semver_cmp(&version, &v).is_gt())
+            }) {
+                best = Some(e);
             }
         }
         best

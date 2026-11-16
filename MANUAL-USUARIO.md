@@ -1101,6 +1101,13 @@ soso-pkg actualizar                  # todos los instalados con versión remota 
 soso-pkg borrar demo
 ```
 
+Un manifiesto `SOSOPKG v2` puede declarar dependencias con restricciones SemVer,
+por ejemplo `dep=soso-pkg >=0.3.0`. Se admiten versiones exactas, `=`, `>`,
+`>=`, `<`, `<=`, `^`, `~` y conjunciones separadas por comas. Al instalar desde
+el índice, el gestor resuelve e instala primero las dependencias; no permite
+borrar ni degradar una versión que deje dependientes instalados incompatibles.
+Los manifiestos v1 siguen siendo válidos y representan paquetes sin dependencias.
+
 Configuración remota en `/etc/paquetes.conf`:
 
 ```text
@@ -1125,6 +1132,9 @@ soso-pkg instalar soso-ed
 soso-pkg instalar sal
 ```
 
+`sal` requiere `soso-pkg >=0.3.0`; la instalación de `sal` con este gestor
+resuelve esa dependencia desde el índice.
+
 La orden con ruta absoluta ejecuta el gestor nuevo una vez; este activa en
 `/bin` y `/lib/sal` los paquetes del sistema que el gestor anterior instaló
 bajo `/var/paquetes`. Después puedes usar `soso-pkg actualizar sal` cuando
@@ -1140,6 +1150,21 @@ opencode --version
 opencode run --format json "tu prompt"
 soso-improve-sal campana /var/self-improvement/campana
 ```
+
+**salvi — editor vi:** vi escrito en Sal (repositorio hermano `salvi`). No viene
+en la imagen; se instala como paquete de aplicación en `/var/paquetes/salvi/`
+y sosh lo encuentra por `/var/paquetes/comandos`:
+
+```sh
+soso-pkg instalar salvi
+salvi nota.txt          # salvi +N fichero abre en la línea N
+```
+
+Modos normal, inserción, visual (`v`, `V`) y `:` (`:w`, `:q`, `:wq`, `:s/a/b/g`,
+`:set nu`…). La tty de soso no informa del tamaño: usa 80×24 salvo que
+`LINES`/`COLUMNS` digan otra cosa o se cambie con `:set lines=N columns=N`.
+Ctrl-C mata el editor (no hay manejadores de señales): sal con `:q`. En el
+host, `cargo xtask pkg-pack salvi` compila `../salvi` y publica el paquete.
 
 ### soso-update — actualizar soso instalado
 

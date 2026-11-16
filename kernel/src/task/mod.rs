@@ -17,6 +17,7 @@ pub mod mmap;
 pub mod path;
 pub mod pipe;
 pub mod pty;
+pub mod senal;
 pub mod shm;
 pub mod syscall;
 pub mod uaccess;
@@ -48,7 +49,9 @@ pub enum State {
     Running,
     /// Hasta uptime_ms >= t.
     Sleeping(u64),
-    WaitingChild,
+    /// `wait`/`waitpid`. `filtro`: pid (>0), -1 = cualquiera, -pgid (< -1).
+    /// `nuevo` = contestar con `waitpid_pack` (si no, el `wait_pack` viejo).
+    WaitingChild { filtro: i64, flags: u64, nuevo: bool },
     /// read() de la tty sin datos: (puntero, longitud) del buffer usuario.
     WaitingTty { buf: u64, len: u64 },
     /// read()/write() de un pipe sin datos o sin espacio.
@@ -159,8 +162,9 @@ impl Console {
 static FG_SERIAL: AtomicU64 = AtomicU64::new(1);
 static FG_SSH: [AtomicU64; crate::net::ssh::SSH_SESSIONS] =
     [const { AtomicU64::new(0) }; crate::net::ssh::SSH_SESSIONS];
-static SERIAL_SIGINT: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+/// Señales de teclado de la consola local (Ctrl-C, Ctrl-Z, Ctrl-\) anotadas
+/// desde la IRQ: bit `sig_bit(sig)`. Las entrega el scheduler.
+static SENALES_TTY: AtomicU64 = AtomicU64::new(0);
 /// Ctrl+Alt+Retroceso: el handler de teclado no mata procesos; lo hace el scheduler.
 static FB_CAD: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
@@ -268,6 +272,8 @@ pub struct Process {
     /// Ctrl-C llegó con la shell en primer plano y en marcha (no bloqueada).
     /// La siguiente syscall devuelve `EINTR` en vez de matarla.
     pub sigint_pendiente: bool,
+    /// Manejadores, máscara, pendientes, parada y alarma (`senal.rs`).
+    pub senales: senal::Estado,
     /// Grupo de procesos y sesión (job control mínimo).
     pub pgid: u64,
     pub sid: u64,
@@ -333,9 +339,20 @@ pub fn exists(pid: u64) -> bool {
     PROCS.lock().iter().any(|p| p.pid == pid && !matches!(p.state, State::Zombie(_)))
 }
 
-/// IRQ teclado: Ctrl-C en consola serie (entrega diferida en el scheduler).
-pub fn note_serial_sigint() {
-    SERIAL_SIGINT.store(true, core::sync::atomic::Ordering::Relaxed);
+/// IRQ teclado: Ctrl-C / Ctrl-Z / Ctrl-\ en la consola local (entrega
+/// diferida en el scheduler). Sólo toca un atómico: corre dentro de la IRQ.
+pub fn note_serial_signal(sig: u64) {
+    SENALES_TTY.fetch_or(soso_abi::sig_bit(sig), Ordering::Relaxed);
+}
+
+/// Señal de teclado de un byte de control (ISIG): Ctrl-C, Ctrl-Z y Ctrl-\.
+pub fn senal_de_tecla(b: u8) -> Option<u64> {
+    match b {
+        0x03 => Some(soso_abi::SIGINT),
+        0x1A => Some(soso_abi::SIGTSTP),
+        0x1C => Some(soso_abi::SIGQUIT),
+        _ => None,
+    }
 }
 
 pub fn note_framebuffer_cad() {
@@ -376,23 +393,24 @@ pub fn session_leader(pid: u64, console: Console) {
 }
 
 fn valid_signal(sig: u64) -> Option<u8> {
-    match sig {
-        soso_abi::SIGPROBE => Some(0),
-        soso_abi::SIGINT | soso_abi::SIGKILL | soso_abi::SIGTERM => Some(sig as u8),
-        _ => None,
+    if sig == soso_abi::SIGPROBE {
+        Some(0)
+    } else if soso_abi::senal_valida(sig) {
+        Some(sig as u8)
+    } else {
+        None
     }
-}
-
-fn signal_ignored(pid: u64, sig: u8) -> bool {
-    pid == 1 && (sig == soso_abi::SIGINT as u8 || sig == soso_abi::SIGTERM as u8)
 }
 
 /// Entrega una señal a un proceso concreto. Devuelve true si tuvo efecto
-/// (incluido ignorada en PID 1).
+/// (incluido ignorada).
+///
+/// Por disposición: KILL mata siempre; CONT reanuda siempre (y además se
+/// entrega si tiene manejador); ignorada se descarta; con manejador queda
+/// pendiente y, si no está bloqueada, interrumpe una espera con `EINTR`; por
+/// defecto termina, para o se ignora según [`senal::defecto`].
 fn signal_one(procs: &mut Vec<Process>, pid: u64, sig: u8) -> bool {
-    if signal_ignored(pid, sig) {
-        return true;
-    }
+    use soso_abi as abi;
     let Some(idx) = procs.iter().position(|p| p.pid == pid) else {
         return false;
     };
@@ -402,37 +420,178 @@ fn signal_one(procs: &mut Vec<Process>, pid: u64, sig: u8) -> bool {
     if sig == 0 {
         return true;
     }
-    if sig == soso_abi::SIGKILL as u8 {
-        deliver_death(procs, pid, soso_abi::exit_by_signal(sig), false);
+    let s = sig as u64;
+    let bit = abi::sig_bit(s);
+    if s == abi::SIGKILL {
+        deliver_death(procs, pid, abi::exit_by_signal(sig), false);
         return true;
     }
-    if sig == soso_abi::SIGINT as u8 || sig == soso_abi::SIGTERM as u8 {
-        // T70: SIGTERM siempre mata (también bloqueados). SIGINT sólo interrumpe
-        // (`EINTR`) a la shell líder en primer plano; el resto del grupo en primer
-        // plano muere con 130 para que sosh recupere el prompt.
-        if sig == soso_abi::SIGINT as u8 && es_shell_en_primer_plano(&procs[idx]) {
-            let bloqueado = matches!(
-                procs[idx].state,
-                State::WaitingTty { .. }
-                    | State::WaitingSocket { .. }
-                    | State::WaitingPipe { .. }
-                    | State::Sleeping(_)
-            );
-            if bloqueado {
-                procs[idx].sigint_pendiente = false;
-                procs[idx].ctx.rax = (-soso_abi::EINTR) as u64;
-                procs[idx].state = State::Runnable;
+    if s == abi::SIGCONT {
+        continuar(procs, idx);
+    }
+    let accion = procs[idx].senales.acciones[s as usize];
+    if accion == abi::SIG_IGN {
+        return true;
+    }
+    if accion != abi::SIG_DFL {
+        procs[idx].senales.pendientes |= bit;
+        if procs[idx].senales.mascara & bit == 0 {
+            senal::interrumpir_bloqueo(&mut procs[idx]);
+            senal::marcar();
+        }
+        return true;
+    }
+    let def = senal::defecto(s);
+    // PID 1 no muere ni se para por una señal que no ha pedido.
+    if pid == 1 || matches!(def, senal::Defecto::Ignorar | senal::Defecto::Continuar) {
+        return true;
+    }
+    // Una shell sin manejadores (sosh anterior a los manejadores, tras una OTA
+    // de sólo kernel) sigue sobreviviendo al teclado: Ctrl-C la interrumpe con
+    // `EINTR` en vez de matarla, y Ctrl-Z y Ctrl-\ no le hacen nada.
+    if es_shell_en_primer_plano(&procs[idx]) {
+        match s {
+            abi::SIGINT => {
+                let bloqueado = matches!(
+                    procs[idx].state,
+                    State::WaitingTty { .. }
+                        | State::WaitingSocket { .. }
+                        | State::WaitingPipe { .. }
+                        | State::Sleeping(_)
+                );
+                if bloqueado {
+                    procs[idx].sigint_pendiente = false;
+                    procs[idx].ctx.rax = (-abi::EINTR) as u64;
+                    procs[idx].state = State::Runnable;
+                } else {
+                    // `ask`: la shell copia la respuesta en `Running`; la
+                    // siguiente syscall devuelve `EINTR` y sosh suelta el socket.
+                    procs[idx].sigint_pendiente = true;
+                }
                 return true;
             }
-            // `ask`: la shell copia la respuesta en `Running`; la siguiente
-            // syscall devuelve `EINTR` y sosh suelta el socket.
-            procs[idx].sigint_pendiente = true;
-            return true;
+            abi::SIGTSTP | abi::SIGQUIT => return true,
+            _ => {}
         }
-        deliver_death(procs, pid, soso_abi::exit_by_signal(sig), false);
+    }
+    // Bloqueada: espera a que la desbloqueen y entonces se aplica el defecto.
+    if s != abi::SIGSTOP && procs[idx].senales.mascara & bit != 0 {
+        procs[idx].senales.pendientes |= bit;
         return true;
     }
-    false
+    match def {
+        senal::Defecto::Terminar => deliver_death(procs, pid, abi::exit_by_signal(sig), false),
+        senal::Defecto::Parar => parar(procs, idx, sig),
+        _ => {}
+    }
+    true
+}
+
+fn mismo_espacio(p: &Process, id: Option<u64>) -> bool {
+    id.is_some() && p.space.as_ref().map(|s| s.id()) == id
+}
+
+/// SIGSTOP/SIGTSTP: para todos los hilos del proceso y avisa al padre.
+fn parar(procs: &mut Vec<Process>, idx: usize, sig: u8) {
+    let esp = procs[idx].space.as_ref().map(|s| s.id());
+    let mut ya_parado = true;
+    for p in procs.iter_mut() {
+        if mismo_espacio(p, esp) && !matches!(p.state, State::Zombie(_)) {
+            ya_parado &= p.senales.detenido;
+            p.senales.detenido = true;
+        }
+    }
+    if ya_parado {
+        return;
+    }
+    senal::marcar();
+    let lider = procs
+        .iter()
+        .position(|p| mismo_espacio(p, esp) && !p.is_thread)
+        .unwrap_or(idx);
+    avisar_padre(procs, lider, soso_abi::WAIT_STOP, sig);
+}
+
+/// SIGCONT: reanuda todos los hilos del proceso y avisa al padre.
+fn continuar(procs: &mut Vec<Process>, idx: usize) {
+    let esp = procs[idx].space.as_ref().map(|s| s.id());
+    let mut estaba = false;
+    for p in procs.iter_mut() {
+        if mismo_espacio(p, esp) {
+            estaba |= p.senales.detenido;
+            p.senales.detenido = false;
+        }
+    }
+    if !estaba {
+        return;
+    }
+    crate::arch::apic::kick_idle_cpus();
+    let lider = procs
+        .iter()
+        .position(|p| mismo_espacio(p, esp) && !p.is_thread)
+        .unwrap_or(idx);
+    avisar_padre(procs, lider, soso_abi::WAIT_CONT, soso_abi::SIGCONT as u8);
+}
+
+/// Parada o continuación de un hijo: al padre que espera con el flag que toca,
+/// o se guarda para el siguiente `waitpid`. Y SIGCHLD en ambos casos.
+fn avisar_padre(procs: &mut Vec<Process>, idx: usize, tipo: u8, code: u8) {
+    let parent = procs[idx].parent;
+    procs[idx].senales.aviso_wait = if despertar_padre(procs, idx, tipo, code) {
+        None
+    } else {
+        Some((tipo, code))
+    };
+    sigchld_al_padre(procs, parent);
+}
+
+pub(crate) fn sigchld_al_padre(procs: &mut Vec<Process>, parent: u64) {
+    if parent != 0 {
+        signal_one(procs, parent, soso_abi::SIGCHLD as u8);
+    }
+}
+
+/// ¿Cubre el filtro de `waitpid` a este hijo?
+pub(crate) fn hijo_encaja(filtro: i64, pid: u64, pgid: u64) -> bool {
+    match filtro {
+        -1 => true,
+        f if f > 0 => pid == f as u64,
+        f => pgid == f.unsigned_abs(),
+    }
+}
+
+/// ¿Pidió el que espera este tipo de evento?
+pub(crate) fn evento_pedido(tipo: u8, flags: u64) -> bool {
+    match tipo {
+        soso_abi::WAIT_STOP => flags & soso_abi::WUNTRACED != 0,
+        soso_abi::WAIT_CONT => flags & soso_abi::WCONTINUED != 0,
+        _ => true,
+    }
+}
+
+/// Despierta al padre del hijo `idx` si está en `wait`/`waitpid` y le vale
+/// este evento. `true` = despertado (el evento queda consumido).
+fn despertar_padre(procs: &mut [Process], idx: usize, tipo: u8, code: u8) -> bool {
+    let (parent, hpid, hpgid) = (procs[idx].parent, procs[idx].pid, procs[idx].pgid);
+    if parent == 0 {
+        return false;
+    }
+    let Some(pi) = procs.iter().position(|p| p.pid == parent) else {
+        return false;
+    };
+    let State::WaitingChild { filtro, flags, nuevo } = procs[pi].state else {
+        return false;
+    };
+    if !hijo_encaja(filtro, hpid, hpgid) || !evento_pedido(tipo, flags) {
+        return false;
+    }
+    procs[pi].state = State::Runnable;
+    procs[pi].ctx.rax = if nuevo {
+        soso_abi::waitpid_pack(hpid, tipo, code)
+    } else {
+        wait_pack(hpid, code)
+    };
+    true
 }
 
 /// La shell: líder de su sesión y grupo en primer plano de su consola.
@@ -490,6 +649,9 @@ fn deliver_death(procs: &mut Vec<Process>, pid: u64, code: u8, orphan: bool) {
         procs[idx].kill_pending = true;
         procs[idx].kill_code = code;
         procs[idx].kill_orphan = orphan;
+        // Si está en una syscall, que muera al salir de ella y no un tick
+        // después con el resultado ya en la mano (SIGPIPE: el `EPIPE`).
+        senal::marcar();
         return;
     }
     // Un proceso muerto no puede seguir teniendo descriptores abiertos: un
@@ -504,18 +666,14 @@ fn deliver_death(procs: &mut Vec<Process>, pid: u64, code: u8, orphan: bool) {
         return;
     }
     let parent = procs[idx].parent;
-    if let Some(pi) = procs
-        .iter()
-        .position(|p| p.pid == parent && matches!(p.state, State::WaitingChild))
-    {
-        procs[pi].state = State::Runnable;
-        procs[pi].ctx.rax = wait_pack(pid, code);
+    if despertar_padre(procs, idx, soso_abi::WAIT_EXIT, code) {
         procs.remove(idx);
     } else {
         procs[idx].state = State::Zombie(code);
         procs[idx].kill_pending = false;
         procs[idx].kill_orphan = false;
     }
+    sigchld_al_padre(procs, parent);
 }
 
 /// Vigilante del dueño del modo gráfico (ver `fb::set_keepalive_for`).
@@ -548,10 +706,13 @@ fn poll_fb_watchdog(procs: &mut Vec<Process>) {
 }
 
 fn poll_pending_tty_signals(procs: &mut Vec<Process>) {
-    if SERIAL_SIGINT.swap(false, core::sync::atomic::Ordering::Relaxed) {
+    let mut senales = SENALES_TTY.swap(0, Ordering::Relaxed);
+    while senales != 0 {
+        let sig = senales.trailing_zeros() as u8;
+        senales &= senales - 1;
         let pgid = Console::Serial.fg_pgid();
         if pgid != 0 {
-            signal_pgid(procs, pgid, soso_abi::SIGINT as u8);
+            signal_pgid(procs, pgid, sig);
         }
     }
     if FB_CAD.swap(false, core::sync::atomic::Ordering::Relaxed) {
@@ -566,6 +727,13 @@ fn poll_pending_tty_signals(procs: &mut Vec<Process>) {
         }
     }
     poll_fb_watchdog(procs);
+}
+
+/// Una señal del propio kernel a un proceso (SIGPIPE, …), sin pasar por las
+/// comprobaciones de `kill`.
+pub fn senal_a(pid: u64, sig: u64) {
+    let mut procs = PROCS.lock();
+    signal_one(&mut procs, pid, sig as u8);
 }
 
 pub fn kill_target(pid: i64, sig: u64) -> Result<u32, i64> {
@@ -1197,6 +1365,7 @@ pub fn spawn_console_io_cwd(
         kill_code: 255,
         kill_orphan: false,
         sigint_pendiente: false,
+        senales: senal::Estado::nuevo(),
         pgid,
         sid,
         tls_base,
@@ -1247,7 +1416,7 @@ pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> Re
     if parent == 0 {
         return Err(-abi::EINVAL);
     }
-    let (space, console, cwd, brk, brk_min, name, pgid, sid, env, tls_base, fds) = with_current(|p| {
+    let (space, console, cwd, brk, brk_min, name, pgid, sid, env, tls_base, fds, senales) = with_current(|p| {
         let space = p.space.as_ref().ok_or(-abi::ENOMEM)?.clone();
         Ok::<_, i64>((
             space,
@@ -1266,6 +1435,7 @@ pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> Re
             // no, lo que parece cualquier cosa menos un problema de TLS.
             p.tls_base,
             syscall::fds_para_hilo(&p.fds),
+            p.senales.para_hilo(),
         ))
     })?;
     let tid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
@@ -1297,6 +1467,7 @@ pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> Re
         kill_code: 255,
         kill_orphan: false,
         sigint_pendiente: false,
+        senales,
         pgid,
         sid,
         tls_base,
@@ -1410,12 +1581,7 @@ pub fn exit_current(code: u8) -> ! {
         fcache::soltar_todos(pid);
         syscall::close_all_fds(&mut procs[idx].fds);
         let parent = procs[idx].parent;
-        let padre_esperando = procs
-            .iter()
-            .position(|p| p.pid == parent && matches!(p.state, State::WaitingChild));
-        if let Some(pi) = padre_esperando {
-            procs[pi].state = State::Runnable;
-            procs[pi].ctx.rax = wait_pack(pid, code);
+        if despertar_padre(&mut procs, idx, soso_abi::WAIT_EXIT, code) {
             space = procs.remove(idx).space;
         } else if parent != 0 && procs.iter().any(|p| p.pid == parent) {
             // El padre vive pero no espera: zombie hasta su wait().
@@ -1426,6 +1592,7 @@ pub fn exit_current(code: u8) -> ! {
             // Huérfano: nadie lo va a reclamar.
             space = procs.remove(idx).space;
         }
+        sigchld_al_padre(&mut procs, parent);
         crate::arch::percpu::set_current_pid(0);
     }
     pty::drenar_cierres();
@@ -1628,6 +1795,7 @@ extern "C" fn schedule_inner() -> ! {
         let mut procs = PROCS.lock();
 
         poll_pending_tty_signals(&mut procs);
+        vencer_alarmas(&mut procs, now);
         // El vigilante apunta el disparo desde el temporizador, donde no se
         // puede imprimir; aquí ya estamos en contexto de proceso.
         if crate::drivers::fb::take_vigilante_salto() {
@@ -1739,6 +1907,8 @@ extern "C" fn schedule_inner() -> ! {
             }
         }
         // Despertar lectores/escritores de pipe cuando haya datos, espacio o EOF.
+        // SIGPIPE se manda al acabar el recorrido: puede retirar procesos.
+        let mut sigpipe: Vec<u64> = Vec::new();
         for i in 0..procs.len() {
             if let State::WaitingPipe {
                 pipe_id,
@@ -1784,6 +1954,9 @@ extern "C" fn schedule_inner() -> ! {
                         Err(e) => {
                             procs[i].ctx.rax = e as u64;
                             procs[i].state = State::Runnable;
+                            if e == -soso_abi::EPIPE {
+                                sigpipe.push(procs[i].pid);
+                            }
                         }
                         _ => {}
                     }
@@ -1798,6 +1971,9 @@ extern "C" fn schedule_inner() -> ! {
                     }
                 }
             }
+        }
+        for pid in sigpipe {
+            signal_one(&mut procs, pid, soso_abi::SIGPIPE as u8);
         }
         // Despertar operaciones TCP bloqueantes.
         for i in 0..procs.len() {
@@ -1894,11 +2070,17 @@ extern "C" fn schedule_inner() -> ! {
             }
         }
 
+        entregar_pendientes(&mut procs);
+        if procs.is_empty() {
+            continue;
+        }
+
         // Round-robin desde el último elegido.
         let n = procs.len();
         let start = RR_NEXT.load(Ordering::Relaxed) % n;
-        let pick =
-            (0..n).map(|i| (start + i) % n).find(|&i| procs[i].state == State::Runnable);
+        let pick = (0..n)
+            .map(|i| (start + i) % n)
+            .find(|&i| procs[i].state == State::Runnable && !procs[i].senales.detenido);
         match pick {
             Some(i) => {
                 RR_NEXT.store((i + 1) % n, Ordering::Relaxed);
@@ -1928,6 +2110,51 @@ extern "C" fn schedule_inner() -> ! {
             }
         }
     }
+}
+
+/// Alarmas vencidas (`SYS_ALARM`) → SIGALRM.
+fn vencer_alarmas(procs: &mut Vec<Process>, now: u64) {
+    if !procs.iter().any(|p| p.senales.alarma_ms != 0 && now >= p.senales.alarma_ms) {
+        return;
+    }
+    let vencidas: Vec<u64> = procs
+        .iter_mut()
+        .filter(|p| p.senales.alarma_ms != 0 && now >= p.senales.alarma_ms)
+        .map(|p| {
+            p.senales.alarma_ms = 0;
+            p.pid
+        })
+        .collect();
+    for pid in vencidas {
+        signal_one(procs, pid, soso_abi::SIGALRM as u8);
+    }
+}
+
+/// Resuelve las señales entregables de los procesos listos para correr: arma
+/// el marco del manejador, o aplica la acción por defecto que quedó aplazada
+/// por la máscara. Una señal por proceso y vuelta: el resto, tras `sigreturn`,
+/// que vuelve a pasar por aquí.
+fn entregar_pendientes(procs: &mut Vec<Process>) {
+    let listo = |p: &Process| {
+        p.state == State::Runnable && !p.senales.detenido && p.senales.entregables() != 0
+    };
+    if procs.iter().any(listo) {
+        let pids: Vec<u64> = procs.iter().filter(|p| listo(p)).map(|p| p.pid).collect();
+        for pid in pids {
+            let Some(i) = procs.iter().position(|p| p.pid == pid) else {
+                continue;
+            };
+            match senal::preparar(&mut procs[i]) {
+                senal::Entrega::Nada | senal::Entrega::Inyectada => {}
+                senal::Entrega::Terminar(code) => deliver_death(procs, pid, code, false),
+                senal::Entrega::Parar(sig) => parar(procs, i, sig),
+            }
+        }
+    }
+    let quiza = procs.iter().any(|p| {
+        p.state == State::Running && (p.senales.detenido || p.senales.entregables() != 0)
+    });
+    senal::QUIZA.store(quiza, Ordering::Relaxed);
 }
 
 fn pipe_wake_read(
@@ -2290,9 +2517,16 @@ extern "C" fn ap_timer_tick(f: &mut TrapFrame) -> u64 {
 fn desalojar_si_toca(f: &mut TrapFrame, cur: u64, bsp_fpu: bool) -> u64 {
     let mut procs = PROCS.lock();
     poll_pending_tty_signals(&mut procs);
-    let force_kill = procs
-        .iter()
-        .any(|p| p.pid == cur && (p.kill_pending || matches!(p.state, State::Zombie(_))));
+    vencer_alarmas(&mut procs, crate::arch::pit::uptime_ms());
+    // Una señal entregable o una parada también desalojan ya: el manejador se
+    // arma en el planificador (`entregar_pendientes`), con el contexto guardado.
+    let force_kill = procs.iter().any(|p| {
+        p.pid == cur
+            && (p.kill_pending
+                || matches!(p.state, State::Zombie(_))
+                || p.senales.detenido
+                || p.senales.entregables() != 0)
+    });
     #[cfg(feature = "lxdde")]
     let wifi_yield = bsp_fpu
         && crate::arch::percpu::cpu_index() == 0
@@ -2305,7 +2539,7 @@ fn desalojar_si_toca(f: &mut TrapFrame, cur: u64, bsp_fpu: bool) -> u64 {
     }
     let hay_otro = procs
         .iter()
-        .any(|p| p.pid != cur && p.state == State::Runnable);
+        .any(|p| p.pid != cur && p.state == State::Runnable && !p.senales.detenido);
     if !force_kill && !wifi_yield && !hay_otro {
         remaining().store(TIMESLICE_TICKS, Ordering::Relaxed);
         return 0;
@@ -2358,14 +2592,14 @@ fn desalojar_si_toca(f: &mut TrapFrame, cur: u64, bsp_fpu: bool) -> u64 {
             if orphan {
                 procs[idx].parent = 0;
             }
-            if let Some(pi) = procs.iter().position(|p| {
-                p.pid == parent && matches!(p.state, State::WaitingChild)
-            }) {
-                procs[pi].state = State::Runnable;
-                procs[pi].ctx.rax = wait_pack(pid, code);
+            let _ = pid;
+            if despertar_padre(&mut procs, idx, soso_abi::WAIT_EXIT, code) {
                 procs.remove(idx);
             } else {
                 procs[idx].state = State::Zombie(code);
+            }
+            if !orphan {
+                sigchld_al_padre(&mut procs, parent);
             }
         } else {
             procs[idx].state = State::Runnable;

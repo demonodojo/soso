@@ -279,13 +279,24 @@ fn ctrl_byte(out: keymap::KeyOutput) -> keymap::KeyOutput {
 }
 
 fn anotar_ctrl_c() {
-    crate::task::note_serial_sigint();
+    crate::task::note_serial_signal(soso_abi::SIGINT);
     crate::task::kick_scheduler();
 }
 
+/// Ctrl-C, Ctrl-Z y Ctrl-\ en modo texto: señal al grupo en primer plano en
+/// vez de byte. Con el teclado en exclusiva del escritorio sólo Ctrl-C lo es
+/// (las otras dos pararían o matarían al propio escritorio).
+fn anotar_senal_tecla(b: u8) -> bool {
+    let Some(sig) = crate::task::senal_de_tecla(b) else {
+        return false;
+    };
+    crate::task::note_serial_signal(sig);
+    crate::task::kick_scheduler();
+    true
+}
+
 fn emit_tty_byte(b: u8) {
-    if b == 0x03 {
-        anotar_ctrl_c();
+    if anotar_senal_tecla(b) {
         return;
     }
     let mut rx = RX.lock();
@@ -295,8 +306,7 @@ fn emit_tty_byte(b: u8) {
 
 /// Variante IRQ-safe: nunca bloquea en `RX` ni en el scheduler.
 fn emit_tty_byte_try(b: u8) -> bool {
-    if b == 0x03 {
-        anotar_ctrl_c();
+    if anotar_senal_tecla(b) {
         return true;
     }
     let Some(mut rx) = RX.try_lock() else {

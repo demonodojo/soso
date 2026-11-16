@@ -497,8 +497,8 @@ fn drive(sess: &mut SshSession, socket: &mut tcp::Socket) -> Result<(), sunset::
         match sess.runner.read_channel(ch, ChanData::Normal, &mut cbuf) {
             Ok(n) if n > 0 => {
                 for &b in &cbuf[..n] {
-                    if b == 0x03 {
-                        task::signal_console(console, soso_abi::SIGINT as u8);
+                    if let Some(sig) = task::senal_de_tecla(b) {
+                        task::signal_console(console, sig as u8);
                     } else {
                         colas.rx.lock().push_back(b);
                     }

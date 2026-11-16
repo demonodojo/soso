@@ -1,0 +1,5 @@
+SOSOPKG v1
+nombre=salvi
+version=0.1.0
+abi=1
+f d4f5d2b2f537506510461470b43a735951e0ae991a126e0a2d004ae4d8a387ba 250560 bin/salvi

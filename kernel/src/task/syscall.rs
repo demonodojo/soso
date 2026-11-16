@@ -79,6 +79,10 @@ pub struct SyscallFrame {
     pub user_rsp: u64,
     pub rflags: u64,
     pub rip: u64,
+    /// `r9` y `r8` se apilan los primeros (la syscall los preserva); sólo
+    /// hacen falta para armar el contexto completo al entregar una señal.
+    pub r9: u64,
+    pub r8: u64,
 }
 
 static mut USER_RSP_SCRATCH: u64 = 0;
@@ -276,7 +280,7 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_SBRK => sys_sbrk(a1 as i64),
         abi::SYS_SLEEP_MS => super::block_current(
             ctx_from_frame(f),
-            State::Sleeping(crate::arch::pit::uptime_ms() + a1),
+            State::Sleeping(crate::arch::pit::uptime_ms().saturating_add(a1)),
         ),
         abi::SYS_HALT => {
             // glibc (el rustc estático enlaza libstdc++) llama
@@ -386,6 +390,12 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_PTY_OPEN => sys_pty_open(),
         abi::SYS_PTY_RESIZE => sys_pty_resize(a1, a2, a3),
         abi::SYS_TTY_SIZE => sys_tty_size(),
+        abi::SYS_SIGACTION => sys_sigaction(a1, a2, a3, a4),
+        abi::SYS_SIGRETURN => sys_sigreturn(f),
+        abi::SYS_SIGPROCMASK => sys_sigprocmask(a1, a2),
+        abi::SYS_SIGPENDING => super::with_current(|p| Ok(p.senales.pendientes)),
+        abi::SYS_ALARM => sys_alarm(a1),
+        abi::SYS_WAITPID => sys_waitpid(f, a1 as i64, a2),
         abi::SYS_SHM_CREATE => sys_shm_create(a1),
         abi::SYS_SHM_MAP => sys_shm_map(a1),
         abi::SYS_SHM_FREE => sys_shm_free(a1),
@@ -432,10 +442,70 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         257 => sys_linux_openat(a1, a2, a3),
         _ => Err(-abi::ENOSYS),
     };
-    match r {
+    let ret = match r {
         Ok(v) => v as i64,
         Err(e) => e,
+    };
+    if super::senal::QUIZA.load(core::sync::atomic::Ordering::Relaxed) {
+        al_volver_de_syscall(f, ret);
     }
+    ret
+}
+
+/// Salida de una syscall con una señal entregable (o el proceso parado): en
+/// vez de volver con `sysret`, se guarda el contexto completo —con el
+/// resultado en `rax`— y la FPU, y se cede al planificador, que arma el
+/// manejador (o no elige al proceso mientras esté parado). No vuelve si hay
+/// algo que hacer.
+fn al_volver_de_syscall(f: &SyscallFrame, ret: i64) {
+    x86_64::instructions::interrupts::disable();
+    let me = super::current_pid();
+    let mut morir = None;
+    let hay = {
+        let mut procs = super::PROCS.lock();
+        match procs.iter_mut().find(|p| p.pid == me) {
+            Some(p) if p.kill_pending => {
+                morir = Some(p.kill_code);
+                false
+            }
+            Some(p) if p.senales.detenido || p.senales.entregables() != 0 => {
+                // La ABI declara los vectoriales caller-saved, pero x87/MXCSR
+                // y lo que el kernel no haya tocado son del usuario.
+                unsafe { crate::arch::fpu::save(&mut p.fpu) };
+                true
+            }
+            _ => false,
+        }
+    };
+    if let Some(code) = morir {
+        super::exit_current(code);
+    }
+    if !hay {
+        x86_64::instructions::interrupts::enable();
+        return;
+    }
+    let ctx = Context {
+        r15: f.r15,
+        r14: f.r14,
+        r13: f.r13,
+        r12: f.r12,
+        // `sysret` deja rcx = rip y r11 = rflags.
+        r11: f.rflags,
+        r10: f.r10,
+        r9: f.r9,
+        r8: f.r8,
+        rdi: f.rdi,
+        rsi: f.rsi,
+        rbp: f.rbp,
+        rbx: f.rbx,
+        rdx: f.rdx,
+        rcx: f.rip,
+        rax: ret as u64,
+        rip: f.rip,
+        rsp: f.user_rsp,
+        rflags: f.rflags,
+    };
+    super::block_current(ctx, State::Runnable);
 }
 
 // ---- acceso a memoria de usuario ----
@@ -998,6 +1068,15 @@ pub fn close_all_fds(fds: &mut Vec<Option<Fd>>) {
 
 // ---- las syscalls ----
 
+/// Tubería sin lectores: SIGPIPE al que escribe (por defecto lo mata con 141)
+/// y, si la ignora o la captura, `EPIPE`. Sólo tuberías: en un socket, un
+/// cliente que cierra no debe tumbar al demonio que le escribía.
+fn epipe() -> i64 {
+    let me = super::current_pid();
+    super::senal_a(me, abi::SIGPIPE);
+    -abi::EPIPE
+}
+
 fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i64> {
     // Escritura corta por encima del techo, igual que `sys_read`.
     let len = len.min(MAX_SYSCALL_BUF);
@@ -1018,15 +1097,16 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
             return Err(-abi::EFAULT);
         }
         if pipe::no_readers(id) {
-            return Err(-abi::EPIPE);
+            return Err(epipe());
         }
         let espacio = super::current_space().ok_or(-abi::EFAULT)?;
-        let n = pipe::try_write(id, &espacio, buf, len)?;
+        let n = pipe::try_write(id, &espacio, buf, len)
+            .map_err(|e| if e == -abi::EPIPE { epipe() } else { e })?;
         if n > 0 {
             return Ok(n);
         }
         if pipe::no_readers(id) {
-            return Err(-abi::EPIPE);
+            return Err(epipe());
         }
         super::block_current(
             ctx_from_frame(f),
@@ -1829,7 +1909,20 @@ fn sys_tcsetpgrp(pgid: u64) -> Result<u64, i64> {
 }
 
 fn sys_wait(f: &mut SyscallFrame) -> Result<u64, i64> {
-    let pid = super::current_pid();
+    esperar_hijo(f, -1, 0, false)
+}
+
+fn sys_waitpid(f: &mut SyscallFrame, pid: i64, flags: u64) -> Result<u64, i64> {
+    if flags & !(abi::WNOHANG | abi::WUNTRACED | abi::WCONTINUED) != 0 {
+        return Err(-abi::EINVAL);
+    }
+    esperar_hijo(f, pid, flags, true)
+}
+
+/// `wait` y `waitpid`. `nuevo` = contestar con `waitpid_pack` (el `wait`
+/// viejo sólo informa de muertes, con `wait_pack`).
+fn esperar_hijo(f: &mut SyscallFrame, pid: i64, flags: u64, nuevo: bool) -> Result<u64, i64> {
+    let me = super::current_pid();
     // `WaitingChild` tiene que armarse con PROCS cogido. Si se suelta el
     // candado, se mira que no hay zombi, y luego se duerme, el hijo puede
     // morir en ese hueco, convertirse en zombi y no despertar a nadie:
@@ -1837,33 +1930,137 @@ fn sys_wait(f: &mut SyscallFrame) -> Result<u64, i64> {
     // askd vivo como hermano, ECHILD nunca llega a desbloquear.
     x86_64::instructions::interrupts::disable();
     let mut procs = super::PROCS.lock();
-    if !procs.iter().any(|p| p.parent == pid) {
-        drop(procs);
-        x86_64::instructions::interrupts::enable();
-        return Err(-abi::ECHILD);
-    }
-    if let Some(i) = procs
+    let filtro = match pid {
+        0 => {
+            let pgid = procs.iter().find(|p| p.pid == me).map(|p| p.pgid).unwrap_or(0);
+            -(pgid as i64)
+        }
+        p => p,
+    };
+    let es_hijo =
+        |p: &super::Process| p.parent == me && !p.is_thread && super::hijo_encaja(filtro, p.pid, p.pgid);
+    let resultado = if !procs.iter().any(es_hijo) {
+        Some(Err(-abi::ECHILD))
+    } else if let Some(i) = procs
         .iter()
-        .position(|p| p.parent == pid && matches!(p.state, State::Zombie(_)))
+        .position(|p| es_hijo(p) && matches!(p.state, State::Zombie(_)))
     {
         let hijo = procs.remove(i);
         let State::Zombie(code) = hijo.state else {
             unreachable!()
         };
-        let v = super::wait_pack(hijo.pid, code);
+        Some(Ok(if nuevo {
+            abi::waitpid_pack(hijo.pid, abi::WAIT_EXIT, code)
+        } else {
+            super::wait_pack(hijo.pid, code)
+        }))
+    } else if let Some(p) = procs.iter_mut().find(|p| {
+        es_hijo(p) && p.senales.aviso_wait.is_some_and(|(t, _)| super::evento_pedido(t, flags))
+    }) {
+        let (tipo, code) = p.senales.aviso_wait.take().unwrap();
+        Some(Ok(abi::waitpid_pack(p.pid, tipo, code)))
+    } else if flags & abi::WNOHANG != 0 {
+        Some(Ok(0))
+    } else {
+        None
+    };
+    if let Some(r) = resultado {
         drop(procs);
         x86_64::instructions::interrupts::enable();
-        return Ok(v);
+        return r;
     }
     let idx = procs
         .iter()
-        .position(|p| p.pid == pid)
+        .position(|p| p.pid == me)
         .expect("wait sin proceso");
     procs[idx].ctx = ctx_from_frame(f);
-    procs[idx].state = State::WaitingChild;
+    procs[idx].state = State::WaitingChild { filtro, flags, nuevo };
     drop(procs);
     crate::arch::percpu::set_current_pid(0);
     super::schedule();
+}
+
+fn sys_sigaction(sig: u64, manejador: u64, flags: u64, restaurador: u64) -> Result<u64, i64> {
+    if flags != 0
+        || !abi::senal_valida(sig)
+        || abi::SENALES_INCAPTURABLES & abi::sig_bit(sig) != 0
+    {
+        return Err(-abi::EINVAL);
+    }
+    let es_funcion = manejador > abi::SIG_IGN;
+    if es_funcion && (manejador >= USER_MAX || restaurador == 0 || restaurador >= USER_MAX) {
+        return Err(-abi::EFAULT);
+    }
+    let me = super::current_pid();
+    let mut procs = super::PROCS.lock();
+    let yo = procs.iter().position(|p| p.pid == me).ok_or(-abi::ESRCH)?;
+    let anterior = procs[yo].senales.acciones[sig as usize];
+    let esp = procs[yo].space.as_ref().map(|s| s.id());
+    // Ignorarla descarta lo pendiente (POSIX); lo mismo si su defecto es ignorar.
+    let descartar = manejador == abi::SIG_IGN
+        || (manejador == abi::SIG_DFL
+            && matches!(
+                super::senal::defecto(sig),
+                super::senal::Defecto::Ignorar | super::senal::Defecto::Continuar
+            ));
+    // Las acciones son del proceso: todos los hilos del mismo espacio.
+    for p in procs.iter_mut() {
+        if p.pid == me || (esp.is_some() && p.space.as_ref().map(|s| s.id()) == esp) {
+            p.senales.acciones[sig as usize] = manejador;
+            if es_funcion {
+                p.senales.restaurador = restaurador;
+            }
+            if descartar {
+                p.senales.pendientes &= !abi::sig_bit(sig);
+            }
+        }
+    }
+    Ok(anterior)
+}
+
+fn sys_sigprocmask(how: u64, set: u64) -> Result<u64, i64> {
+    let set = set & !abi::SENALES_INCAPTURABLES;
+    super::with_current(|p| {
+        let anterior = p.senales.mascara;
+        p.senales.mascara = match how {
+            abi::SIG_BLOCK => anterior | set,
+            abi::SIG_UNBLOCK => anterior & !set,
+            abi::SIG_SETMASK => set,
+            _ => return Err(-abi::EINVAL),
+        };
+        if p.senales.entregables() != 0 {
+            // Al desbloquear, lo pendiente se entrega antes de volver.
+            super::senal::marcar();
+        }
+        Ok(anterior)
+    })
+}
+
+fn sys_alarm(ms: u64) -> Result<u64, i64> {
+    let ahora = crate::arch::pit::uptime_ms();
+    super::with_current(|p| {
+        let antes = p.senales.alarma_ms;
+        let quedaba = if antes == 0 { 0 } else { antes.saturating_sub(ahora).max(1) };
+        p.senales.alarma_ms = if ms == 0 { 0 } else { ahora.saturating_add(ms) };
+        Ok(quedaba)
+    })
+}
+
+/// Vuelta de un manejador. El marco viene del usuario: [`senal::leer_marco`]
+/// lo valida entero antes de cargar nada en la CPU.
+fn sys_sigreturn(f: &SyscallFrame) -> Result<u64, i64> {
+    let space = super::current_space().ok_or(-abi::EFAULT)?;
+    let Some((ctx, fpu, mascara)) = super::senal::leer_marco(&space, f.user_rsp) else {
+        drop(space);
+        super::kill_current("sigreturn: marco de señal inválido");
+    };
+    drop(space);
+    x86_64::instructions::interrupts::disable();
+    super::with_current(|p| {
+        p.fpu = fpu;
+        p.senales.mascara = mascara;
+    });
+    super::block_current(ctx, State::Runnable);
 }
 
 fn sys_sbrk(delta: i64) -> Result<u64, i64> {
@@ -2130,7 +2327,7 @@ fn proc_state_abi(s: super::State) -> u8 {
         State::Runnable => PROC_STATE_RUNNABLE,
         State::Running => PROC_STATE_RUNNING,
         State::Sleeping(_) => PROC_STATE_SLEEPING,
-        State::WaitingChild => PROC_STATE_WAIT_CHILD,
+        State::WaitingChild { .. } => PROC_STATE_WAIT_CHILD,
         State::WaitingTty { .. } => PROC_STATE_WAIT_TTY,
         State::WaitingPipe { .. } => PROC_STATE_WAIT_PIPE,
         State::WaitingFutex { .. } => PROC_STATE_WAIT_FUTEX,
@@ -2187,7 +2384,11 @@ fn sys_pslist(out: u64, max: u64) -> Result<u64, i64> {
                 info.pid = p.pid;
                 info.ppid = p.parent;
                 info.pgid = p.pgid;
-                info.state = proc_state_abi(p.state);
+                info.state = if p.senales.detenido && !matches!(p.state, State::Zombie(_)) {
+                    abi::PROC_STATE_STOPPED
+                } else {
+                    proc_state_abi(p.state)
+                };
                 if p.is_thread {
                     info.flags |= abi::PROC_FLAG_THREAD;
                 }

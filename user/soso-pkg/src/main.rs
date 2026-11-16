@@ -13,15 +13,27 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use libsoso::{abi, println, sys};
-use soso_pkg_core::{
-    artefacto_remoto, comandos::reconstruir, decidir, indice::Indice, manifest::Manifest,
-    indice_url, parse_version, AccionInstalacion, Conf, MAX_PACK_SIZE,
-};
 use soso_abi::ABI_VERSION;
+use soso_pkg_core::{
+    AccionInstalacion, Conf, MAX_PACK_SIZE, artefacto_remoto,
+    comandos::reconstruir,
+    decidir,
+    indice::{EntradaIndice, Indice},
+    indice_url,
+    manifest::Manifest,
+    parse_version,
+};
 
 libsoso::entry!(main);
 
 const MAX_TXT: usize = 256 * 1024;
+const MAX_DEP_DEPTH: usize = 32;
+
+struct PlanPaquete {
+    entrada: EntradaIndice,
+    manifiesto: Manifest,
+    texto: String,
+}
 
 fn main(args: &[String]) -> u8 {
     activar_paquetes_sistema_instalados();
@@ -206,49 +218,154 @@ fn instalar_remoto(nombre: &str, forzar: bool, origen: &Origen) -> u8 {
             return 1;
         }
     };
-    let Some(ent) = idx.mejor(nombre) else {
-        println!("soso-pkg: «{nombre}» no está en el índice");
+    let mut plan = Vec::new();
+    let mut pila = Vec::new();
+    if !planificar_paquete(nombre, None, &idx, origen, &mut pila, &mut plan) {
         return 1;
-    };
-    let base = match origen {
-        Origen::Local(dir) => dir.clone(),
-        Origen::Remoto(url) => url.clone(),
-    };
-    let url_txt = match origen {
-        Origen::Local(_) => format!(
-            "{}/{}/{}/paquete.txt",
-            base.trim_end_matches('/'),
-            ent.nombre,
-            ent.version_raw
-        ),
-        Origen::Remoto(_) => artefacto_remoto(&base, &ent.nombre, &ent.version_raw, "paquete.txt"),
-    };
-    let url_pack = match origen {
-        Origen::Local(_) => format!(
-            "{}/{}/{}/paquete.pack",
-            base.trim_end_matches('/'),
-            ent.nombre,
-            ent.version_raw
-        ),
-        Origen::Remoto(_) => artefacto_remoto(&base, &ent.nombre, &ent.version_raw, "paquete.pack"),
-    };
-    let man_bytes = match cargar_artefacto(&url_txt, origen) {
-        Ok(b) => b,
-        Err(c) => return c,
-    };
-    let pack = match cargar_artefacto_pack(&url_pack, origen, ent.pack_size) {
-        Ok(b) => b,
-        Err(c) => return c,
-    };
-    let man_text = core::str::from_utf8(&man_bytes).unwrap_or("");
-    let man = match Manifest::parse(man_text) {
-        Ok(m) => m,
-        Err(e) => {
-            println!("soso-pkg: {e}");
+    }
+    for paquete in plan {
+        let url_pack = url_paquete(&paquete.entrada, origen, "paquete.pack");
+        let pack = match cargar_artefacto_pack(&url_pack, origen, paquete.entrada.pack_size) {
+            Ok(b) => b,
+            Err(c) => return c,
+        };
+        if aplicar_manifiesto(paquete.manifiesto, &paquete.texto, &pack, forzar) != 0 {
             return 1;
         }
+    }
+    0
+}
+
+fn planificar_paquete(
+    nombre: &str,
+    requisito: Option<&str>,
+    indice: &Indice,
+    origen: &Origen,
+    pila: &mut Vec<String>,
+    plan: &mut Vec<PlanPaquete>,
+) -> bool {
+    if let Some(p) = plan.iter().find(|p| p.entrada.nombre == nombre) {
+        let ok = requisito
+            .map(|r| soso_pkg_core::version_req::satisface(&p.manifiesto.version, r))
+            .unwrap_or(true);
+        if !ok {
+            println!("soso-pkg: requisitos incompatibles para {nombre}");
+        }
+        return ok;
+    }
+    if pila.iter().any(|n| n == nombre) {
+        println!(
+            "soso-pkg: ciclo de dependencias: {} -> {nombre}",
+            pila.join(" -> ")
+        );
+        return false;
+    }
+    if pila.len() >= MAX_DEP_DEPTH {
+        println!("soso-pkg: dependencias anidadas por encima del límite ({MAX_DEP_DEPTH})");
+        return false;
+    }
+
+    let instalado = requisito.and_then(|r| {
+        manifest_instalada(nombre).filter(|m| soso_pkg_core::version_req::satisface(&m.version, r))
+    });
+    let (entrada, manifiesto, texto) = if let Some(m) = instalado {
+        (None, m, String::new())
+    } else {
+        let entrada = match requisito {
+            Some(r) => indice.mejor_compatible(nombre, r),
+            None => indice.mejor(nombre),
+        };
+        let Some(entrada) = entrada else {
+            if let Some(r) = requisito {
+                println!("soso-pkg: no hay una versión de {nombre} que cumpla {r}");
+            } else {
+                println!("soso-pkg: «{nombre}» no está en el índice");
+            }
+            return false;
+        };
+        let entrada = entrada.clone();
+        let (texto, manifiesto) = match cargar_manifiesto_indice(&entrada, origen) {
+            Ok(x) => x,
+            Err(_) => return false,
+        };
+        if requisito.is_some_and(|r| !soso_pkg_core::version_req::satisface(&manifiesto.version, r))
+        {
+            println!(
+                "soso-pkg: {} no cumple la versión requerida",
+                manifiesto.nombre
+            );
+            return false;
+        }
+        (Some(entrada), manifiesto, texto)
     };
-    aplicar_manifiesto(man, man_text, &pack, forzar)
+
+    pila.push(nombre.into());
+    for dep in &manifiesto.dependencias {
+        if !planificar_paquete(&dep.nombre, Some(&dep.version), indice, origen, pila, plan) {
+            pila.pop();
+            return false;
+        }
+    }
+    pila.pop();
+    if let Some(entrada) = entrada {
+        plan.push(PlanPaquete {
+            entrada,
+            manifiesto,
+            texto,
+        });
+    }
+    true
+}
+
+fn cargar_manifiesto_indice(
+    entrada: &EntradaIndice,
+    origen: &Origen,
+) -> Result<(String, Manifest), u8> {
+    let url = url_paquete(entrada, origen, "paquete.txt");
+    let bytes = cargar_artefacto(&url, origen)?;
+    if bytes.len() as u64 != entrada.txt_size
+        || soso_update_core::hex_sha256(&bytes) != entrada.txt_hash
+    {
+        println!(
+            "soso-pkg: manifiesto de {} no coincide con el índice",
+            entrada.nombre
+        );
+        return Err(1);
+    }
+    let text = core::str::from_utf8(&bytes)
+        .map_err(|_| {
+            println!("soso-pkg: manifiesto de {} no es UTF-8", entrada.nombre);
+            1
+        })?
+        .to_string();
+    let man = Manifest::parse(&text).map_err(|e| {
+        println!("soso-pkg: {e}");
+        1
+    })?;
+    if man.nombre != entrada.nombre || man.version_raw != entrada.version_raw {
+        println!("soso-pkg: nombre o versión del manifiesto no coincide con el índice");
+        return Err(1);
+    }
+    if man.pack_size() != entrada.pack_size {
+        println!("soso-pkg: tamaño declarado del pack no coincide con el índice");
+        return Err(1);
+    }
+    Ok((text, man))
+}
+
+fn url_paquete(entrada: &EntradaIndice, origen: &Origen, fichero: &str) -> String {
+    match origen {
+        Origen::Local(dir) => format!(
+            "{}/{}/{}/{}",
+            dir.trim_end_matches('/'),
+            entrada.nombre,
+            entrada.version_raw,
+            fichero
+        ),
+        Origen::Remoto(base) => {
+            artefacto_remoto(base, &entrada.nombre, &entrada.version_raw, fichero)
+        }
+    }
 }
 
 fn cargar_artefacto(url: &str, origen: &Origen) -> Result<Vec<u8>, u8> {
@@ -326,6 +443,9 @@ fn aplicar_manifiesto(man: Manifest, man_text: &str, pack: &[u8], forzar: bool) 
         println!("soso-pkg: {e}");
         return 1;
     }
+    if !dependencias_cumplidas(&man) || !dependientes_compatibles(&man.nombre, Some(&man.version)) {
+        return 1;
+    }
     let local = version_instalada(&man.nombre);
     match decidir(&man.version, local.as_ref(), forzar) {
         AccionInstalacion::YaInstalado => {
@@ -343,7 +463,8 @@ fn aplicar_manifiesto(man: Manifest, man_text: &str, pack: &[u8], forzar: bool) 
     } else {
         0
     };
-    let necesita = man.pack_size()
+    let necesita = man
+        .pack_size()
         .saturating_add(man_text.len() as u64 + 4096)
         .saturating_add(respaldo);
     if fs::espacio_libre() < necesita {
@@ -389,11 +510,52 @@ fn aplicar_manifiesto(man: Manifest, man_text: &str, pack: &[u8], forzar: bool) 
         println!("soso-pkg: {msg}");
         return 1;
     }
-    println!(
-        "soso-pkg: {} {} instalado",
-        man.nombre, man.version_raw
-    );
+    println!("soso-pkg: {} {} instalado", man.nombre, man.version_raw);
     0
+}
+
+fn dependencias_cumplidas(man: &Manifest) -> bool {
+    for dep in &man.dependencias {
+        let Some(instalado) = manifest_instalada(&dep.nombre) else {
+            println!(
+                "soso-pkg: falta la dependencia {} {}",
+                dep.nombre, dep.version
+            );
+            return false;
+        };
+        if !soso_pkg_core::version_req::satisface(&instalado.version, &dep.version) {
+            println!(
+                "soso-pkg: {} {} no cumple {} {}",
+                dep.nombre, instalado.version_raw, dep.nombre, dep.version
+            );
+            return false;
+        }
+    }
+    true
+}
+
+fn dependientes_compatibles(nombre: &str, version: Option<&soso_update_core::SemVer>) -> bool {
+    for (instalado, man) in paquetes_instalados() {
+        if instalado == nombre {
+            continue;
+        }
+        for dep in &man.dependencias {
+            if dep.nombre != nombre {
+                continue;
+            }
+            if !version.is_some_and(|v| soso_pkg_core::version_req::satisface(v, &dep.version)) {
+                let objetivo = version
+                    .map(|v| format!("{}.{}.{}", v.major, v.minor, v.patch))
+                    .unwrap_or_else(|| "ausente".into());
+                println!(
+                    "soso-pkg: {instalado} requiere {nombre} {}, incompatible con {objetivo}",
+                    dep.version
+                );
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn espacio_respaldo_sistema(man: &Manifest) -> u64 {
@@ -406,9 +568,9 @@ fn espacio_respaldo_sistema(man: &Manifest) -> u64 {
         };
         let copia_previa = format!("{raiz}/.respaldo/{}", f.path);
         let ausente = format!("{copia_previa}.ausente");
-        let mismo_archivo = anterior.as_ref().is_some_and(|m| {
-            m.destino_sistema && m.files.iter().any(|old| old.path == f.path)
-        });
+        let mismo_archivo = anterior
+            .as_ref()
+            .is_some_and(|m| m.destino_sistema && m.files.iter().any(|old| old.path == f.path));
         let tam = if mismo_archivo && fs::exists(&copia_previa) {
             fs::read_bytes(&copia_previa, MAX_PACK_SIZE as usize)
                 .map_or(MAX_PACK_SIZE as u64, |data| data.len() as u64)
@@ -432,9 +594,10 @@ fn preparar_respaldo_sistema(man: &Manifest, staging: &str) -> Result<(), ()> {
         };
         let backup = format!("{staging}/.respaldo/{}", f.path);
         let ausente = format!("{backup}.ausente");
-        if anterior.as_ref().is_some_and(|m| {
-            m.destino_sistema && m.files.iter().any(|old| old.path == f.path)
-        }) {
+        if anterior
+            .as_ref()
+            .is_some_and(|m| m.destino_sistema && m.files.iter().any(|old| old.path == f.path))
+        {
             let old_backup = format!("{raiz}/.respaldo/{}", f.path);
             let old_ausente = format!("{old_backup}.ausente");
             if let Some(data) = fs::read_bytes(&old_backup, MAX_PACK_SIZE as usize) {
@@ -511,7 +674,9 @@ fn activar_paquetes_sistema_instalados() {
                     let _ = escribir_ruta_sistema(&ausente, b"1");
                 }
             }
-            if let Some(data) = fs::read_bytes(&format!("{raiz}/{}", f.path), MAX_PACK_SIZE as usize) {
+            if let Some(data) =
+                fs::read_bytes(&format!("{raiz}/{}", f.path), MAX_PACK_SIZE as usize)
+            {
                 let _ = escribir_ruta_sistema(&destino, &data);
             }
         }
@@ -622,6 +787,9 @@ fn cmd_borrar(nombre: &str) -> u8 {
     let dest = format!("/var/paquetes/{nombre}");
     if !fs::exists(&dest) {
         println!("soso-pkg: «{nombre}» no está instalado");
+        return 1;
+    }
+    if !dependientes_compatibles(nombre, None) {
         return 1;
     }
     if proceso_usa_paquete(nombre) {

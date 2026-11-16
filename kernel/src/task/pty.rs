@@ -91,7 +91,10 @@ pub fn set_size(slot: u8, cols: u32, rows: u32) -> Result<(), i64> {
         return Err(-soso_abi::EINVAL);
     }
     let c = colas(slot as usize).ok_or(-soso_abi::EINVAL)?;
-    *c.size.lock() = (cols, rows);
+    let antes = core::mem::replace(&mut *c.size.lock(), (cols, rows));
+    if antes != (cols, rows) {
+        task::signal_console(Console::Pty(slot), soso_abi::SIGWINCH as u8);
+    }
     Ok(())
 }
 
@@ -198,8 +201,8 @@ pub fn master_write(slot: u8, data: &[u8]) {
     };
     let console = Console::Pty(slot);
     for &b in data {
-        if b == 0x03 {
-            task::signal_console(console, soso_abi::SIGINT as u8);
+        if let Some(sig) = task::senal_de_tecla(b) {
+            task::signal_console(console, sig as u8);
             continue;
         }
         c.rx.lock().push_back(b);

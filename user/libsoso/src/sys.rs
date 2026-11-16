@@ -257,6 +257,19 @@ pub fn wait() -> Result<(u64, u8), i64> {
     if v < 0 { Err(v) } else { Ok(abi::wait_decode(v)) }
 }
 
+/// `waitpid(pid, flags)`: `Ok(None)` con `WNOHANG` y nada que recoger; si no,
+/// `(pid, tipo, código)` con `tipo` en `abi::WAIT_EXIT/STOP/CONT`.
+pub fn waitpid(pid: i64, flags: u64) -> Result<Option<(u64, u8, u8)>, i64> {
+    let v = syscall4(abi::SYS_WAITPID, pid as u64, flags, 0, 0);
+    if v < 0 {
+        Err(v)
+    } else if v == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(abi::waitpid_decode(v as u64)))
+    }
+}
+
 pub fn getpid() -> u64 {
     syscall1(abi::SYS_GETPID, 0) as u64
 }

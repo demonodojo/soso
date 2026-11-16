@@ -5,10 +5,10 @@
 
 extern crate alloc;
 
-#[cfg(feature = "std")]
-pub mod empaquetar;
 pub mod comandos;
 pub mod conf;
+#[cfg(feature = "std")]
+pub mod empaquetar;
 pub mod fuente;
 pub mod indice;
 pub mod manifest;
@@ -16,17 +16,21 @@ pub mod oferta;
 pub mod pack;
 pub mod rutas;
 pub mod urls;
+pub mod version_req;
 
-pub use comandos::{entrada_comando, EntradaComando, IndiceComandos};
+pub use comandos::{EntradaComando, IndiceComandos, entrada_comando};
 pub use conf::Conf;
 pub use fuente::Fuente;
 #[cfg(feature = "std")]
 pub use fuente::MemFuente;
 pub use indice::{EntradaIndice, Indice, ParseIndiceError};
-pub use manifest::{FileEntry, Manifest, ParseManifestError, ValidateError, MANIFEST_MAGIC};
-pub use oferta::{decidir, parse_version, AccionInstalacion};
+pub use manifest::{
+    Dependency, FileEntry, MANIFEST_MAGIC, MANIFEST_MAGIC_V2, Manifest, ParseManifestError,
+    ValidateError,
+};
+pub use oferta::{AccionInstalacion, decidir, parse_version};
 pub use pack::PackReader;
-pub use rutas::{nombre_valido, ruta_valida, RutaError};
+pub use rutas::{RutaError, nombre_valido, ruta_valida};
 pub use urls::{artefacto_remoto, indice_url};
 
 /// Tope del `.pack` (64 MiB).

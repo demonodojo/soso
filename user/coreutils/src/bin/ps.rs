@@ -21,6 +21,7 @@ fn estado_texto(s: u8) -> &'static str {
         abi::PROC_STATE_WAIT_FUTEX => "futex",
         abi::PROC_STATE_WAIT_SOCKET => "socket",
         abi::PROC_STATE_ZOMBIE => "zombi",
+        abi::PROC_STATE_STOPPED => "parado",
         _ => "?",
     }
 }

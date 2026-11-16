@@ -63,6 +63,23 @@ impl FpuArea {
     }
 }
 
+/// ¿Se puede pasar esta imagen a `xrstor` sin que la CPU levante #GP?
+///
+/// Hace falta para `sigreturn`: la imagen viene de la pila del usuario, y un
+/// #GP dentro de `xrstor` sería un fallo **del kernel**, no del proceso. Las
+/// condiciones son las del SDM para el formato estándar (no compactado):
+/// ningún bit de `XSTATE_BV` fuera de lo que restauramos, `XCOMP_BV = 0`, el
+/// resto de la cabecera a cero y ningún bit reservado en MXCSR.
+pub fn imagen_valida(area: &[u8; 1024]) -> bool {
+    let u64_en = |off: usize| u64::from_le_bytes(area[off..off + 8].try_into().unwrap());
+    let mxcsr = u32::from_le_bytes(area[24..28].try_into().unwrap());
+    // 0xFFBF: la máscara conservadora (sin DAZ). Es la que pone `inicial`.
+    mxcsr & !0xFFBF == 0
+        && u64_en(512) & !XSAVE_MASK == 0
+        && u64_en(520) == 0
+        && area[528..576].iter().all(|&b| b == 0)
+}
+
 /// # Safety
 /// XSAVE habilitado (XCR0 con x87|SSE|AVX) y `area` alineada a 64
 /// (garantizado por el tipo).

@@ -7,6 +7,7 @@ extern crate alloc;
 
 pub mod glob;
 pub mod linea;
+pub mod senal;
 pub mod sys;
 pub mod thread;
 pub mod ventana;
