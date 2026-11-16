@@ -1128,8 +1128,8 @@ paquete también se pueden ejecutar desde **sosh** mediante el mapa de
 
 ```sh
 soso-pkg listar
-soso-pkg buscar [texto]              # requiere url= en /etc/paquetes.conf
-soso-pkg instalar demo               # desde el repositorio configurado
+soso-pkg buscar [texto]              # en todos los repositorios configurados
+soso-pkg instalar demo               # desde los repositorios configurados
 soso-pkg instalar /ruta/al/paquete   # directorio con paquete.txt (+ paquete.pack o ficheros sueltos)
 soso-pkg actualizar                  # todos los instalados con versión remota mayor
 soso-pkg borrar demo
@@ -1142,18 +1142,28 @@ el índice, el gestor resuelve e instala primero las dependencias; no permite
 borrar ni degradar una versión que deje dependientes instalados incompatibles.
 Los manifiestos v1 siguen siendo válidos y representan paquetes sin dependencias.
 
-Configuración remota en `/etc/paquetes.conf`:
+Configuración remota en `/etc/paquetes.conf`: `url=` es el repositorio de soso
+y cada `origen=` añade otro, en orden de prioridad. El compilador **Sal** lo
+publica su propio repositorio:
 
 ```text
 url=https://raw.githubusercontent.com/demonodojo/soso/main/rootfs/share/paquetes
+origen=https://raw.githubusercontent.com/demonodojo/sal/main/paquetes
 ```
+
+Sin ninguna línea `origen=` se usa el de Sal igualmente; `origen=ninguno` deja
+sólo el de soso. Si hay el mismo paquete en dos repositorios gana la versión
+más alta (y, si empatan, el que va antes), y las dependencias pueden venir de
+otro repositorio. Un repositorio que no responde no impide usar los demás:
+`soso-pkg` avisa con `sigo sin el origen …`. Con más de un repositorio, `buscar`
+dice de cuál sale cada paquete.
 
 Para probar sin red: `soso-pkg instalar /share/paquetes-prueba/v1` (fixture en la
 imagen de prueba). El navegador **soso-web** suele venir precargado en
 `/var/paquetes/soso-web/`; también puedes instalarlo con
 `soso-pkg instalar /share/paquetes/soso-web/1.0.0`. Sin `--forzar` solo se instala una versión **mayor**; para
 reinstalar o bajar versión, añade `--forzar`. `--origen DIR` usa un índice y
-paquetes locales en lugar de HTTPS.
+paquetes locales en lugar de HTTPS; se puede repetir para combinar varios.
 
 En una instalación existente cuyo `/etc/paquetes.conf` aún no tenga `url=`,
 configura el repositorio una vez y actualiza el gestor y el editor:
@@ -1166,8 +1176,10 @@ soso-pkg instalar soso-ed
 soso-pkg instalar sal
 ```
 
-`sal` requiere `soso-pkg >=0.3.0`; la instalación de `sal` con este gestor
-resuelve esa dependencia desde el índice.
+`sal` necesita `soso-pkg` 0.4.0 o posterior para encontrarlo (es el primero
+que lee el repositorio de Sal); con un gestor anterior, instala antes
+`soso-pkg`. La dependencia `soso-pkg >=0.3.0` de `sal` se resuelve desde el
+repositorio de soso.
 
 La orden con ruta absoluta ejecuta el gestor nuevo una vez; este activa en
 `/bin` y `/lib/sal` los paquetes del sistema que el gestor anterior instaló

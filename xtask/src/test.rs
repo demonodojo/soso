@@ -951,6 +951,11 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 ssh_soso_pkg(key, port)
             });
         });
+        filter.if_step(sid, "soso-pkg: varios orígenes", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "soso-pkg: varios orígenes", || {
+                ssh_soso_pkg_origenes(key, port)
+            });
+        });
         filter.if_step(sid, "opencode-sal: instalar y --version", || {
             report.paso_ssh_sys(&mut qemu, slot, sid, "opencode-sal: instalar y --version", || {
                 ssh_opencode_sal(key, port)
@@ -2776,6 +2781,35 @@ exit
     }
     if !marca("BORRADO_OK") {
         return Err(format!("borrar demo falló; stdout: {texto:?}"));
+    }
+    Ok(())
+}
+
+/// Varios orígenes: el primero no existe (se avisa y se sigue), `demo` sale
+/// de `origen-b` y su dependencia `demo-base` de `origen-a`.
+fn ssh_soso_pkg_origenes(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let o = "--origen /no/existe --origen /share/paquetes-prueba/origen-a --origen /share/paquetes-prueba/origen-b";
+    let guion = format!(
+        "soso-pkg buscar demo {o}\nsoso-pkg instalar demo {o}\nsoso-pkg listar\npkg-demo && echo MULTI_OK\nsoso-pkg borrar demo && echo BORRA_DEMO\nsoso-pkg borrar demo-base && echo BORRA_BASE\nexit\n"
+    );
+    let texto = ssh_guion(key, ssh_port, &guion, Duration::from_secs(120))?;
+    let marca = |m: &str| texto.lines().any(|l| l.trim() == m);
+    for esperado in [
+        "sigo sin el origen /no/existe",
+        "demo-base  1.0.0  (/share/paquetes-prueba/origen-a)",
+        "demo  2.0.0  (/share/paquetes-prueba/origen-b)",
+        "demo  2.0.0  demo",
+        "demo-base  1.0.0  demo-base",
+        "pkg-demo: ok",
+    ] {
+        if !texto.contains(esperado) {
+            return Err(format!("falta {esperado:?}; stdout: {texto:?}"));
+        }
+    }
+    for m in ["MULTI_OK", "BORRA_DEMO", "BORRA_BASE"] {
+        if !marca(m) {
+            return Err(format!("falta la marca {m}; stdout: {texto:?}"));
+        }
     }
     Ok(())
 }

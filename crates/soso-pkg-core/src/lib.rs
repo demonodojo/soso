@@ -19,11 +19,11 @@ pub mod urls;
 pub mod version_req;
 
 pub use comandos::{EntradaComando, IndiceComandos, entrada_comando};
-pub use conf::Conf;
+pub use conf::{Conf, ORIGEN_SAL, ORIGEN_SOSO};
 pub use fuente::Fuente;
 #[cfg(feature = "std")]
 pub use fuente::MemFuente;
-pub use indice::{EntradaIndice, Indice, ParseIndiceError};
+pub use indice::{Catalogo, EntradaIndice, Indice, ParseIndiceError};
 pub use manifest::{
     Dependency, FileEntry, MANIFEST_MAGIC, MANIFEST_MAGIC_V2, Manifest, ParseManifestError,
     ValidateError,

@@ -18,7 +18,7 @@ use soso_pkg_core::{
     AccionInstalacion, Conf, MAX_PACK_SIZE, artefacto_remoto,
     comandos::reconstruir,
     decidir,
-    indice::{EntradaIndice, Indice},
+    indice::{Catalogo, EntradaIndice, Indice},
     indice_url,
     manifest::Manifest,
     parse_version,
@@ -31,6 +31,8 @@ const MAX_DEP_DEPTH: usize = 32;
 
 struct PlanPaquete {
     entrada: EntradaIndice,
+    /// Posición del origen en la lista con la que se cargó el catálogo.
+    origen: usize,
     manifiesto: Manifest,
     texto: String,
 }
@@ -44,17 +46,18 @@ fn main(args: &[String]) -> u8 {
     let mut it = args.iter().map(|s| s.as_str());
     let cmd = it.next().unwrap();
     let mut forzar = false;
-    let mut origen: Option<String> = None;
+    // `--origen DIR` se puede repetir: varios repositorios locales, en orden.
+    let mut origen: Vec<String> = Vec::new();
     let mut resto: Vec<&str> = Vec::new();
     while let Some(a) = it.next() {
         if a == "--forzar" {
             forzar = true;
         } else if a == "--origen" {
-            origen = it.next().map(|s| s.to_string());
-            if origen.is_none() {
+            let Some(dir) = it.next() else {
                 println!("soso-pkg: --origen requiere un directorio");
                 return 2;
-            }
+            };
+            origen.push(dir.to_string());
         } else {
             resto.push(a);
         }
@@ -63,16 +66,16 @@ fn main(args: &[String]) -> u8 {
         "listar" => cmd_listar(),
         "buscar" => {
             let filtro = resto.first().copied();
-            cmd_buscar(filtro, origen.as_deref())
+            cmd_buscar(filtro, &origen)
         }
         "instalar" => {
             let Some(arg) = resto.first() else {
                 println!("uso: soso-pkg instalar <nombre|DIR> [--forzar] [--origen DIR]");
                 return 2;
             };
-            cmd_instalar(arg, forzar, origen.as_deref())
+            cmd_instalar(arg, forzar, &origen)
         }
-        "actualizar" => cmd_actualizar(resto.first().copied(), forzar, origen.as_deref()),
+        "actualizar" => cmd_actualizar(resto.first().copied(), forzar, &origen),
         "borrar" => {
             let Some(n) = resto.first() else {
                 println!("uso: soso-pkg borrar <nombre>");
@@ -89,9 +92,10 @@ fn main(args: &[String]) -> u8 {
 
 fn uso() {
     println!("soso-pkg listar");
-    println!("soso-pkg buscar [texto] [--origen DIR]");
-    println!("soso-pkg instalar <nombre|DIR> [--forzar] [--origen DIR]");
-    println!("soso-pkg actualizar [nombre] [--forzar] [--origen DIR]");
+    println!("soso-pkg buscar [texto] [--origen DIR]…");
+    println!("soso-pkg instalar <nombre|DIR> [--forzar] [--origen DIR]…");
+    println!("soso-pkg actualizar [nombre] [--forzar] [--origen DIR]…");
+    println!("orígenes: url= y origen= en /etc/paquetes.conf (por defecto, soso y Sal)");
     println!("soso-pkg borrar <nombre>");
 }
 
@@ -99,7 +103,11 @@ fn cmd_listar() -> u8 {
     fs::mkdir_all("/var/paquetes");
     for n in fs::list_dir("/var/paquetes") {
         if n.starts_with('.') {
-            if n == ".staging" || n == ".viejo" {
+            // Tras una instalación buena el directorio queda vacío: sólo es
+            // una instalación a medias si dentro queda algún paquete.
+            if (n == ".staging" || n == ".viejo")
+                && !fs::list_dir(&format!("/var/paquetes/{n}")).is_empty()
+            {
                 println!("  (incompleto: {n})");
             }
             continue;
@@ -118,22 +126,21 @@ fn cmd_listar() -> u8 {
     0
 }
 
-fn resolver_origen(origen_cli: Option<&str>) -> Result<Origen, u8> {
-    if let Some(dir) = origen_cli {
-        return Ok(Origen::Local(normalizar_dir(dir)));
+/// Orígenes en orden de prioridad: los `--origen` de la línea de órdenes o, si
+/// no hay, los de `/etc/paquetes.conf`.
+fn resolver_origenes(cli: &[String]) -> Vec<Origen> {
+    if !cli.is_empty() {
+        return cli.iter().map(|d| Origen::Local(normalizar_dir(d))).collect();
     }
-    let conf = Conf::parse(
+    Conf::parse(
         &fs::read_bytes("/etc/paquetes.conf", 4096)
             .map(|b| String::from_utf8_lossy(&b).into_owned())
             .unwrap_or_default(),
-    );
-    if let Some(url) = conf.url {
-        Ok(Origen::Remoto(url))
-    } else {
-        Ok(Origen::Remoto(String::from(
-            "https://raw.githubusercontent.com/demonodojo/soso/main/rootfs/share/paquetes",
-        )))
-    }
+    )
+    .origenes_efectivos()
+    .into_iter()
+    .map(Origen::Remoto)
+    .collect()
 }
 
 enum Origen {
@@ -141,31 +148,62 @@ enum Origen {
     Remoto(String),
 }
 
-fn cmd_buscar(filtro: Option<&str>, origen_cli: Option<&str>) -> u8 {
-    let origen = match resolver_origen(origen_cli) {
-        Ok(o) => o,
+impl Origen {
+    /// Para los mensajes: sin `https://` ni el prefijo de raw.githubusercontent.
+    fn etiqueta(&self) -> String {
+        match self {
+            Origen::Local(d) => d.clone(),
+            Origen::Remoto(u) => {
+                let u = u.trim_start_matches("https://").trim_end_matches('/');
+                u.strip_prefix("raw.githubusercontent.com/")
+                    .map(|r| format!("github.com/{r}"))
+                    .unwrap_or_else(|| u.to_string())
+            }
+        }
+    }
+}
+
+/// Índice de cada origen. Un origen que no responde no tumba a los demás: se
+/// avisa y se sigue; sólo falla si no queda ninguno. Devuelve los orígenes que
+/// sí cargaron, en el mismo orden que los índices del catálogo.
+fn cargar_catalogo(origenes: Vec<Origen>) -> Result<(Catalogo, Vec<Origen>), u8> {
+    let mut cat = Catalogo::default();
+    let mut vivos = Vec::new();
+    for origen in origenes {
+        let Ok(bytes) = cargar_indice(&origen) else {
+            println!("soso-pkg: sigo sin el origen {}", origen.etiqueta());
+            continue;
+        };
+        let Ok(text) = core::str::from_utf8(&bytes) else {
+            println!("soso-pkg: índice no UTF-8 en {}", origen.etiqueta());
+            continue;
+        };
+        match Indice::parse(text) {
+            Ok(i) => {
+                cat.indices.push(i);
+                vivos.push(origen);
+            }
+            Err(e) => println!("soso-pkg: {} ({e})", origen.etiqueta()),
+        }
+    }
+    if vivos.is_empty() {
+        println!("soso-pkg: ningún origen de paquetes disponible");
+        return Err(1);
+    }
+    Ok((cat, vivos))
+}
+
+fn cmd_buscar(filtro: Option<&str>, origen_cli: &[String]) -> u8 {
+    let (cat, origenes) = match cargar_catalogo(resolver_origenes(origen_cli)) {
+        Ok(x) => x,
         Err(c) => return c,
     };
-    let idx_bytes = match cargar_indice(&origen) {
-        Ok(b) => b,
-        Err(c) => return c,
-    };
-    let text = match core::str::from_utf8(&idx_bytes) {
-        Ok(t) => t,
-        Err(_) => {
-            println!("soso-pkg: índice no UTF-8");
-            return 1;
+    for (o, e) in cat.buscar(filtro) {
+        if origenes.len() > 1 {
+            println!("{}  {}  ({})", e.nombre, e.version_raw, origenes[o].etiqueta());
+        } else {
+            println!("{}  {}", e.nombre, e.version_raw);
         }
-    };
-    let idx = match Indice::parse(text) {
-        Ok(i) => i,
-        Err(e) => {
-            println!("soso-pkg: {e}");
-            return 1;
-        }
-    };
-    for e in idx.buscar(filtro) {
-        println!("{}  {}", e.nombre, e.version_raw);
     }
     0
 }
@@ -180,21 +218,21 @@ fn cargar_indice(origen: &Origen) -> Result<Vec<u8>, u8> {
             })
         }
         Origen::Remoto(base) => net::https_get(&indice_url(base)).map_err(|e| {
-            println!("soso-pkg: índice ({e})");
+            println!("soso-pkg: índice de {} ({e})", origen.etiqueta());
             1
         }),
     }
 }
 
-fn cmd_instalar(arg: &str, forzar: bool, origen_cli: Option<&str>) -> u8 {
+fn cmd_instalar(arg: &str, forzar: bool, origen_cli: &[String]) -> u8 {
     if arg.starts_with('/') || arg.starts_with("./") || arg.contains('/') {
         return instalar_local(normalizar_dir(arg), forzar);
     }
-    let origen = match resolver_origen(origen_cli) {
-        Ok(o) => o,
+    let (cat, origenes) = match cargar_catalogo(resolver_origenes(origen_cli)) {
+        Ok(x) => x,
         Err(c) => return c,
     };
-    instalar_remoto(arg, forzar, &origen)
+    instalar_remoto(arg, forzar, &cat, &origenes)
 }
 
 fn normalizar_dir(p: &str) -> String {
@@ -205,25 +243,14 @@ fn normalizar_dir(p: &str) -> String {
     }
 }
 
-fn instalar_remoto(nombre: &str, forzar: bool, origen: &Origen) -> u8 {
-    let idx_bytes = match cargar_indice(origen) {
-        Ok(b) => b,
-        Err(c) => return c,
-    };
-    let text = core::str::from_utf8(&idx_bytes).unwrap_or("");
-    let idx = match Indice::parse(text) {
-        Ok(i) => i,
-        Err(e) => {
-            println!("soso-pkg: {e}");
-            return 1;
-        }
-    };
+fn instalar_remoto(nombre: &str, forzar: bool, cat: &Catalogo, origenes: &[Origen]) -> u8 {
     let mut plan = Vec::new();
     let mut pila = Vec::new();
-    if !planificar_paquete(nombre, None, &idx, origen, &mut pila, &mut plan) {
+    if !planificar_paquete(nombre, None, cat, origenes, &mut pila, &mut plan) {
         return 1;
     }
     for paquete in plan {
+        let origen = &origenes[paquete.origen];
         let url_pack = url_paquete(&paquete.entrada, origen, "paquete.pack");
         let pack = match cargar_artefacto_pack(&url_pack, origen, paquete.entrada.pack_size) {
             Ok(b) => b,
@@ -239,8 +266,8 @@ fn instalar_remoto(nombre: &str, forzar: bool, origen: &Origen) -> u8 {
 fn planificar_paquete(
     nombre: &str,
     requisito: Option<&str>,
-    indice: &Indice,
-    origen: &Origen,
+    cat: &Catalogo,
+    origenes: &[Origen],
     pila: &mut Vec<String>,
     plan: &mut Vec<PlanPaquete>,
 ) -> bool {
@@ -272,10 +299,10 @@ fn planificar_paquete(
         (None, m, String::new())
     } else {
         let entrada = match requisito {
-            Some(r) => indice.mejor_compatible(nombre, r),
-            None => indice.mejor(nombre),
+            Some(r) => cat.mejor_compatible(nombre, r),
+            None => cat.mejor(nombre),
         };
-        let Some(entrada) = entrada else {
+        let Some((origen, entrada)) = entrada else {
             if let Some(r) = requisito {
                 println!("soso-pkg: no hay una versión de {nombre} que cumpla {r}");
             } else {
@@ -284,7 +311,7 @@ fn planificar_paquete(
             return false;
         };
         let entrada = entrada.clone();
-        let (texto, manifiesto) = match cargar_manifiesto_indice(&entrada, origen) {
+        let (texto, manifiesto) = match cargar_manifiesto_indice(&entrada, &origenes[origen]) {
             Ok(x) => x,
             Err(_) => return false,
         };
@@ -296,20 +323,21 @@ fn planificar_paquete(
             );
             return false;
         }
-        (Some(entrada), manifiesto, texto)
+        (Some((origen, entrada)), manifiesto, texto)
     };
 
     pila.push(nombre.into());
     for dep in &manifiesto.dependencias {
-        if !planificar_paquete(&dep.nombre, Some(&dep.version), indice, origen, pila, plan) {
+        if !planificar_paquete(&dep.nombre, Some(&dep.version), cat, origenes, pila, plan) {
             pila.pop();
             return false;
         }
     }
     pila.pop();
-    if let Some(entrada) = entrada {
+    if let Some((origen, entrada)) = entrada {
         plan.push(PlanPaquete {
             entrada,
+            origen,
             manifiesto,
             texto,
         });
@@ -620,6 +648,14 @@ fn preparar_respaldo_sistema(man: &Manifest, staging: &str) -> Result<(), ()> {
     Ok(())
 }
 
+/// ¿Tiene ya `destino` el contenido que dice el manifiesto? Primero el
+/// tamaño (barato) y sólo si coincide, el hash.
+fn destino_al_dia(destino: &str, f: &soso_pkg_core::FileEntry) -> bool {
+    fs::size(destino) == Some(f.size)
+        && fs::read_bytes(destino, f.size as usize + 1)
+            .is_some_and(|b| soso_update_core::hex_sha256(&b) == f.hash_hex)
+}
+
 fn escribir_ruta_sistema(path: &str, data: &[u8]) -> Result<(), ()> {
     if let Some(fin) = path.rfind('/') {
         fs::mkdir_all(&path[..fin]);
@@ -673,6 +709,14 @@ fn activar_paquetes_sistema_instalados() {
                 } else {
                     let _ = escribir_ruta_sistema(&ausente, b"1");
                 }
+            }
+            // Sólo si hace falta: reescribir un destino al día cambia su inodo,
+            // y si es un ejecutable en marcha —el propio /bin/soso-pkg, que
+            // pasa por aquí en cada ejecución— pierde las páginas que aún no
+            // había cargado y muere con un page fault al final de la orden.
+            // Además así no se copian en cada orden los 37 MB de `sal`.
+            if destino_al_dia(&destino, f) {
+                continue;
             }
             if let Some(data) =
                 fs::read_bytes(&format!("{raiz}/{}", f.path), MAX_PACK_SIZE as usize)
@@ -743,22 +787,10 @@ fn reconstruir_comandos() -> Result<(), String> {
         .map_err(|_| "no pude escribir comandos".into())
 }
 
-fn cmd_actualizar(nombre: Option<&str>, forzar: bool, origen_cli: Option<&str>) -> u8 {
-    let origen = match resolver_origen(origen_cli) {
-        Ok(o) => o,
+fn cmd_actualizar(nombre: Option<&str>, forzar: bool, origen_cli: &[String]) -> u8 {
+    let (cat, origenes) = match cargar_catalogo(resolver_origenes(origen_cli)) {
+        Ok(x) => x,
         Err(c) => return c,
-    };
-    let idx_bytes = match cargar_indice(&origen) {
-        Ok(b) => b,
-        Err(c) => return c,
-    };
-    let text = core::str::from_utf8(&idx_bytes).unwrap_or("");
-    let idx = match Indice::parse(text) {
-        Ok(i) => i,
-        Err(e) => {
-            println!("soso-pkg: {e}");
-            return 1;
-        }
     };
     let instalados = paquetes_instalados();
     let mut rc = 0u8;
@@ -766,7 +798,7 @@ fn cmd_actualizar(nombre: Option<&str>, forzar: bool, origen_cli: Option<&str>) 
         if nombre.is_some_and(|filtro| filtro != n) {
             continue;
         }
-        let Some(ent) = idx.mejor(&n) else {
+        let Some((_, ent)) = cat.mejor(&n) else {
             continue;
         };
         let rem = match parse_version(&ent.version_raw) {
@@ -776,7 +808,7 @@ fn cmd_actualizar(nombre: Option<&str>, forzar: bool, origen_cli: Option<&str>) 
         if decidir(&rem, Some(&man.version), forzar) != AccionInstalacion::Actualizar {
             continue;
         }
-        if instalar_remoto(&n, forzar, &origen) != 0 {
+        if instalar_remoto(&n, forzar, &cat, &origenes) != 0 {
             rc = 1;
         }
     }

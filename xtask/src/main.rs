@@ -30,6 +30,7 @@ fn main() {
     match cmd.as_str() {
         "sal-build" => sal::build(&std::env::args().skip(2).collect::<Vec<_>>()),
         "sal-pack" => sal::pack(),
+        "sal-paquete" => sal::paquete(&std::env::args().skip(2).collect::<Vec<_>>()),
         "sal-fetch" => sal::fetch(),
         "test-sal" => sal::test(),
         "build" => {
@@ -1046,6 +1047,37 @@ fn write_paquete_prueba(root: &Path) {
         let _ = std::fs::write(dst.join("paquete.txt"), man);
         let _ = std::fs::write(dst.join("paquete.pack"), &data);
         let _ = std::fs::write(dst.join("bin/pkg-demo"), &data);
+    }
+    // Dos repositorios para `soso-pkg … --origen A --origen B`: `demo` 2.0.0
+    // está en B y depende de `demo-base`, que sólo está en A. Así se prueba que
+    // las dependencias se resuelven entre orígenes, como `sal` (repositorio de
+    // Sal) con `soso-pkg` (repositorio de soso).
+    let publicar = |origen: &str, nombre: &str, ver: &str, bin: &str, dep: Option<&str>| {
+        let Ok((_, pack, mut man)) = soso_pkg_core::empaquetar::empaquetar(
+            nombre,
+            ver,
+            None,
+            vec![(format!("bin/{bin}"), data.clone())],
+        ) else {
+            return;
+        };
+        if let Some(dep) = dep {
+            man.dependencias.push(soso_pkg_core::Dependency {
+                nombre: dep.into(),
+                version: ">=1.0.0".into(),
+            });
+        }
+        let dst = base.join(origen).join(nombre).join(ver);
+        let _ = std::fs::create_dir_all(&dst);
+        let _ = std::fs::write(dst.join("paquete.txt"), man.format());
+        let _ = std::fs::write(dst.join("paquete.pack"), &pack);
+    };
+    publicar("origen-a", "demo-base", "1.0.0", "pkg-base", None);
+    publicar("origen-b", "demo", "2.0.0", "pkg-demo", Some("demo-base"));
+    for origen in ["origen-a", "origen-b"] {
+        if let Err(e) = pkg_pack::generar_indice_en(&base.join(origen), |_| true) {
+            eprintln!("xtask: aviso: índice de {origen}: {e}");
+        }
     }
 }
 

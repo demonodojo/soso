@@ -1,0 +1,4 @@
+SOSOPKG v1
+nombre=demo-base
+version=1.0.0
+f 533b57e4e39aa239a6d05773314a75c3cc49883c1fcf6d94f17a54b8577bd0fa 35416 bin/pkg-base

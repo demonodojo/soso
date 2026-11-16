@@ -3,7 +3,9 @@
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 sal=${SOSO_SAL_SOURCE:-"$repo/../sal"}
-out="$repo/target/sal/sdk"
+# SOSO_SAL_OUT: otra carpeta en vez de target/sal (el paquete de Sal se fabrica
+# aparte para no pisar el SDK con el que se compila el propio soso).
+out="${SOSO_SAL_OUT:-$repo/target/sal}/sdk"
 mkdir -p "$out"
 cc=${SAL_HOST_CC:-clang}
 lld=$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld

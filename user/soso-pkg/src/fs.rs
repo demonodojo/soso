@@ -14,6 +14,12 @@ pub fn exists(path: &str) -> bool {
     sys::stat(path, &mut st) >= 0
 }
 
+/// Tamaño de un fichero, o `None` si no existe.
+pub fn size(path: &str) -> Option<u64> {
+    let mut st = abi::Stat::default();
+    (sys::stat(path, &mut st) >= 0).then_some(st.size)
+}
+
 pub fn read_bytes(path: &str, max: usize) -> Option<Vec<u8>> {
     let fd = sys::open(path, O_RDONLY);
     if fd < 0 {

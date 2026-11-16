@@ -4,7 +4,7 @@ set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 sal=${SOSO_SAL_SOURCE:-"$repo/../sal"}
 vendor=${SOSO_RUST_VENDOR:-"$HOME/.cache/soso-rust-vendor"}
-out="$repo/target/sal/native"
+out="${SOSO_SAL_OUT:-$repo/target/sal}/native"
 mkdir -p "$out/sysroot/lib/rustlib"
 rustc="$vendor/build-soso/x86_64-unknown-linux-gnu/stage1/bin/rustc"
 # El bootstrap de `rust-build-std` deja el compilador en ci-rustc-sysroot (no hay

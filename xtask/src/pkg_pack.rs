@@ -6,7 +6,7 @@ use std::process::exit;
 
 use soso_abi::ABI_VERSION;
 use soso_pkg_core::comandos::reconstruir;
-use soso_pkg_core::{Dependency, empaquetar};
+use soso_pkg_core::empaquetar;
 
 pub const SOSO_WEB_VERSION: &str = "1.0.0";
 const SOSO_WEB_NOMBRE: &str = "soso-web";
@@ -15,10 +15,8 @@ const OPENCODE_SAL_NOMBRE: &str = "opencode-sal";
 pub const SOSO_ED_VERSION: &str = "0.1.1";
 /// Cliente de actualizaciones OTA, instalable/actualizable sin cambiar kernel ni rootfs.
 pub const SOSO_UPDATE_PACKAGE_VERSION: &str = "0.1.0";
-pub const SOSO_PKG_VERSION: &str = "0.3.0";
+pub const SOSO_PKG_VERSION: &str = "0.4.0";
 pub const SOSO_WM_VERSION: &str = "0.1.0";
-/// Revisión del paquete que agrupa el compilador, el SDK y el backend.
-pub const SAL_VERSION: &str = "0.5.2";
 /// Editor vi escrito en Sal (repositorio hermano `../salvi`).
 pub const SALVI_VERSION: &str = "0.1.0";
 const SALVI_NOMBRE: &str = "salvi";
@@ -26,7 +24,7 @@ const SALVI_NOMBRE: &str = "salvi";
 pub fn run(args: &[String]) {
     let Some(pkg) = args.first() else {
         eprintln!(
-            "uso: cargo xtask pkg-pack <soso-web|opencode-sal|soso-ed|soso-pkg|soso-update|soso-wm|sal|salvi> [--out DIR]"
+            "uso: cargo xtask pkg-pack <soso-web|opencode-sal|soso-ed|soso-pkg|soso-update|soso-wm|salvi> [--out DIR]"
         );
         exit(2);
     };
@@ -35,26 +33,11 @@ pub fn run(args: &[String]) {
         return;
     }
     if pkg == "sal" {
-        let root = crate::project_root();
-        let out = args
-            .iter()
-            .skip(1)
-            .find_map(|a| a.strip_prefix("--out=").map(PathBuf::from))
-            .unwrap_or_else(|| root.join("rootfs/share/paquetes/sal").join(SAL_VERSION));
-        match materializar_sal(&root, &out) {
-            Ok(()) => {
-                if let Err(e) = generar_indice(&root) {
-                    eprintln!("xtask pkg-pack: no pude actualizar indice.txt: {e}");
-                    exit(1);
-                }
-                println!("xtask pkg-pack: {}", out.display());
-            }
-            Err(e) => {
-                eprintln!("xtask pkg-pack: {e}");
-                exit(1);
-            }
-        }
-        return;
+        eprintln!(
+            "xtask pkg-pack: Sal se publica desde su propio repositorio: \
+             scripts/paquete-soso.sh en ../sal (usa cargo xtask sal-paquete)"
+        );
+        exit(2);
     }
     if pkg == SALVI_NOMBRE {
         let root = crate::project_root();
@@ -153,53 +136,7 @@ pub fn materializar_paquetes_sistema(root: &Path) -> Result<(), String> {
             .join(version);
         materializar_bin_sistema(root, nombre, version, nombre, &dir)?;
     }
-    // El compilador nativo solo existe tras `sal-build` sin --cross-only.
-    // Las imágenes que no lo preparan conservan el paquete remoto existente.
-    if root.join("rootfs/bin/sal").is_file() {
-        materializar_sal(
-            root,
-            &root.join("rootfs/share/paquetes/sal").join(SAL_VERSION),
-        )?;
-    }
     generar_indice(root)
-}
-
-fn materializar_sal(root: &Path, out: &Path) -> Result<(), String> {
-    let elf = root.join("rootfs/bin/sal");
-    let data =
-        fs::read(&elf).map_err(|_| format!("no hay {elf:?}; ejecuta cargo xtask sal-build"))?;
-    let mut files = vec![("bin/sal".into(), data)];
-    let lib = root.join("rootfs/lib/sal");
-    for file in [
-        "runtime.o",
-        "kernels.o",
-        "libsal-soso.a",
-        "link.ld",
-        "sal_runtime.h",
-        "manifest.txt",
-        "source.lock",
-        "bin/sal-llc",
-    ] {
-        let path = lib.join(file);
-        let data = fs::read(&path)
-            .map_err(|_| format!("no hay {path:?}; ejecuta cargo xtask sal-build"))?;
-        files.push((format!("lib/sal/{file}"), data));
-    }
-    let (_, pack, mut man) = empaquetar::empaquetar("sal", SAL_VERSION, Some(ABI_VERSION), files)
-        .map_err(|e| format!("{e}"))?;
-    man.destino_sistema = true;
-    man.dependencias.push(Dependency {
-        nombre: "soso-pkg".into(),
-        version: ">=0.3.0".into(),
-    });
-    let man_text = man.format();
-    if out.exists() {
-        fs::remove_dir_all(out).map_err(|e| e.to_string())?;
-    }
-    fs::create_dir_all(out).map_err(|e| e.to_string())?;
-    fs::write(out.join("paquete.txt"), &man_text).map_err(|e| e.to_string())?;
-    fs::write(out.join("paquete.pack"), &pack).map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 /// Paquete de aplicación (sin `destino=sistema`): queda en `/var/paquetes/salvi`
@@ -272,21 +209,25 @@ fn materializar_bin_sistema(
 
 /// Índice HTTPS estático para servir este árbol con raw.githubusercontent.com.
 pub fn generar_indice(root: &Path) -> Result<(), String> {
-    let base = root.join("rootfs/share/paquetes");
+    generar_indice_en(&root.join("rootfs/share/paquetes"), |n| {
+        n == "soso-ed"
+            || n == "soso-pkg"
+            || n == "soso-update"
+            || n == "soso-wm"
+            || n == SALVI_NOMBRE
+    })
+}
+
+/// `indice.txt` de un árbol `<nombre>/<versión>/paquete.{txt,pack}` con los
+/// paquetes que acepte `publicado`. Lo usa también el repositorio de Sal.
+pub fn generar_indice_en(base: &Path, publicado: impl Fn(&str) -> bool) -> Result<(), String> {
     let mut filas = Vec::new();
-    for pkg in fs::read_dir(&base).map_err(|e| e.to_string())? {
+    for pkg in fs::read_dir(base).map_err(|e| e.to_string())? {
         let pkg = pkg.map_err(|e| e.to_string())?.path();
         if !pkg.is_dir() {
             continue;
         }
-        let publicado = pkg.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
-            n == "soso-ed"
-                || n == "soso-pkg"
-                || n == "soso-update"
-                || n == "soso-wm"
-                || n == "sal"
-                || n == SALVI_NOMBRE
-        });
+        let publicado = pkg.file_name().and_then(|n| n.to_str()).is_some_and(&publicado);
         if !publicado {
             continue;
         }

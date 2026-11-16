@@ -11,7 +11,7 @@ previos para poder restaurarlos al desinstalar.
 | Fase | Contenido | Estado |
 |------|-----------|--------|
 | P0 | Contrato `paquete.txt` / `paquete.pack`, índice, `soso-pkg-core`, cliente `soso-pkg` (local + HTTPS), índice de comandos, sosh | Hecho |
-| P1 | Repositorio publicado, `cargo xtask pkg-pack`, paquetes `soso-ed`, `soso-pkg`, `soso-update`, `soso-wm` y `sal` con destino sistema | En curso: índice público raw de GitHub y paquetes de sistema publicados en `rootfs/share/paquetes/`; `soso-update` se actualiza por este gestor y se excluye de los packs OTA; `soso-web` y `opencode-sal` siguen empaquetables |
+| P1 | Repositorio publicado, `cargo xtask pkg-pack`, paquetes `soso-ed`, `soso-pkg`, `soso-update`, `soso-wm` y `sal` con destino sistema | En curso: índice público raw de GitHub y paquetes de sistema publicados en `rootfs/share/paquetes/`; `soso-update` se actualiza por este gestor y se excluye de los packs OTA; `soso-web` y `opencode-sal` siguen empaquetables; **varios orígenes** (`soso-pkg` 0.4.0) y `sal` publicado desde su propio repositorio |
 | P2 | Servicios/demonios, `.desktop` / escritorio | Pendiente |
 | P3 | Descarga por rangos (packs > 64 MiB) | Pendiente |
 
@@ -31,7 +31,23 @@ Rutas en disco:
 
 - `/var/paquetes/<nombre>/` — árbol instalado + copia de `paquete.txt`
 - `/var/paquetes/comandos` — mapa `nombre → ruta` para sosh
-- `/etc/paquetes.conf` — `url=` base del repositorio HTTPS
+- `/etc/paquetes.conf` — `url=` base del repositorio HTTPS de soso y una línea
+  `origen=` por cada repositorio extra (ver «Varios orígenes»)
+
+## Varios orígenes
+
+`soso-pkg` 0.4.0 junta los índices de varios repositorios, en orden de
+prioridad: primero `url=` (el de soso) y luego cada `origen=`. Sin ninguna
+línea `origen=` usa los de por defecto (`ORIGENES_POR_DEFECTO` en
+`soso-pkg-core`: el de Sal); `origen=ninguno` deja sólo el principal. Gana la
+versión más alta de cualquier origen y, si empatan, el primero. Las
+dependencias se resuelven en el conjunto: `sal` (repositorio de Sal) pide
+`soso-pkg` (repositorio de soso). Un origen que no responde se avisa (`sigo sin
+el origen …`) y se sigue con los demás. `--origen DIR` se puede repetir.
+
+Compatibilidad: la clave es nueva (`origen=`) para que un `soso-pkg` < 0.4.0,
+que sólo entiende `url=`, siga leyendo el repositorio de soso; para llegar a
+`sal` primero hay que actualizar `soso-pkg`.
 - Paquetes de sistema: copia de seguridad en `.respaldo/` dentro del paquete;
   `soso-pkg` la restaura al desinstalar.
 
@@ -74,22 +90,44 @@ soso-pkg borrar <nombre>
   `.respaldo/` para restaurarlos al desinstalar.
 - El gestor nuevo activa automáticamente en `/bin` los paquetes de sistema que
   instaló un gestor anterior bajo `/var/paquetes`.
-- `cargo xtask pkg-pack soso-ed|soso-pkg|soso-update|soso-wm|sal` genera su manifiesto y
-  pack. `sal` incluye compilador, backend LLVM y SDK bajo una sola versión; al
-  actualizarlo se renuevan `/bin/sal` y `/lib/sal/` desde ese paquete. Requiere
-  primero `soso-pkg 0.2.0`, que entiende los destinos `lib/sal/`. La compilación
-  genera los paquetes disponibles y actualiza `indice.txt`.
+- `cargo xtask pkg-pack soso-ed|soso-pkg|soso-update|soso-wm` genera su
+  manifiesto y pack. La compilación genera los paquetes disponibles y actualiza
+  `indice.txt`.
 - El ejecutable base `soso-update` se conserva para instalaciones nuevas y el
   USB live, pero `cargo xtask release` lo excluye de `rootfs.pack`: una copia
   instalada como paquete se puede actualizar sin que una OTA la sobrescriba.
   El empaquetado no mueve la transacción al gestor: el cliente sigue armando la
   pareja kernel+rootfs y el arranque confirma o revierte el cambio.
 
+## Paquete `sal` (repositorio de Sal)
+
+- Lo publica el repositorio de Sal en `paquetes/` (índice y packs servidos por
+  `https://raw.githubusercontent.com/demonodojo/sal/main/paquetes`), no soso.
+  Agrupa compilador nativo, backend LLVM (`sal-llc`) y SDK bajo la versión del
+  `Cargo.toml` de Sal; al actualizarlo se renuevan `/bin/sal` y `/lib/sal/`.
+  Declara `dep=soso-pkg >=0.3.0` (destinos `lib/sal/`). `lib/sal/origen.txt`
+  dice de qué versión, commit y repositorio salió.
+- En Sal: `scripts/paquete-soso.sh [etiqueta]` (por defecto `v<versión>`) crea
+  un worktree limpio de la etiqueta **junto a soso** (hay versiones que dependen
+  de `../soso/crates/sosomodel`) y llama a la receta de soso; luego se commitea
+  y empuja `paquetes/`. Una versión publicada no se rehace (`FORZAR=1`).
+- La receta es de soso, porque el SDK y la toolchain nativa viven aquí:
+  `cargo xtask sal-paquete --fuente <checkout de Sal> --out <dir>` exige el
+  checkout sin cambios sin commitear, compila con `scripts/sal-sdk.sh` y
+  `scripts/sal-native.sh` en `target/sal-paquete/<versión>` (`SOSO_SAL_OUT`, sin
+  pisar el SDK con el que se construye soso) y regenera el `indice.txt` de
+  `<dir>`. Necesita la toolchain nativa de soso (docs/SELF-HOSTING.md).
+- La imagen de soso sigue llevando `/bin/sal` y `/lib/sal` de
+  `cargo xtask sal-build` (pin `config/sal-source.lock`); el paquete es para
+  actualizarlo sin una OTA.
+
 ## Verificación
 
 - Host: `cargo test -p soso-pkg-core --features std`
 - Host: `cargo xtask pkg-pack soso-web` (tras compilar userspace)
 - Guest: fase `soso-pkg` en `cargo xtask test` (fixture en `/share/paquetes-prueba`);
+  `soso-pkg: varios orígenes` instala `demo` de `origen-b` con su dependencia
+  `demo-base` de `origen-a`, tras un origen inexistente;
   fases `soso-web` / `soso-wm` usan rutas bajo `/var/paquetes/soso-web/`
 
 ## Relación con otros planes

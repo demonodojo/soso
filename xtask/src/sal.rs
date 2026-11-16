@@ -476,3 +476,163 @@ pub fn test() {
             .arg("tests/sal/probar.py"),
     );
 }
+
+/// Versión `[package]` del `Cargo.toml` de un checkout de Sal.
+fn version_de(fuente: &Path) -> Result<String, String> {
+    let toml = fs::read_to_string(fuente.join("Cargo.toml"))
+        .map_err(|e| format!("{}: {e}", fuente.join("Cargo.toml").display()))?;
+    let mut en_package = false;
+    for linea in toml.lines() {
+        let l = linea.trim();
+        if l.starts_with('[') {
+            en_package = l == "[package]";
+            continue;
+        }
+        if en_package {
+            if let Some(v) = l.strip_prefix("version").map(str::trim_start) {
+                if let Some(v) = v.strip_prefix('=') {
+                    return Ok(v.trim().trim_matches('"').to_string());
+                }
+            }
+        }
+    }
+    Err("el Cargo.toml de Sal no declara [package] version".into())
+}
+
+fn git_salida(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .map_err(|e| format!("git: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// `cargo xtask sal-paquete --fuente DIR --out DIR [--forzar]`: fabrica el
+/// paquete `sal` de soso (compilador nativo, backend LLVM y SDK) a partir de un
+/// checkout **limpio** de Sal y lo publica en `<out>/sal/<versión>/`, con el
+/// `indice.txt` de `<out>` regenerado.
+///
+/// Lo invoca el repositorio de Sal (`scripts/paquete-soso.sh`), que es quien
+/// publica el paquete: soso sólo pone la receta, porque el SDK y la toolchain
+/// para soso viven aquí. La versión sale del `Cargo.toml` de la fuente, nunca
+/// de una constante de soso, y se compila en `target/sal-paquete/<versión>`
+/// para no pisar el SDK con el que se construye el propio soso.
+pub fn paquete(args: &[String]) {
+    let mut fuente = None;
+    let mut out = None;
+    let mut forzar = false;
+    let mut i = args.iter();
+    while let Some(a) = i.next() {
+        match a.as_str() {
+            "--fuente" => fuente = i.next().map(std::path::PathBuf::from),
+            "--out" => out = i.next().map(std::path::PathBuf::from),
+            "--forzar" => forzar = true,
+            _ => {
+                eprintln!("uso: cargo xtask sal-paquete --fuente <checkout de Sal> --out <dir del repositorio> [--forzar]");
+                exit(2);
+            }
+        }
+    }
+    let (Some(fuente), Some(out)) = (fuente, out) else {
+        eprintln!("uso: cargo xtask sal-paquete --fuente <checkout de Sal> --out <dir del repositorio> [--forzar]");
+        exit(2);
+    };
+    if let Err(e) = paquete_en(&fuente, &out, forzar) {
+        eprintln!("xtask sal-paquete: {e}");
+        exit(1);
+    }
+}
+
+fn paquete_en(fuente: &Path, out: &Path, forzar: bool) -> Result<(), String> {
+    let root = super::project_root();
+    let fuente = fs::canonicalize(fuente).map_err(|e| format!("{}: {e}", fuente.display()))?;
+    // Lo publicado tiene que poder rehacerse desde un commit: nada de cambios
+    // sin commitear (era el problema de empaquetar el checkout de trabajo).
+    let sucio = git_salida(&fuente, &["status", "--porcelain", "--untracked-files=no"])?;
+    if !sucio.is_empty() {
+        return Err(format!(
+            "{} tiene cambios sin commitear; usa un worktree limpio de la etiqueta",
+            fuente.display()
+        ));
+    }
+    let version = version_de(&fuente)?;
+    let commit = git_salida(&fuente, &["rev-parse", "HEAD"])?;
+    let destino = out.join("sal").join(&version);
+    if destino.exists() && !forzar {
+        return Err(format!(
+            "{} ya existe: una versión publicada no se rehace (--forzar si nadie la ha bajado aún)",
+            destino.display()
+        ));
+    }
+    let area = root.join("target/sal-paquete").join(&version);
+    let _ = fs::remove_dir_all(&area);
+    fs::create_dir_all(&area).map_err(|e| e.to_string())?;
+    for script in ["scripts/sal-sdk.sh", "scripts/sal-native.sh"] {
+        ejecutar(
+            Command::new("bash")
+                .current_dir(&root)
+                .env("SOSO_SAL_SOURCE", &fuente)
+                .env("SOSO_SAL_OUT", &area)
+                .arg(script),
+        );
+    }
+    ejecutar(
+        Command::new("python3")
+            .current_dir(&root)
+            .arg("scripts/sal-elf.py")
+            .arg(area.join("native/sal"))
+            .arg(area.join("native/sal-llc")),
+    );
+    let leer = |p: std::path::PathBuf| fs::read(&p).map_err(|e| format!("{}: {e}", p.display()));
+    let mut files = vec![("bin/sal".to_string(), leer(area.join("native/sal"))?)];
+    for file in [
+        "runtime.o",
+        "kernels.o",
+        "libsal-soso.a",
+        "link.ld",
+        "sal_runtime.h",
+        "manifest.txt",
+    ] {
+        files.push((format!("lib/sal/{file}"), leer(area.join("sdk").join(file))?));
+    }
+    files.push(("lib/sal/bin/sal-llc".into(), leer(area.join("native/sal-llc"))?));
+    let repo = git_salida(&fuente, &["remote", "get-url", "origin"]).unwrap_or_default();
+    files.push((
+        "lib/sal/origen.txt".into(),
+        format!("sal-paquete=1\nversion={version}\ncommit={commit}\nrepositorio={repo}\n").into_bytes(),
+    ));
+    let (_, pack, mut man) = soso_pkg_core::empaquetar::empaquetar(
+        "sal",
+        &version,
+        Some(soso_abi::ABI_VERSION),
+        files,
+    )
+    .map_err(|e| format!("{e}"))?;
+    man.destino_sistema = true;
+    // Los destinos `lib/sal/` sólo los entiende soso-pkg 0.3.0 en adelante.
+    man.dependencias.push(soso_pkg_core::Dependency {
+        nombre: "soso-pkg".into(),
+        version: ">=0.3.0".into(),
+    });
+    let _ = fs::remove_dir_all(&destino);
+    fs::create_dir_all(&destino).map_err(|e| e.to_string())?;
+    fs::write(destino.join("paquete.txt"), man.format()).map_err(|e| e.to_string())?;
+    fs::write(destino.join("paquete.pack"), &pack).map_err(|e| e.to_string())?;
+    super::pkg_pack::generar_indice_en(out, |_| true)?;
+    println!(
+        "Paquete sal {version} ({}): {} ({} bytes)",
+        &commit[..12],
+        destino.display(),
+        pack.len()
+    );
+    Ok(())
+}
