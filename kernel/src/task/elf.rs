@@ -187,8 +187,7 @@ pub fn load(space: &AddrSpace, data: &[u8]) -> Result<(u64, u64, u64), &'static 
         while page < vaddr + memsz {
             let prot = page_prot.get(&page).copied().unwrap_or(UserProt::Rw);
             let page_idx = Page::<Size4KiB>::containing_address(VirtAddr::new(page));
-            let mut mapper = space.mapper();
-            use x86_64::structures::paging::Translate;
+            let mapper = space.mapper();
             let frame = if let Ok(f) = mapper.translate_page(page_idx) {
                 f
             } else {

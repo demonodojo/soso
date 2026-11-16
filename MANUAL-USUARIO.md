@@ -1181,6 +1181,12 @@ Opciones útiles: `--forzar` (reinstala aunque la versión no suba), `--sin-kern
 (solo `/bin`, `/etc`, `/lib`), `--local /ruta` (artefactos locales, sin red),
 `--channel dev|stable|<etiqueta>`.
 
+El cliente `soso-update` también está disponible como paquete de sistema. En
+una instalación existente puedes incorporarlo al gestor con
+`soso-pkg instalar soso-update` y actualizarlo después con
+`soso-pkg actualizar soso-update`. Esto actualiza el cliente; las releases del
+sistema siguen aplicando kernel y rootfs mediante la transacción OTA recuperable.
+
 Sin `--forzar`, `aplicar` sólo instala una versión mayor, la misma release
 cuando algo instalado no coincide con ella (la repone) o la misma versión
 republicada con una fecha posterior a la tuya. Si la release es más antigua, o
@@ -1273,6 +1279,9 @@ entera, no se fía del registro). Con `--pedir` deja apuntada la vuelta atrás e
 ese disco y la hace su propio arranque siguiente; quita el USB y enciende
 normal. Si lo que está roto es el kernel de esa máquina y no llega a arrancar,
 esto todavía no basta — está anotado como pendiente.
+
+El cliente de rescate del USB live se conserva en la imagen base; no depende de
+que esté instalado el paquete `soso-update` del sistema averiado.
 
 **Mientras hay una actualización armada.** Desde que `aplicar` guarda la copia
 de vuelta atrás y hasta que reinicias, los programas y bibliotecas del sistema

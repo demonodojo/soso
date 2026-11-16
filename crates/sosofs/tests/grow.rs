@@ -2,7 +2,7 @@
 
 #![cfg(feature = "std")]
 
-use block_dev::{BLOCK_SIZE, BlockDevice, MemBlockDevice};
+use block_dev::MemBlockDevice;
 use sosofs::builder::build_image;
 use sosofs::layout::ROOT_INODE;
 use sosofs::{FsError, Sosofs};
@@ -26,7 +26,7 @@ fn grow_ampliar_y_escribir() {
     let mut dev = MemBlockDevice::new(pack_blocks);
     build_image(&src, &mut dev).unwrap();
 
-    let mut fs = Sosofs::mount(dev).unwrap();
+    let fs = Sosofs::mount(dev).unwrap();
     let before = fs.block_count();
     assert!(before <= pack_blocks);
 

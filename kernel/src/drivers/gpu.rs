@@ -644,11 +644,6 @@ fn aviso_rebote(motivo: Motivo, user_ptr: u64, n: usize) {
 /// desaloja bajo presión, y otro core puede devolver sus frames al asignador en
 /// mitad del DMA.
 #[cfg(feature = "lxdde")]
-fn subir_por_dma(va: u64, user_ptr: u64, n: usize) -> Result<(), Motivo> {
-    subir_por_dma_at(va, 0, user_ptr, n)
-}
-
-#[cfg(feature = "lxdde")]
 fn subir_por_dma_at(va: u64, dev_off: u64, user_ptr: u64, n: usize) -> Result<(), Motivo> {
     if n == 0 {
         return Err(Motivo::Vacio);
@@ -1212,8 +1207,10 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
             return Ok(submit_bits(true));
         }
         #[cfg(not(feature = "lxdde"))]
-        let _ = (tex_va, src_ptr, pitch, dx, dy, rw, rh);
-        return Err(abi::ENOSYS);
+        {
+            let _ = (tex_va, src_ptr, pitch, dx, dy, rw, rh);
+            return Err(abi::ENOSYS);
+        }
     }
     if cmd.len() >= 5 && &cmd[..5] == b"GPRIM" && cmd.len() >= 48 {
         const GPRIM_HDR: usize = 48;
@@ -1403,8 +1400,10 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
             );
         }
         #[cfg(not(feature = "lxdde"))]
-        let _ = (rt_va, frame_bytes, flags, rgba, n);
-        return Err(abi::ENOSYS);
+        {
+            let _ = (rt_va, frame_bytes, flags, rgba, n, pres_x, pres_y);
+            return Err(abi::ENOSYS);
+        }
     }
     if cmd.len() >= 5 && &cmd[..5] == b"GFRAM" && cmd.len() >= 53 {
         let rt_h = u64::from_le_bytes(cmd[5..13].try_into().unwrap_or([0; 8]));
@@ -1482,21 +1481,24 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
         }
         drop(g);
         #[cfg(not(feature = "lxdde"))]
-        let _ = (
-            rt_va,
-            tex_va,
-            src_ptr,
-            fb_w,
-            fb_h,
-            pitch,
-            dx,
-            dy,
-            rw,
-            rh,
-            rgba,
-            frame_bytes,
-            legacy_src_len,
-        );
+        {
+            let _ = (
+                rt_va,
+                tex_va,
+                src_ptr,
+                fb_w,
+                fb_h,
+                pitch,
+                dx,
+                dy,
+                rw,
+                rh,
+                rgba,
+                frame_bytes,
+                legacy_src_len,
+            );
+            return Err(abi::ENOSYS);
+        }
         #[cfg(feature = "lxdde")]
         {
             let full_damage = dx == 0 && dy == 0 && rw == fb_w && rh == fb_h;
@@ -1526,7 +1528,6 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
                 full_damage,
             );
         }
-        return Err(abi::ENOSYS);
     }
     if cmd.len() >= 5 && &cmd[..5] == b"SAXPY" && cmd.len() >= 29 {
         let a = f32::from_le_bytes(cmd[5..9].try_into().unwrap_or([0; 4]));

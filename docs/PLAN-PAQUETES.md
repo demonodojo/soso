@@ -11,7 +11,7 @@ previos para poder restaurarlos al desinstalar.
 | Fase | Contenido | Estado |
 |------|-----------|--------|
 | P0 | Contrato `paquete.txt` / `paquete.pack`, índice, `soso-pkg-core`, cliente `soso-pkg` (local + HTTPS), índice de comandos, sosh | Hecho |
-| P1 | Repositorio publicado, `cargo xtask pkg-pack`, paquetes `soso-ed`, `soso-pkg`, `soso-wm` y `sal` con destino sistema | En curso: índice público raw de GitHub y paquetes de sistema publicados en `rootfs/share/paquetes/`; `soso-web` y `opencode-sal` siguen empaquetables |
+| P1 | Repositorio publicado, `cargo xtask pkg-pack`, paquetes `soso-ed`, `soso-pkg`, `soso-update`, `soso-wm` y `sal` con destino sistema | En curso: índice público raw de GitHub y paquetes de sistema publicados en `rootfs/share/paquetes/`; `soso-update` se actualiza por este gestor y se excluye de los packs OTA; `soso-web` y `opencode-sal` siguen empaquetables |
 | P2 | Servicios/demonios, `.desktop` / escritorio | Pendiente |
 | P3 | Descarga por rangos (packs > 64 MiB) | Pendiente |
 
@@ -69,16 +69,21 @@ soso-pkg borrar <nombre>
 
 ## Paquetes con ejecutables del sistema
 
-- `soso-ed`, `soso-pkg`, `soso-wm` y `sal` declaran `destino=sistema`; el gestor
+- `soso-ed`, `soso-pkg`, `soso-update`, `soso-wm` y `sal` declaran `destino=sistema`; el gestor
   conserva sus archivos en `/var/paquetes/<nombre>/` y copia los originales en
   `.respaldo/` para restaurarlos al desinstalar.
 - El gestor nuevo activa automáticamente en `/bin` los paquetes de sistema que
   instaló un gestor anterior bajo `/var/paquetes`.
-- `cargo xtask pkg-pack soso-ed|soso-pkg|soso-wm|sal` genera su manifiesto y
+- `cargo xtask pkg-pack soso-ed|soso-pkg|soso-update|soso-wm|sal` genera su manifiesto y
   pack. `sal` incluye compilador, backend LLVM y SDK bajo una sola versión; al
   actualizarlo se renuevan `/bin/sal` y `/lib/sal/` desde ese paquete. Requiere
   primero `soso-pkg 0.2.0`, que entiende los destinos `lib/sal/`. La compilación
   genera los paquetes disponibles y actualiza `indice.txt`.
+- El ejecutable base `soso-update` se conserva para instalaciones nuevas y el
+  USB live, pero `cargo xtask release` lo excluye de `rootfs.pack`: una copia
+  instalada como paquete se puede actualizar sin que una OTA la sobrescriba.
+  El empaquetado no mueve la transacción al gestor: el cliente sigue armando la
+  pareja kernel+rootfs y el arranque confirma o revierte el cambio.
 
 ## Verificación
 

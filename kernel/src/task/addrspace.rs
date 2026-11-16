@@ -399,18 +399,6 @@ impl AddrSpace {
         Some(())
     }
 
-    pub fn set_page_prot(&self, va: u64, prot: UserProt) -> Option<()> {
-        let page = Page::<Size4KiB>::containing_address(VirtAddr::new(va & !0xfff));
-        if !self.is_mapped(va) {
-            return None;
-        }
-        let mut mapper = self.mapper();
-        let flush = unsafe { mapper.update_flags(page, prot.leaf_flags()).ok()? };
-        flush.flush();
-        crate::arch::apic::tlb_shootdown_all();
-        Some(())
-    }
-
     /// Desmapea una página ya mapeada y libera su frame, **sin** tocar el
     /// libro mmap (reclaim). El siguiente acceso vuelve a page-fault.
     pub fn evict_page(&self, va: u64, is_2m: bool) {

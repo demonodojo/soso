@@ -11,7 +11,7 @@ use std::process::{Command, exit};
 
 use soso_update_core::hash::hex_sha256;
 use soso_update_core::manifest::Manifest;
-use soso_update_core::pack::pack_rootfs;
+use soso_update_core::pack::pack_rootfs_con;
 use soso_update_core::semver::{parse as parse_semver, SemVer};
 
 use crate::drivers::{self, DriverProfile};
@@ -58,7 +58,10 @@ pub fn run(args: &[String]) {
     std::fs::copy(&kernel_src, &kernel_dst).expect("copiar kernel");
     strip_kernel(&kernel_dst);
 
-    let (pack_blob, files) = pack_rootfs(&root.join("rootfs")).expect("empaquetar rootfs");
+    // El cliente OTA se distribuye por soso-pkg: no actualizar el ejecutable
+    // mientras se está usando para armar/aplicar la pareja kernel+rootfs.
+    let (pack_blob, files) = pack_rootfs_con(&root.join("rootfs"), |p| p != "bin/soso-update")
+        .expect("empaquetar rootfs");
     // Segunda barrera: `PackWriter::should_pack` ya filtra, pero una release
     // publicada con la clave SSH o los logs de la máquina que empaquetó no se
     // puede despublicar. Más vale abortar aquí.

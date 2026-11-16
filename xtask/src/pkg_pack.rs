@@ -13,6 +13,8 @@ const SOSO_WEB_NOMBRE: &str = "soso-web";
 pub const OPENCODE_SAL_VERSION: &str = "1.0.0";
 const OPENCODE_SAL_NOMBRE: &str = "opencode-sal";
 pub const SOSO_ED_VERSION: &str = "0.1.1";
+/// Cliente de actualizaciones OTA, instalable/actualizable sin cambiar kernel ni rootfs.
+pub const SOSO_UPDATE_PACKAGE_VERSION: &str = "0.1.0";
 pub const SOSO_PKG_VERSION: &str = "0.3.0";
 pub const SOSO_WM_VERSION: &str = "0.1.0";
 /// Revisión del paquete que agrupa el compilador, el SDK y el backend.
@@ -24,7 +26,7 @@ const SALVI_NOMBRE: &str = "salvi";
 pub fn run(args: &[String]) {
     let Some(pkg) = args.first() else {
         eprintln!(
-            "uso: cargo xtask pkg-pack <soso-web|opencode-sal|soso-ed|soso-pkg|soso-wm|sal|salvi> [--out DIR]"
+            "uso: cargo xtask pkg-pack <soso-web|opencode-sal|soso-ed|soso-pkg|soso-update|soso-wm|sal|salvi> [--out DIR]"
         );
         exit(2);
     };
@@ -80,11 +82,12 @@ pub fn run(args: &[String]) {
         }
         return;
     }
-    if pkg == "soso-ed" || pkg == "soso-pkg" || pkg == "soso-wm" {
+    if pkg == "soso-ed" || pkg == "soso-pkg" || pkg == "soso-update" || pkg == "soso-wm" {
         let root = crate::project_root();
         let version = match pkg.as_str() {
             "soso-ed" => SOSO_ED_VERSION,
             "soso-pkg" => SOSO_PKG_VERSION,
+            "soso-update" => SOSO_UPDATE_PACKAGE_VERSION,
             _ => SOSO_WM_VERSION,
         };
         let out = args
@@ -141,6 +144,7 @@ pub fn materializar_paquetes_sistema(root: &Path) -> Result<(), String> {
     for (nombre, version) in [
         ("soso-ed", SOSO_ED_VERSION),
         ("soso-pkg", SOSO_PKG_VERSION),
+        ("soso-update", SOSO_UPDATE_PACKAGE_VERSION),
         ("soso-wm", SOSO_WM_VERSION),
     ] {
         let dir = root
@@ -276,7 +280,12 @@ pub fn generar_indice(root: &Path) -> Result<(), String> {
             continue;
         }
         let publicado = pkg.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
-            n == "soso-ed" || n == "soso-pkg" || n == "soso-wm" || n == "sal" || n == SALVI_NOMBRE
+            n == "soso-ed"
+                || n == "soso-pkg"
+                || n == "soso-update"
+                || n == "soso-wm"
+                || n == "sal"
+                || n == SALVI_NOMBRE
         });
         if !publicado {
             continue;

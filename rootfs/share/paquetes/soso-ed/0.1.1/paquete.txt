@@ -3,4 +3,4 @@ nombre=soso-ed
 version=0.1.1
 abi=1
 destino=sistema
-f 20aa5b387facb2c3efb3ab7fd0e74e3f6e2e6b50277ae84d829b216d8fd47c16 56560 bin/soso-ed
+f ca000c5679887648322dd19e21887a5662d9af329ce45eb240320d13cd5a606a 56480 bin/soso-ed
