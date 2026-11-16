@@ -251,7 +251,7 @@ struct iwl_ax211_priv {
     uint8_t irq_pending;
     int cmd_status;
     int cmd_fw_err;
-    uint8_t cmd_resp[512];
+    uint8_t cmd_resp[2056];
     uint16_t cmd_resp_len;
     /* Longitud anunciada por el FW antes de recortar a cmd_resp[]. */
     uint16_t cmd_resp_wire_len;

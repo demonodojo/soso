@@ -99,6 +99,14 @@ pub const SYS_FB_PRESENT: u64 = 64;
 pub const SYS_INPUT_POLL: u64 = 65;
 /// Copia un rectángulo del búfer lógico al GOP. `(buf, len, x|y<<16, w|h<<16)`.
 pub const SYS_FB_PRESENT_RECT: u64 = 97;
+/// Señal de vida del dueño del modo gráfico: `(plazo_ms)`.
+///
+/// El dueño promete volver a llamarla dentro de `plazo_ms` (0 desactiva el
+/// vigilante). Si no lo hace —se quedó bloqueado con un cliente que no lee, o
+/// girando—, el scheduler mata **sólo su grupo de procesos** y recupera la
+/// consola de texto, igual que Ctrl+Alt+Retroceso. Así un escritorio colgado
+/// no se lleva por delante la shell desde la que se lanzó.
+pub const SYS_FB_KEEPALIVE: u64 = 104;
 /// Abre un pseudo-terminal: devuelve `(fd_maestro << 32) | ranura`.
 pub const SYS_PTY_OPEN: u64 = 98;
 /// Reserva memoria compartida (`len` alineado); devuelve `id`.

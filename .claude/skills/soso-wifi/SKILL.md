@@ -198,11 +198,14 @@ QEMU nic: `SOSO_QEMU_NIC=vfio:<BDF>` + `SOSO_LXDDE_MODE=iwlwifi`.
   (`IWL_LINK_LOST_RX_STUCK`) con `rb_hw`/`rx_pend`. Banco: `ring_soak` (`salud`).
 - **Anillo RX gen2 = 256 RBD (2026-10-24).** Linux 22000 usa hasta 2048;
   soso pasó de 32 a 256 (`IWL_GEN2_RX_N`, context-info `RB_CB_SIZE` 2^8).
-- **Huecos de sondeo (2026-10-24).** Si `wifi::poll` o `mantener` llevan >500 ms
+- **Huecos de sondeo (2026-10-24; FATLOG 2026-11-16).** Si `wifi::poll` o `mantener` llevan >500 ms
   sin correr, el kernel avisa (`wifi: sondeo parado …` con causa: volcado del
   log, transporte ocupado o planificador BSP). Tras el primer aviso, resume cada
   30 s en lugar de inundar la consola. La línea `wifi: pérdidas` incluye
-  `sondeo_max`. En la BSP, `lx_mdelay` bombea red cada ms y el tick fuerza
+  `sondeo_max`. El flush incremental de FATLOG limita cada vuelta a una escritura
+  de sector (512 B); la causa «volcado del log» usa la duración de esa
+  transacción reciente, no el tiempo total acumulado entre vueltas. En la BSP,
+  `lx_mdelay` bombea red cada ms y el tick fuerza
   `schedule_inner` si `mantener` lleva >100 ms (inferencia GPU sin matar la
   WiFi). Ver también **`soso-gpu`** (`launch_wait_sem`).
 - **Reconexión visible (2026-10-24).** Tras caída: `wifi: enlace perdido …`,

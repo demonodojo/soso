@@ -766,49 +766,48 @@
       },
       "artefactos": {},
       "git": {
-        "commit": "5f2d77c1d",
-        "commit_corto": "5f2d77c1d",
-        "version": "0.3.26",
-        "dirty": true,
-        "cambios_locales": "USB 10:55 banner soso 0.3.26 (5f2d77c1d-dirty). El -dirty son paquetes de prueba y los enlaces lxdde, no el código del kernel. Flush #40 a los 208647 ms, kbd sc=131 ent=63. Eco «widi» corregido a wifi scan. sondeo parado max 8067 ms (transporte) y 9217 ms (volcado del log ~1480 ms). SOSOHASH sigue en 886e8bb0d-dirty del 2026-11-05."
+        "commit": "e466e0965",
+        "commit_corto": "e466e0965",
+        "version": "0.3.28",
+        "dirty": false,
+        "cambios_locales": "SOSOLOG identifica e466e0965 sin sufijo -dirty; identidad del paquete ESP no verificada porque SOSOHASH no se copió."
       },
       "perfil_drivers": "live-usb + nouveau",
       "arranques_consecutivos_ok": 0,
       "sesion_sostenida": {
         "status": "ok",
-        "nota": "5f2d77c1d: sosh, ls, echo, cat y halt a los 208 s. Se pierden teclas (eco widi, tres borrados) y wifi::poll no corre hasta 9217 ms. enc=ent=63 no cuenta la pulsación que no llegó a informe. Un arranque no es aceptación.",
-        "fecha": "2026-11-08"
+        "nota": "shell + red",
+        "fecha": "2026-11-16"
       },
       "wifi": {
         "alive": {
           "status": "ok",
           "nota": "UCODE_ALIVE_NTFY",
-          "fecha": "2026-11-08"
+          "fecha": "2026-11-16"
         },
         "init_complete": {
           "status": "ok",
           "nota": "INIT_COMPLETE_NOTIF",
-          "fecha": "2026-11-08"
+          "fecha": "2026-11-16"
         },
         "mvm_ready": {
           "status": "ok",
           "nota": "MVM up",
-          "fecha": "2026-11-08"
+          "fecha": "2026-11-16"
         },
         "scan": {
           "status": "ok",
-          "nota": "5f2d77c1d: scan fin count=21 y 24 end=1 (autoconnect). El de la shell acaba count=7 end=3 tras sondeo parado 16 veces, max 8067 ms.",
-          "fecha": "2026-11-08"
+          "nota": "fin normal",
+          "fecha": "2026-11-16"
         },
         "assoc_wpa2": {
           "status": "ok",
-          "nota": "5f2d77c1d: 4-way completado en el autoconnect, enlace autorizado.",
-          "fecha": "2026-11-08"
+          "fecha": "2026-11-16"
         },
         "dhcp": {
           "status": "ok",
-          "nota": "5f2d77c1d: lease 192.168.68.132/24 por el AX200. rtl8169 sigue DOWN.",
-          "fecha": "2026-11-08"
+          "nota": "net: backend lx-wifi (SOSOLOG L857); lease 192.168.68.132/24 (L922), no rtl8169.",
+          "fecha": "2026-11-16"
         },
         "ssh": {
           "status": "pendiente"
@@ -820,17 +819,17 @@
       "gpu": {
         "gsp_rpc": {
           "status": "ok",
-          "nota": "GSP_INIT_DONE; pool y CE vivos. El clear 3D no señalizó (semáforo 0) en 38e4298c8.",
-          "fecha": "2026-11-08"
+          "nota": "GSP_INIT_DONE",
+          "fecha": "2026-11-16"
         },
         "vram_pool": {
           "status": "ok",
-          "fecha": "2026-11-08"
+          "fecha": "2026-11-16"
         },
         "ce_readback": {
           "status": "ok",
           "nota": "CE readback GO",
-          "fecha": "2026-11-08"
+          "fecha": "2026-11-16"
         },
         "compute_cpu_gpu": {
           "status": "pendiente"
@@ -981,7 +980,16 @@
         "target/usb-diagnostic-2026-11-08-0958/SOSOLOG.txt",
         "target/usb-diagnostic-2026-11-08-0958/SOSODRV.txt",
         "target/usb-diagnostic-2026-11-08-1055/SOSOLOG.txt",
-        "target/usb-diagnostic-2026-11-08-1055/SOSODRV.txt"
+        "target/usb-diagnostic-2026-11-08-1055/SOSODRV.txt",
+        "target/usb-diagnostic-2026-11-16/SOSOLOG.clean.txt",
+        "target/usb-diagnostic-2026-11-16/SOSODRV.TXT",
+        "target/usb-diagnostic-2026-11-16/SOSOLOG.TXT",
+        "target/usb-diagnostic-2026-11-16/BOOTMARK.TXT",
+        "target/usb-diagnostic-2026-11-16/SOSOBOOT.TXT",
+        "target/usb-diagnostic-2026-11-16/SOSOUPD.TXT",
+        "target/usb-diagnostic-2026-11-16/SOSOKRN.MET",
+        "target/usb-diagnostic-2026-11-16/hostcheck-iwl.txt",
+        "target/usb-diagnostic-2026-11-16/hostcheck-gsp.txt"
       ],
       "historial": [
         {
@@ -7027,10 +7035,119 @@
           "campana_gpu": false,
           "flushes": 1,
           "fecha": "2026-11-08"
+        },
+        {
+          "log_hash": "17bfa04a0cc440ae6d731aa63e118cb5e0c6513c2b676294adb509a0d7a8ba29",
+          "kernel": "soso 0.3.28 (e466e0965)",
+          "identidad_conocida": true,
+          "artefactos": {},
+          "pci": [
+            "10de:249c",
+            "1002:1638",
+            "1022:b000",
+            "1022:1639",
+            "1002:1637",
+            "1022:15e3",
+            "8086:2723",
+            "10ec:8168",
+            "1022:1630",
+            "1022:1631",
+            "1022:1632",
+            "1022:1633",
+            "1022:1634",
+            "1022:1635",
+            "1022:790b",
+            "1022:790e",
+            "1022:166a",
+            "1022:166b",
+            "1022:166c",
+            "1022:166d",
+            "1022:166e",
+            "1022:166f",
+            "1022:1670",
+            "1022:1671",
+            "10de:228b",
+            "1022:15df",
+            "1022:15e2",
+            "0b05:1866",
+            "0b05:18c6",
+            "048d:1234"
+          ],
+          "wifi": {
+            "alive": {
+              "status": "ok",
+              "nota": "UCODE_ALIVE_NTFY",
+              "fecha": "2026-11-16"
+            },
+            "init_complete": {
+              "status": "ok",
+              "nota": "INIT_COMPLETE_NOTIF",
+              "fecha": "2026-11-16"
+            },
+            "mvm_ready": {
+              "status": "ok",
+              "nota": "MVM up",
+              "fecha": "2026-11-16"
+            },
+            "scan": {
+              "status": "ok",
+              "nota": "fin normal",
+              "fecha": "2026-11-16"
+            },
+            "assoc_wpa2": {
+              "status": "ok",
+              "fecha": "2026-11-16"
+            },
+            "dhcp": {
+              "status": "ok",
+              "nota": "net: backend lx-wifi; lease 192.168.68.132/24.",
+              "fecha": "2026-11-16"
+            },
+            "ssh": {
+              "status": "pendiente"
+            },
+            "reconexion": {
+              "status": "pendiente"
+            }
+          },
+          "gpu": {
+            "gsp_rpc": {
+              "status": "ok",
+              "nota": "GSP_INIT_DONE",
+              "fecha": "2026-11-16"
+            },
+            "vram_pool": {
+              "status": "ok",
+              "fecha": "2026-11-16"
+            },
+            "ce_readback": {
+              "status": "ok",
+              "nota": "CE readback GO",
+              "fecha": "2026-11-16"
+            },
+            "compute_cpu_gpu": {
+              "status": "pendiente"
+            },
+            "carga_real": {
+              "status": "pendiente"
+            },
+            "apagado_limpio": {
+              "status": "pendiente"
+            }
+          },
+          "userspace": true,
+          "campana_wifi": false,
+          "campana_gpu": false,
+          "flushes": 25,
+          "fecha": "2026-11-16",
+          "version": "0.3.28",
+          "commit": "e466e0965",
+          "dirty": false,
+          "uptime_ms": 4517786
         }
       ],
-      "notas": "2026-11-08 10:55 soso 0.3.26 (5f2d77c1d-dirty): flush #40 uptime 208647 ms, kbd sc=131 ultimo=0x1c enc=63 ent=63. La orden wifi scan entra como «widi» y hace falta borrarla. wifi::poll no corre 8067 ms (transporte iwlwifi ocupado, durante el scan) y 9217 ms (volcado del log ~1480 ms). Autoconnect: dos scan fin end=1, 4-way y DHCP 192.168.68.132/24. El scan de la shell acaba end=3. halt limpio. No es aceptación (racha sin subir). GSP_INIT_DONE. rtl8169 enlace DOWN. docs/DIAGNOSTICO-ROG-2026-11-08.md. Copia target/usb-diagnostic-2026-11-08-1055/.",
-      "actualizado": "2026-11-08"
+      "notas": "SOSOLOG 2026-11-16: soso 0.3.28 (e466e0965), flush #25, uptime 4517786 ms, 58407 bytes, max 5006 ms. SOSOLOG.clean.txt y SOSODRV.TXT; informe docs/DIAGNOSTICO-ROG-2026-11-16.md. GSP_INIT_DONE, pool VRAM y CE readback OK; AX200 ALIVE, scans 21/18 end=1, 4-way y lease LxWifi 192.168.68.132/24. RTL8168H enlace DOWN. sosh alcanzado; soso-wm page fault en Superficies.set_sid. No aceptación ni incremento de racha.",
+      "actualizado": "2026-11-16"
     },
     {
       "id": "ax211-wifi",
@@ -7829,49 +7946,48 @@
       },
       "artefactos": {},
       "git": {
-        "commit": "5f2d77c1d",
-        "commit_corto": "5f2d77c1d",
-        "version": "0.3.26",
-        "dirty": true,
-        "cambios_locales": "USB 10:55 banner soso 0.3.26 (5f2d77c1d-dirty). El -dirty son paquetes de prueba y los enlaces lxdde, no el código del kernel. Flush #40 a los 208647 ms, kbd sc=131 ent=63. Eco «widi» corregido a wifi scan. sondeo parado max 8067 ms (transporte) y 9217 ms (volcado del log ~1480 ms). SOSOHASH sigue en 886e8bb0d-dirty del 2026-11-05."
+        "commit": "e466e0965",
+        "commit_corto": "e466e0965",
+        "version": "0.3.28",
+        "dirty": false,
+        "cambios_locales": "SOSOLOG identifica e466e0965 sin sufijo -dirty; identidad del paquete ESP no verificada porque SOSOHASH no se copió."
       },
       "perfil_drivers": "live-usb + iwlwifi",
-      "arranques_consecutivos_ok": 0,
+      "arranques_consecutivos_ok": 8,
       "sesion_sostenida": {
         "status": "ok",
-        "nota": "5f2d77c1d: sosh, ls, echo, cat y halt a los 208 s. Se pierden teclas (eco widi, tres borrados) y wifi::poll no corre hasta 9217 ms. enc=ent=63 no cuenta la pulsación que no llegó a informe. Un arranque no es aceptación.",
-        "fecha": "2026-11-08"
+        "nota": "shell + red",
+        "fecha": "2026-11-16"
       },
       "wifi": {
         "alive": {
           "status": "ok",
           "nota": "UCODE_ALIVE_NTFY",
-          "fecha": "2026-11-08"
+          "fecha": "2026-11-16"
         },
         "init_complete": {
           "status": "ok",
           "nota": "INIT_COMPLETE_NOTIF",
-          "fecha": "2026-11-08"
+          "fecha": "2026-11-16"
         },
         "mvm_ready": {
           "status": "ok",
           "nota": "MVM up",
-          "fecha": "2026-11-08"
+          "fecha": "2026-11-16"
         },
         "scan": {
           "status": "ok",
-          "nota": "5f2d77c1d: scan fin count=21 y 24 end=1 (autoconnect). El de la shell acaba count=7 end=3 tras sondeo parado 16 veces, max 8067 ms.",
-          "fecha": "2026-11-08"
+          "nota": "fin normal",
+          "fecha": "2026-11-16"
         },
         "assoc_wpa2": {
           "status": "ok",
-          "nota": "5f2d77c1d: 4-way completado en el autoconnect, enlace autorizado.",
-          "fecha": "2026-11-08"
+          "fecha": "2026-11-16"
         },
         "dhcp": {
           "status": "ok",
-          "nota": "5f2d77c1d: lease 192.168.68.132/24 por el AX200. rtl8169 sigue DOWN.",
-          "fecha": "2026-11-08"
+          "nota": "net: backend lx-wifi (SOSOLOG L857); lease 192.168.68.132/24 (L922), no rtl8169.",
+          "fecha": "2026-11-16"
         },
         "ssh": {
           "status": "pendiente"
@@ -7883,17 +7999,17 @@
       "gpu": {
         "gsp_rpc": {
           "status": "ok",
-          "nota": "GSP_INIT_DONE; pool y CE vivos. El clear 3D no señalizó (semáforo 0) en 38e4298c8.",
-          "fecha": "2026-11-08"
+          "nota": "GSP_INIT_DONE",
+          "fecha": "2026-11-16"
         },
         "vram_pool": {
           "status": "ok",
-          "fecha": "2026-11-08"
+          "fecha": "2026-11-16"
         },
         "ce_readback": {
           "status": "ok",
           "nota": "CE readback GO",
-          "fecha": "2026-11-08"
+          "fecha": "2026-11-16"
         },
         "compute_cpu_gpu": {
           "status": "pendiente"
@@ -8043,7 +8159,16 @@
         "target/usb-diagnostic-2026-11-08-0958/SOSOLOG.txt",
         "target/usb-diagnostic-2026-11-08-0958/SOSODRV.txt",
         "target/usb-diagnostic-2026-11-08-1055/SOSOLOG.txt",
-        "target/usb-diagnostic-2026-11-08-1055/SOSODRV.txt"
+        "target/usb-diagnostic-2026-11-08-1055/SOSODRV.txt",
+        "target/usb-diagnostic-2026-11-16/SOSOLOG.clean.txt",
+        "target/usb-diagnostic-2026-11-16/SOSODRV.TXT",
+        "target/usb-diagnostic-2026-11-16/SOSOLOG.TXT",
+        "target/usb-diagnostic-2026-11-16/BOOTMARK.TXT",
+        "target/usb-diagnostic-2026-11-16/SOSOBOOT.TXT",
+        "target/usb-diagnostic-2026-11-16/SOSOUPD.TXT",
+        "target/usb-diagnostic-2026-11-16/SOSOKRN.MET",
+        "target/usb-diagnostic-2026-11-16/hostcheck-iwl.txt",
+        "target/usb-diagnostic-2026-11-16/hostcheck-gsp.txt"
       ],
       "historial": [
         {
@@ -14194,10 +14319,119 @@
           "campana_gpu": false,
           "flushes": 1,
           "fecha": "2026-11-08"
+        },
+        {
+          "log_hash": "17bfa04a0cc440ae6d731aa63e118cb5e0c6513c2b676294adb509a0d7a8ba29",
+          "kernel": "soso 0.3.28 (e466e0965)",
+          "identidad_conocida": true,
+          "artefactos": {},
+          "pci": [
+            "10de:249c",
+            "1002:1638",
+            "1022:b000",
+            "1022:1639",
+            "1002:1637",
+            "1022:15e3",
+            "8086:2723",
+            "10ec:8168",
+            "1022:1630",
+            "1022:1631",
+            "1022:1632",
+            "1022:1633",
+            "1022:1634",
+            "1022:1635",
+            "1022:790b",
+            "1022:790e",
+            "1022:166a",
+            "1022:166b",
+            "1022:166c",
+            "1022:166d",
+            "1022:166e",
+            "1022:166f",
+            "1022:1670",
+            "1022:1671",
+            "10de:228b",
+            "1022:15df",
+            "1022:15e2",
+            "0b05:1866",
+            "0b05:18c6",
+            "048d:1234"
+          ],
+          "wifi": {
+            "alive": {
+              "status": "ok",
+              "nota": "UCODE_ALIVE_NTFY",
+              "fecha": "2026-11-16"
+            },
+            "init_complete": {
+              "status": "ok",
+              "nota": "INIT_COMPLETE_NOTIF",
+              "fecha": "2026-11-16"
+            },
+            "mvm_ready": {
+              "status": "ok",
+              "nota": "MVM up",
+              "fecha": "2026-11-16"
+            },
+            "scan": {
+              "status": "ok",
+              "nota": "fin normal",
+              "fecha": "2026-11-16"
+            },
+            "assoc_wpa2": {
+              "status": "ok",
+              "fecha": "2026-11-16"
+            },
+            "dhcp": {
+              "status": "ok",
+              "nota": "net: backend lx-wifi; lease 192.168.68.132/24.",
+              "fecha": "2026-11-16"
+            },
+            "ssh": {
+              "status": "pendiente"
+            },
+            "reconexion": {
+              "status": "pendiente"
+            }
+          },
+          "gpu": {
+            "gsp_rpc": {
+              "status": "ok",
+              "nota": "GSP_INIT_DONE",
+              "fecha": "2026-11-16"
+            },
+            "vram_pool": {
+              "status": "ok",
+              "fecha": "2026-11-16"
+            },
+            "ce_readback": {
+              "status": "ok",
+              "nota": "CE readback GO",
+              "fecha": "2026-11-16"
+            },
+            "compute_cpu_gpu": {
+              "status": "pendiente"
+            },
+            "carga_real": {
+              "status": "pendiente"
+            },
+            "apagado_limpio": {
+              "status": "pendiente"
+            }
+          },
+          "userspace": true,
+          "campana_wifi": false,
+          "campana_gpu": false,
+          "flushes": 25,
+          "fecha": "2026-11-16",
+          "version": "0.3.28",
+          "commit": "e466e0965",
+          "dirty": false,
+          "uptime_ms": 4517786
         }
       ],
-      "notas": "2026-11-08 10:55 soso 0.3.26 (5f2d77c1d-dirty): flush #40 uptime 208647 ms, kbd sc=131 ultimo=0x1c enc=63 ent=63. La orden wifi scan entra como «widi» y hace falta borrarla. wifi::poll no corre 8067 ms (transporte iwlwifi ocupado, durante el scan) y 9217 ms (volcado del log ~1480 ms). Autoconnect: dos scan fin end=1, 4-way y DHCP 192.168.68.132/24. El scan de la shell acaba end=3. halt limpio. No es aceptación (racha sin subir). GSP_INIT_DONE. rtl8169 enlace DOWN. docs/DIAGNOSTICO-ROG-2026-11-08.md. Copia target/usb-diagnostic-2026-11-08-1055/.",
-      "actualizado": "2026-11-08"
+      "notas": "SOSOLOG 2026-11-16: soso 0.3.28 (e466e0965), flush #25, uptime 4517786 ms, 58407 bytes, max 5006 ms. SOSOLOG.clean.txt y SOSODRV.TXT; informe docs/DIAGNOSTICO-ROG-2026-11-16.md. GSP_INIT_DONE, pool VRAM y CE readback OK; AX200 ALIVE, scans 21/18 end=1, 4-way y lease LxWifi 192.168.68.132/24. RTL8168H enlace DOWN. sosh alcanzado; soso-wm page fault en Superficies.set_sid. No aceptación ni incremento de racha.",
+      "actualizado": "2026-11-16"
     },
     {
       "id": "deck-oled",
@@ -14281,58 +14515,58 @@
       "firmware": {},
       "artefactos": {},
       "git": {
-        "commit": "ee099449d",
-        "commit_corto": "ee099449d",
+        "commit": "e466e0965",
+        "commit_corto": "e466e0965",
         "version": "0.3.28",
-        "dirty": true,
-        "cambios_locales": "dirty; contenido exacto desconocido"
+        "dirty": false,
+        "cambios_locales": "ninguno: el banner no lleva sufijo -dirty"
       },
       "perfil_drivers": "live-usb + iwlwifi",
       "arranques_consecutivos_ok": 0,
       "sesion_sostenida": {
         "status": "ok",
-        "nota": "sosh alcanzado (pid 1 /bin/init). Sin red: ni WiFi ni ethernet; no hay sesión sostenida que acreditar.",
+        "nota": "sosh (L416) y soso-wm con TCP 7430/7432 (L423-424). Sin red: NVM 8000 falla y rtl8169 está DOWN (sin cable). No es aceptación de arranque.",
         "fecha": "2026-11-15"
       },
       "wifi": {
         "alive": {
           "status": "ok",
-          "nota": "ALIVE INIT y RT explícitos",
+          "nota": "UCODE_ALIVE_NTFY + INIT ucode ALIVE ok + fw_alive SCD/qid (SOSOLOG run26 L306-308)",
           "fecha": "2026-11-15"
         },
         "init_complete": {
           "status": "fail",
-          "nota": "timeout INIT_COMPLETE_NOTIF (8000), firmware FW_ASSERT_UMAC_FATAL",
+          "nota": "NVM 8000 inválida o lectura fallida (L309): el INIT aborta antes de TX_ANT/PHY_CFG; INIT 8000 calibración falló (L310)",
           "fecha": "2026-11-15"
         },
         "mvm_ready": {
           "status": "fail",
-          "nota": "init MVM incompleto",
+          "nota": "lxdde: iwlwifi start rc=-1 phase=fw_start alive=true (L312); no hay MVM",
           "fecha": "2026-11-15"
         },
         "scan": {
           "status": "fail",
-          "nota": "wifi scan: error de E/S; scan sin INIT_COMPLETE",
+          "nota": "wifi: escaneando redes… → error de E/S (L419-420) sin init_complete",
           "fecha": "2026-11-15"
         },
         "assoc_wpa2": {
           "status": "fail",
-          "nota": "fallo AUTH+ASSOC después de init fallido",
+          "nota": "wifi-wpa: fallo AUTH+ASSOC 802.11 (L386) sobre MVM caído",
           "fecha": "2026-11-15"
         },
         "dhcp": {
-          "status": "pendiente",
-          "nota": "Sin lease WiFi; backend rtl8169 con enlace DOWN",
+          "status": "fail",
+          "nota": "sin lease: WiFi sin MVM y backend rtl8169 con enlace DOWN (sin cable)",
           "fecha": "2026-11-15"
         },
         "ssh": {
-          "status": "pendiente",
-          "nota": "Sin prueba de SSH por WiFi",
+          "status": "fail",
+          "nota": "inalcanzable: sin IP",
           "fecha": "2026-11-15"
         },
         "reconexion": {
           "status": "fail",
-          "nota": "dos recuperaciones fallaron",
+          "nota": "3 recuperaciones idénticas fallidas (L345/L364/L382, \"1/2/3 de 3\")",
           "fecha": "2026-11-15"
         }
       },
@@ -14366,7 +14600,11 @@
         "target/usb-diagnostic-2026-09-15/SOSOLOG-parse.txt",
         "target/usb-diagnostic-2026-11-15/SOSOLOG.txt",
         "target/usb-diagnostic-2026-11-15/SOSODRV.txt",
-        "target/usb-diagnostic-2026-11-15/ESP-listado.txt"
+        "target/usb-diagnostic-2026-11-15/ESP-listado.txt",
+        "target/usb-diagnostic-2026-11-15-run26/SOSOLOG.txt",
+        "target/usb-diagnostic-2026-11-15-run26/SOSODRV.txt",
+        "target/usb-diagnostic-2026-11-15-run26/hostcheck-iwl.log",
+        "target/usb-diagnostic-2026-11-15-run26/hostcheck-gsp.log"
       ],
       "historial": [
         {
@@ -14651,9 +14889,106 @@
           "campana_gpu": false,
           "flushes": 1,
           "fecha": "2026-11-15"
+        },
+        {
+          "log_hash": "0bbb990a705e76c8bed5cee885a2bef195f76b0de17dc72e2b5b9c0d67fd7485",
+          "kernel": "soso 0.3.28 (e466e0965)",
+          "identidad_conocida": true,
+          "artefactos": {},
+          "pci": [
+            "8086:5917",
+            "1c5c:1527",
+            "8086:9d2f",
+            "8086:9d71",
+            "8086:24fd",
+            "10ec:8168",
+            "8086:5914",
+            "8086:1903",
+            "8086:9d31",
+            "8086:9d60",
+            "8086:9d61",
+            "8086:9d3a",
+            "8086:9d03",
+            "8086:9d14",
+            "8086:9d15",
+            "8086:9d18",
+            "8086:9d1b",
+            "8086:9d4e",
+            "8086:9d21",
+            "8086:9d23",
+            "10ec:522a",
+            "048d:1234"
+          ],
+          "wifi": {
+            "alive": {
+              "status": "ok",
+              "nota": "UCODE_ALIVE_NTFY + INIT ucode ALIVE ok + fw_alive SCD/qid (SOSOLOG run26 L306-308)",
+              "fecha": "2026-11-15"
+            },
+            "init_complete": {
+              "status": "fail",
+              "nota": "NVM 8000 inválida o lectura fallida (L309): el INIT aborta antes de TX_ANT/PHY_CFG; INIT 8000 calibración falló (L310)",
+              "fecha": "2026-11-15"
+            },
+            "mvm_ready": {
+              "status": "fail",
+              "nota": "lxdde: iwlwifi start rc=-1 phase=fw_start alive=true (L312); no hay MVM",
+              "fecha": "2026-11-15"
+            },
+            "scan": {
+              "status": "fail",
+              "nota": "wifi: escaneando redes… → error de E/S (L419-420) sin init_complete",
+              "fecha": "2026-11-15"
+            },
+            "assoc_wpa2": {
+              "status": "fail",
+              "nota": "wifi-wpa: fallo AUTH+ASSOC 802.11 (L386) sobre MVM caído",
+              "fecha": "2026-11-15"
+            },
+            "dhcp": {
+              "status": "fail",
+              "nota": "sin lease: WiFi sin MVM y backend rtl8169 con enlace DOWN (sin cable)",
+              "fecha": "2026-11-15"
+            },
+            "ssh": {
+              "status": "fail",
+              "nota": "inalcanzable: sin IP",
+              "fecha": "2026-11-15"
+            },
+            "reconexion": {
+              "status": "fail",
+              "nota": "3 recuperaciones idénticas fallidas (L345/L364/L382, \"1/2/3 de 3\")",
+              "fecha": "2026-11-15"
+            }
+          },
+          "gpu": {
+            "gsp_rpc": {
+              "status": "pendiente"
+            },
+            "vram_pool": {
+              "status": "pendiente"
+            },
+            "ce_readback": {
+              "status": "pendiente"
+            },
+            "compute_cpu_gpu": {
+              "status": "pendiente"
+            },
+            "carga_real": {
+              "status": "pendiente"
+            },
+            "apagado_limpio": {
+              "status": "pendiente"
+            }
+          },
+          "userspace": true,
+          "campana_wifi": false,
+          "campana_gpu": false,
+          "flushes": 1,
+          "fecha": "2026-11-15"
         }
       ],
-      "notas": "Flush #34 uptime 901384 ms, kernel 0.3.28 ee099449d-dirty; INIT y RT ALIVE, pero init MVM expira y firmware assert; RTL8168H enlace DOWN. Comparación Linux y corrección: docs/DIAGNOSTICO-HP-2026-11-15-FLUSH34.md.",
+      "notas": "Arranque 2026-11-15 flush #26 (uptime 381 s), kernel 0.3.28 (e466e0965). WiFi 8265: probe ok, ALIVE ok, INIT ok y NVM_ACCESS_CMD grp=0 id=0x88 ENVIADO CON RESPUESTA (sin timeout ni \"sin emparejar\"), pero iwl_mvm_nvm_read_8000 rechaza los datos en una validación propia sin traza (iwl_mvm_nvm.c:139-201) -> \"NVM 8000 inválida\" y \"INIT 8000 calibración falló\". Discrepancias vs Linux 6.6.32 confirmadas: (a) soso aborta toda la NVM al primer error de sección; Linux mvm/nvm.c:317-326 sigue y solo exige 1,3,12 y (10|11) (mvm/nvm.c:236-256); (b) chunks de 256 B vs IWL_NVM_DEFAULT_CHUNK_SIZE 2048 (mvm/nvm.c:19); (c) sin traza por sección (Linux mvm/fw.c:730). Descartados tras comparar: cabecera wide, layouts cmd/resp, MAC (sección 11 byte 2 -> PRPH 0xA03080), radio/antenas, LAR 0x4C7/0x507, 51 canales, límite 32 KiB y parseo RX gen1 (iwl_trans.c:1374 = iwl_rx_packet_payload_len). Ethernet rtl8169 DOWN por cable ausente (descartado). xHCI pierde el Enable Slot del puerto 6: completion huérfana ptr=0 code=Success slot=2 (L196), timeout 5 s (L197) y sin reintento (L216). Sondeo WiFi parado hasta 8857 ms por el volcado de fatlog (L417/L421). Matriz sin record-boot. Informe: docs/DIAGNOSTICO-HP-2026-11-15-NVM.md",
       "actualizado": "2026-11-15"
     }
   ]

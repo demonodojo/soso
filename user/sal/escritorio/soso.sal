@@ -55,6 +55,9 @@ fn sys_fb_set_mode() -> Int
 fn sys_fb_present_rect() -> Int
     97
 
+fn sys_fb_keepalive() -> Int
+    104
+
 fn sys_input_poll() -> Int
     65
 
@@ -273,6 +276,11 @@ fn fb_info(out_ptr: Int) -> Int ! io, alloc
 
 fn fb_set_mode(mode: Int) -> Int ! io
     syscall(sys_fb_set_mode(), mode, 0, 0, 0, 0, 0)
+
+# Promesa de que el dueño del modo gráfico sigue vivo: si pasan `ms` sin
+# volver a llamarla, el kernel mata su grupo y recupera la consola.
+fn fb_keepalive(ms: Int) -> Int ! io
+    syscall(sys_fb_keepalive(), ms, 0, 0, 0, 0, 0)
 
 fn fb_present_rect(buf_ptr: Int, buf_len: Int, x: Int, y: Int, w: Int, h: Int) -> Int ! io
     xy = x + y * 65536

@@ -931,6 +931,7 @@ fn ejecutar_pipeline(cmds: &[CmdSpec], ctx: Option<usize>) -> u8 {
 
     let shell_pgid = sys::getpid();
     let mut ultimo = 0u8;
+    let mut crashes: Vec<(String, u64, u8)> = Vec::new();
     for (cmd, pid) in cmds.iter().zip(pids.iter()) {
         match wait_pid(*pid as u64) {
             Ok(0) => ultimo = 0,
@@ -940,6 +941,12 @@ fn ejecutar_pipeline(cmds: &[CmdSpec], ctx: Option<usize>) -> u8 {
             }
             Ok(code) => {
                 println!("sosh: [{} salió con código {code}]", cmd.prog);
+                if matches!(code, 101 | 255)
+                    && cmd.prog != "notifybug"
+                    && cmd.prog != "/bin/notifybug"
+                {
+                    crashes.push((cmd.prog.clone(), *pid as u64, code));
+                }
                 ultimo = code;
             }
             Err(e) => {
@@ -949,7 +956,33 @@ fn ejecutar_pipeline(cmds: &[CmdSpec], ctx: Option<usize>) -> u8 {
         }
     }
     let _ = sys::tcsetpgrp(shell_pgid);
+    for (programa, pid, code) in crashes {
+        enviar_informe_crash(&programa, pid, code);
+    }
     ultimo
+}
+
+/// Dispara notifybug sin esperar al handshake HTTPS: la shell recupera el
+/// prompt enseguida y el informe recoge el backtrace y los logs persistidos.
+fn enviar_informe_crash(programa: &str, pid: u64, code: u8) {
+    let mensaje = format!("crash de usuario: {programa} pid={pid} wait_code={code}");
+    let argv = ["/bin/notifybug", "--auto-crash", mensaje.as_str()];
+    let r = sys::spawn_io_full(
+        "/bin/notifybug",
+        &argv,
+        &[],
+        [
+            abi::FD_CLOSED,
+            abi::FD_CLOSED,
+            abi::FD_CLOSED,
+            abi::FD_KERNEL_LOG,
+        ],
+    );
+    if r < 0 {
+        println!("sosh: no pude iniciar notifybug tras el crash ({r})");
+    } else {
+        println!("sosh: crash detectado; notifybug prepara el informe en segundo plano");
+    }
 }
 
 /// Un pipeline (sin operadores de cadena). `(Some, _)` = salir de la shell.

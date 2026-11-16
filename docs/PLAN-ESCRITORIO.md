@@ -37,6 +37,7 @@ Gestor de ventanas gráfico en Sal con terminales sobre PTY, clientes vía TCP
 - Ctrl+Mayús+**+** / Ctrl+Mayús+**-** — tamaño de letra del WM (barra, menú, títulos)  
 - Alt+Mayús+E — salir a consola  
 - Ctrl+Alt+Retroceso — mata al dueño de pantalla (kernel)
+- Vigilante: el WM llama a `SYS_FB_KEEPALIVE` (104) en cada tick con 5000 ms de plazo; si deja de dar señales de vida, el scheduler mata **sólo su grupo de procesos** y recupera la consola de texto
 
 ## Pruebas
 

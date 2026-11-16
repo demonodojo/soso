@@ -152,7 +152,7 @@ fn causa_parada_sondeo(fails_ahora: u32, fails_al_inicio: u32) -> (&'static str,
     if fails_ahora > fails_al_inicio {
         return ("transporte iwlwifi ocupado", 0);
     }
-    let fat = crate::drivers::fatlog::ultimo_volcado_ms();
+    let fat = crate::drivers::fatlog::ultima_escritura_reciente_ms().unwrap_or(0);
     let logfs = crate::drivers::logfs::ultimo_pasada_ms();
     let ms = fat.max(logfs);
     if ms >= 200 {

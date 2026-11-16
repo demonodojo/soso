@@ -18,7 +18,7 @@ int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t i
     (void)timeout;
     calls++;
     if (group != LEGACY_GROUP || id != NVM_ACCESS_CMD || len != sizeof(*cmd) ||
-        cmd->op_code != 0 || cmd->target != 0 || cmd->length != 256)
+        cmd->op_code != 0 || cmd->target != 0 || cmd->length != 2048)
         return -1;
     if (section == 1) size = 16;
     if (section == 3) size = 2600;
@@ -34,15 +34,15 @@ int iwl_trans_send_cmd_wait(struct iwl_ax211_priv *iwl, uint8_t group, uint8_t i
         return 0;
     }
     n = size - off;
-    if (n > 256) n = 256;
+    if (n > 2048) n = 2048;
     rsp->length = n;
     if (section == 1 && off == 0) { rsp->data[0] = 0x39; rsp->data[1] = 0x0e; }
     if (section == 3 && off == 0) { rsp->data[0] = 9; rsp->data[2] = 1; }
     if (section == 12 && off == 0) rsp->data[3] = 0x33;
     if (section == 3 && off <= 0xa0e && off + n > 0xa0e) rsp->data[0xa0e - off] = 1;
     iwl->cmd_resp_len = sizeof(*rsp) + n;
-    if (fault == 2 && section == 3 && off == 256) iwl->cmd_resp_len--;
-    if (fault == 3 && section == 3 && off == 256) rsp->offset++;
+    if (fault == 2 && section == 3 && off == 2048) iwl->cmd_resp_len--;
+    if (fault == 3 && section == 3 && off == 2048) rsp->offset++;
     return 0;
 }
 int main(void)
@@ -56,7 +56,7 @@ int main(void)
         if (((i == 0 || i == 4) && (rc || !iwl.nvm_ready || iwl.nvm_n_channels != 51 ||
                      iwl.nvm_chan_flags[0] != 9 || !iwl.lar_enabled ||
                      iwl.valid_tx_ant != 3 || iwl.valid_rx_ant != 3 ||
-                     iwl.mac[0] != 0x10 || iwl.mac[5] != 0x60 || calls < 20)) ||
+                     iwl.mac[0] != 0x10 || iwl.mac[5] != 0x60 || calls < 10)) ||
             (i > 0 && i < 4 && (!rc || iwl.nvm_ready))) {
             fprintf(stderr, "NVM 8000 caso %u rc=%d ready=%u calls=%u\n", i, rc, iwl.nvm_ready, calls);
             return 1;

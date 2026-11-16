@@ -35,6 +35,26 @@ fn menu_ok(gw: Int, gh: Int, tema: Int) -> Int ! alloc
         k = k + 1
     ok
 
+# Los menus superiores tienen que tener hit-test acotado y una accion de salida
+# accesible. Esta regresion acompana a las pruebas guest de responsive/escape.
+fn menu_limites_ok(gw: Int, gh: Int, tema: Int) -> Int ! alloc
+    x0 = lanz_menu_x0(gw)
+    y0 = lanz_menu_y0(gh)
+    x1 = x0 + lanz_menu_ancho(gw, gh, tema)
+    y1 = y0 + lanz_menu_alto(gh)
+    if lanz_hit_menu(x0, y0, gw, gh, tema) == lanz_nada()
+        1
+    elsif lanz_hit_menu(x1 - 1, y1 - 1, gw, gh, tema) == lanz_nada()
+        2
+    elsif lanz_hit_menu(x1, y0, gw, gh, tema) != lanz_nada()
+        3
+    elsif lanz_hit_menu(x0, y1, gw, gh, tema) != lanz_nada()
+        4
+    elsif lanz_menu_accion(lanz_menu_n() - 1) != lanz_salir()
+        5
+    else
+        0
+
 fn main() -> Int ! alloc
     gw = 8
     gh = 16
@@ -51,6 +71,8 @@ fn main() -> Int ! alloc
         botones_ok(gw, gh)
     elsif menu_ok(gw, gh, tema) != 0
         menu_ok(gw, gh, tema)
+    elsif menu_limites_ok(gw, gh, tema) != 0
+        menu_limites_ok(gw, gh, tema)
     elsif lanz_hit_menu(lanz_menu_x0(gw) + lanz_menu_ancho(gw, gh, tema), lanz_menu_y0(gh) + 2, gw, gh, tema) != lanz_nada()
         3
     elsif lanz_hit_menu(lanz_menu_x0(gw) + 2, lanz_menu_y0(gh) + lanz_menu_alto(gh), gw, gh, tema) != lanz_nada()

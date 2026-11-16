@@ -157,6 +157,13 @@ static FB: Mutex<Option<FbState>> = Mutex::new(None);
 static GRAPHICS_MODE: AtomicBool = AtomicBool::new(false);
 /// Proceso dueño del modo gráfico (0 = consola del kernel).
 static FB_OWNER: AtomicU64 = AtomicU64::new(0);
+/// Vigilante del dueño: plazo que declaró (`SYS_FB_KEEPALIVE`) y última señal.
+/// `0` en el plazo = vigilante apagado (consola o app que no lo pidió).
+static KEEPALIVE_MS: AtomicU64 = AtomicU64::new(0);
+static KEEPALIVE_AT: AtomicU64 = AtomicU64::new(0);
+/// El vigilante mató al dueño; el scheduler lo cuenta en `dmesg` sin imprimir
+/// desde el handler del temporizador.
+static VIGILANTE_SALTO: AtomicBool = AtomicBool::new(false);
 /// Páginas del GOP remapeadas a write-combining (`usize::MAX` = no se pudo).
 static WC_PAGES: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// Dirección física del GOP, para el log de arranque.
@@ -934,6 +941,7 @@ pub fn set_graphics_mode_for(pid: u64, on: bool) -> Result<(), i64> {
     }
     FB_OWNER.store(0, Ordering::Release);
     GRAPHICS_MODE.store(false, Ordering::Relaxed);
+    KEEPALIVE_MS.store(0, Ordering::Relaxed);
     let mut guard = FB.lock();
     if let Some(st) = guard.as_mut() {
         erase_cursor(st);
@@ -951,12 +959,50 @@ pub fn fb_input_exclusive() -> bool {
     FB_OWNER.load(Ordering::Relaxed) != 0
 }
 
+/// Arma el vigilante del dueño del modo gráfico (`plazo_ms == 0` lo apaga).
+/// Sólo puede hacerlo el propio dueño: es una promesa suya.
+pub fn set_keepalive_for(pid: u64, plazo_ms: u64) -> Result<(), i64> {
+    if FB_OWNER.load(Ordering::Acquire) != pid {
+        return Err(-soso_abi::EPERM);
+    }
+    let plazo_ms = plazo_ms.min(60_000);
+    KEEPALIVE_MS.store(plazo_ms, Ordering::Release);
+    KEEPALIVE_AT.store(crate::arch::pit::uptime_ms(), Ordering::Release);
+    Ok(())
+}
+
+/// Plazo declarado por el dueño (0 = vigilante apagado).
+pub fn keepalive_ms() -> u64 {
+    KEEPALIVE_MS.load(Ordering::Relaxed)
+}
+
+/// Última señal de vida del dueño, en ms de arranque.
+pub fn keepalive_at() -> u64 {
+    KEEPALIVE_AT.load(Ordering::Relaxed)
+}
+
+pub fn clear_keepalive() {
+    KEEPALIVE_MS.store(0, Ordering::Relaxed);
+}
+
+/// El vigilante disparó: lo apunta el scheduler, que lo cuenta luego desde
+/// contexto de proceso (aquí no se puede imprimir: el handler del temporizador
+/// no debe tomar el candado de la consola).
+pub fn note_vigilante_salto() {
+    VIGILANTE_SALTO.store(true, Ordering::Relaxed);
+}
+
+pub fn take_vigilante_salto() -> bool {
+    VIGILANTE_SALTO.swap(false, Ordering::Relaxed)
+}
+
 /// Al morir el dueño, vuelve la consola de texto del kernel.
 pub fn release_owner_if(pid: u64) {
     if FB_OWNER.swap(0, Ordering::AcqRel) != pid {
         return;
     }
     GRAPHICS_MODE.store(false, Ordering::Relaxed);
+    KEEPALIVE_MS.store(0, Ordering::Relaxed);
     let mut guard = FB.lock();
     if let Some(st) = guard.as_mut() {
         erase_cursor(st);

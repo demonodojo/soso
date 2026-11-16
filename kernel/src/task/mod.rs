@@ -518,6 +518,35 @@ fn deliver_death(procs: &mut Vec<Process>, pid: u64, code: u8, orphan: bool) {
     }
 }
 
+/// Vigilante del dueño del modo gráfico (ver `fb::set_keepalive_for`).
+///
+/// El escritorio declara cada cuánto va a dar señales de vida. Si deja de
+/// darlas —bloqueado escribiendo a un cliente que no lee, o girando en ring
+/// 3— se mata **sólo su grupo de procesos** y vuelve la consola de texto: el
+/// resto del sistema, y la shell que lo lanzó, siguen vivos.
+fn poll_fb_watchdog(procs: &mut Vec<Process>) {
+    let owner = crate::drivers::fb::framebuffer_owner();
+    if owner == 0 {
+        return;
+    }
+    let plazo = crate::drivers::fb::keepalive_ms();
+    if plazo == 0 {
+        return;
+    }
+    let ahora = crate::arch::pit::uptime_ms();
+    if ahora.saturating_sub(crate::drivers::fb::keepalive_at()) <= plazo {
+        return;
+    }
+    crate::drivers::fb::clear_keepalive();
+    crate::drivers::fb::note_vigilante_salto();
+    let pgid = procs
+        .iter()
+        .find(|p| p.pid == owner)
+        .map(|p| p.pgid)
+        .unwrap_or(owner);
+    signal_pgid(procs, pgid, soso_abi::SIGKILL as u8);
+}
+
 fn poll_pending_tty_signals(procs: &mut Vec<Process>) {
     if SERIAL_SIGINT.swap(false, core::sync::atomic::Ordering::Relaxed) {
         let pgid = Console::Serial.fg_pgid();
@@ -536,6 +565,7 @@ fn poll_pending_tty_signals(procs: &mut Vec<Process>) {
             signal_pgid(procs, pgid, soso_abi::SIGKILL as u8);
         }
     }
+    poll_fb_watchdog(procs);
 }
 
 pub fn kill_target(pid: i64, sig: u64) -> Result<u32, i64> {
@@ -720,25 +750,6 @@ fn mmap_fault_fail(addr: u64, is_write: bool, reason: &str) {
         "mmap-fault: pid={pid} va={addr:#x} wr={} {reason} (frames={free} evict={evict})",
         is_write as u8
     );
-}
-
-/// Vuelca tres palabras de la pila de usuario, si están mapeadas.
-pub fn dump_user_stack(rsp: u64) {
-    if rsp % 8 != 0 || current_pid() == 0 {
-        return;
-    }
-    let mut w = [0u64; 3];
-    let ok = with_current(|p| {
-        let space = p.space.as_ref().unwrap();
-        let mut buf = [0u8; 24];
-        space.read(rsp, &mut buf).map(|_| buf)
-    });
-    if let Some(buf) = ok {
-        for (i, c) in buf.chunks_exact(8).enumerate() {
-            w[i] = u64::from_le_bytes(c.try_into().unwrap());
-        }
-        crate::println!("task: [rsp]={:#x} [rsp+8]={:#x} [rsp+16]={:#x}", w[0], w[1], w[2]);
-    }
 }
 
 /// Intenta resolver un page fault de usuario en una región mmap.
@@ -1452,6 +1463,17 @@ pub fn kill_current(reason: &str) -> ! {
     exit_current(255);
 }
 
+/// Registra una terminación desde el panic handler de userspace, conserva el
+/// contexto de pila y vuelve al padre con el código reservado 101.
+pub fn panic_current(rip: u64, rsp: u64) -> ! {
+    let pid = current_pid();
+    let name = with_current(|p| p.name.clone());
+    crate::println!("task: panic de usuario [{pid}] {name} rip={rip:#x} rsp={rsp:#x}");
+    dump_user_stack_n(rsp, 48);
+    flush_fatlog_on_task_death();
+    exit_current(101);
+}
+
 /// Bloquea el proceso actual con el contexto ya volcado en su `ctx`
 /// (rax se rellenará al despertar) y cede el control.
 pub fn block_current(ctx: Context, state: State) -> ! {
@@ -1606,6 +1628,13 @@ extern "C" fn schedule_inner() -> ! {
         let mut procs = PROCS.lock();
 
         poll_pending_tty_signals(&mut procs);
+        // El vigilante apunta el disparo desde el temporizador, donde no se
+        // puede imprimir; aquí ya estamos en contexto de proceso.
+        if crate::drivers::fb::take_vigilante_salto() {
+            crate::println!(
+                "fb: el dueño de la pantalla no dio señales de vida; se cierra y vuelve la consola"
+            );
+        }
 
         // Recoger zombis huérfanos
         // cliente cerró). No liberar el AddrSpace si el pid sigue en
@@ -2363,7 +2392,7 @@ pub fn dump_user_stack_n(rsp: u64, n: usize) {
             let v = u64::from_le_bytes(c.try_into().unwrap());
             // Sólo lo que parece código (texto del ejecutable): ahorra ruido.
             if (0x400000..0x4000_0000).contains(&v) {
-                crate::println!("task:   [rsp+{:#x}]={v:#x}", i * 8);
+                crate::println!("task: backtrace candidato [rsp+{:#x}]={v:#x}", i * 8);
             }
         }
     }

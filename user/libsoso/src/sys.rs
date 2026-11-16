@@ -42,6 +42,13 @@ pub fn exit(code: u8) -> ! {
     unreachable!()
 }
 
+/// Sale como panic de usuario y deja al kernel la rsp del contexto original
+/// para incluir palabras de pila en el informe de diagnóstico.
+pub fn exit_panic(rsp: u64) -> ! {
+    syscall4(abi::SYS_EXIT, 101, rsp, 0, 0);
+    unreachable!()
+}
+
 pub fn read(fd: u64, buf: &mut [u8]) -> i64 {
     syscall4(abi::SYS_READ, fd, buf.as_mut_ptr() as u64, buf.len() as u64, 0)
 }

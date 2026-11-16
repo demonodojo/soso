@@ -237,10 +237,15 @@ fn excepcion_generica(stack_frame: &InterruptStackFrame, vector: u8, error_code:
 }
 
 extern "sysv64" fn kill_vector_shim(vector: u64, _: u64) -> u64 {
+    let rip = EXC_RIP.load(Ordering::Relaxed);
+    let rsp = EXC_RSP.load(Ordering::Relaxed);
+    let extra = EXC_EXTRA.load(Ordering::Relaxed);
     crate::println!(
-        "task: excepción de usuario: {}",
-        nombre_excepcion(vector as u8)
+        "task: excepción de usuario: {} vector={} error={extra:#x} rip={rip:#x} rsp={rsp:#x}",
+        nombre_excepcion(vector as u8),
+        vector
     );
+    crate::task::dump_user_stack_n(rsp, 48);
     crate::task::kill_current("excepción de CPU")
 }
 
@@ -444,7 +449,7 @@ extern "sysv64" fn kill_shim(motivo: u64, dato: u64) -> u64 {
             // [rsp] es la dirección de retorno si el fallo ocurre en la primera
             // instrucción de una función (rip=0 tras un `call` nulo, TLS sin
             // base...): sin ella el rip solo dice dónde, no quién llamó.
-            crate::task::dump_user_stack(rsp);
+            crate::task::dump_user_stack_n(rsp, 48);
             crate::task::kill_current("page fault")
         }
         1 => {
@@ -456,7 +461,13 @@ extern "sysv64" fn kill_shim(motivo: u64, dato: u64) -> u64 {
             crate::task::dump_user_stack_n(rsp, 48);
             crate::task::kill_current("general protection fault")
         }
-        2 => crate::task::kill_current("invalid opcode"),
+        2 => {
+            let rip = EXC_RIP.load(Ordering::Relaxed);
+            let rsp = EXC_RSP.load(Ordering::Relaxed);
+            crate::println!("task: invalid opcode de usuario rip={rip:#x} rsp={rsp:#x}");
+            crate::task::dump_user_stack_n(rsp, 48);
+            crate::task::kill_current("invalid opcode")
+        }
         _ => crate::task::kill_current("excepción"),
     }
 }

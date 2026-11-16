@@ -740,6 +740,15 @@ El token es un PAT de GitHub con permiso **Issues (escritura)**. Ese fichero **n
 viaja** en las actualizaciones OTA: lo configuras una vez en la máquina. Si
 `token` está vacío, el comando explica qué falta y no llama a la red.
 
+Cuando un programa de la terminal termina por page fault, excepción fatal o
+panic de Rust, `sosh` recupera el prompt y lanza `notifybug` en segundo plano
+con el nombre del programa y su código de salida. El informe incluye el
+contexto guardado en los logs, como RIP/RSP, dirección del page fault y las
+direcciones candidatas de retorno de la pila. Para que GitHub reciba la issue,
+la red debe funcionar y `/etc/notifybug.conf` debe tener un token con permiso
+de escritura de Issues. `notifybug` no se relanza automáticamente si es el
+programa que falla.
+
 En el **USB live** puedes usar `notifybug` igual (lee `/var/log` y, si aplica,
 también vuelca a `SOSOLOG.TXT`); para sacar el pendrive sin red sigue valiendo
 `cargo xtask sosolog` en el PC anfitrión.
@@ -850,6 +859,8 @@ el botón **Aplicaciones** despliega un menú con **Terminal**, **Navegador web*
 **Salir del escritorio**, y los accesos directos **Terminal** y **Web** abren lo mismo de
 un clic. Un clic fuera del menú lo cierra.
 **Ctrl+Alt+Retroceso** recupera la consola si el gestor deja de responder (PS/2 y teclado USB); el kernel mata al dueño de pantalla y repinta la consola de texto.
+
+El escritorio además **se vigila solo**: mientras tiene la pantalla promete al kernel una señal de vida cada pocos milisegundos y, si pasa **5 s** sin darla (se quedó bloqueado con un cliente que no lee, o girando), el kernel mata **sólo su grupo de procesos** y vuelve la consola de texto con la shell intacta. Después se relanza `soso-wm` normalmente. Lo mismo vale para cualquier programa que tome la pantalla completa (`soso-web --grafico` sin gestor) si llama a la señal de vida.
 
 Arranque recomendado para navegar en ventana:
 

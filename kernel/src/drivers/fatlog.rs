@@ -13,6 +13,10 @@ const FILE_SIZE: usize = 256 * 1024;
 const POLL_MS: u64 = 2000;
 const FULL_WHEN_RING_FULL_MS: u64 = 30_000;
 const BOMBEO_CHUNK: usize = 16 * 1024;
+/// El flush diferido hace como máximo una transacción de sector por vuelta.
+/// Una BOT multi-sector mantenía ocupado el BSP mientras el xHCI esperaba al
+/// stick, y podía dejar sin sondeo al WiFi durante varios segundos.
+const POLL_CHUNK: usize = SECTOR;
 /// Reserva fija para la cabecera de flush (ver `format_header`).
 const HDR_SLOT: usize = 160;
 const LOGBUF_CAP: usize = 256 * 1024;
@@ -28,6 +32,10 @@ static BOOT_FULL_DONE: AtomicBool = AtomicBool::new(false);
 /// Duración del último volcado y máximo observado (para diagnosticar parones de red).
 static ULTIMO_VOLCADO_MS: AtomicU64 = AtomicU64::new(0);
 static MAX_VOLCADO_MS: AtomicU64 = AtomicU64::new(0);
+/// Latencia de la última transacción de escritura ESP, para atribuir gaps al
+/// bloqueo real de E/S y no a la duración acumulada de un flush incremental.
+static ULTIMA_ESCRITURA_MS: AtomicU64 = AtomicU64::new(0);
+static ULTIMA_ESCRITURA_AT_MS: AtomicU64 = AtomicU64::new(0);
 /// Último latido de teclado volcado, para no reescribir sin necesidad.
 static LAST_LATIDO: AtomicU32 = AtomicU32::new(u32::MAX);
 
@@ -97,12 +105,6 @@ pub fn flush_checkpoint() {
     if ACTIVE.load(Ordering::Relaxed) {
         flush_or_warn(false);
     }
-}
-
-/// Duración del último volcado completo a la ESP (ms).
-#[cfg_attr(not(feature = "lxdde"), allow(dead_code))]
-pub fn ultimo_volcado_ms() -> u64 {
-    ULTIMO_VOLCADO_MS.load(Ordering::Relaxed)
 }
 
 /// Máximo observado desde el arranque.
@@ -179,12 +181,18 @@ fn write_bytes(
     }
     let base_lba = slot.data_lba + (offset / SECTOR) as u64;
     if !bombeo_entre_bloques {
-        return espfat::write(base_lba, data).map_err(|_| ());
+        let t0 = crate::arch::tsc::uptime_ms();
+        let result = espfat::write(base_lba, data).map_err(|_| ());
+        registrar_escritura(t0);
+        return result;
     }
     let mut off = 0usize;
     while off < data.len() {
         let chunk = (data.len() - off).min(BOMBEO_CHUNK);
-        espfat::write(base_lba + (off / SECTOR) as u64, &data[off..off + chunk]).map_err(|_| ())?;
+        let t0 = crate::arch::tsc::uptime_ms();
+        let result = espfat::write(base_lba + (off / SECTOR) as u64, &data[off..off + chunk]);
+        registrar_escritura(t0);
+        result.map_err(|_| ())?;
         off += chunk;
         if off < data.len() {
             bombeo_red_bsp();
@@ -193,7 +201,26 @@ fn write_bytes(
     Ok(())
 }
 
-/// Un solo trozo de como mucho [`BOMBEO_CHUNK`] sin bombeo de red (camino `poll`).
+fn registrar_escritura(t0: u64) {
+    ULTIMA_ESCRITURA_MS.store(
+        crate::arch::tsc::uptime_ms().saturating_sub(t0),
+        Ordering::Relaxed,
+    );
+    ULTIMA_ESCRITURA_AT_MS.store(crate::arch::tsc::uptime_ms(), Ordering::Relaxed);
+}
+
+/// Última transacción ESP reciente, no el tiempo acumulado entre vueltas de
+/// un flush diferido. Solo sirve como pista causal durante cinco segundos.
+#[cfg_attr(not(feature = "lxdde"), allow(dead_code))]
+pub fn ultima_escritura_reciente_ms() -> Option<u64> {
+    let at = ULTIMA_ESCRITURA_AT_MS.load(Ordering::Relaxed);
+    if at == 0 || crate::arch::tsc::uptime_ms().saturating_sub(at) > 5_000 {
+        return None;
+    }
+    Some(ULTIMA_ESCRITURA_MS.load(Ordering::Relaxed))
+}
+
+/// Un solo sector sin bombeo de red (camino `poll`).
 fn write_bytes_poll_chunk(slot: Slot, offset: usize, buf: &[u8], chunk_end: usize) -> Result<(), ()> {
     write_bytes(slot, offset, &buf[offset..chunk_end], false)
 }
@@ -320,7 +347,7 @@ fn flush_poll_continuation() -> bool {
             ring_lleno,
             ring_at,
         } => {
-            let end = FILE_SIZE.min(off + BOMBEO_CHUNK);
+            let end = FILE_SIZE.min(off + POLL_CHUNK);
             let ok = crate::drivers::logbuf::run_without_capture(|| {
                 write_bytes_poll_chunk(slot, off, buf, end).is_ok()
             });
@@ -381,7 +408,7 @@ fn flush_poll_continuation() -> bool {
             }
             let t = tramos[idx];
             let rem = t.len - sub_off;
-            let n = rem.min(BOMBEO_CHUNK);
+            let n = rem.min(POLL_CHUNK);
             let base = t.offset + sub_off;
             let ok = crate::drivers::logbuf::run_without_capture(|| {
                 write_bytes(slot, base, &buf[base..base + n], false).is_ok()

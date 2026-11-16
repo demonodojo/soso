@@ -503,13 +503,16 @@ fn lanzar_shell() -> u8 {
             }
         }
         if !sosh_sigue_viva(pid) {
-            match sys::wait() {
+            match wait_pid(pid as u64) {
                 Ok((_, 0)) => {
                     println!("init: shell cerrada; adiós");
                     return 0;
                 }
                 Ok((_, code)) => {
                     println!("init: sosh murió con código {code}; relanzando");
+                    if matches!(code, 101 | 255) {
+                        notificar_crash_sosh(code);
+                    }
                     let _ = sys::unlink("/tmp/sosh-ready");
                     ota_hecho = false;
                     pid = sys::spawn("/bin/sosh", "");
@@ -526,6 +529,42 @@ fn lanzar_shell() -> u8 {
             continue;
         }
         let _ = sys::sleep_ms(50);
+    }
+}
+
+/// PID 1 también informa si el propio gestor de terminal muere: en ese caso
+/// no queda una shell que pueda lanzar notifybug por su cuenta.
+fn notificar_crash_sosh(code: u8) {
+    let argv = [
+        "/bin/notifybug",
+        "--auto-crash",
+        "crash de usuario: /bin/sosh (PID 1, reinicio de shell)",
+    ];
+    let r = sys::spawn_io_full(
+        "/bin/notifybug",
+        &argv,
+        &[],
+        [
+            abi::FD_CLOSED,
+            abi::FD_CLOSED,
+            abi::FD_CLOSED,
+            abi::FD_KERNEL_LOG,
+        ],
+    );
+    if r < 0 {
+        println!("init: no pude iniciar notifybug tras el crash de sosh ({r}, código {code})");
+    } else {
+        println!("init: sosh sufrió un crash; notifybug prepara el informe en segundo plano");
+    }
+}
+
+fn wait_pid(want: u64) -> Result<(u64, u8), i64> {
+    loop {
+        match sys::wait() {
+            Ok((pid, code)) if pid == want => return Ok((pid, code)),
+            Ok(_) => {}
+            Err(e) => return Err(e),
+        }
     }
 }
 

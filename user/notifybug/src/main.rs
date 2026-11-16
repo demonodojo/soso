@@ -25,14 +25,27 @@ const CONF: &str = "/etc/notifybug.conf";
 const RELEASE: &str = "/etc/soso-release";
 const HW: &str = "/etc/soso-hw";
 
+macro_rules! salida {
+    ($automatica:expr, $($arg:tt)*) => {{
+        if $automatica {
+            libsoso::logln!($($arg)*);
+        } else {
+            println!($($arg)*);
+        }
+    }};
+}
+
 fn main(args: &[String]) -> u8 {
     let mut ver = false;
+    let mut automatica = false;
     let mut mensaje = String::new();
     for a in args {
         if a == "--ver" {
             ver = true;
+        } else if a == "--auto-crash" {
+            automatica = true;
         } else if a.starts_with('-') {
-            println!("notifybug: opción desconocida {a}");
+            salida!(automatica, "notifybug: opción desconocida {a}");
             return 2;
         } else {
             if !mensaje.is_empty() {
@@ -44,7 +57,7 @@ fn main(args: &[String]) -> u8 {
 
     let r = sys::fatlog_flush();
     if r < 0 {
-        println!("notifybug: aviso: no pude volcar el log a disco ({r})");
+        salida!(automatica, "notifybug: aviso: no pude volcar el log a disco ({r})");
     }
 
     let conf_text = read_text(CONF, 2048).unwrap_or_default();
@@ -89,51 +102,51 @@ fn main(args: &[String]) -> u8 {
     let titulo = titulo_issue(&mensaje, release.as_deref());
 
     if ver {
-        println!("--- título ---");
-        println!("{titulo}");
-        println!("--- cuerpo ---");
-        println!("{cuerpo}");
+        salida!(automatica, "--- título ---");
+        salida!(automatica, "{titulo}");
+        salida!(automatica, "--- cuerpo ---");
+        salida!(automatica, "{cuerpo}");
         return 0;
     }
 
     if !token_listo(&conf) {
-        println!("notifybug: falta token en {CONF}");
-        println!("  Edita el fichero y pon un PAT de GitHub con permiso Issues (escritura):");
-        println!("  token=ghp_…");
-        println!("  repo={}", conf.repo);
+        salida!(automatica, "notifybug: falta token en {CONF}");
+        salida!(automatica, "  Edita el fichero y pon un PAT de GitHub con permiso Issues (escritura):");
+        salida!(automatica, "  token=ghp_…");
+        salida!(automatica, "  repo={}", conf.repo);
         return 2;
     }
 
     let url = match issues_url(&conf.repo) {
         Ok(u) => u,
         Err(e) => {
-            println!("notifybug: {e}");
+            salida!(automatica, "notifybug: {e}");
             return 2;
         }
     };
 
     let json = build_issue_json(&titulo, &cuerpo);
-    println!("notifybug: enviando informe a {}…", conf.repo);
+    salida!(automatica, "notifybug: enviando informe a {}…", conf.repo);
     let resp = match net::https_post_json(&url, &conf.token, json.as_bytes()) {
         Ok(r) => r,
         Err(e) => {
-            println!("notifybug: {}", net::map_http_err(e));
+            salida!(automatica, "notifybug: {}", net::map_http_err(e));
             return 1;
         }
     };
 
     match parse_issue_response(resp.status, &resp.body) {
         Ok(issue_url) => {
-            println!("notifybug: issue creada:");
-            println!("  {issue_url}");
+            salida!(automatica, "notifybug: issue creada:");
+            salida!(automatica, "  {issue_url}");
             0
         }
         Err(e) => {
-            println!("notifybug: {e}");
+            salida!(automatica, "notifybug: {e}");
             if !resp.body.is_empty() {
                 let preview = core::str::from_utf8(&resp.body[..resp.body.len().min(200)])
                     .unwrap_or("(binario)");
-                println!("  respuesta: {preview}");
+                salida!(automatica, "  respuesta: {preview}");
             }
             1
         }

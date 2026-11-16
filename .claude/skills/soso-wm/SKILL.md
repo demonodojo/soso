@@ -51,6 +51,18 @@ Tests layout Rust: `cargo test -p soso-wm-proto`.
 
 - Un proceso es **dueño** del modo gráfico (`SYS_FB_SET_MODE`, `fb_present` / rect).
 - `Ctrl+Alt+Retroceso` mata al dueño (consola).
+- **Vigilante del dueño**: `wm_tick` llama a `fb_keepalive(5000)` (`SYS_FB_KEEPALIVE=104`).
+  Si pasan 5 s sin señal, `poll_fb_watchdog` (scheduler) mata con `SIGKILL` **sólo el
+  grupo del dueño** y `release_owner_if` devuelve la consola: un WM colgado no se lleva
+  la shell. Un tick normal son 10 ms; no subir de ~5 s el plazo sin medirlo.
+- **Vigilante del dueño**: `wm_tick` llama a `fb_keepalive(5000)` (`SYS_FB_KEEPALIVE=104`).
+  Si pasan 5 s sin señal, `poll_fb_watchdog` (scheduler) mata con `SIGKILL` **sólo el
+  grupo del dueño** y `release_owner_if` devuelve la consola: un WM colgado no se lleva
+  la shell. Un tick normal son 10 ms; no subir de ~5 s el plazo sin medirlo.
+- **Vigilante del dueño**: `wm_tick` llama a `fb_keepalive(5000)` (`SYS_FB_KEEPALIVE=104`).
+  Si pasan 5 s sin señal, `poll_fb_watchdog` (scheduler) mata con `SIGKILL` **sólo el
+  grupo del dueño** y `release_owner_if` devuelve la consola: un WM colgado no se lleva
+  la shell. Un tick normal son 10 ms; no subir de ~5 s el plazo sin medirlo.
 - Entrada exclusiva mientras el WM tiene el FB (`fb_input_exclusive`).
 
 ## Atajos de teclado (usuario)

@@ -3407,7 +3407,14 @@ fn wm_sync_visibilidad(st: &mut Estado) -> Int ! io, alloc
         i = i + 1
     0
 
+# Plazo del vigilante del kernel: si el WM pasa más de esto sin volver a
+# `wm_tick` (bloqueado con un cliente que no lee, o girando), el kernel mata
+# sólo su grupo y recupera la consola. El tick normal son 10 ms.
+fn wm_keepalive_ms() -> Int
+    5000
+
 fn wm_tick(st: &mut Estado, listener: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
+    _ka = fb_keepalive(wm_keepalive_ms())
     _ps = wm_cargar_psf(st, sw)
     evt = st.evt_buf
     _in = wm_drenar_input(st, evt, 24 * 8, compos, clen, sw, sh, stride, bpp, fmt)

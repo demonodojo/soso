@@ -241,7 +241,13 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         return -abi::EINTR;
     }
     let r = match f.nr {
-        abi::SYS_EXIT => super::exit_current(a1 as u8),
+        abi::SYS_EXIT => {
+            let code = a1 as u8;
+            if code == 101 && a2 != 0 {
+                super::panic_current(f.rip, a2);
+            }
+            super::exit_current(code)
+        }
         abi::SYS_READ => sys_read(f, a1, a2, a3),
         abi::SYS_WRITE => sys_write(f, a1, a2, a3),
         abi::SYS_OPEN => {
@@ -375,6 +381,7 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_FB_SET_MODE => sys_fb_set_mode(a1),
         abi::SYS_FB_PRESENT => sys_fb_present(a1, a2),
         abi::SYS_FB_PRESENT_RECT => sys_fb_present_rect(a1, a2, a3, a4),
+        abi::SYS_FB_KEEPALIVE => sys_fb_keepalive(a1),
         abi::SYS_INPUT_POLL => sys_input_poll(a1, a2),
         abi::SYS_PTY_OPEN => sys_pty_open(),
         abi::SYS_SHM_CREATE => sys_shm_create(a1),
@@ -3028,6 +3035,11 @@ fn sys_fb_info(out: u64) -> Result<u64, i64> {
         space.write(out, bytes).ok_or(-abi::EFAULT)?;
         Ok(0)
     })
+}
+
+fn sys_fb_keepalive(plazo_ms: u64) -> Result<u64, i64> {
+    let pid = super::current_pid();
+    crate::drivers::fb::set_keepalive_for(pid, plazo_ms).map(|_| 0)
 }
 
 fn sys_fb_set_mode(mode: u64) -> Result<u64, i64> {
