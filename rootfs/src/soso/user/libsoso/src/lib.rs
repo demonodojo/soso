@@ -7,6 +7,7 @@ extern crate alloc;
 
 pub mod glob;
 pub mod linea;
+pub mod senal;
 pub mod sys;
 pub mod thread;
 pub mod ventana;
@@ -358,8 +359,33 @@ pub fn errno_str(e: i64) -> &'static str {
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
+    let rsp: u64;
+    unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)) };
+    registrar_panic(info, rsp);
     println!("panic de usuario: {info}");
-    sys::exit(101);
+    sys::exit_panic(rsp);
+}
+
+/// Escribe al fd de log sin heap ni el candado de consola: el panic puede
+/// originarse precisamente por OOM o mientras otro contexto imprimía.
+fn registrar_panic(info: &core::panic::PanicInfo<'_>, rsp: u64) {
+    use core::fmt::Write;
+    struct Linea {
+        bytes: [u8; 768],
+        len: usize,
+    }
+    impl Write for Linea {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            let n = s.len().min(self.bytes.len().saturating_sub(self.len));
+            self.bytes[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
+            self.len += n;
+            Ok(())
+        }
+    }
+
+    let mut linea = Linea { bytes: [0; 768], len: 0 };
+    let _ = write!(linea, "user-panic: pid={} rsp={rsp:#x} {info}\n", sys::getpid());
+    let _ = sys::write_all(abi::LOG_FD, &linea.bytes[..linea.len]);
 }
 
 #[global_allocator]

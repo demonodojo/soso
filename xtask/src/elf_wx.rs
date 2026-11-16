@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 const PT_LOAD: u32 = 1;
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
+// Sólo la usan los tests (un PT_LOAD RWX de ejemplo); fuera de ellos sería código muerto.
+#[cfg(test)]
+const PF_R: u32 = 4;
 
 #[derive(Clone, Copy)]
 struct Load {

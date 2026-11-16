@@ -70,6 +70,7 @@ fn main(args: &[String]) -> u8 {
         // hijos de verdad a los que matar.
         "dormir" => return sondas::senales::dormir(args.get(1).map(|s| s.as_str()).unwrap_or("0")),
         "salir" => return sondas::senales::salir(args.get(1).map(|s| s.as_str()).unwrap_or("0")),
+        "tuberia-rota" => return sondas::senales::tuberia_rota(),
         "gritar" => return sondas::salidas::gritar(),
         "eco-entorno" => return sondas::salidas::eco_entorno(),
         "eco-cwd" => return sondas::salidas::eco_cwd(),

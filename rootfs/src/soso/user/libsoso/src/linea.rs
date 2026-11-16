@@ -121,6 +121,14 @@ impl Lector {
             let mut byte = [0u8; 1];
             let n = sys::read(0, &mut byte);
             if n == -(abi::EINTR as i64) {
+                // Con señales capturadas, sólo SIGINT es Ctrl-C: cualquier otra
+                // (SIGWINCH, SIGCHLD…) interrumpe el `read` sin que el usuario
+                // haya pedido nada, y la línea a medias se conserva. Sin nada
+                // capturado, el `EINTR` viene del Ctrl-C de una shell sin
+                // manejadores (caso especial del kernel).
+                if crate::senal::llegadas() != 0 && !crate::senal::tomar(abi::SIGINT) {
+                    continue;
+                }
                 self.len = 0;
                 self.eco_str("^C\n");
                 continue;

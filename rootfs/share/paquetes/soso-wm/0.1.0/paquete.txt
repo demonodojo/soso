@@ -3,4 +3,4 @@ nombre=soso-wm
 version=0.1.0
 abi=1
 destino=sistema
-f 7a1f98192c2a9dbafd35226a7f258a2733c72d36c8be683c94ea20807e59242a 645080 bin/soso-wm
+f 0a0daa6c88361002d78075422a3662c3099875b4a14beb43e24b95a9d8e9a6eb 645048 bin/soso-wm

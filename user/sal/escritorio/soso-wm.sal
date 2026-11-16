@@ -78,7 +78,7 @@ fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, 
         if t1i >= 0
             fd1 = st.tab.fd(t1i)
             _w1 = write_str_fd(fd1, d"echo dos\n")
-        _p = spawn_io_full(d"/bin/demo-cliente", fd_tty_heredado(), fd_tty_heredado(), fd_tty_heredado(), fd_kernel_log())
+        demo_pid = spawn_io_full(d"/bin/demo-cliente", fd_tty_heredado(), fd_tty_heredado(), fd_tty_heredado(), fd_kernel_log())
         t0 = uptime_ms()
         ok = 0
         demo = 0
@@ -126,6 +126,10 @@ fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, 
                             elsif vstage == 2
                                 if st.tab.vis(demo_i) == 1
                                     ok = 1
+        # El cliente no es hijo de nadie que lo vaya a esperar: si se queda,
+        # sobrevive a la prueba y a la sesión que la lanzó.
+        if demo_pid > 0
+            _k = kill_pid(demo_pid, 9)
         close_fd(listener)
         if ok == 2
             _d1 = print_str(d"soso-wm: prueba plazo agotado; faltan:")
@@ -359,7 +363,7 @@ fn prueba_web_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: I
         msg = bytes_ptr(msg_own)
         st = Estado.new(evt, msg)
         _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, 0, sw, sh, wm_color_fondo(&mut st))
-        _p = spawn_io_4(d"/var/paquetes/soso-web/bin/soso-web", d"--grafico", d"--local", d"/var/paquetes/soso-web/share/ejemplo/web-prueba.html", fd_tty_heredado(), fd_tty_heredado(), fd_tty_heredado(), fd_kernel_log())
+        web_pid = spawn_io_4(d"/var/paquetes/soso-web/bin/soso-web", d"--grafico", d"--local", d"/var/paquetes/soso-web/share/ejemplo/web-prueba.html", fd_tty_heredado(), fd_tty_heredado(), fd_tty_heredado(), fd_kernel_log())
         t0 = uptime_ms()
         ok = 0
         while ok == 0
@@ -373,6 +377,10 @@ fn prueba_web_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: I
                     if st.tab.fase(fi) == 2
                         if prueba_web_pixel_ok(&mut st, fi) != 0
                             ok = 1
+        # soso-web no sale al perder el WM: se quedaba huérfano y dormido, con
+        # su socket abierto, hasta que se cerraba la sesión que lanzó la prueba.
+        if web_pid > 0
+            _k = kill_pid(web_pid, 9)
         close_fd(listener)
         if ok == 1
             _pr = print_str(d"soso-wm: prueba-web OK\n")

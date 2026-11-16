@@ -113,6 +113,9 @@ fn main(args: &[String]) -> u8 {
         libsoso::logln!("{}", args[1..].join(" "));
         return 0;
     }
+    if let Some(modo) = cmd.strip_prefix("sig-") {
+        return modo_senal(modo);
+    }
     println!("init: args desconocidos {args:?} (usa: test)");
     2
 }
@@ -364,6 +367,333 @@ fn fpu_stress(seed: u8) -> u8 {
     } else {
         println!("fpu {}: {fallos} corrupciones de YMM", seed as char);
         1
+    }
+}
+
+// ---- manejadores de señales ----
+
+use libsoso::senal;
+
+/// Espera a un hijo concreto con `waitpid` y devuelve `(tipo, código)`.
+fn esperar(pid: i64, flags: u64) -> Option<(u8, u8)> {
+    loop {
+        match sys::waitpid(pid, flags) {
+            Ok(Some((p, tipo, code))) if p == pid as u64 => return Some((tipo, code)),
+            Err(e) if e == -abi::EINTR => continue,
+            _ => return None,
+        }
+    }
+}
+
+fn suite_senales() -> u8 {
+    use abi::{WAIT_CONT, WAIT_EXIT, WAIT_STOP};
+    let salida = |code: u8| Some((WAIT_EXIT, code));
+
+    check!(
+        senal::accion(abi::SIGKILL, senal::Accion::Ignorar) == Err(-abi::EINVAL)
+            && senal::accion(abi::SIGSTOP, senal::Accion::Ignorar) == Err(-abi::EINVAL),
+        "sigaction rechaza KILL y STOP"
+    );
+    let antes = senal::bloquear(abi::sig_bit(abi::SIGKILL));
+    let ahora = senal::fijar_mascara(antes);
+    check!(ahora & abi::sig_bit(abi::SIGKILL) == 0, "SIGKILL no se puede bloquear");
+
+    // 1. Un manejador cuenta las señales que le llegan.
+    let h = sys::spawn("/bin/init", "sig-usr1");
+    check!(h > 0, "spawn sig-usr1");
+    let _ = sys::sleep_ms(200);
+    for _ in 0..3 {
+        let _ = sys::kill(h, abi::SIGUSR1);
+        let _ = sys::sleep_ms(100);
+    }
+    check!(esperar(h, 0) == salida(3), "manejador de USR1 ejecutado 3 veces");
+
+    // 2. Una espera interrumpida por un manejador vuelve con EINTR.
+    let h = sys::spawn("/bin/init", "sig-eintr");
+    let _ = sys::sleep_ms(200);
+    let _ = sys::kill(h, abi::SIGUSR1);
+    check!(esperar(h, 0) == salida(42), "sleep interrumpido devuelve EINTR");
+
+    // 3. Ignorada no mata; KILL sí.
+    let h = sys::spawn("/bin/init", "sig-ign");
+    let _ = sys::sleep_ms(200);
+    check!(sys::kill(h, abi::SIGTERM) > 0, "TERM a un proceso que la ignora");
+    let _ = sys::sleep_ms(100);
+    check!(sys::kill(h, abi::SIGPROBE) > 0, "sigue vivo tras TERM ignorada");
+    let _ = sys::kill(h, abi::SIGKILL);
+    check!(esperar(h, 0) == salida(137), "KILL lo mata igual (137)");
+
+    // 4. Máscara: bloqueada queda pendiente; al desbloquear se entrega antes de
+    //    que la syscall vuelva.
+    let h = sys::spawn("/bin/init", "sig-mascara");
+    check!(esperar(h, 0) == salida(0), "máscara: pendiente y entrega al desbloquear");
+
+    // 5. Contexto completo: los YMM y los registros sobreviven a manejadores
+    //    que los pisan, llegando en mitad del bucle (camino del temporizador).
+    //    Señales iguales pendientes se funden en una, así que no se exige un
+    //    número exacto de manejadores: USR2 dice al hijo que ya está.
+    let h = sys::spawn("/bin/init", "sig-ymm");
+    let _ = sys::sleep_ms(100);
+    if sys::kill(h, abi::SIGPROBE) < 0 {
+        let r = esperar(h, 0);
+        check!(false, "sig-ymm murió antes de tiempo: {r:?}");
+    }
+    for i in 0..50 {
+        let r = sys::kill(h, abi::SIGUSR1);
+        check!(r > 0, "kill USR1 #{i} a sig-ymm ({r})");
+        let _ = sys::sleep_ms(20);
+    }
+    let _ = sys::kill(h, abi::SIGUSR2);
+    let r = esperar(h, 0);
+    check!(r == salida(0), "YMM y registros intactos tras manejadores que los pisan ({r:?})");
+
+    // 6. Un sigreturn con un marco manipulado mata al proceso, no al kernel.
+    for modo in ["sig-malo-rip", "sig-malo-xstate", "sig-malo-mxcsr"] {
+        let h = sys::spawn("/bin/init", modo);
+        check!(esperar(h, 0) == salida(255), "{modo}: el proceso muere (255)");
+    }
+
+    // 7. SIGCHLD y waitpid.
+    check!(senal::capturar(abi::SIGCHLD).is_ok(), "capturar SIGCHLD");
+    let _ = senal::tomar(abi::SIGCHLD);
+    let h = sys::spawn("/bin/init", "hijo");
+    check!(esperar(h, 0) == salida(7), "waitpid de un hijo concreto (7)");
+    check!(senal::tomar(abi::SIGCHLD), "SIGCHLD al morir el hijo");
+    let _ = senal::por_defecto(abi::SIGCHLD);
+    let h = sys::spawn("/bin/init", "sleep 5000");
+    check!(sys::waitpid(h, abi::WNOHANG) == Ok(None), "WNOHANG con el hijo vivo da 0");
+    let _ = sys::kill(h, abi::SIGKILL);
+    check!(esperar(h, 0) == salida(137), "waitpid tras KILL (137)");
+
+    // 8. Alarma.
+    let h = sys::spawn("/bin/init", "sig-alarma");
+    check!(esperar(h, 0) == salida(abi::exit_by_signal(abi::SIGALRM as u8)), "alarma por defecto mata (142)");
+    let h = sys::spawn("/bin/init", "sig-alarma-h");
+    check!(esperar(h, 0) == salida(42), "alarma con manejador interrumpe el sleep");
+
+    // 9. SIGPIPE.
+    let h = sys::spawn("/bin/init", "sig-pipe");
+    check!(esperar(h, 0) == salida(abi::exit_by_signal(abi::SIGPIPE as u8)), "tubería sin lector mata (141)");
+    let h = sys::spawn("/bin/init", "sig-pipe-ign");
+    check!(esperar(h, 0) == salida(42), "PIPE ignorada: write devuelve EPIPE");
+
+    // 10. STOP / CONT.
+    let h = sys::spawn("/bin/init", "sleep 30000");
+    let _ = sys::sleep_ms(200);
+    let _ = sys::kill(h, abi::SIGSTOP);
+    check!(
+        esperar(h, abi::WUNTRACED) == Some((WAIT_STOP, abi::SIGSTOP as u8)),
+        "waitpid(WUNTRACED) informa de la parada"
+    );
+    let _ = sys::kill(h, abi::SIGCONT);
+    check!(
+        esperar(h, abi::WCONTINUED) == Some((WAIT_CONT, abi::SIGCONT as u8)),
+        "waitpid(WCONTINUED) informa de la continuación"
+    );
+    let _ = sys::kill(h, abi::SIGTERM);
+    check!(esperar(h, 0) == salida(143), "TERM tras continuar (143)");
+
+    // Parado en plena CPU: no avanza hasta CONT y luego termina bien.
+    let h = sys::spawn("/bin/init", "cpu P");
+    let _ = sys::sleep_ms(50);
+    let _ = sys::kill(h, abi::SIGTSTP);
+    check!(
+        esperar(h, abi::WUNTRACED) == Some((WAIT_STOP, abi::SIGTSTP as u8)),
+        "TSTP para a un proceso en plena CPU"
+    );
+    let _ = sys::sleep_ms(300);
+    let _ = sys::kill(h, abi::SIGCONT);
+    check!(esperar(h, 0) == salida(0), "tras CONT termina normalmente");
+    0
+}
+
+static CUENTA: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Manejador que pisa YMM y registros de uso general: si el kernel no los
+/// restaura en `sigreturn`, el bucle de `sig-ymm` lo nota.
+extern "C" fn ensuciar(_sig: u64) {
+    CUENTA.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    unsafe {
+        core::arch::asm!(
+            "vpcmpeqd ymm3, ymm3, ymm3",
+            "vpxor ymm4, ymm4, ymm4",
+            "mov rax, -1",
+            "mov rcx, -1",
+            "mov rdx, -1",
+            "mov rsi, -1",
+            "mov rdi, -1",
+            "mov r8, -1",
+            "mov r9, -1",
+            "mov r10, -1",
+            "mov r11, -1",
+            out("ymm3") _, out("ymm4") _,
+            out("rax") _, out("rcx") _, out("rdx") _, out("rsi") _, out("rdi") _,
+            out("r8") _, out("r9") _, out("r10") _, out("r11") _,
+        );
+    }
+}
+
+/// `sigreturn` con un marco hecho a mano.
+fn sigreturn_con(marco: &abi::SigFrame) -> ! {
+    let dir = marco as *const abi::SigFrame as u64 + 8;
+    unsafe {
+        core::arch::asm!(
+            "mov rsp, {p}",
+            "mov eax, {nr}",
+            "syscall",
+            "ud2",
+            p = in(reg) dir,
+            nr = const abi::SYS_SIGRETURN,
+            options(noreturn),
+        )
+    }
+}
+
+fn marco_valido() -> abi::SigFrame {
+    let mut fpu = [0u8; 1024];
+    fpu[24..28].copy_from_slice(&0x1F80u32.to_le_bytes());
+    let mut regs = [0u64; 18];
+    regs[abi::SIGFRAME_RIP] = busy as *const () as u64;
+    let pila = [0u8; 64];
+    regs[abi::SIGFRAME_RSP] = pila.as_ptr() as u64 & !0xF;
+    regs[abi::SIGFRAME_RFLAGS] = 0x202;
+    abi::SigFrame { restaurador: 0, sig: 0, mascara: 0, _reservado: 0, regs, fpu }
+}
+
+fn modo_senal(modo: &str) -> u8 {
+    let usr1 = abi::sig_bit(abi::SIGUSR1);
+    match modo {
+        "usr1" => {
+            let _ = senal::capturar(abi::SIGUSR1);
+            let mut n = 0u8;
+            while n < 3 {
+                if sys::sleep_ms(20_000) == 0 {
+                    return 99;
+                }
+                if senal::tomar(abi::SIGUSR1) {
+                    n += 1;
+                }
+            }
+            n
+        }
+        "eintr" => {
+            let _ = senal::capturar(abi::SIGUSR1);
+            let r = sys::sleep_ms(30_000);
+            if r == -abi::EINTR && senal::tomar(abi::SIGUSR1) { 42 } else { 1 }
+        }
+        "ign" => {
+            let _ = senal::ignorar(abi::SIGTERM);
+            let _ = sys::sleep_ms(30_000);
+            0
+        }
+        "mascara" => {
+            let _ = senal::capturar(abi::SIGUSR1);
+            let _ = senal::bloquear(usr1);
+            let _ = sys::kill(sys::getpid() as i64, abi::SIGUSR1);
+            if senal::tomar(abi::SIGUSR1) {
+                return 1;
+            }
+            if senal::pendientes() & usr1 == 0 {
+                return 2;
+            }
+            let _ = senal::desbloquear(usr1);
+            if !senal::tomar(abi::SIGUSR1) {
+                return 3;
+            }
+            if senal::pendientes() & usr1 != 0 {
+                return 4;
+            }
+            0
+        }
+        "ymm" => {
+            let _ = senal::accion(abi::SIGUSR1, senal::Accion::Manejar(ensuciar));
+            let _ = senal::capturar(abi::SIGUSR2);
+            let pat = [7.25f32; 8];
+            let fin = sys::uptime_ms() + 30_000;
+            while sys::uptime_ms() < fin {
+                let fallos: u64;
+                let marca: u64;
+                unsafe {
+                    core::arch::asm!(
+                        "vmovups ymm3, [{pat}]",
+                        "mov {m}, 0x5050505050505050",
+                        "xor {fallos}, {fallos}",
+                        "2:",
+                        "vpcmpeqd ymm4, ymm3, [{pat}]",
+                        "vpmovmskb {t:e}, ymm4",
+                        "cmp {t:e}, -1",
+                        "je 3f",
+                        "inc {fallos}",
+                        "3:",
+                        "dec {i}",
+                        "jnz 2b",
+                        pat = in(reg) pat.as_ptr(),
+                        fallos = out(reg) fallos,
+                        m = out(reg) marca,
+                        i = inout(reg) 200_000u64 => _,
+                        t = out(reg) _,
+                        out("ymm3") _,
+                        out("ymm4") _,
+                    );
+                }
+                if fallos != 0 {
+                    println!("sig-ymm: {fallos} corrupciones de YMM");
+                    return 1;
+                }
+                if marca != 0x5050_5050_5050_5050 {
+                    println!("sig-ymm: registro pisado ({marca:#x})");
+                    return 2;
+                }
+                if senal::tomar(abi::SIGUSR2) {
+                    let n = CUENTA.load(core::sync::atomic::Ordering::SeqCst);
+                    if n >= 10 {
+                        return 0;
+                    }
+                    println!("sig-ymm: sólo {n} manejadores");
+                    return 100 + n as u8;
+                }
+            }
+            // Sin USR2: el código lleva cuántos USR1 llegaron (diagnóstico).
+            200 + CUENTA.load(core::sync::atomic::Ordering::SeqCst).min(50) as u8
+        }
+        "malo-rip" => {
+            let mut m = marco_valido();
+            m.regs[abi::SIGFRAME_RIP] = 0xffff_8000_0000_1000;
+            sigreturn_con(&m)
+        }
+        "malo-xstate" => {
+            let mut m = marco_valido();
+            m.fpu[512..520].copy_from_slice(&0xFFu64.to_le_bytes());
+            sigreturn_con(&m)
+        }
+        "malo-mxcsr" => {
+            let mut m = marco_valido();
+            m.fpu[24..28].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+            sigreturn_con(&m)
+        }
+        "alarma" => {
+            let _ = senal::alarma(100);
+            let _ = sys::sleep_ms(5_000);
+            0
+        }
+        "alarma-h" => {
+            let _ = senal::capturar(abi::SIGALRM);
+            let _ = senal::alarma(100);
+            let r = sys::sleep_ms(5_000);
+            if r == -abi::EINTR && senal::tomar(abi::SIGALRM) { 42 } else { 1 }
+        }
+        "pipe" | "pipe-ign" => {
+            if modo == "pipe-ign" {
+                let _ = senal::ignorar(abi::SIGPIPE);
+            }
+            let Ok((r, w)) = sys::pipe() else {
+                return 2;
+            };
+            let _ = sys::close(r);
+            let n = sys::write(w, b"x");
+            if n == -abi::EPIPE { 42 } else { 1 }
+        }
+        _ => 2,
     }
 }
 
@@ -709,6 +1039,10 @@ fn suite() -> u8 {
         }
     }
     check!(interrumpidos == 2, "wait de ambos del grupo (130)");
+
+    if suite_senales() != 0 {
+        return 1;
+    }
 
     // Dos hijos de CPU pura: su salida intercalada demuestra la preempción.
     let p1 = sys::spawn("/bin/init", "cpu A");

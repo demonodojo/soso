@@ -1147,6 +1147,11 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 || ssh_sosh_comillas(key, port),
             );
         });
+        filter.if_step(sid, "sosh: kill y trabajos", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "sosh: kill y trabajos", || {
+                ssh_sosh_kill(key, port)
+            });
+        });
         filter.if_step(sid, "fd 3: redirección y comando log", || {
             report.paso_ssh_sys(
                 &mut qemu,
@@ -3234,6 +3239,7 @@ fn ssh_probe_senales(key: &Path, ssh_port: u16) -> Result<(), String> {
         "senales/sondeo-distingue-vivo-de-inexistente",
         "senales/kill-devuelve-cuantos-no-cero",
         "senales/tuberia-sin-lector",
+        "senales/sigpipe-por-defecto-mata",
     ] {
         if !salida.contains(esperado) {
             return Err(format!("falta el caso «{esperado}»: {salida:?}"));
@@ -3674,6 +3680,25 @@ fn ssh_sosh_comillas(key: &Path, ssh_port: u16) -> Result<(), String> {
     // Y una comilla sin cerrar se dice, no se adivina.
     if !texto.contains("sin cerrar") || !texto.contains("comilla doble sin cerrar") {
         return Err(format!("la comilla sin cerrar no se rechazó: {texto:?}"));
+    }
+    Ok(())
+}
+
+/// `/bin/kill` y los builtins de trabajos de sosh, sin necesitar Ctrl-Z (la
+/// parada y la continuación de verdad las cubre `init test`).
+fn ssh_sosh_kill(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let guion = "kill -l\nkill -s NOPE 1\nkill 99999\njobs\nfg\necho FIN-KILL\n";
+    let texto = ssh_guion_hasta(key, ssh_port, guion, Duration::from_secs(60), "FIN-KILL")?;
+    for esperado in [
+        "15 TERM",
+        "20 TSTP",
+        "señal desconocida: NOPE",
+        "kill: 99999:",
+        "fg: no hay trabajos",
+    ] {
+        if !texto.contains(esperado) {
+            return Err(format!("falta {esperado:?} en la salida: {texto:?}"));
+        }
     }
     Ok(())
 }

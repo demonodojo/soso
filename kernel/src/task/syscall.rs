@@ -221,6 +221,7 @@ fn ctx_from_frame(f: &SyscallFrame) -> Context {
 
 extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
     super::pty::drenar_cierres();
+    drenar_fds_aplazados();
     // ¿Entra alguien con DF puesto? `f.rflags` es el r11 que guardó `syscall`,
     // o sea las banderas **de ring 3**, que el `cld` de la entrada no altera.
     // Aquí es donde se vería un proceso que dejó DF=1: por el temporizador casi
@@ -1052,6 +1053,44 @@ pub fn drop_fd(fd: Fd) -> Result<(), i64> {
 }
 
 /// Cierra todos los fds abiertos de un proceso (p. ej. al hacer exit).
+/// Descriptores de procesos muertos cuyo cierre se aplaza (ver
+/// [`aplazar_cierre_fds`]).
+static FDS_APLAZADOS: spin::Mutex<Vec<Fd>> = spin::Mutex::new(Vec::new());
+static HAY_FDS_APLAZADOS: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Saca los descriptores de la tabla para cerrarlos más tarde, en
+/// [`drenar_fds_aplazados`].
+///
+/// Para quien mata procesos con el candado de la red cogido: `kill_console`
+/// desde el cierre de una sesión SSH. Cerrar ahí un socket TCP vuelve a pedir
+/// ese candado: con un core la máquina se quedaba girando en `tcp_close` (con
+/// varios, era un ABBA contra `kill`, que va PROCS → red). Hacía falta que
+/// sobreviviera al cierre de la sesión un proceso con un socket y fuera de la
+/// CPU — `soso-wm --prueba-web` o `--prueba-layout` desde SSH.
+pub fn aplazar_cierre_fds(fds: &mut Vec<Option<Fd>>) {
+    let mut lista = FDS_APLAZADOS.lock();
+    for slot in fds.iter_mut() {
+        if let Some(fd) = slot.take() {
+            lista.push(fd);
+        }
+    }
+    if !lista.is_empty() {
+        HAY_FDS_APLAZADOS.store(true, core::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Cierra lo aplazado por [`aplazar_cierre_fds`]. Sin el candado de la red
+/// cogido; con o sin `PROCS` (como [`close_all_fds`]).
+pub fn drenar_fds_aplazados() {
+    if !HAY_FDS_APLAZADOS.swap(false, core::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    let mut lista = core::mem::take(&mut *FDS_APLAZADOS.lock());
+    let mut tabla: Vec<Option<Fd>> = lista.drain(..).map(Some).collect();
+    close_all_fds(&mut tabla);
+}
+
 pub fn close_all_fds(fds: &mut Vec<Option<Fd>>) {
     for slot in fds.iter_mut() {
         if let Some(fd) = slot.take() {

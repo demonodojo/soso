@@ -17,6 +17,7 @@ const OP_REDIM: u32 = 20;
 const OP_CERRAR_WM: u32 = 21;
 const OP_TEMA: u32 = 23;
 const OP_ESCALA: u32 = 24;
+const OP_VISIBLE: u32 = 25;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Evento {
@@ -27,6 +28,8 @@ pub enum Evento {
     CerrarPedido,
     Tema { claro: bool },
     Escala { nivel: u32, glifo_w: u32, glifo_h: u32 },
+    /// El panel pasa a verse u ocultarse (otra pestaña activa, ventana minimizada).
+    Visible { visible: bool },
 }
 
 pub enum Superficie {
@@ -299,6 +302,9 @@ impl Superficie {
                 botones: u32_le(&buf, 12),
             })),
             OP_FOCO => Ok(Some(Evento::Foco)),
+            OP_VISIBLE => Ok(Some(Evento::Visible {
+                visible: u32_le(&buf, 4) != 0,
+            })),
             OP_REDIM => {
                 let shm_id = u32_le(&buf, 20) as u64;
                 Ok(Some(Evento::Redimensionar {

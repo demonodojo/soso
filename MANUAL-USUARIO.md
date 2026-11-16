@@ -348,9 +348,16 @@ $
 - **Backspace** funciona para corregir la línea.
 - **Ctrl-C** interrumpe el comando en primer plano (p. ej. un pipeline largo) y
   devuelve el prompt `$`; en la línea vacía muestra `^C` y sigue en sosh.
+- **Ctrl-Z** para el comando en primer plano y devuelve el prompt
+  (`sosh: [1] detenido  …`). `jobs` lista los trabajos parados, `fg [n]` reanuda
+  uno en primer plano y `bg [n]` lo deja corriendo detrás (al terminar, sosh
+  avisa con `[n] terminado` antes del siguiente prompt). **Ctrl-\** termina el
+  comando en primer plano (SIGQUIT, código 131). A sosh no le afectan ni Ctrl-Z
+  ni Ctrl-\.
 - **Ctrl-D** en una línea vacía cierra la shell (equivalente a `exit`). En un
   programa que lee la consola (`cat`, `grep`, …) es fin de entrada.
-- Si un comando falla, sosh muestra el código de salida.
+- Si un comando falla, sosh muestra el código de salida; si murió por una
+  señal, también su nombre: `[soso-llm salió con código 143 (SIGTERM)]`.
 
 ### Pipes y redirecciones
 
@@ -500,6 +507,9 @@ El **código de salida** distingue las tres cosas:
 | `wifi status` | Estado del adaptador WiFi |
 | `wifi setup` | Escanea, eliges red por número y contraseña (WPA sin eco); guarda credenciales |
 | `wifi connect <ssid> [psk]` | Asocia a una red; sin `psk` pide la clave sin eco (Enter = abierta). Con clave en la línea funciona pero queda en el log |
+| `jobs` | Lista los trabajos parados con Ctrl-Z o corriendo detrás con `bg` |
+| `fg [n]` | Reanuda el trabajo `n` (por defecto el último) en primer plano |
+| `bg [n]` | Reanuda el trabajo `n` detrás; la shell sigue aceptando órdenes |
 
 Ejemplos:
 
@@ -653,7 +663,31 @@ Muestra los procesos del sistema: PID, proceso padre, estado y comando (ruta del
     7      2  corriendo  /bin/ps
 ```
 
-Los hilos de usuario aparecen con `(hilo)` al final. En la kernel-shell de emergencia (`soso>`) el comando es el mismo.
+Los hilos de usuario aparecen con `(hilo)` al final. Un proceso parado con Ctrl-Z
+o `kill -STOP` sale como `parado`. En la kernel-shell de emergencia (`soso>`) el
+comando es el mismo.
+
+### kill — mandar una señal
+
+```sh
+kill 12              # SIGTERM al proceso 12
+kill -9 12           # SIGKILL (también -KILL o -SIGKILL)
+kill -s STOP 12      # lo para; `kill -CONT 12` lo reanuda
+kill -TERM -12       # pid negativo: a todo el grupo 12
+kill -l              # lista las señales
+```
+
+Señales: HUP, INT, QUIT, KILL, USR1, USR2, PIPE, ALRM, TERM, CHLD, CONT, STOP,
+TSTP y WINCH, con los números de Linux. Por defecto terminan el proceso con
+código 128 + número (SIGTERM → 143), salvo CHLD y WINCH, que se ignoran, y STOP
+y TSTP, que lo paran. KILL y STOP no se pueden capturar. `/bin/init` (PID 1)
+sólo responde a KILL.
+
+Los programas pueden capturarlas, ignorarlas o bloquearlas (`libsoso::senal`).
+Además de `kill` y el teclado, el sistema manda SIGCHLD al morir o pararse un
+hijo, SIGPIPE al escribir en una tubería sin lector (no en sockets),
+SIGWINCH al cambiar el tamaño de un terminal del escritorio y SIGALRM al vencer
+una alarma.
 
 ### uname — versión y estado del equipo
 
@@ -1163,7 +1197,7 @@ salvi nota.txt          # salvi +N fichero abre en la línea N
 Modos normal, inserción, visual (`v`, `V`) y `:` (`:w`, `:q`, `:wq`, `:s/a/b/g`,
 `:set nu`…). La tty de soso no informa del tamaño: usa 80×24 salvo que
 `LINES`/`COLUMNS` digan otra cosa o se cambie con `:set lines=N columns=N`.
-Ctrl-C mata el editor (no hay manejadores de señales): sal con `:q`. En el
+Ctrl-C mata el editor (salvi no captura señales): sal con `:q`. En el
 host, `cargo xtask pkg-pack salvi` compila `../salvi` y publica el paquete.
 
 ### soso-update — actualizar soso instalado
@@ -1700,6 +1734,7 @@ soso es un sistema con alcance deliberadamente reducido en algunas áreas:
 | Usuarios | Monousuario; hasta 4 sesiones SSH simultáneas |
 | Shell | Sin variables ni historial; cwd, pipes y redirecciones |
 | Procesos | `spawn`, no `fork`; scheduler round-robin preemptivo |
+| Señales | Sin `SA_RESTART` (una espera interrumpida vuelve con `EINTR`) ni pila alternativa; los fallos de CPU no se entregan como SIGSEGV; un trabajo con `bg` que lea de la consola compite con la shell por la entrada |
 | Red | DHCP automático al arrancar o dirección fija (`/etc/red.conf`); fallback a `10.0.2.15` en QEMU; hasta 4 redes WiFi guardadas; sin IPv6 |
 | SSH | Sin SFTP, port forwarding ni múltiples sesiones |
 | Web | Sin JavaScript ni CSS avanzado; modo gráfico básico |

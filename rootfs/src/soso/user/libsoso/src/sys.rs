@@ -42,6 +42,13 @@ pub fn exit(code: u8) -> ! {
     unreachable!()
 }
 
+/// Sale como panic de usuario y deja al kernel la rsp del contexto original
+/// para incluir palabras de pila en el informe de diagnóstico.
+pub fn exit_panic(rsp: u64) -> ! {
+    syscall4(abi::SYS_EXIT, 101, rsp, 0, 0);
+    unreachable!()
+}
+
 pub fn read(fd: u64, buf: &mut [u8]) -> i64 {
     syscall4(abi::SYS_READ, fd, buf.as_mut_ptr() as u64, buf.len() as u64, 0)
 }
@@ -248,6 +255,19 @@ pub fn pipe() -> Result<(u64, u64), i64> {
 pub fn wait() -> Result<(u64, u8), i64> {
     let v = syscall1(abi::SYS_WAIT, 0);
     if v < 0 { Err(v) } else { Ok(abi::wait_decode(v)) }
+}
+
+/// `waitpid(pid, flags)`: `Ok(None)` con `WNOHANG` y nada que recoger; si no,
+/// `(pid, tipo, código)` con `tipo` en `abi::WAIT_EXIT/STOP/CONT`.
+pub fn waitpid(pid: i64, flags: u64) -> Result<Option<(u64, u8, u8)>, i64> {
+    let v = syscall4(abi::SYS_WAITPID, pid as u64, flags, 0, 0);
+    if v < 0 {
+        Err(v)
+    } else if v == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(abi::waitpid_decode(v as u64)))
+    }
 }
 
 pub fn getpid() -> u64 {
@@ -781,6 +801,21 @@ pub fn pty_open() -> Result<(u64, u8), i64> {
     let fd = (r >> 32) as u64;
     let slot = (r & 0xff) as u8;
     Ok((fd, slot))
+}
+
+/// Ajusta el tamaño de un PTY a través de su descriptor maestro.
+pub fn pty_resize(fd: u64, cols: u32, rows: u32) -> i64 {
+    syscall4(abi::SYS_PTY_RESIZE, fd, cols as u64, rows as u64, 0)
+}
+
+/// Tamaño de la terminal actual, como `(columnas, filas)`.
+pub fn tty_size() -> (u32, u32) {
+    let value = syscall1(abi::SYS_TTY_SIZE, 0);
+    if value < 0 {
+        return (0, 0);
+    }
+    let packed = value as u64;
+    (packed as u32, (packed >> 32) as u32)
 }
 
 pub fn shm_create(len: u64) -> Result<u64, i64> {

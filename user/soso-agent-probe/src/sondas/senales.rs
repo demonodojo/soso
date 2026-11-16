@@ -15,8 +15,10 @@
 //!   llegaran iguales al padre, un timeout sería indistinguible de un fallo
 //!   del programa, y el agente aprendería la lección equivocada.
 //! - **Escribir en una tubería cerrada**. En POSIX eso es `SIGPIPE` y mata al
-//!   escritor salvo que se ignore. Sin manejadores, la pregunta es qué hace
-//!   soso: devolver un error es lo bueno; morir en silencio, lo malo.
+//!   escritor salvo que se ignore. Desde que soso tiene manejadores
+//!   (`libsoso::senal`) se comporta así: por defecto muere con 141, y un
+//!   proceso que ignora SIGPIPE —lo que hace cualquier runtime que no quiera
+//!   perder una herramienta— recibe `EPIPE`. Se miden las dos cosas.
 
 use alloc::format;
 use alloc::string::String;
@@ -216,10 +218,10 @@ pub fn ejecutar() -> Vec<Caso> {
         ),
     );
 
-    // 5. Escribir en una tubería cuyo lector ya cerró. En POSIX esto levanta
-    //    `SIGPIPE` y mata al escritor si no lo ignora; sin manejadores, lo
-    //    único aceptable es un error. Morir aquí dejaría al agente sin saber
-    //    por qué desapareció su herramienta.
+    // 5. Escribir en una tubería cuyo lector ya cerró, **ignorando SIGPIPE**:
+    //    tiene que ser un error, no la muerte. Es lo que hace un runtime que
+    //    no quiere quedarse sin saber por qué desapareció su herramienta.
+    let _ = libsoso::senal::ignorar(abi::SIGPIPE);
     let observado = match sys::pipe() {
         Err(e) => format!("pipe = {}", errno(e)),
         Ok((r, w)) => {
@@ -234,6 +236,7 @@ pub fn ejecutar() -> Vec<Caso> {
             }
         }
     };
+    let _ = libsoso::senal::por_defecto(abi::SIGPIPE);
     anotar(
         &mut casos,
         Caso::nuevo(
@@ -241,6 +244,22 @@ pub fn ejecutar() -> Vec<Caso> {
             "error la tubería no tiene lector (-32)",
             observado,
         ),
+    );
+
+    // 6. Lo mismo con la disposición por defecto, en un hijo: muere con
+    //    128 + SIGPIPE, y el padre lo distingue de una salida normal.
+    let pid = lanzar(&[YO, "tuberia-rota"]);
+    let observado = if pid < 0 {
+        format!("spawn = {}", errno(pid))
+    } else {
+        match esperar_a(pid as u64) {
+            Ok(c) => format!("{c}"),
+            Err(e) => e,
+        }
+    };
+    anotar(
+        &mut casos,
+        Caso::nuevo("senales/sigpipe-por-defecto-mata", "141", observado),
     );
 
     casos
@@ -257,6 +276,16 @@ pub fn dormir(ms: &str) -> u8 {
     });
     sys::sleep_ms(ms);
     println!("probe: el hijo terminó de dormir {ms} ms sin que lo mataran");
+    0
+}
+
+/// Subcomando auxiliar: escribir en una tubería sin lector con SIGPIPE por
+/// defecto. Si sobrevive, sale con 0.
+pub fn tuberia_rota() -> u8 {
+    if let Ok((r, w)) = sys::pipe() {
+        sys::close(r);
+        let _ = sys::write(w, b"nadie escucha");
+    }
     0
 }
 

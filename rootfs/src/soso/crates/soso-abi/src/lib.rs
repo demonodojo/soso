@@ -111,6 +111,29 @@ pub const SYS_FB_KEEPALIVE: u64 = 104;
 pub const SYS_PTY_RESIZE: u64 = 105;
 /// Devuelve el tamaño de la consola actual: filas en los 32 bits altos, columnas en los bajos.
 pub const SYS_TTY_SIZE: u64 = 106;
+/// `(sig, manejador, flags, restaurador)` → manejador anterior.
+///
+/// `manejador` es [`SIG_DFL`], [`SIG_IGN`] o la dirección de un
+/// `extern "C" fn(sig: u64)`. `restaurador` es a donde vuelve el manejador con
+/// `ret`: una rutina que llama a [`SYS_SIGRETURN`] (libsoso trae una). `flags`
+/// es 0; cualquier otro valor da `EINVAL`, para poder darle uso más adelante.
+/// SIGKILL y SIGSTOP no se pueden capturar ni ignorar.
+pub const SYS_SIGACTION: u64 = 107;
+/// Vuelta de un manejador: el kernel lee el [`SigFrame`] que hay justo
+/// debajo de `rsp` y reanuda donde se interrumpió. No vuelve.
+pub const SYS_SIGRETURN: u64 = 108;
+/// `(how, set)` → máscara anterior. `how` es [`SIG_BLOCK`], [`SIG_UNBLOCK`] o
+/// [`SIG_SETMASK`]. SIGKILL y SIGSTOP no se pueden bloquear.
+pub const SYS_SIGPROCMASK: u64 = 109;
+/// Señales pendientes del hilo (máscara de bits [`sig_bit`]).
+pub const SYS_SIGPENDING: u64 = 110;
+/// `(ms)` → ms que le quedaban a la alarma anterior. Al vencer llega SIGALRM;
+/// `0` la cancela.
+pub const SYS_ALARM: u64 = 111;
+/// `(pid, flags)`: espera a un hijo concreto (`pid > 0`), a cualquiera (`-1`),
+/// a uno del grupo `-pid` (`pid < -1`) o del grupo propio (`0`). Devuelve
+/// [`waitpid_pack`]; con [`WNOHANG`] y nada que recoger, `0`.
+pub const SYS_WAITPID: u64 = 112;
 /// Abre un pseudo-terminal: devuelve `(fd_maestro << 32) | ranura`.
 pub const SYS_PTY_OPEN: u64 = 98;
 /// Reserva memoria compartida (`len` alineado); devuelve `id`.
@@ -447,18 +470,169 @@ pub const LOCK_UN: u64 = 8;
 /// no tenerla.
 pub const LOCK_NB: u64 = 4;
 
-// ---- señales (modelo mínimo) ----
+// ---- señales ----
+//
+// Números de Linux. Acción por defecto: terminar con 128+n (HUP, INT, QUIT,
+// USR1, USR2, PIPE, ALRM, TERM), ignorar (CHLD, WINCH, CONT) o parar (STOP,
+// TSTP). KILL y STOP no se capturan, ni se ignoran, ni se bloquean.
 
 /// `kill(pid, 0)`: sondeo. El proceso existe y no es zombi; no entrega señal.
 pub const SIGPROBE: u64 = 0;
+pub const SIGHUP: u64 = 1;
 pub const SIGINT: u64 = 2;
+pub const SIGQUIT: u64 = 3;
 pub const SIGKILL: u64 = 9;
+pub const SIGUSR1: u64 = 10;
+pub const SIGUSR2: u64 = 12;
+/// Escritura en una **tubería** sin lectores (no en sockets: un demonio no
+/// debe morir porque un cliente cierre). Además devuelve `EPIPE`.
+pub const SIGPIPE: u64 = 13;
+pub const SIGALRM: u64 = 14;
 pub const SIGTERM: u64 = 15;
+/// Un hijo murió, se paró o continuó.
+pub const SIGCHLD: u64 = 17;
+pub const SIGCONT: u64 = 18;
+pub const SIGSTOP: u64 = 19;
+/// Ctrl-Z en la tty.
+pub const SIGTSTP: u64 = 20;
+/// Cambió el tamaño del PTY.
+pub const SIGWINCH: u64 = 28;
+
+/// Tamaño de las tablas de señales (números 0..NSIG).
+pub const NSIG: usize = 32;
+
+pub const fn sig_bit(sig: u64) -> u64 {
+    1u64 << sig
+}
+
+/// Señales que este kernel sabe entregar.
+pub const SENALES_SOPORTADAS: u64 = sig_bit(SIGHUP)
+    | sig_bit(SIGINT)
+    | sig_bit(SIGQUIT)
+    | sig_bit(SIGKILL)
+    | sig_bit(SIGUSR1)
+    | sig_bit(SIGUSR2)
+    | sig_bit(SIGPIPE)
+    | sig_bit(SIGALRM)
+    | sig_bit(SIGTERM)
+    | sig_bit(SIGCHLD)
+    | sig_bit(SIGCONT)
+    | sig_bit(SIGSTOP)
+    | sig_bit(SIGTSTP)
+    | sig_bit(SIGWINCH);
+
+/// Las que nadie puede capturar, ignorar ni bloquear.
+pub const SENALES_INCAPTURABLES: u64 = sig_bit(SIGKILL) | sig_bit(SIGSTOP);
+
+pub const fn senal_valida(sig: u64) -> bool {
+    sig > 0 && sig < NSIG as u64 && SENALES_SOPORTADAS & sig_bit(sig) != 0
+}
+
+/// Disposición por defecto (`sigaction`).
+pub const SIG_DFL: u64 = 0;
+/// Ignorar la señal (`sigaction`).
+pub const SIG_IGN: u64 = 1;
+
+/// `sigprocmask`: añadir `set` a la máscara.
+pub const SIG_BLOCK: u64 = 0;
+/// `sigprocmask`: quitar `set` de la máscara.
+pub const SIG_UNBLOCK: u64 = 1;
+/// `sigprocmask`: la máscara pasa a ser `set`.
+pub const SIG_SETMASK: u64 = 2;
+
+/// `waitpid`: no bloquear; devuelve 0 si no hay nada que recoger.
+pub const WNOHANG: u64 = 1;
+/// `waitpid`: informar también de hijos parados.
+pub const WUNTRACED: u64 = 2;
+/// `waitpid`: informar también de hijos que continuaron.
+pub const WCONTINUED: u64 = 8;
+
+/// Tipo de evento de `waitpid`: el hijo terminó; el código es el de salida.
+pub const WAIT_EXIT: u8 = 0;
+/// El hijo se paró; el código es la señal que lo paró.
+pub const WAIT_STOP: u8 = 1;
+/// El hijo continuó tras SIGCONT; el código es SIGCONT.
+pub const WAIT_CONT: u8 = 2;
+
+/// Retorno de `waitpid`: `(pid << 16) | (tipo << 8) | código`.
+pub const fn waitpid_pack(pid: u64, tipo: u8, code: u8) -> u64 {
+    (pid << 16) | ((tipo as u64) << 8) | code as u64
+}
+
+/// Inverso de [`waitpid_pack`]: `(pid, tipo, código)`.
+pub const fn waitpid_decode(v: u64) -> (u64, u8, u8) {
+    (v >> 16, (v >> 8) as u8, v as u8)
+}
 
 /// Código de salida por señal: 128 + número de señal.
 pub const fn exit_by_signal(sig: u8) -> u8 {
     128 + sig
 }
+
+/// Nombres de las señales soportadas, sin el prefijo `SIG`.
+pub const NOMBRES_SENALES: [(u64, &str); 14] = [
+    (SIGHUP, "HUP"),
+    (SIGINT, "INT"),
+    (SIGQUIT, "QUIT"),
+    (SIGKILL, "KILL"),
+    (SIGUSR1, "USR1"),
+    (SIGUSR2, "USR2"),
+    (SIGPIPE, "PIPE"),
+    (SIGALRM, "ALRM"),
+    (SIGTERM, "TERM"),
+    (SIGCHLD, "CHLD"),
+    (SIGCONT, "CONT"),
+    (SIGSTOP, "STOP"),
+    (SIGTSTP, "TSTP"),
+    (SIGWINCH, "WINCH"),
+];
+
+/// `nombre_senal(SIGINT) == Some("INT")`.
+pub fn nombre_senal(sig: u64) -> Option<&'static str> {
+    NOMBRES_SENALES.iter().find(|(n, _)| *n == sig).map(|(_, s)| *s)
+}
+
+/// Acepta `INT`, `SIGINT`, `int` o el número (`2`).
+pub fn senal_por_nombre(s: &str) -> Option<u64> {
+    if let Ok(n) = s.parse::<u64>() {
+        return (n == SIGPROBE || senal_valida(n)).then_some(n);
+    }
+    let s = if s.len() > 3 && s[..3].eq_ignore_ascii_case("SIG") { &s[3..] } else { s };
+    NOMBRES_SENALES
+        .iter()
+        .find(|(_, nombre)| nombre.eq_ignore_ascii_case(s))
+        .map(|(n, _)| *n)
+}
+
+/// Lo que el kernel deja en la pila de usuario al llamar a un manejador.
+///
+/// El manejador entra con `rsp` apuntando a `restaurador` (como tras un
+/// `call`), `rdi = sig`. Al hacer `ret` salta al restaurador con `rsp` 8 bytes
+/// por encima del marco, y [`SYS_SIGRETURN`] lo lee desde ahí.
+///
+/// `regs` sigue el orden de `Context` del kernel: r15, r14, r13, r12, r11,
+/// r10, r9, r8, rdi, rsi, rbp, rbx, rdx, rcx, rax, rip, rsp, rflags. `fpu` es la
+/// imagen `xsave` (x87|SSE|AVX). El kernel valida ambas al volver: un marco
+/// manipulado mata al proceso, no al kernel.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SigFrame {
+    pub restaurador: u64,
+    pub sig: u64,
+    /// Máscara a restaurar al volver.
+    pub mascara: u64,
+    pub _reservado: u64,
+    pub regs: [u64; 18],
+    pub fpu: [u8; 1024],
+}
+
+/// Índices de [`SigFrame::regs`] que interesan fuera del kernel.
+pub const SIGFRAME_RAX: usize = 14;
+pub const SIGFRAME_RIP: usize = 15;
+pub const SIGFRAME_RSP: usize = 16;
+pub const SIGFRAME_RFLAGS: usize = 17;
+
+const _: () = assert!(core::mem::size_of::<SigFrame>() == 32 + 18 * 8 + 1024);
 
 // ---- mmap ----
 
@@ -670,6 +844,8 @@ pub const PROC_STATE_WAIT_PIPE: u8 = 5;
 pub const PROC_STATE_WAIT_FUTEX: u8 = 6;
 pub const PROC_STATE_WAIT_SOCKET: u8 = 7;
 pub const PROC_STATE_ZOMBIE: u8 = 8;
+/// Parado por SIGSTOP/SIGTSTP (hasta SIGCONT).
+pub const PROC_STATE_STOPPED: u8 = 9;
 
 pub const PROC_FLAG_THREAD: u8 = 1;
 

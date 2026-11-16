@@ -370,6 +370,9 @@ pub fn kill_pid(pid: u64) {
 }
 
 /// Mata todos los procesos vivos atados a esta consola (p. ej. al cerrar SSH).
+/// La llama el cierre de una sesión SSH **con el candado de la red cogido**:
+/// los descriptores de los muertos se cierran después (`tcp_close` lo volvería
+/// a pedir), en `syscall::drenar_fds_aplazados`.
 pub fn kill_console(console: Console) {
     let mut procs = PROCS.lock();
     let pids: alloc::vec::Vec<u64> = procs
@@ -378,6 +381,9 @@ pub fn kill_console(console: Console) {
         .map(|p| p.pid)
         .collect();
     for pid in pids {
+        if let Some(p) = procs.iter_mut().find(|p| p.pid == pid && p.state != State::Running) {
+            syscall::aplazar_cierre_fds(&mut p.fds);
+        }
         deliver_death(&mut procs, pid, 255, true);
     }
 }
@@ -1790,6 +1796,7 @@ extern "C" fn schedule_inner() -> ! {
             // PROCS aún no está cogido: poll_devices despierta con try_lock.
             crate::drivers::kbd::poll_devices();
         }
+        syscall::drenar_fds_aplazados();
         x86_64::instructions::interrupts::disable();
         let now = crate::arch::pit::uptime_ms();
         let mut procs = PROCS.lock();
@@ -2537,9 +2544,24 @@ fn desalojar_si_toca(f: &mut TrapFrame, cur: u64, bsp_fpu: bool) -> u64 {
     if !force_kill && !wifi_yield && remaining().fetch_sub(1, Ordering::Relaxed) > 1 {
         return 0;
     }
-    let hay_otro = procs
-        .iter()
-        .any(|p| p.pid != cur && p.state == State::Runnable && !p.senales.detenido);
+    // «Otro» incluye a quien el planificador despertaría ahora mismo: un
+    // dormido o un futex con el plazo vencido. Esos sólo pasan a `Runnable`
+    // dentro de `schedule_inner`, así que con un solo core y un proceso en
+    // plena CPU no despertaban nunca: un padre que dormía 100 ms para mandarle
+    // una señal esperaba a que el hijo acabara. **No mirar aquí la entrada de
+    // la tty** (`has_input`): estamos en la IRQ del temporizador con `PROCS`
+    // cogido, y toma los candados del teclado, la serie y SSH.
+    let ahora = crate::arch::pit::uptime_ms();
+    let hay_otro = procs.iter().any(|p| {
+        p.pid != cur
+            && !p.senales.detenido
+            && match p.state {
+                State::Runnable => true,
+                State::Sleeping(t) => ahora >= t,
+                State::WaitingFutex { deadline_ms, .. } => deadline_ms != 0 && ahora >= deadline_ms,
+                _ => false,
+            }
+    });
     if !force_kill && !wifi_yield && !hay_otro {
         remaining().store(TIMESLICE_TICKS, Ordering::Relaxed);
         return 0;

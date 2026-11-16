@@ -2,6 +2,11 @@
 //! Una línea puede ser un pipeline de comandos de /bin, más los builtins
 //! `exit`, `help`, `cd`, `pwd`, `wifi` y `ask`.
 //!
+//! **Señales y trabajos:** la shell captura SIGINT (Ctrl-C interrumpe lo que
+//! ella misma esté haciendo, como un `ask`) e ignora SIGTSTP y SIGQUIT. Sus
+//! hijos nacen con todo por defecto, así que Ctrl-Z para al trabajo en primer
+//! plano: queda en la lista de `jobs` y se reanuda con `fg` o `bg`.
+//!
 //! **Guiones:** `sosh /ruta` ejecuta una orden por línea (comentarios `#`, sin
 //! prompt). En la misma línea: `;`, `&&` y `||` con el código de salida del
 //! paso anterior.
@@ -25,7 +30,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use libsoso::linea::Lector;
-use libsoso::{abi, errno_str, print, println, sys};
+use libsoso::{abi, errno_str, print, println, senal, sys};
 
 libsoso::entry!(main);
 
@@ -131,6 +136,12 @@ fn main(args: &[alloc::string::String]) -> u8 {
     let shell_pgid = sys::getpid();
     let _ = sys::setsid();
     let _ = sys::tcsetpgrp(shell_pgid);
+    // Ctrl-C no mata a la shell: interrumpe su espera (`EINTR`) y deja el bit
+    // en `senal::tomar`. Ctrl-Z y Ctrl-\ no le hacen nada. Los hijos no heredan
+    // nada de esto (`spawn` lo devuelve todo al defecto).
+    let _ = senal::capturar(abi::SIGINT);
+    let _ = senal::ignorar(abi::SIGTSTP);
+    let _ = senal::ignorar(abi::SIGQUIT);
     println!("sosh — escribe 'help' para la ayuda");
     let t0 = sys::uptime_ms();
     prefault_imagen();
@@ -144,6 +155,8 @@ fn main(args: &[alloc::string::String]) -> u8 {
     }
     let mut lector = Lector::new().con_hook_ptt(hook_ptt);
     loop {
+        recoger_trabajos();
+        let _ = senal::tomar(abi::SIGINT);
         print!("{PROMPT}");
         match lector.siguiente() {
             Ok(Some(cmd)) => {
@@ -929,23 +942,41 @@ fn ejecutar_pipeline(cmds: &[CmdSpec], ctx: Option<usize>) -> u8 {
         let _ = sys::tcsetpgrp(first as u64);
     }
 
+    let hijos: Vec<(String, u64)> = cmds
+        .iter()
+        .zip(pids.iter())
+        .map(|(c, &p)| (c.prog.clone(), p as u64))
+        .collect();
+    let pgid = pids.first().map(|&p| p as u64).unwrap_or(0);
+    esperar_trabajo(hijos, pgid, texto_de(cmds), None, ctx)
+}
+
+/// Espera a los procesos de un trabajo en primer plano (en orden) e informa
+/// de cómo acabó cada uno. Si Ctrl-Z lo para, la shell recupera la tty y el
+/// trabajo pasa a la lista de `jobs` (`id` si ya estaba en ella).
+fn esperar_trabajo(
+    hijos: Vec<(String, u64)>,
+    pgid: u64,
+    texto: String,
+    id: Option<usize>,
+    ctx: Option<usize>,
+) -> u8 {
     let shell_pgid = sys::getpid();
+    let n = hijos.len();
     let mut ultimo = 0u8;
     let mut crashes: Vec<(String, u64, u8)> = Vec::new();
-    for (cmd, pid) in cmds.iter().zip(pids.iter()) {
-        match wait_pid(*pid as u64) {
-            Ok(0) => ultimo = 0,
-            Ok(130) => {
-                println!("sosh: [{} interrumpido]", cmd.prog);
-                ultimo = 130;
-            }
-            Ok(code) => {
-                println!("sosh: [{} salió con código {code}]", cmd.prog);
-                if matches!(code, 101 | 255)
-                    && cmd.prog != "notifybug"
-                    && cmd.prog != "/bin/notifybug"
-                {
-                    crashes.push((cmd.prog.clone(), *pid as u64, code));
+    let mut parados: Vec<(String, u64)> = Vec::new();
+    for (i, (prog, pid)) in hijos.into_iter().enumerate() {
+        if !parados.is_empty() {
+            parados.push((prog, pid));
+            continue;
+        }
+        match esperar_hijo(pid) {
+            Ok(Fin::Parado) => parados.push((prog, pid)),
+            Ok(Fin::Salio(code)) => {
+                informar_salida(&prog, code, i + 1 == n);
+                if matches!(code, 101 | 255) && prog != "notifybug" && prog != "/bin/notifybug" {
+                    crashes.push((prog, pid, code));
                 }
                 ultimo = code;
             }
@@ -959,7 +990,159 @@ fn ejecutar_pipeline(cmds: &[CmdSpec], ctx: Option<usize>) -> u8 {
     for (programa, pid, code) in crashes {
         enviar_informe_crash(&programa, pid, code);
     }
+    if !parados.is_empty() {
+        let id = guardar_trabajo(id, pgid, parados, texto.clone());
+        println!("\nsosh: [{id}] detenido  {texto}");
+        return abi::exit_by_signal(abi::SIGTSTP as u8);
+    }
     ultimo
+}
+
+fn informar_salida(prog: &str, code: u8, ultimo_del_pipeline: bool) {
+    match code {
+        0 => {}
+        130 => println!("sosh: [{prog} interrumpido]"),
+        // `cat grande | head`: que el de la izquierda muera por SIGPIPE es lo
+        // normal cuando el de la derecha ya tiene bastante.
+        141 if !ultimo_del_pipeline => {}
+        c => match abi::nombre_senal(u64::from(c.wrapping_sub(128))).filter(|_| c > 128) {
+            Some(nombre) => println!("sosh: [{prog} salió con código {c} (SIG{nombre})]"),
+            None => println!("sosh: [{prog} salió con código {c}]"),
+        },
+    }
+}
+
+fn texto_de(cmds: &[CmdSpec]) -> String {
+    let partes: Vec<String> = cmds
+        .iter()
+        .map(|c| {
+            let mut t = c.prog.clone();
+            for a in &c.args {
+                t.push(' ');
+                t.push_str(a);
+            }
+            t
+        })
+        .collect();
+    partes.join(" | ")
+}
+
+enum Fin {
+    Salio(u8),
+    Parado,
+}
+
+/// Espera a un hijo concreto: termina o se para. Los demás hijos que mueran
+/// mientras tanto se recogen en el prompt (`recoger_trabajos`).
+fn esperar_hijo(pid: u64) -> Result<Fin, i64> {
+    loop {
+        match sys::waitpid(pid as i64, abi::WUNTRACED) {
+            Ok(Some((_, abi::WAIT_STOP, _))) => return Ok(Fin::Parado),
+            Ok(Some((_, abi::WAIT_EXIT, code))) => return Ok(Fin::Salio(code)),
+            Ok(_) => {}
+            Err(e) if e == -abi::EINTR => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+// ---- trabajos (Ctrl-Z, jobs, fg, bg) ----
+
+struct Trabajo {
+    id: usize,
+    pgid: u64,
+    /// Procesos que quedan vivos: (programa, pid).
+    hijos: Vec<(String, u64)>,
+    texto: String,
+    en_marcha: bool,
+}
+
+/// La shell es de un solo hilo: la lista no necesita candado.
+static mut TRABAJOS: Vec<Trabajo> = Vec::new();
+
+#[allow(static_mut_refs)]
+fn trabajos() -> &'static mut Vec<Trabajo> {
+    unsafe { &mut TRABAJOS }
+}
+
+fn guardar_trabajo(id: Option<usize>, pgid: u64, hijos: Vec<(String, u64)>, texto: String) -> usize {
+    let lista = trabajos();
+    let id = id.unwrap_or_else(|| lista.iter().map(|t| t.id).max().unwrap_or(0) + 1);
+    lista.push(Trabajo { id, pgid, hijos, texto, en_marcha: false });
+    id
+}
+
+/// Recoge los hijos que hayan terminado (trabajos en segundo plano, askd…) y
+/// avisa de los trabajos que ya no tienen procesos.
+fn recoger_trabajos() {
+    while let Ok(Some((pid, _, code))) = sys::waitpid(-1, abi::WNOHANG) {
+        for t in trabajos().iter_mut() {
+            if let Some(i) = t.hijos.iter().position(|(_, p)| *p == pid) {
+                let (prog, _) = t.hijos.remove(i);
+                if t.hijos.is_empty() {
+                    informar_salida(&prog, code, true);
+                }
+            }
+        }
+    }
+    trabajos().retain(|t| {
+        if t.hijos.is_empty() {
+            println!("sosh: [{}] terminado  {}", t.id, t.texto);
+        }
+        !t.hijos.is_empty()
+    });
+}
+
+/// `""` → el último; `"2"` o `"%2"` → ese.
+fn elegir_trabajo(arg: &str) -> Result<usize, String> {
+    let lista = trabajos();
+    if arg.is_empty() {
+        return if lista.is_empty() {
+            Err(String::from("no hay trabajos"))
+        } else {
+            Ok(lista.len() - 1)
+        };
+    }
+    let n: usize = arg
+        .trim_start_matches('%')
+        .parse()
+        .map_err(|_| format!("{arg}: no es un número de trabajo"))?;
+    lista
+        .iter()
+        .position(|t| t.id == n)
+        .ok_or_else(|| format!("{arg}: no existe ese trabajo"))
+}
+
+fn builtin_jobs() -> u8 {
+    for t in trabajos().iter() {
+        let estado = if t.en_marcha { "en marcha" } else { "detenido" };
+        println!("[{}] {estado}  {}", t.id, t.texto);
+    }
+    0
+}
+
+/// `fg` (primer plano) o `bg` (segundo plano): SIGCONT al grupo del trabajo.
+fn builtin_continuar(arg: &str, primer_plano: bool, ctx: Option<usize>) -> u8 {
+    let orden = if primer_plano { "fg" } else { "bg" };
+    let idx = match elegir_trabajo(arg) {
+        Ok(i) => i,
+        Err(msg) => {
+            sosh_msg(ctx, &format!("{orden}: {msg}"));
+            return 1;
+        }
+    };
+    if !primer_plano {
+        let t = &mut trabajos()[idx];
+        let _ = sys::kill(-(t.pgid as i64), abi::SIGCONT);
+        t.en_marcha = true;
+        println!("[{}] {} &", t.id, t.texto);
+        return 0;
+    }
+    let t = trabajos().remove(idx);
+    println!("{}", t.texto);
+    let _ = sys::tcsetpgrp(t.pgid);
+    let _ = sys::kill(-(t.pgid as i64), abi::SIGCONT);
+    esperar_trabajo(t.hijos, t.pgid, t.texto, Some(t.id), ctx)
 }
 
 /// Dispara notifybug sin esperar al handshake HTTPS: la shell recupera el
@@ -1029,6 +1212,11 @@ fn ejecutar_pipeline_o_builtin(cmds: &[CmdSpec], ctx: Option<usize>) -> (Option<
             "sosolog" if cmds[0].args.is_empty() => {
                 ejecutar_sosolog();
                 return (None, 0);
+            }
+            "jobs" => return (None, builtin_jobs()),
+            "fg" | "bg" => {
+                let arg = cmds[0].args.first().map(|s| s.as_str()).unwrap_or("");
+                return (None, builtin_continuar(arg, cmds[0].prog == "fg", ctx));
             }
             _ => {}
         }
@@ -1328,7 +1516,8 @@ fn ejecutar_sosolog() {
 }
 
 fn ayuda() {
-    println!("builtins: exit [código], help, cd, pwd, wifi, ask, voz, sosolog");
+    println!("builtins: exit [código], help, cd, pwd, wifi, ask, voz, sosolog, jobs, fg, bg");
+    println!("Ctrl-Z:   para el trabajo en primer plano; `fg [n]` lo reanuda aquí, `bg [n]` detrás");
     println!("sosolog:  persistir el log ahora: /var/log/*.log y, en live, SOSOLOG.TXT");
     println!("wifi:     wifi scan | status | setup | connect <ssid> [psk]");
     println!("ask:      ask <pregunta>  — el texto va literal al modelo");
@@ -1360,19 +1549,6 @@ fn resto_de<'a>(cmd: &str, line: &'a str) -> Option<&'a str> {
     line.strip_prefix(cmd)
         .filter(|r| r.starts_with(' '))
         .map(|r| r[1..].trim_end())
-}
-
-/// Espera a un hijo concreto; si otro hijo zombi (p. ej. askd) sale antes, lo
-/// recoge y sigue esperando.
-fn wait_pid(want: u64) -> Result<u8, i64> {
-    loop {
-        match sys::wait() {
-            Ok((got, code)) if got == want => return Ok(code),
-            Ok(_) => {}
-            Err(e) if e == -abi::ECHILD => return Err(-abi::ECHILD),
-            Err(e) => return Err(e),
-        }
-    }
 }
 
 fn parse_sock_addr(s: &str) -> Option<abi::SockAddr> {
@@ -1441,7 +1617,9 @@ fn copiar_respuesta_ask(fd: u64) -> Result<bool, ()> {
             }
             return Ok(true);
         }
-        if sys::write(1, &buf[..n]) == -(abi::EINTR as i64) {
+        // Ctrl-C con la shell copiando (en marcha, no bloqueada): el manejador
+        // sólo deja el bit, la escritura no vuelve con EINTR.
+        if sys::write(1, &buf[..n]) == -(abi::EINTR as i64) || senal::tomar(abi::SIGINT) {
             return Ok(false);
         }
     }
@@ -1449,6 +1627,7 @@ fn copiar_respuesta_ask(fd: u64) -> Result<bool, ()> {
 }
 
 fn preguntar_via_askd(texto: &str) -> u8 {
+    let _ = senal::tomar(abi::SIGINT);
     let fd = match connect_askd() {
         Ok(f) => f,
         Err(e) if e == -(abi::EINTR as i64) => return 130,
