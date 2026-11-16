@@ -1,28 +1,32 @@
 # Plan — paquetes de aplicaciones
 
 Gestor incremental de aplicaciones en userspace, **independiente** del OTA
-(`soso-update`). El OTA sigue administrando `bin/`, `lib/` y `etc/` del sistema;
-las apps instaladas viven en `/var/paquetes/` y no viajan en el `rootfs.pack`.
+(`soso-update`). Los paquetes normales viven en `/var/paquetes/`; los que
+declaran `destino=sistema` pueden publicar sus ejecutables en `/bin` sin pasar
+por una release OTA. Se guarda copia del binario previo para poder desinstalar.
 
 ## Estado
 
 | Fase | Contenido | Estado |
 |------|-----------|--------|
 | P0 | Contrato `paquete.txt` / `paquete.pack`, índice, `soso-pkg-core`, cliente `soso-pkg` (local + HTTPS), índice de comandos, sosh | Hecho |
-| P1 | Repositorio publicado, `cargo xtask pkg-pack`, paquete referencia `soso-web`, dependencias entre paquetes | En curso (`pkg-pack`, `soso-web` fuera del OTA; **`opencode-sal`** empaquetable vía `cargo xtask pkg-pack opencode-sal`) |
+| P1 | Repositorio publicado, `cargo xtask pkg-pack`, paquetes `soso-ed` y `soso-pkg` con destino sistema | En curso: índice público raw de GitHub y paquetes de sistema publicados en `rootfs/share/paquetes/`; `soso-web` y `opencode-sal` siguen empaquetables |
 | P2 | Servicios/demonios, `.desktop` / escritorio | Pendiente |
 | P3 | Descarga por rangos (packs > 64 MiB) | Pendiente |
 
 ## Contrato (P0)
 
-Ver el plan de implementación acordado en el repositorio (manifiesto `SOSOPKG v1`,
-índice `SOSOPKG indice v1`, rutas bajo `bin/` y `share/`, tope 64 MiB).
+Manifiesto `SOSOPKG v1`, índice `SOSOPKG indice v1`, rutas bajo `bin/` y
+`share/`, tope 64 MiB. `destino=sistema` (opcional y compatible con gestores
+anteriores) instala `bin/*` además de guardarlo en el árbol privado del paquete.
 
 Rutas en disco:
 
 - `/var/paquetes/<nombre>/` — árbol instalado + copia de `paquete.txt`
 - `/var/paquetes/comandos` — mapa `nombre → ruta` para sosh
 - `/etc/paquetes.conf` — `url=` base del repositorio HTTPS
+- Paquetes de sistema: copia de seguridad en `.respaldo/` dentro del paquete;
+  `soso-pkg` la restaura al desinstalar.
 
 ## Comandos de usuario
 
@@ -42,8 +46,17 @@ soso-pkg borrar <nombre>
   `soso-web` en `/var/paquetes/comandos` (sosh y escritorio Alt+W).
 - El OTA **no** incluye `/bin/soso-web`; actualizar el navegador con
   `soso-pkg instalar` / `actualizar` sin release completa del sistema.
-- **Repo Git separado** para el navegador: opcional; el monorepo sigue siendo la
-  fuente hasta publicar un índice HTTPS estable.
+- **Origen público actual:** `https://raw.githubusercontent.com/demonodojo/soso/main/rootfs/share/paquetes`
+  (índice y packs publicados junto al monorepo).
+
+## Paquetes con ejecutables del sistema
+
+- `soso-ed` y `soso-pkg` declaran `destino=sistema`; el gestor conserva también
+  los binarios en `/var/paquetes/<nombre>/bin/` para rollback y compatibilidad.
+- El gestor nuevo activa automáticamente en `/bin` los paquetes de sistema que
+  instaló un gestor anterior bajo `/var/paquetes`.
+- `cargo xtask pkg-pack soso-ed|soso-pkg` genera su manifiesto y pack. La
+  compilación de userspace genera ambos y actualiza `indice.txt`.
 
 ## Verificación
 

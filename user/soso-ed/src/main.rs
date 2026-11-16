@@ -13,6 +13,10 @@ libsoso::entry!(main);
 
 const MAX_LINEA: usize = 4096;
 const MAX_LINEAS: usize = 4096;
+// La terminal gráfica inicial de soso tiene 24 filas: dos para la cabecera
+// del editor y 22 para el texto. Mantener el área completa evita dejar la
+// parte inferior de la terminal con el contenido anterior o vacía.
+const FILAS_TEXTO: usize = 22;
 
 struct Editor {
     lineas: Vec<String>,
@@ -161,8 +165,13 @@ impl Editor {
         }
     }
 
-    fn pintar(&self) {
+    fn pintar(&mut self) {
         let _ = sys::write_all(1, b"\x1b[2J\x1b[H");
+        if self.fila < self.fila_scroll {
+            self.fila_scroll = self.fila;
+        } else if self.fila >= self.fila_scroll + FILAS_TEXTO {
+            self.fila_scroll = self.fila + 1 - FILAS_TEXTO;
+        }
         let barra = if self.modificado { '*' } else { ' ' };
         println!(
             "soso-ed {barra} {} — fila {} col {} — Ctrl-S guardar, Ctrl-Q salir",
@@ -171,11 +180,7 @@ impl Editor {
             self.col + 1
         );
         println!("────────────────────────────────────────");
-        let visibles = 20usize;
-        if self.fila >= self.fila_scroll + visibles {
-            // scroll implícito vía fila_scroll no usado aún
-        }
-        let fin = (self.fila_scroll + visibles).min(self.lineas.len());
+        let fin = (self.fila_scroll + FILAS_TEXTO).min(self.lineas.len());
         for i in self.fila_scroll..fin {
             let pref = if i == self.fila { '>' } else { ' ' };
             let l = &self.lineas[i];
@@ -191,6 +196,9 @@ impl Editor {
             } else {
                 println!("{pref} {l}");
             }
+        }
+        for _ in fin..self.fila_scroll + FILAS_TEXTO {
+            println!("~");
         }
     }
 }
@@ -217,26 +225,49 @@ fn leer_tecla() -> Option<Tecla> {
         0x0d | 0x0a => return Some(Tecla::Char(b'\n')),
         0x08 | 0x7f => return Some(Tecla::Char(0x08)),
         0x1b => {
-            let mut seq = [0u8; 2];
-            if sys::read(0, &mut seq[..1]) <= 0 {
+            let mut intro = [0u8; 1];
+            if sys::read(0, &mut intro) <= 0 {
                 return Some(Tecla::Desconocida);
             }
-            if seq[0] != b'[' {
+            // Los terminales pueden emitir CSI (ESC [ A) o SS3 (ESC O A)
+            // para las flechas. En CSI consumimos también modificadores como
+            // ESC [ 1 ; 5 D para no insertar sus bytes en el fichero.
+            if intro[0] == b'O' {
+                let mut final_byte = [0u8; 1];
+                if sys::read(0, &mut final_byte) <= 0 {
+                    return Some(Tecla::Desconocida);
+                }
+                return Some(tecla_flecha(final_byte[0]).unwrap_or(Tecla::Desconocida));
+            }
+            if intro[0] != b'[' {
                 return Some(Tecla::Desconocida);
             }
-            if sys::read(0, &mut seq[1..2]) <= 0 {
-                return Some(Tecla::Desconocida);
+            let mut final_byte = 0u8;
+            let mut byte = [0u8; 1];
+            for _ in 0..16 {
+                if sys::read(0, &mut byte) <= 0 {
+                    return Some(Tecla::Desconocida);
+                }
+                // Los finales CSI están en el rango 0x40..=0x7e.
+                if (0x40..=0x7e).contains(&byte[0]) {
+                    final_byte = byte[0];
+                    break;
+                }
             }
-            return Some(match seq[1] {
-                b'A' => Tecla::Arriba,
-                b'B' => Tecla::Abajo,
-                b'C' => Tecla::Derecha,
-                b'D' => Tecla::Izq,
-                _ => Tecla::Desconocida,
-            });
+            return Some(tecla_flecha(final_byte).unwrap_or(Tecla::Desconocida));
         }
         c @ 0x20..=0x7e => Some(Tecla::Char(c)),
         c => Some(Tecla::Char(c)),
+    }
+}
+
+fn tecla_flecha(c: u8) -> Option<Tecla> {
+    match c {
+        b'A' => Some(Tecla::Arriba),
+        b'B' => Some(Tecla::Abajo),
+        b'C' => Some(Tecla::Derecha),
+        b'D' => Some(Tecla::Izq),
+        _ => None,
     }
 }
 

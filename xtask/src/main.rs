@@ -1019,6 +1019,9 @@ pub(crate) fn build_user() -> bool {
     if let Err(e) = pkg_pack::materializar_soso_web_en_rootfs(&root) {
         eprintln!("xtask: aviso: paquete soso-web: {e}");
     }
+    if let Err(e) = pkg_pack::materializar_paquetes_sistema(&root) {
+        eprintln!("xtask: aviso: paquetes del sistema no empaquetados: {e}");
+    }
     cambiado
 }
 

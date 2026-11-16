@@ -1074,10 +1074,12 @@ el empaquetado).
 
 ### soso-pkg — paquetes de aplicación
 
-Instala programas **fuera** del árbol que administra `soso-update` (`/bin`, `/lib`,
-`/etc/` del sistema). Los paquetes viven en `/var/paquetes/<nombre>/`; los
-comandos declarados en `bin/` del paquete se ejecutan desde **sosh** como si
-estuvieran en el `PATH` (mapa en `/var/paquetes/comandos`).
+Instala y actualiza programas. Por defecto, los paquetes viven aislados en
+`/var/paquetes/<nombre>/`; un paquete puede declarar `destino=sistema` para
+instalar sus ejecutables `bin/` también en `/bin`. En ese caso `soso-pkg`
+conserva el fichero anterior y lo restaura al desinstalar. Los comandos de
+paquete también se pueden ejecutar desde **sosh** mediante el mapa de
+`/var/paquetes/comandos`.
 
 ```sh
 soso-pkg listar
@@ -1091,7 +1093,7 @@ soso-pkg borrar demo
 Configuración remota en `/etc/paquetes.conf`:
 
 ```text
-url=https://ejemplo.org/mis-paquetes
+url=https://raw.githubusercontent.com/demonodojo/soso/main/rootfs/share/paquetes
 ```
 
 Para probar sin red: `soso-pkg instalar /share/paquetes-prueba/v1` (fixture en la
@@ -1100,6 +1102,20 @@ imagen de prueba). El navegador **soso-web** suele venir precargado en
 `soso-pkg instalar /share/paquetes/soso-web/1.0.0`. Sin `--forzar` solo se instala una versión **mayor**; para
 reinstalar o bajar versión, añade `--forzar`. `--origen DIR` usa un índice y
 paquetes locales en lugar de HTTPS.
+
+En una instalación existente cuyo `/etc/paquetes.conf` aún no tenga `url=`,
+configura el repositorio una vez y actualiza el gestor y el editor:
+
+```sh
+echo 'url=https://raw.githubusercontent.com/demonodojo/soso/main/rootfs/share/paquetes' > /etc/paquetes.conf
+soso-pkg instalar soso-pkg
+soso-pkg instalar soso-ed
+/var/paquetes/soso-pkg/bin/soso-pkg listar
+```
+
+La última orden ejecuta el gestor nuevo una vez; este activa en `/bin` los
+paquetes del sistema que el gestor anterior instaló bajo `/var/paquetes`.
+Después puedes usar normalmente `soso-pkg actualizar soso-ed`.
 
 **OpenCode en Sal (`opencode-sal`, D12):** agente compatible con `opencode.json` y
 coordinador de automejora dentro de soso. En el host: `cargo xtask pkg-pack opencode-sal`
@@ -1322,7 +1338,9 @@ sal run hola.sal
 ```
 
 El ejemplo devuelve `42`; la shell muestra ese código. Edita `hola.sal` con
-`soso-ed` y repite `sal build` o `sal run` para recompilarlo. Para pasar argumentos,
+`soso-ed` y repite `sal build` o `sal run` para recompilarlo. En el editor, usa
+las flechas para moverte, `Ctrl-S` para guardar y `Ctrl-Q` para salir; el área
+de texto muestra 22 filas y se desplaza al mover el cursor. Para pasar argumentos,
 usa `sal run programa.sal -- "dos palabras"`. Los ejemplos están en
 `/usr/share/sal/` y el SDK en `/lib/sal/`.
 

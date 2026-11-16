@@ -25,6 +25,9 @@ pub struct Manifest {
     pub version: SemVer,
     pub version_raw: String,
     pub abi: Option<u32>,
+    /// Instala `bin/*` también en `/bin`; el campo es opcional para que los
+    /// gestores anteriores sigan tratando el paquete como una app normal.
+    pub destino_sistema: bool,
     pub files: Vec<FileEntry>,
 }
 
@@ -62,6 +65,7 @@ pub enum ValidateError {
     SizeMismatch { path: String },
     MissingInPack { path: String },
     DuplicatePath { path: String },
+    SystemTargetNotBin { path: String },
     AbiIncompatible { esperado: u32, actual: u32 },
 }
 
@@ -78,6 +82,9 @@ impl core::fmt::Display for ValidateError {
                 write!(f, "abi={esperado} incompatible con el sistema (abi={actual})")
             }
             Self::DuplicatePath { path } => write!(f, "ruta duplicada: {path}"),
+            Self::SystemTargetNotBin { path } => {
+                write!(f, "destino=sistema solo admite ficheros bin/: {path}")
+            }
         }
     }
 }
@@ -88,6 +95,7 @@ impl Manifest {
         let mut nombre = String::new();
         let mut version_raw = String::new();
         let mut abi: Option<u32> = None;
+        let mut destino_sistema = false;
         let mut files = Vec::new();
 
         for (index, line) in text.lines().enumerate() {
@@ -115,6 +123,15 @@ impl Manifest {
                             field: "abi",
                         })?,
                 );
+            } else if let Some(v) = line.strip_prefix("destino=") {
+                destino_sistema = match v.trim() {
+                    "sistema" => true,
+                    "paquete" => false,
+                    _ => return Err(ParseManifestError::BadLine {
+                        line: index + 1,
+                        field: "destino",
+                    }),
+                };
             } else if let Some(rest) = line.strip_prefix("f ") {
                 let parts: Vec<_> = rest.split_whitespace().collect();
                 if parts.len() < 3 {
@@ -157,6 +174,7 @@ impl Manifest {
             version,
             version_raw,
             abi,
+            destino_sistema,
             files,
         };
         m.assign_offsets();
@@ -183,6 +201,9 @@ impl Manifest {
         if let Some(a) = self.abi {
             out.push_str(&format!("abi={a}\n"));
         }
+        if self.destino_sistema {
+            out.push_str("destino=sistema\n");
+        }
         for f in &self.files {
             out.push_str(&format!("f {} {} {}\n", f.hash_hex, f.size, f.path));
         }
@@ -204,6 +225,11 @@ impl Manifest {
         }
         let mut seen = alloc::collections::BTreeSet::new();
         for f in &self.files {
+            if self.destino_sistema && !f.path.starts_with("bin/") {
+                return Err(ValidateError::SystemTargetNotBin {
+                    path: f.path.clone(),
+                });
+            }
             if f.hash_hex.len() != 64
                 || !f.hash_hex
                     .bytes()

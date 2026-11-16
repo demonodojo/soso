@@ -12,14 +12,33 @@ pub const SOSO_WEB_VERSION: &str = "1.0.0";
 const SOSO_WEB_NOMBRE: &str = "soso-web";
 pub const OPENCODE_SAL_VERSION: &str = "1.0.0";
 const OPENCODE_SAL_NOMBRE: &str = "opencode-sal";
+pub const SOSO_ED_VERSION: &str = "0.1.0";
+pub const SOSO_PKG_VERSION: &str = "0.1.0";
 
 pub fn run(args: &[String]) {
     let Some(pkg) = args.first() else {
-        eprintln!("uso: cargo xtask pkg-pack <soso-web|opencode-sal> [--out DIR]");
+        eprintln!("uso: cargo xtask pkg-pack <soso-web|opencode-sal|soso-ed|soso-pkg> [--out DIR]");
         exit(2);
     };
     if pkg == OPENCODE_SAL_NOMBRE {
         run_opencode_sal(args);
+        return;
+    }
+    if pkg == "soso-ed" || pkg == "soso-pkg" {
+        let root = crate::project_root();
+        let version = if pkg == "soso-ed" { SOSO_ED_VERSION } else { SOSO_PKG_VERSION };
+        let out = args.iter().skip(1).find_map(|a| a.strip_prefix("--out=").map(PathBuf::from))
+            .unwrap_or_else(|| root.join("rootfs/share/paquetes").join(pkg).join(version));
+        match materializar_bin_sistema(&root, pkg, version, pkg, &out) {
+            Ok(()) => {
+                if let Err(e) = generar_indice(&root) {
+                    eprintln!("xtask pkg-pack: no pude actualizar indice.txt: {e}");
+                    exit(1);
+                }
+                println!("xtask pkg-pack: {}", out.display());
+            }
+            Err(e) => { eprintln!("xtask pkg-pack: {e}"); exit(1); }
+        }
         return;
     }
     if pkg != SOSO_WEB_NOMBRE {
@@ -49,6 +68,71 @@ pub fn run(args: &[String]) {
             exit(1);
         }
     }
+}
+
+pub fn materializar_paquetes_sistema(root: &Path) -> Result<(), String> {
+    for (nombre, version) in [("soso-ed", SOSO_ED_VERSION), ("soso-pkg", SOSO_PKG_VERSION)] {
+        let dir = root.join("rootfs/share/paquetes").join(nombre).join(version);
+        materializar_bin_sistema(root, nombre, version, nombre, &dir)?;
+    }
+    generar_indice(root)
+}
+
+fn materializar_bin_sistema(
+    root: &Path,
+    nombre: &str,
+    version: &str,
+    binario: &str,
+    out: &Path,
+) -> Result<(), String> {
+    let elf = root.join("target/user/x86_64-soso-user/release").join(binario);
+    let data = fs::read(&elf).map_err(|_| format!("no hay {elf:?}; ejecuta build_user"))?;
+    let (_, pack, mut man) = empaquetar::empaquetar(
+        nombre,
+        version,
+        Some(ABI_VERSION),
+        vec![(format!("bin/{binario}"), data.clone())],
+    ).map_err(|e| format!("{e}"))?;
+    man.destino_sistema = true;
+    let man_text = man.format();
+    if out.exists() { fs::remove_dir_all(out).map_err(|e| e.to_string())?; }
+    fs::create_dir_all(out).map_err(|e| e.to_string())?;
+    fs::write(out.join("paquete.txt"), &man_text).map_err(|e| e.to_string())?;
+    fs::write(out.join("paquete.pack"), &pack).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Índice HTTPS estático para servir este árbol con raw.githubusercontent.com.
+pub fn generar_indice(root: &Path) -> Result<(), String> {
+    let base = root.join("rootfs/share/paquetes");
+    let mut filas = Vec::new();
+    for pkg in fs::read_dir(&base).map_err(|e| e.to_string())? {
+        let pkg = pkg.map_err(|e| e.to_string())?.path();
+        if !pkg.is_dir() { continue; }
+        let publicado = pkg.file_name().and_then(|n| n.to_str())
+            .is_some_and(|n| n == "soso-ed" || n == "soso-pkg");
+        if !publicado { continue; }
+        for ver in fs::read_dir(&pkg).map_err(|e| e.to_string())? {
+            let dir = ver.map_err(|e| e.to_string())?.path();
+            if !dir.is_dir() { continue; }
+            let txt = match fs::read(dir.join("paquete.txt")) { Ok(b) => b, Err(_) => continue };
+            let pack = match fs::read(dir.join("paquete.pack")) { Ok(b) => b, Err(_) => continue };
+            let text = core::str::from_utf8(&txt).map_err(|e| e.to_string())?;
+            let man = soso_pkg_core::Manifest::parse(text).map_err(|e| format!("{e}"))?;
+            let version = man.version_raw;
+            filas.push(format!(
+                "p {} {} {} {} {} {}\n",
+                man.nombre,
+                version,
+                soso_update_core::hex_sha256(&txt), txt.len(),
+                soso_update_core::hex_sha256(&pack), pack.len(),
+            ));
+        }
+    }
+    filas.sort();
+    let mut indice = String::from("SOSOPKG indice v1\n");
+    for fila in filas { indice.push_str(&fila); }
+    fs::write(base.join("indice.txt"), indice).map_err(|e| e.to_string())
 }
 
 /// Catálogo en `share/` + copia instalada bajo `rootfs/var/paquetes/` (imagen live).

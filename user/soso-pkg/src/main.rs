@@ -24,6 +24,7 @@ libsoso::entry!(main);
 const MAX_TXT: usize = 256 * 1024;
 
 fn main(args: &[String]) -> u8 {
+    activar_paquetes_sistema_instalados();
     if args.is_empty() {
         uso();
         return 2;
@@ -117,8 +118,9 @@ fn resolver_origen(origen_cli: Option<&str>) -> Result<Origen, u8> {
     if let Some(url) = conf.url {
         Ok(Origen::Remoto(url))
     } else {
-        println!("soso-pkg: falta url= en /etc/paquetes.conf (o use --origen DIR)");
-        Err(1)
+        Ok(Origen::Remoto(String::from(
+            "https://raw.githubusercontent.com/demonodojo/soso/main/rootfs/share/paquetes",
+        )))
     }
 }
 
@@ -309,11 +311,14 @@ fn instalar_local(dir: String, forzar: bool) -> u8 {
 }
 
 fn version_instalada(nombre: &str) -> Option<soso_update_core::SemVer> {
+    manifest_instalada(nombre).map(|m| m.version)
+}
+
+fn manifest_instalada(nombre: &str) -> Option<Manifest> {
     let p = format!("/var/paquetes/{nombre}/paquete.txt");
     let bytes = fs::read_bytes(&p, MAX_TXT)?;
     let text = core::str::from_utf8(&bytes).ok()?;
-    let m = Manifest::parse(text).ok()?;
-    Some(m.version)
+    Manifest::parse(text).ok()
 }
 
 fn aplicar_manifiesto(man: Manifest, man_text: &str, pack: &[u8], forzar: bool) -> u8 {
@@ -358,8 +363,19 @@ fn aplicar_manifiesto(man: Manifest, man_text: &str, pack: &[u8], forzar: bool) 
             return 1;
         }
     }
+    if man.destino_sistema {
+        if preparar_respaldo_sistema(&man, &staging).is_err() {
+            fs::borrar_arbol(&staging);
+            println!("soso-pkg: no pude preparar el respaldo de /bin");
+            return 1;
+        }
+    }
     if let Err(msg) = promover(&man.nombre) {
         println!("soso-pkg: {msg}");
+        return 1;
+    }
+    if man.destino_sistema && !activar_bin_sistema(&man).is_empty() {
+        println!("soso-pkg: no pude activar todos los ejecutables en /bin");
         return 1;
     }
     if let Err(msg) = reconstruir_comandos() {
@@ -371,6 +387,102 @@ fn aplicar_manifiesto(man: Manifest, man_text: &str, pack: &[u8], forzar: bool) 
         man.nombre, man.version_raw
     );
     0
+}
+
+fn preparar_respaldo_sistema(man: &Manifest, staging: &str) -> Result<(), ()> {
+    let raiz = format!("/var/paquetes/{}", man.nombre);
+    let anterior = manifest_instalada(&man.nombre);
+    for f in &man.files {
+        let Some(nombre) = f.path.strip_prefix("bin/") else {
+            continue;
+        };
+        let backup = format!("{staging}/.respaldo/{}", f.path);
+        let ausente = format!("{backup}.ausente");
+        if anterior.as_ref().is_some_and(|m| {
+            m.destino_sistema && m.files.iter().any(|old| old.path == f.path)
+        }) {
+            let old_backup = format!("{raiz}/.respaldo/{}", f.path);
+            let old_ausente = format!("{old_backup}.ausente");
+            if let Some(data) = fs::read_bytes(&old_backup, MAX_PACK_SIZE as usize) {
+                fs::mkdir_all(&format!("{staging}/.respaldo/bin"));
+                fs::write_bytes_replace(&backup, &data).map_err(|_| ())?;
+            } else if fs::exists(&old_ausente) {
+                fs::mkdir_all(&format!("{staging}/.respaldo/bin"));
+                fs::write_bytes_replace(&ausente, b"1").map_err(|_| ())?;
+            } else if let Some(data) = fs::read_bytes(&format!("/bin/{nombre}"), MAX_PACK_SIZE as usize) {
+                // Paquete instalado por un gestor anterior, que ignoraba
+                // destino=sistema: /bin aún contiene el binario original.
+                fs::mkdir_all(&format!("{staging}/.respaldo/bin"));
+                fs::write_bytes_replace(&backup, &data).map_err(|_| ())?;
+            } else {
+                fs::mkdir_all(&format!("{staging}/.respaldo/bin"));
+                fs::write_bytes_replace(&ausente, b"1").map_err(|_| ())?;
+            }
+        } else if let Some(data) = fs::read_bytes(&format!("/bin/{nombre}"), MAX_PACK_SIZE as usize) {
+            fs::mkdir_all(&format!("{staging}/.respaldo/bin"));
+            fs::write_bytes_replace(&backup, &data).map_err(|_| ())?;
+        } else {
+            fs::mkdir_all(&format!("{staging}/.respaldo/bin"));
+            fs::write_bytes_replace(&ausente, b"1").map_err(|_| ())?;
+        }
+    }
+    Ok(())
+}
+
+fn activar_bin_sistema(man: &Manifest) -> Vec<String> {
+    let mut errores = Vec::new();
+    let raiz = format!("/var/paquetes/{}", man.nombre);
+    for f in &man.files {
+        let Some(nombre) = f.path.strip_prefix("bin/") else {
+            continue;
+        };
+        let origen = format!("{raiz}/{}", f.path);
+        let destino = format!("/bin/{nombre}");
+        let Some(data) = fs::read_bytes(&origen, MAX_PACK_SIZE as usize) else {
+            errores.push(destino);
+            continue;
+        };
+        if fs::write_bytes_replace(&destino, &data).is_err() {
+            errores.push(destino);
+        }
+    }
+    errores
+}
+
+/// Permite que un soso-pkg antiguo instale esta versión en `/var/paquetes`;
+/// al ejecutarla por primera vez, la versión nueva activa los destinos de
+/// sistema y conserva el binario que había antes.
+fn activar_paquetes_sistema_instalados() {
+    for nombre in fs::list_dir("/var/paquetes") {
+        if nombre.starts_with('.') {
+            continue;
+        }
+        let Some(man) = manifest_instalada(&nombre) else {
+            continue;
+        };
+        if !man.destino_sistema {
+            continue;
+        }
+        let raiz = format!("/var/paquetes/{nombre}");
+        for f in &man.files {
+            let Some(cmd) = f.path.strip_prefix("bin/") else {
+                continue;
+            };
+            let backup = format!("{raiz}/.respaldo/{}", f.path);
+            let ausente = format!("{backup}.ausente");
+            if !fs::exists(&backup) && !fs::exists(&ausente) {
+                fs::mkdir_all(&format!("{raiz}/.respaldo/bin"));
+                if let Some(previo) = fs::read_bytes(&format!("/bin/{cmd}"), MAX_PACK_SIZE as usize) {
+                    let _ = fs::write_bytes_replace(&backup, &previo);
+                } else {
+                    let _ = fs::write_bytes_replace(&ausente, b"1");
+                }
+            }
+            if let Some(data) = fs::read_bytes(&format!("{raiz}/{}", f.path), MAX_PACK_SIZE as usize) {
+                let _ = fs::write_bytes_replace(&format!("/bin/{cmd}"), &data);
+            }
+        }
+    }
 }
 
 fn promover(nombre: &str) -> Result<(), &'static str> {
@@ -482,6 +594,27 @@ fn cmd_borrar(nombre: &str) -> u8 {
     if proceso_usa_paquete(nombre) {
         println!("soso-pkg: hay procesos usando «{nombre}»");
         return 1;
+    }
+    if let Some(man) = manifest_instalada(nombre) {
+        if man.destino_sistema {
+            for f in &man.files {
+                let Some(cmd) = f.path.strip_prefix("bin/") else {
+                    continue;
+                };
+                let backup = format!("{dest}/.respaldo/{}", f.path);
+                let ausente = format!("{backup}.ausente");
+                if let Some(data) = fs::read_bytes(&backup, MAX_PACK_SIZE as usize) {
+                    if fs::write_bytes_replace(&format!("/bin/{cmd}"), &data).is_err() {
+                        println!("soso-pkg: no pude restaurar /bin/{cmd}");
+                        return 1;
+                    }
+                } else if fs::exists(&ausente) {
+                    let _ = fs::unlink(&format!("/bin/{cmd}"));
+                }
+                // Sin archivo de estado significa que lo instaló un gestor
+                // anterior y /bin nunca se modificó: se conserva tal cual.
+            }
+        }
     }
     fs::borrar_arbol(&dest);
     if let Err(msg) = reconstruir_comandos() {

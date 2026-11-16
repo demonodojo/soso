@@ -1,0 +1,6 @@
+SOSOPKG v1
+nombre=soso-ed
+version=0.1.0
+abi=1
+destino=sistema
+f 473570a520bf1e4771c1268b2fbdab0926faeb31b263e0eb0c6e15f046d47935 56368 bin/soso-ed

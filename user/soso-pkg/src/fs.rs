@@ -52,6 +52,23 @@ pub fn write_bytes(path: &str, data: &[u8]) -> Result<(), i64> {
     }
 }
 
+pub fn write_bytes_replace(path: &str, data: &[u8]) -> Result<(), i64> {
+    let fd = sys::open(path, abi::O_WRONLY | abi::O_CREAT | abi::O_TRUNC);
+    if fd < 0 {
+        return Err(fd);
+    }
+    if let Err(e) = sys::write_all(fd as u64, data) {
+        let _ = sys::close(fd as u64);
+        return Err(e);
+    }
+    let r = sys::close(fd as u64);
+    if r < 0 { Err(r) } else { Ok(()) }
+}
+
+pub fn unlink(path: &str) -> i64 {
+    sys::unlink(path)
+}
+
 pub fn mkdir_all(path: &str) {
     if path.is_empty() || exists(path) {
         return;
