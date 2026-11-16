@@ -1120,13 +1120,15 @@ configura el repositorio una vez y actualiza el gestor y el editor:
 ```sh
 echo 'url=https://raw.githubusercontent.com/demonodojo/soso/main/rootfs/share/paquetes' > /etc/paquetes.conf
 soso-pkg instalar soso-pkg
-soso-pkg instalar soso-ed
 /var/paquetes/soso-pkg/bin/soso-pkg listar
+soso-pkg instalar soso-ed
+soso-pkg instalar sal
 ```
 
-La última orden ejecuta el gestor nuevo una vez; este activa en `/bin` los
-paquetes del sistema que el gestor anterior instaló bajo `/var/paquetes`.
-Después puedes usar normalmente `soso-pkg actualizar soso-ed`.
+La orden con ruta absoluta ejecuta el gestor nuevo una vez; este activa en
+`/bin` y `/lib/sal` los paquetes del sistema que el gestor anterior instaló
+bajo `/var/paquetes`. Después puedes usar `soso-pkg actualizar sal` cuando
+quieras renovar el compilador y sus componentes.
 
 **OpenCode en Sal (`opencode-sal`, D12):** agente compatible con `opencode.json` y
 coordinador de automejora dentro de soso. En el host: `cargo xtask pkg-pack opencode-sal`
@@ -1337,10 +1339,9 @@ Detalle en [Descargar desde Hugging Face (guest)](#descargar-desde-hugging-face-
 ### Sal — programar utilidades
 
 Las imágenes preparadas con `cargo xtask sal-build` incluyen **sal** y
-**sal-contar**. En instalaciones existentes, puedes instalar o actualizar el
-compilador con `soso-pkg instalar sal`; requiere que la instalación tenga el
-SDK de Sal en `/lib/sal`. Puedes compilar y ejecutar programas dentro de soso
-sin red:
+**sal-contar**. En instalaciones existentes, actualiza primero `soso-pkg` y
+después instala o actualiza el paquete `sal`; contiene el compilador, backend
+LLVM y SDK juntos. Puedes compilar y ejecutar programas dentro de soso sin red:
 
 ```sh
 cd /tmp

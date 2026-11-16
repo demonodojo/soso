@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 use soso_update_core::{hex_sha256, parse_semver, SemVer};
 
-use crate::rutas::{nombre_valido, ruta_valida, RutaError};
+use crate::rutas::{nombre_valido, ruta_destino_sistema, ruta_valida, RutaError};
 use crate::MAX_PACK_SIZE;
 
 pub const MANIFEST_MAGIC: &str = "SOSOPKG v1";
@@ -25,8 +25,8 @@ pub struct Manifest {
     pub version: SemVer,
     pub version_raw: String,
     pub abi: Option<u32>,
-    /// Instala `bin/*` también en `/bin`; el campo es opcional para que los
-    /// gestores anteriores sigan tratando el paquete como una app normal.
+    /// Instala `bin/*` en `/bin` y el SDK limitado a `lib/sal/*` en `/lib/sal`;
+    /// el campo es opcional para conservar compatibilidad con gestores antiguos.
     pub destino_sistema: bool,
     pub files: Vec<FileEntry>,
 }
@@ -65,7 +65,7 @@ pub enum ValidateError {
     SizeMismatch { path: String },
     MissingInPack { path: String },
     DuplicatePath { path: String },
-    SystemTargetNotBin { path: String },
+    SystemTargetNotAllowed { path: String },
     AbiIncompatible { esperado: u32, actual: u32 },
 }
 
@@ -82,8 +82,8 @@ impl core::fmt::Display for ValidateError {
                 write!(f, "abi={esperado} incompatible con el sistema (abi={actual})")
             }
             Self::DuplicatePath { path } => write!(f, "ruta duplicada: {path}"),
-            Self::SystemTargetNotBin { path } => {
-                write!(f, "destino=sistema solo admite ficheros bin/: {path}")
+            Self::SystemTargetNotAllowed { path } => {
+                write!(f, "destino=sistema solo admite bin/ y lib/sal/: {path}")
             }
         }
     }
@@ -225,8 +225,8 @@ impl Manifest {
         }
         let mut seen = alloc::collections::BTreeSet::new();
         for f in &self.files {
-            if self.destino_sistema && !f.path.starts_with("bin/") {
-                return Err(ValidateError::SystemTargetNotBin {
+            if self.destino_sistema && ruta_destino_sistema(&f.path).is_none() {
+                return Err(ValidateError::SystemTargetNotAllowed {
                     path: f.path.clone(),
                 });
             }

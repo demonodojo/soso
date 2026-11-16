@@ -2,8 +2,9 @@
 
 Gestor incremental de aplicaciones en userspace, **independiente** del OTA
 (`soso-update`). Los paquetes normales viven en `/var/paquetes/`; los que
-declaran `destino=sistema` pueden publicar sus ejecutables en `/bin` sin pasar
-por una release OTA. Se guarda copia del binario previo para poder desinstalar.
+declaran `destino=sistema` pueden publicar ejecutables en `/bin` y archivos del
+SDK de Sal en `/lib/sal` sin pasar por una release OTA. Se guardan los archivos
+previos para poder restaurarlos al desinstalar.
 
 ## Estado
 
@@ -16,9 +17,10 @@ por una release OTA. Se guarda copia del binario previo para poder desinstalar.
 
 ## Contrato (P0)
 
-Manifiesto `SOSOPKG v1`, índice `SOSOPKG indice v1`, rutas bajo `bin/` y
-`share/`, tope 64 MiB. `destino=sistema` (opcional y compatible con gestores
-anteriores) instala `bin/*` además de guardarlo en el árbol privado del paquete.
+Manifiesto `SOSOPKG v1`, índice `SOSOPKG indice v1`, rutas bajo `bin/`,
+`share/` y `lib/sal/`, tope 64 MiB. `destino=sistema` instala `bin/*` en `/bin`
+y `lib/sal/*` en `/lib/sal`, además de guardarlos en el árbol privado del
+paquete. Los destinos de sistema quedan limitados a esas dos áreas.
 
 Rutas en disco:
 
@@ -51,14 +53,16 @@ soso-pkg borrar <nombre>
 
 ## Paquetes con ejecutables del sistema
 
-- `soso-ed`, `soso-pkg`, `soso-wm` y `sal` declaran `destino=sistema`; el gestor conserva también
-  los binarios en `/var/paquetes/<nombre>/bin/` para rollback y compatibilidad.
-- El gestor nuevo activa automáticamente en `/bin` los paquetes de sistema que
-  instaló un gestor anterior bajo `/var/paquetes`.
+- `soso-ed`, `soso-pkg`, `soso-wm` y `sal` declaran `destino=sistema`; el gestor
+  conserva sus archivos en `/var/paquetes/<nombre>/` y copia los originales en
+  `.respaldo/` para restaurarlos al desinstalar.
+- El gestor nuevo activa automáticamente en `/bin` y `/lib/sal` los paquetes de
+  sistema que instaló un gestor anterior bajo `/var/paquetes`.
 - `cargo xtask pkg-pack soso-ed|soso-pkg|soso-wm|sal` genera su manifiesto y
-  pack. El paquete `sal` contiene el compilador nativo, y usa el SDK/backend
-  que instala la imagen base en `/lib/sal`. La compilación genera los paquetes
-  disponibles y actualiza `indice.txt`.
+  pack. `sal` incluye compilador, backend LLVM y SDK bajo una sola versión; al
+  actualizarlo se renuevan `/bin/sal` y `/lib/sal/` desde ese paquete. Requiere
+  primero `soso-pkg 0.2.0`, que entiende los destinos `lib/sal/`. La compilación
+  genera los paquetes disponibles y actualiza `indice.txt`.
 
 ## Verificación
 

@@ -13,10 +13,10 @@ const SOSO_WEB_NOMBRE: &str = "soso-web";
 pub const OPENCODE_SAL_VERSION: &str = "1.0.0";
 const OPENCODE_SAL_NOMBRE: &str = "opencode-sal";
 pub const SOSO_ED_VERSION: &str = "0.1.1";
-pub const SOSO_PKG_VERSION: &str = "0.1.0";
+pub const SOSO_PKG_VERSION: &str = "0.2.0";
 pub const SOSO_WM_VERSION: &str = "0.1.0";
-/// Debe coincidir con la versión del compilador en el checkout fijado por sal-source.lock.
-pub const SAL_VERSION: &str = "0.5.0";
+/// Revisión del paquete que agrupa el compilador, el SDK y el backend.
+pub const SAL_VERSION: &str = "0.5.1";
 
 pub fn run(args: &[String]) {
     let Some(pkg) = args.first() else {
@@ -113,11 +113,28 @@ pub fn materializar_paquetes_sistema(root: &Path) -> Result<(), String> {
 fn materializar_sal(root: &Path, out: &Path) -> Result<(), String> {
     let elf = root.join("rootfs/bin/sal");
     let data = fs::read(&elf).map_err(|_| format!("no hay {elf:?}; ejecuta cargo xtask sal-build"))?;
+    let mut files = vec![("bin/sal".into(), data)];
+    let lib = root.join("rootfs/lib/sal");
+    for file in [
+        "runtime.o",
+        "kernels.o",
+        "libsal-soso.a",
+        "link.ld",
+        "sal_runtime.h",
+        "manifest.txt",
+        "source.lock",
+        "bin/sal-llc",
+    ] {
+        let path = lib.join(file);
+        let data = fs::read(&path)
+            .map_err(|_| format!("no hay {path:?}; ejecuta cargo xtask sal-build"))?;
+        files.push((format!("lib/sal/{file}"), data));
+    }
     let (_, pack, mut man) = empaquetar::empaquetar(
         "sal",
         SAL_VERSION,
         Some(ABI_VERSION),
-        vec![("bin/sal".into(), data)],
+        files,
     ).map_err(|e| format!("{e}"))?;
     man.destino_sistema = true;
     let man_text = man.format();

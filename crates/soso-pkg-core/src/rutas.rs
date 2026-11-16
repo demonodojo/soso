@@ -1,6 +1,6 @@
 //! Validación de nombres de paquete y rutas internas.
 
-use alloc::string::String;
+use alloc::{format, string::String};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RutaError {
@@ -24,7 +24,7 @@ impl core::fmt::Display for RutaError {
             Self::RutaAbsoluta => write!(f, "ruta absoluta no permitida"),
             Self::ComponenteInvalido => write!(f, "componente de ruta inválido"),
             Self::ParentDir => write!(f, "«..» no permitido"),
-            Self::PrefijoNoPermitido => write!(f, "ruta debe empezar por bin/ o share/"),
+            Self::PrefijoNoPermitido => write!(f, "ruta debe empezar por bin/, share/ o lib/sal/"),
         }
     }
 }
@@ -57,7 +57,7 @@ pub fn nombre_valido(n: &str) -> Result<(), RutaError> {
     Ok(())
 }
 
-/// Ruta relativa dentro del paquete: solo `bin/` o `share/`.
+/// Ruta relativa dentro del paquete: `bin/`, `share/` o `lib/sal/`.
 pub fn ruta_valida(rel: &str) -> Result<(), RutaError> {
     if rel.is_empty() {
         return Err(RutaError::RutaVacia);
@@ -68,7 +68,7 @@ pub fn ruta_valida(rel: &str) -> Result<(), RutaError> {
     if rel.split('/').any(|p| p == "..") {
         return Err(RutaError::ParentDir);
     }
-    if !(rel.starts_with("bin/") || rel.starts_with("share/")) {
+    if !(rel.starts_with("bin/") || rel.starts_with("share/") || rel.starts_with("lib/sal/")) {
         return Err(RutaError::PrefijoNoPermitido);
     }
     for c in rel.split('/') {
@@ -80,6 +80,19 @@ pub fn ruta_valida(rel: &str) -> Result<(), RutaError> {
         }
     }
     Ok(())
+}
+
+/// Ruta absoluta administrable por `destino=sistema`; mantiene acotado `lib/`
+/// al SDK y backend de Sal para impedir que un paquete escriba en otras libs.
+pub fn ruta_destino_sistema(rel: &str) -> Option<String> {
+    ruta_valida(rel).ok()?;
+    if let Some(nombre) = rel.strip_prefix("bin/") {
+        if nombre.is_empty() || nombre.contains('/') { return None; }
+        return Some(format!("/bin/{nombre}"));
+    }
+    let resto = rel.strip_prefix("lib/sal/")?;
+    if resto.is_empty() || resto.ends_with('/') { return None; }
+    Some(format!("/lib/sal/{resto}"))
 }
 
 /// Nombre del ejecutable en `bin/foo` → `foo`.
