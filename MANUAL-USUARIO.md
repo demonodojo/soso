@@ -1337,7 +1337,10 @@ Detalle en [Descargar desde Hugging Face (guest)](#descargar-desde-hugging-face-
 ### Sal — programar utilidades
 
 Las imágenes preparadas con `cargo xtask sal-build` incluyen **sal** y
-**sal-contar**. Puedes compilar y ejecutar programas dentro de soso sin red:
+**sal-contar**. En instalaciones existentes, puedes instalar o actualizar el
+compilador con `soso-pkg instalar sal`; requiere que la instalación tenga el
+SDK de Sal en `/lib/sal`. Puedes compilar y ejecutar programas dentro de soso
+sin red:
 
 ```sh
 cd /tmp

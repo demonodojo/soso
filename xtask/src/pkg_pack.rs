@@ -15,14 +15,32 @@ const OPENCODE_SAL_NOMBRE: &str = "opencode-sal";
 pub const SOSO_ED_VERSION: &str = "0.1.1";
 pub const SOSO_PKG_VERSION: &str = "0.1.0";
 pub const SOSO_WM_VERSION: &str = "0.1.0";
+/// Debe coincidir con la versión del compilador en el checkout fijado por sal-source.lock.
+pub const SAL_VERSION: &str = "0.5.0";
 
 pub fn run(args: &[String]) {
     let Some(pkg) = args.first() else {
-        eprintln!("uso: cargo xtask pkg-pack <soso-web|opencode-sal|soso-ed|soso-pkg|soso-wm> [--out DIR]");
+        eprintln!("uso: cargo xtask pkg-pack <soso-web|opencode-sal|soso-ed|soso-pkg|soso-wm|sal> [--out DIR]");
         exit(2);
     };
     if pkg == OPENCODE_SAL_NOMBRE {
         run_opencode_sal(args);
+        return;
+    }
+    if pkg == "sal" {
+        let root = crate::project_root();
+        let out = args.iter().skip(1).find_map(|a| a.strip_prefix("--out=").map(PathBuf::from))
+            .unwrap_or_else(|| root.join("rootfs/share/paquetes/sal").join(SAL_VERSION));
+        match materializar_sal(&root, &out) {
+            Ok(()) => {
+                if let Err(e) = generar_indice(&root) {
+                    eprintln!("xtask pkg-pack: no pude actualizar indice.txt: {e}");
+                    exit(1);
+                }
+                println!("xtask pkg-pack: {}", out.display());
+            }
+            Err(e) => { eprintln!("xtask pkg-pack: {e}"); exit(1); }
+        }
         return;
     }
     if pkg == "soso-ed" || pkg == "soso-pkg" || pkg == "soso-wm" {
@@ -84,7 +102,30 @@ pub fn materializar_paquetes_sistema(root: &Path) -> Result<(), String> {
         let dir = root.join("rootfs/share/paquetes").join(nombre).join(version);
         materializar_bin_sistema(root, nombre, version, nombre, &dir)?;
     }
+    // El compilador nativo solo existe tras `sal-build` sin --cross-only.
+    // Las imágenes que no lo preparan conservan el paquete remoto existente.
+    if root.join("rootfs/bin/sal").is_file() {
+        materializar_sal(root, &root.join("rootfs/share/paquetes/sal").join(SAL_VERSION))?;
+    }
     generar_indice(root)
+}
+
+fn materializar_sal(root: &Path, out: &Path) -> Result<(), String> {
+    let elf = root.join("rootfs/bin/sal");
+    let data = fs::read(&elf).map_err(|_| format!("no hay {elf:?}; ejecuta cargo xtask sal-build"))?;
+    let (_, pack, mut man) = empaquetar::empaquetar(
+        "sal",
+        SAL_VERSION,
+        Some(ABI_VERSION),
+        vec![("bin/sal".into(), data)],
+    ).map_err(|e| format!("{e}"))?;
+    man.destino_sistema = true;
+    let man_text = man.format();
+    if out.exists() { fs::remove_dir_all(out).map_err(|e| e.to_string())?; }
+    fs::create_dir_all(out).map_err(|e| e.to_string())?;
+    fs::write(out.join("paquete.txt"), &man_text).map_err(|e| e.to_string())?;
+    fs::write(out.join("paquete.pack"), &pack).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn materializar_bin_sistema(
@@ -123,7 +164,7 @@ pub fn generar_indice(root: &Path) -> Result<(), String> {
         let pkg = pkg.map_err(|e| e.to_string())?.path();
         if !pkg.is_dir() { continue; }
         let publicado = pkg.file_name().and_then(|n| n.to_str())
-            .is_some_and(|n| n == "soso-ed" || n == "soso-pkg" || n == "soso-wm");
+            .is_some_and(|n| n == "soso-ed" || n == "soso-pkg" || n == "soso-wm" || n == "sal");
         if !publicado { continue; }
         for ver in fs::read_dir(&pkg).map_err(|e| e.to_string())? {
             let dir = ver.map_err(|e| e.to_string())?.path();

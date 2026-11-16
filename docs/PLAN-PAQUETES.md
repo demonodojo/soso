@@ -10,7 +10,7 @@ por una release OTA. Se guarda copia del binario previo para poder desinstalar.
 | Fase | Contenido | Estado |
 |------|-----------|--------|
 | P0 | Contrato `paquete.txt` / `paquete.pack`, índice, `soso-pkg-core`, cliente `soso-pkg` (local + HTTPS), índice de comandos, sosh | Hecho |
-| P1 | Repositorio publicado, `cargo xtask pkg-pack`, paquetes `soso-ed` y `soso-pkg` con destino sistema | En curso: índice público raw de GitHub y paquetes de sistema publicados en `rootfs/share/paquetes/`; `soso-web` y `opencode-sal` siguen empaquetables |
+| P1 | Repositorio publicado, `cargo xtask pkg-pack`, paquetes `soso-ed`, `soso-pkg`, `soso-wm` y `sal` con destino sistema | En curso: índice público raw de GitHub y paquetes de sistema publicados en `rootfs/share/paquetes/`; `soso-web` y `opencode-sal` siguen empaquetables |
 | P2 | Servicios/demonios, `.desktop` / escritorio | Pendiente |
 | P3 | Descarga por rangos (packs > 64 MiB) | Pendiente |
 
@@ -51,12 +51,14 @@ soso-pkg borrar <nombre>
 
 ## Paquetes con ejecutables del sistema
 
-- `soso-ed` y `soso-pkg` declaran `destino=sistema`; el gestor conserva también
+- `soso-ed`, `soso-pkg`, `soso-wm` y `sal` declaran `destino=sistema`; el gestor conserva también
   los binarios en `/var/paquetes/<nombre>/bin/` para rollback y compatibilidad.
 - El gestor nuevo activa automáticamente en `/bin` los paquetes de sistema que
   instaló un gestor anterior bajo `/var/paquetes`.
-- `cargo xtask pkg-pack soso-ed|soso-pkg` genera su manifiesto y pack. La
-  compilación de userspace genera ambos y actualiza `indice.txt`.
+- `cargo xtask pkg-pack soso-ed|soso-pkg|soso-wm|sal` genera su manifiesto y
+  pack. El paquete `sal` contiene el compilador nativo, y usa el SDK/backend
+  que instala la imagen base en `/lib/sal`. La compilación genera los paquetes
+  disponibles y actualiza `indice.txt`.
 
 ## Verificación
 

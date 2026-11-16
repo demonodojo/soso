@@ -1,0 +1,6 @@
+SOSOPKG v1
+nombre=sal
+version=0.5.0
+abi=1
+destino=sistema
+f 3b1ce7582cc7256b762fcc7413129e9bbf2074d7e12e15dfcf94dab8262cfd28 5761908 bin/sal
