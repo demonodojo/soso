@@ -12,6 +12,7 @@ struct Colas {
     rx: Mutex<VecDeque<u8>>,
     tx: Mutex<VecDeque<u8>>,
     master_open: Mutex<bool>,
+    size: Mutex<(u32, u32)>, // columnas, filas
 }
 
 static COLAS: [Colas; PTY_MAX] = [
@@ -19,41 +20,49 @@ static COLAS: [Colas; PTY_MAX] = [
         rx: Mutex::new(VecDeque::new()),
         tx: Mutex::new(VecDeque::new()),
         master_open: Mutex::new(false),
+        size: Mutex::new((80, 24)),
     },
     Colas {
         rx: Mutex::new(VecDeque::new()),
         tx: Mutex::new(VecDeque::new()),
         master_open: Mutex::new(false),
+        size: Mutex::new((80, 24)),
     },
     Colas {
         rx: Mutex::new(VecDeque::new()),
         tx: Mutex::new(VecDeque::new()),
         master_open: Mutex::new(false),
+        size: Mutex::new((80, 24)),
     },
     Colas {
         rx: Mutex::new(VecDeque::new()),
         tx: Mutex::new(VecDeque::new()),
         master_open: Mutex::new(false),
+        size: Mutex::new((80, 24)),
     },
     Colas {
         rx: Mutex::new(VecDeque::new()),
         tx: Mutex::new(VecDeque::new()),
         master_open: Mutex::new(false),
+        size: Mutex::new((80, 24)),
     },
     Colas {
         rx: Mutex::new(VecDeque::new()),
         tx: Mutex::new(VecDeque::new()),
         master_open: Mutex::new(false),
+        size: Mutex::new((80, 24)),
     },
     Colas {
         rx: Mutex::new(VecDeque::new()),
         tx: Mutex::new(VecDeque::new()),
         master_open: Mutex::new(false),
+        size: Mutex::new((80, 24)),
     },
     Colas {
         rx: Mutex::new(VecDeque::new()),
         tx: Mutex::new(VecDeque::new()),
         master_open: Mutex::new(false),
+        size: Mutex::new((80, 24)),
     },
 ];
 
@@ -75,6 +84,21 @@ pub fn set_fg_pgid(slot: u8, pgid: u64) {
     if let Some(a) = FG_PTY.get(slot as usize) {
         a.store(pgid, core::sync::atomic::Ordering::Relaxed);
     }
+}
+
+pub fn set_size(slot: u8, cols: u32, rows: u32) -> Result<(), i64> {
+    if cols == 0 || rows == 0 || cols > 1000 || rows > 1000 {
+        return Err(-soso_abi::EINVAL);
+    }
+    let c = colas(slot as usize).ok_or(-soso_abi::EINVAL)?;
+    *c.size.lock() = (cols, rows);
+    Ok(())
+}
+
+pub fn size(slot: u8) -> (u32, u32) {
+    colas(slot as usize)
+        .map(|c| *c.size.lock())
+        .unwrap_or((80, 24))
 }
 
 pub fn rx_has_data(slot: u8) -> bool {
@@ -111,6 +135,7 @@ pub fn alloc_slot() -> Result<u8, i64> {
         }
         c.rx.lock().clear();
         c.tx.lock().clear();
+        *c.size.lock() = (80, 24);
         *open = true;
         return Ok(slot as u8);
     }

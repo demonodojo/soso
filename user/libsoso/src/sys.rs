@@ -790,6 +790,21 @@ pub fn pty_open() -> Result<(u64, u8), i64> {
     Ok((fd, slot))
 }
 
+/// Ajusta el tamaño de un PTY a través de su descriptor maestro.
+pub fn pty_resize(fd: u64, cols: u32, rows: u32) -> i64 {
+    syscall4(abi::SYS_PTY_RESIZE, fd, cols as u64, rows as u64, 0)
+}
+
+/// Tamaño de la terminal actual, como `(columnas, filas)`.
+pub fn tty_size() -> (u32, u32) {
+    let value = syscall1(abi::SYS_TTY_SIZE, 0);
+    if value < 0 {
+        return (0, 0);
+    }
+    let packed = value as u64;
+    (packed as u32, (packed >> 32) as u32)
+}
+
 pub fn shm_create(len: u64) -> Result<u64, i64> {
     let r = syscall1(abi::SYS_SHM_CREATE, len);
     if r < 0 { Err(r) } else { Ok(r as u64) }

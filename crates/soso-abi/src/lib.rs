@@ -107,6 +107,10 @@ pub const SYS_FB_PRESENT_RECT: u64 = 97;
 /// consola de texto, igual que Ctrl+Alt+Retroceso. Así un escritorio colgado
 /// no se lleva por delante la shell desde la que se lanzó.
 pub const SYS_FB_KEEPALIVE: u64 = 104;
+/// Ajusta el tamaño de un PTY a partir de su fd maestro (cols, filas).
+pub const SYS_PTY_RESIZE: u64 = 105;
+/// Devuelve el tamaño de la consola actual: filas en los 32 bits altos, columnas en los bajos.
+pub const SYS_TTY_SIZE: u64 = 106;
 /// Abre un pseudo-terminal: devuelve `(fd_maestro << 32) | ranura`.
 pub const SYS_PTY_OPEN: u64 = 98;
 /// Reserva memoria compartida (`len` alineado); devuelve `id`.

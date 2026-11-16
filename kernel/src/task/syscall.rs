@@ -384,6 +384,8 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_FB_KEEPALIVE => sys_fb_keepalive(a1),
         abi::SYS_INPUT_POLL => sys_input_poll(a1, a2),
         abi::SYS_PTY_OPEN => sys_pty_open(),
+        abi::SYS_PTY_RESIZE => sys_pty_resize(a1, a2, a3),
+        abi::SYS_TTY_SIZE => sys_tty_size(),
         abi::SYS_SHM_CREATE => sys_shm_create(a1),
         abi::SYS_SHM_MAP => sys_shm_map(a1),
         abi::SYS_SHM_FREE => sys_shm_free(a1),
@@ -3118,6 +3120,24 @@ fn sys_pty_open() -> Result<u64, i64> {
         let fd = alloc_fd(p, Fd::PtyMaster(slot))?;
         Ok((fd as u64) << 32 | u64::from(slot))
     })
+}
+
+fn sys_pty_resize(fd: u64, cols: u64, rows: u64) -> Result<u64, i64> {
+    let slot = with_fd(fd, |f| match f {
+        Fd::PtyMaster(slot) => Ok(*slot),
+        _ => Err(-abi::EBADF),
+    })?;
+    super::pty::set_size(slot, cols as u32, rows as u32)?;
+    Ok(0)
+}
+
+fn sys_tty_size() -> Result<u64, i64> {
+    let console = super::with_current(|p| p.console);
+    let (cols, rows) = match console {
+        super::Console::Pty(slot) => super::pty::size(slot),
+        _ => (80, 24),
+    };
+    Ok((u64::from(rows) << 32) | u64::from(cols))
 }
 
 fn sys_shm_create(len: u64) -> Result<u64, i64> {

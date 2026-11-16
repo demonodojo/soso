@@ -1095,7 +1095,7 @@ fn wm_integrar(st: &mut Estado, i: Int, dest: Int) -> Int ! alloc
         _rp = wm_pedir_repintar(st)
         1
 
-fn wm_aplicar_mosaic(st: &mut Estado, sw: Int, sh: Int) -> Int ! alloc
+fn wm_aplicar_mosaic(st: &mut Estado, sw: Int, sh: Int) -> Int ! io, alloc
     mos = st.mosaic
     # Las minimizadas no ocupan hueco.
     nv = 0
@@ -1342,7 +1342,7 @@ fn wm_color_barra_foco(st: &mut Estado) -> Int ! alloc
     tema_acento(wm_tema_id(st))
 
 # Redimensiona los terminales de todos los paneles de la ventana de `i`.
-fn wm_term_redimensionar_si(st: &mut Estado, i: Int) -> Int ! alloc
+fn wm_term_redimensionar_si(st: &mut Estado, i: Int) -> Int ! io, alloc
     cab = st.tab.grupo_cab(i)
     n = st.tab.grupo_n(cab)
     r = 0
@@ -1353,7 +1353,7 @@ fn wm_term_redimensionar_si(st: &mut Estado, i: Int) -> Int ! alloc
         k = k + 1
     r
 
-fn wm_term_redimensionar_uno(st: &mut Estado, i: Int) -> Int ! alloc
+fn wm_term_redimensionar_uno(st: &mut Estado, i: Int) -> Int ! io, alloc
     if st.tab.tipo(i) != tab_tipo_term()
         0
     else
@@ -1364,6 +1364,8 @@ fn wm_term_redimensionar_uno(st: &mut Estado, i: Int) -> Int ! alloc
         bh = wm_bar_h(st)
         cols = wm_term_cols(ww, gw)
         rows = wm_term_rows(wh, gh, bh)
+        fdm = st.tab.fd(i)
+        _sz = pty_resize(fdm, cols, rows)
         grid = st.tab.shm_ptr(i)
         ow = st.tab.term_cols(i)
         oh = st.tab.term_rows(i)
@@ -2938,6 +2940,56 @@ fn wm_tecla_foco(st: &mut Estado, key: Int) -> Int ! io, alloc
             _t = st.guardar_panel(fi)
     0
 
+# Las flechas llegan como ESC, intro y final en eventos contiguos. Reunirlos
+# antes de escribir evita que el proceso del PTY lea una secuencia a medias.
+fn wm_tecla_foco_secuencia(st: &mut Estado, evt: Int, evt_len: Int, i: Int, n: Int) -> Int ! io, alloc
+    fi = st.focus
+    if fi >= 0
+        fi = st.tab.grupo_panel_activo(fi)
+    if fi >= 0
+        if st.tab.tipo(fi) == tab_tipo_term()
+            if input_event_key(evt, evt_len, i) == 27
+                if i + 2 < n
+                    intro = input_event_key(evt, evt_len, i + 1)
+                    fin = input_event_key(evt, evt_len, i + 2)
+                    flecha = 0
+                    if intro == 91
+                        if fin == 65
+                            flecha = 1
+                        if fin == 66
+                            flecha = 1
+                        if fin == 67
+                            flecha = 1
+                        if fin == 68
+                            flecha = 1
+                    if intro == 79
+                        if fin == 65
+                            flecha = 1
+                        if fin == 66
+                            flecha = 1
+                        if fin == 67
+                            flecha = 1
+                        if fin == 68
+                            flecha = 1
+                    if flecha != 0
+                        msg = st.msg_buf
+                        b = bytes_view_mem(msg, msg_len())
+                        _a = bytes_set_u8(b, 0, 27)
+                        _b = bytes_set_u8(b, 1, u8(intro))
+                        _c = bytes_set_u8(b, 2, u8(fin))
+                        _w = write_fd(st.tab.fd(fi), msg, 3)
+                        3
+                    else
+                        0
+                else
+                    0
+            else
+                0
+        else
+            0
+    else
+        0
+
 fn wm_cerrar_foco(st: &mut Estado) -> Int ! io, alloc
     fi = st.focus
     if fi >= 0
@@ -2987,7 +3039,16 @@ fn wm_term_slot(st: &mut Estado) -> Int ! io, alloc
         if pack >= 0
             ma = pty_fd_maestro(pack)
             sl = pty_slot(pack)
-            pid = spawn_io_full(d"/bin/sosh", fd_pty_stdio(sl), fd_pty_stdio(sl), fd_pty_stdio(sl), fd_kernel_log())
+            bh = wm_bar_h(st)
+            gw = fuente_gw(wm_escala_apps(st))
+            gh = fuente_gh(wm_escala_apps(st))
+            wh0 = 400 + bh
+            cols = wm_term_cols(640, gw)
+            rows = wm_term_rows(wh0, gh, bh)
+            _sz = pty_resize(ma, cols, rows)
+            col_env = d"COLUMNS=" + int_to_str(cols)
+            row_env = d"LINES=" + int_to_str(rows)
+            pid = spawn_io_full_env(d"/bin/sosh", fd_pty_stdio(sl), fd_pty_stdio(sl), fd_pty_stdio(sl), fd_kernel_log(), d"PATH=/bin:/sbin", d"HOME=/", col_env, row_env)
             if pid > 0
                 _a = st.tab.set_tipo(si, tab_tipo_term())
                 _a = st.tab.set_fd(si, ma)
@@ -2999,12 +3060,6 @@ fn wm_term_slot(st: &mut Estado) -> Int ! io, alloc
                 _a = st.tab.set_cab(si, 0)
                 _a = st.tab.set_orden(si, 0)
                 _a = st.tab.set_escala(si, wm_escala_apps(st))
-                gw = fuente_gw(wm_escala_apps(st))
-                gh = fuente_gh(wm_escala_apps(st))
-                bh = wm_bar_h(st)
-                wh0 = 400 + bh
-                cols = wm_term_cols(640, gw)
-                rows = wm_term_rows(wh0, gh, bh)
                 grid_buf = term_capa(cols, rows)
                 grid = bytes_ptr(grid_buf)
                 _a = st.tab.set_term_buf(si, grid_buf)
@@ -3265,7 +3320,11 @@ fn wm_input(st: &mut Estado, evt: Int, evt_len: Int, n: Int, compos: Int, clen: 
                         if zoom_sentido(zv) != zoom_sentido_nada()
                             _z = wm_zoom_aplicar(st, zv, compos, clen, sw, sh, stride, bpp, fmt)
                     else
-                        _t = wm_tecla_foco(st, key)
+                        consumidos = wm_tecla_foco_secuencia(st, evt, evt_len, i, n)
+                        if consumidos > 0
+                            i = i + consumidos - 1
+                        else
+                            _t = wm_tecla_foco(st, key)
                 if (mods & mod_alt()) != 0
                     if (mods & mod_shift()) == 0
                         if key == 100

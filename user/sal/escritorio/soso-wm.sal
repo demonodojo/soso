@@ -397,7 +397,7 @@ fn prueba_layout_solapan(st: &mut Estado, a: Int, b: Int) -> Int ! alloc
                     1
     0
 
-fn prueba_layout_mosaic(st: &mut Estado, sw: Int, sh: Int) -> Int ! alloc
+fn prueba_layout_mosaic(st: &mut Estado, sw: Int, sh: Int) -> Int ! io, alloc
     nz = st.tab.nz()
     if nz != 4
         100
@@ -460,7 +460,7 @@ fn prueba_layout_drag(st: &mut Estado, sw: Int, sh: Int, compos: Int, clen: Int,
                 else
                     0
 
-fn prueba_layout_float(st: &mut Estado, sw: Int, sh: Int) -> Int ! alloc
+fn prueba_layout_float(st: &mut Estado, sw: Int, sh: Int) -> Int ! io, alloc
     i = 0
     st.tab.set_wx(i, 0)
     st.tab.set_wy(i, 40 + wm_bar_h(st))

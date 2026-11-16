@@ -13,10 +13,6 @@ libsoso::entry!(main);
 
 const MAX_LINEA: usize = 4096;
 const MAX_LINEAS: usize = 4096;
-// La terminal gráfica inicial de soso tiene 24 filas: dos para la cabecera
-// del editor y 22 para el texto. Mantener el área completa evita dejar la
-// parte inferior de la terminal con el contenido anterior o vacía.
-const FILAS_TEXTO: usize = 22;
 
 struct Editor {
     lineas: Vec<String>,
@@ -167,10 +163,15 @@ impl Editor {
 
     fn pintar(&mut self) {
         let _ = sys::write_all(1, b"\x1b[2J\x1b[H");
+        let (_, mut filas_terminal) = sys::tty_size();
+        if filas_terminal == 0 {
+            filas_terminal = dimension_entorno("LINES").unwrap_or(24);
+        }
+        let visibles = (filas_terminal as usize).saturating_sub(2).max(1);
         if self.fila < self.fila_scroll {
             self.fila_scroll = self.fila;
-        } else if self.fila >= self.fila_scroll + FILAS_TEXTO {
-            self.fila_scroll = self.fila + 1 - FILAS_TEXTO;
+        } else if self.fila >= self.fila_scroll + visibles {
+            self.fila_scroll = self.fila + 1 - visibles;
         }
         let barra = if self.modificado { '*' } else { ' ' };
         println!(
@@ -180,7 +181,8 @@ impl Editor {
             self.col + 1
         );
         println!("────────────────────────────────────────");
-        let fin = (self.fila_scroll + FILAS_TEXTO).min(self.lineas.len());
+        let fin = (self.fila_scroll + visibles).min(self.lineas.len());
+        let mut fila_vista = 0usize;
         for i in self.fila_scroll..fin {
             let pref = if i == self.fila { '>' } else { ' ' };
             let l = &self.lineas[i];
@@ -192,15 +194,32 @@ impl Editor {
                 } else {
                     print!(" ");
                 }
-                print!("\x1b[0m{b}\n");
+                print!("\x1b[0m{b}");
             } else {
-                println!("{pref} {l}");
+                print!("{pref} {l}");
+            }
+            fila_vista += 1;
+            if fila_vista < visibles {
+                print!("\n");
             }
         }
-        for _ in fin..self.fila_scroll + FILAS_TEXTO {
-            println!("~");
+        while fila_vista < visibles {
+            print!("~");
+            fila_vista += 1;
+            if fila_vista < visibles {
+                print!("\n");
+            }
         }
     }
+}
+
+fn dimension_entorno(clave: &str) -> Option<u32> {
+    let mut valor = [0u8; 8];
+    let n = sys::getenv(clave, &mut valor);
+    if n <= 0 || n as usize > valor.len() {
+        return None;
+    }
+    core::str::from_utf8(&valor[..n as usize]).ok()?.parse().ok()
 }
 
 enum Tecla {
@@ -224,6 +243,7 @@ fn leer_tecla() -> Option<Tecla> {
         0x13 => return Some(Tecla::Char(0x13)), // Ctrl-S
         0x0d | 0x0a => return Some(Tecla::Char(b'\n')),
         0x08 | 0x7f => return Some(Tecla::Char(0x08)),
+        0x9b => return Some(leer_csi()),
         0x1b => {
             let mut intro = [0u8; 1];
             if sys::read(0, &mut intro) <= 0 {
@@ -242,23 +262,28 @@ fn leer_tecla() -> Option<Tecla> {
             if intro[0] != b'[' {
                 return Some(Tecla::Desconocida);
             }
-            let mut final_byte = 0u8;
-            let mut byte = [0u8; 1];
-            for _ in 0..16 {
-                if sys::read(0, &mut byte) <= 0 {
-                    return Some(Tecla::Desconocida);
-                }
-                // Los finales CSI están en el rango 0x40..=0x7e.
-                if (0x40..=0x7e).contains(&byte[0]) {
-                    final_byte = byte[0];
-                    break;
-                }
-            }
-            return Some(tecla_flecha(final_byte).unwrap_or(Tecla::Desconocida));
+            return Some(leer_csi());
         }
         c @ 0x20..=0x7e => Some(Tecla::Char(c)),
         c => Some(Tecla::Char(c)),
     }
+}
+
+fn leer_csi() -> Tecla {
+    let mut final_byte = 0u8;
+    let mut byte = [0u8; 1];
+    for _ in 0..32 {
+        if sys::read(0, &mut byte) <= 0 {
+            return Tecla::Desconocida;
+        }
+        // Los finales CSI están en el rango 0x40..=0x7e. Consumir todos los
+        // parámetros antes de decidir evita dejar bytes rezagados en el PTY.
+        if (0x40..=0x7e).contains(&byte[0]) {
+            final_byte = byte[0];
+            break;
+        }
+    }
+    tecla_flecha(final_byte).unwrap_or(Tecla::Desconocida)
 }
 
 fn tecla_flecha(c: u8) -> Option<Tecla> {

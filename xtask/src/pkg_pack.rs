@@ -12,21 +12,26 @@ pub const SOSO_WEB_VERSION: &str = "1.0.0";
 const SOSO_WEB_NOMBRE: &str = "soso-web";
 pub const OPENCODE_SAL_VERSION: &str = "1.0.0";
 const OPENCODE_SAL_NOMBRE: &str = "opencode-sal";
-pub const SOSO_ED_VERSION: &str = "0.1.0";
+pub const SOSO_ED_VERSION: &str = "0.1.1";
 pub const SOSO_PKG_VERSION: &str = "0.1.0";
+pub const SOSO_WM_VERSION: &str = "0.1.0";
 
 pub fn run(args: &[String]) {
     let Some(pkg) = args.first() else {
-        eprintln!("uso: cargo xtask pkg-pack <soso-web|opencode-sal|soso-ed|soso-pkg> [--out DIR]");
+        eprintln!("uso: cargo xtask pkg-pack <soso-web|opencode-sal|soso-ed|soso-pkg|soso-wm> [--out DIR]");
         exit(2);
     };
     if pkg == OPENCODE_SAL_NOMBRE {
         run_opencode_sal(args);
         return;
     }
-    if pkg == "soso-ed" || pkg == "soso-pkg" {
+    if pkg == "soso-ed" || pkg == "soso-pkg" || pkg == "soso-wm" {
         let root = crate::project_root();
-        let version = if pkg == "soso-ed" { SOSO_ED_VERSION } else { SOSO_PKG_VERSION };
+        let version = match pkg.as_str() {
+            "soso-ed" => SOSO_ED_VERSION,
+            "soso-pkg" => SOSO_PKG_VERSION,
+            _ => SOSO_WM_VERSION,
+        };
         let out = args.iter().skip(1).find_map(|a| a.strip_prefix("--out=").map(PathBuf::from))
             .unwrap_or_else(|| root.join("rootfs/share/paquetes").join(pkg).join(version));
         match materializar_bin_sistema(&root, pkg, version, pkg, &out) {
@@ -71,7 +76,11 @@ pub fn run(args: &[String]) {
 }
 
 pub fn materializar_paquetes_sistema(root: &Path) -> Result<(), String> {
-    for (nombre, version) in [("soso-ed", SOSO_ED_VERSION), ("soso-pkg", SOSO_PKG_VERSION)] {
+    for (nombre, version) in [
+        ("soso-ed", SOSO_ED_VERSION),
+        ("soso-pkg", SOSO_PKG_VERSION),
+        ("soso-wm", SOSO_WM_VERSION),
+    ] {
         let dir = root.join("rootfs/share/paquetes").join(nombre).join(version);
         materializar_bin_sistema(root, nombre, version, nombre, &dir)?;
     }
@@ -85,7 +94,11 @@ fn materializar_bin_sistema(
     binario: &str,
     out: &Path,
 ) -> Result<(), String> {
-    let elf = root.join("target/user/x86_64-soso-user/release").join(binario);
+    let elf = if binario == "soso-wm" {
+        root.join("rootfs/bin/soso-wm")
+    } else {
+        root.join("target/user/x86_64-soso-user/release").join(binario)
+    };
     let data = fs::read(&elf).map_err(|_| format!("no hay {elf:?}; ejecuta build_user"))?;
     let (_, pack, mut man) = empaquetar::empaquetar(
         nombre,
@@ -110,7 +123,7 @@ pub fn generar_indice(root: &Path) -> Result<(), String> {
         let pkg = pkg.map_err(|e| e.to_string())?.path();
         if !pkg.is_dir() { continue; }
         let publicado = pkg.file_name().and_then(|n| n.to_str())
-            .is_some_and(|n| n == "soso-ed" || n == "soso-pkg");
+            .is_some_and(|n| n == "soso-ed" || n == "soso-pkg" || n == "soso-wm");
         if !publicado { continue; }
         for ver in fs::read_dir(&pkg).map_err(|e| e.to_string())? {
             let dir = ver.map_err(|e| e.to_string())?.path();

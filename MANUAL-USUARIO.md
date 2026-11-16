@@ -1351,7 +1351,8 @@ sal run hola.sal
 El ejemplo devuelve `42`; la shell muestra ese código. Edita `hola.sal` con
 `soso-ed` y repite `sal build` o `sal run` para recompilarlo. En el editor, usa
 las flechas para moverte, `Ctrl-S` para guardar y `Ctrl-Q` para salir; el área
-de texto muestra 22 filas y se desplaza al mover el cursor. Para pasar argumentos,
+de texto se ajusta a las filas de la terminal y se desplaza al mover el cursor.
+Para pasar argumentos,
 usa `sal run programa.sal -- "dos palabras"`. Los ejemplos están en
 `/usr/share/sal/` y el SDK en `/lib/sal/`.
 

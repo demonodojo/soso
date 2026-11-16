@@ -64,6 +64,9 @@ fn sys_input_poll() -> Int
 fn sys_pty_open() -> Int
     98
 
+fn sys_pty_resize() -> Int
+    105
+
 fn sys_shm_create() -> Int
     99
 
@@ -334,6 +337,9 @@ fn input_poll(out_ptr: Int, out_len: Int, max_evt: Int) -> Int ! io
 fn pty_open() -> Int ! io
     syscall(sys_pty_open(), 0, 0, 0, 0, 0, 0)
 
+fn pty_resize(fd_maestro: Int, cols: Int, rows: Int) -> Int ! io
+    syscall(sys_pty_resize(), fd_maestro, cols, rows, 0, 0, 0)
+
 fn pty_fd_maestro(v: Int) -> Int
     v / 4294967296
 
@@ -462,6 +468,37 @@ fn spawn_io_full(path: String, stdin: Int, stdout: Int, stderr: Int, log_fd: Int
     bytes_set_i64(opts, 24, 0)
     bytes_set_i64(opts, 72, 0)
     bytes_set_i64(opts, 80, 0)
+    bytes_set_i64(opts, 96, 0)
+    bytes_set_i64(opts, 104, 0)
+    bytes_set_i64(opts, spawnio_off_path_ptr(), bytes_ptr(pbuf))
+    bytes_set_i64(opts, spawnio_off_path_len(), plen)
+    bytes_set_i64(opts, spawnio_off_stdin(), stdin)
+    bytes_set_i64(opts, spawnio_off_stdout(), stdout)
+    bytes_set_i64(opts, spawnio_off_stderr(), stderr)
+    bytes_set_i64(opts, spawnio_off_argv_ptr(), bytes_ptr(tab))
+    bytes_set_i64(opts, spawnio_off_argv_count(), 1)
+    bytes_set_i64(opts, spawnio_off_log_fd(), log_fd)
+    syscall(sys_spawn_io(), bytes_ptr(opts), 0, 0, 0, 0, 0)
+
+fn spawn_io_full_env(path: String, stdin: Int, stdout: Int, stderr: Int, log_fd: Int, env1: String, env2: String, env3: String, env4: String) -> Int ! io, alloc
+    pbuf = spawn_string_buf(&path)
+    plen = str_len(path)
+    tab = bytes_new(16)
+    _a = spawn_argv_slot_ptr(&tab, 0, &pbuf, plen)
+    e1 = spawn_string_buf(&env1)
+    e2 = spawn_string_buf(&env2)
+    e3 = spawn_string_buf(&env3)
+    e4 = spawn_string_buf(&env4)
+    env = bytes_new(64)
+    _e1 = spawn_argv_slot_ptr(&env, 0, &e1, str_len(env1))
+    _e2 = spawn_argv_slot_ptr(&env, 1, &e2, str_len(env2))
+    _e3 = spawn_argv_slot_ptr(&env, 2, &e3, str_len(env3))
+    _e4 = spawn_argv_slot_ptr(&env, 3, &e4, str_len(env4))
+    opts = bytes_new(spawnio_size())
+    bytes_set_i64(opts, 16, 0)
+    bytes_set_i64(opts, 24, 0)
+    bytes_set_i64(opts, 72, bytes_ptr(env))
+    bytes_set_i64(opts, 80, 4)
     bytes_set_i64(opts, 96, 0)
     bytes_set_i64(opts, 104, 0)
     bytes_set_i64(opts, spawnio_off_path_ptr(), bytes_ptr(pbuf))
