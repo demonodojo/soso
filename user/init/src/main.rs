@@ -1122,6 +1122,22 @@ fn suite() -> u8 {
         return 1;
     }
 
+    // El dueño del framebuffer lo sigue siendo aunque maten a otro proceso
+    // (antes cualquier muerte por señal —una sesión SSH que se cierra, un
+    // fallo— se lo quitaba, y la consola quedaba congelada al caer después el
+    // escritorio). Sin pantalla (`fb_set_mode` falla) no hay nada que probar.
+    if sys::fb_set_mode(abi::FB_MODE_GRAPHICS).is_ok() {
+        let h = sys::spawn("/bin/init", "sleep 30000");
+        let _ = sys::sleep_ms(100);
+        let _ = sys::kill(h, abi::SIGKILL);
+        let _ = esperar(h, 0);
+        let sigue = sys::fb_keepalive(5_000);
+        let _ = sys::fb_keepalive(0);
+        let suelta = sys::fb_set_mode(abi::FB_MODE_CONSOLE);
+        check!(sigue.is_ok(), "framebuffer: sigue siendo dueño tras morir otro proceso ({sigue:?})");
+        check!(suelta.is_ok(), "framebuffer: el dueño devuelve la consola ({suelta:?})");
+    }
+
     // Dos hijos de CPU pura: su salida intercalada demuestra la preempción.
     let p1 = sys::spawn("/bin/init", "cpu A");
     let p2 = sys::spawn("/bin/init", "cpu B");

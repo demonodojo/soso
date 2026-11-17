@@ -63,7 +63,7 @@ soso-pkg borrar <nombre>
 
 ## Paquete `soso-web` (referencia P1)
 
-- Host: `cargo xtask pkg-pack soso-web` → `rootfs/share/paquetes/soso-web/1.0.0/`
+- Host: `cargo xtask pkg-pack soso-web` → `rootfs/share/paquetes/soso-web/<versión>/`
   (`bin/soso-web`, `share/fonts/DejaVuSans.ttf`, `share/ejemplo/web-prueba.html`).
 - Imagen de prueba: `build_user` instala bajo `/var/paquetes/soso-web/` y registra
   `soso-web` en `/var/paquetes/comandos` (sosh y escritorio Alt+W).

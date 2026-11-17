@@ -780,6 +780,13 @@ pub fn fb_set_mode(mode: u64) -> Result<(), i64> {
     if r < 0 { Err(r) } else { Ok(()) }
 }
 
+/// Vigilante del dueño del modo gráfico: si pasan `plazo_ms` sin otra
+/// llamada, el kernel mata su grupo y devuelve la consola (0 lo apaga).
+pub fn fb_keepalive(plazo_ms: u64) -> Result<(), i64> {
+    let r = syscall1(abi::SYS_FB_KEEPALIVE, plazo_ms);
+    if r < 0 { Err(r) } else { Ok(()) }
+}
+
 pub fn fb_present(ptr: u64, len: u64) -> Result<(), i64> {
     let r = syscall4(abi::SYS_FB_PRESENT, ptr, len, 0, 0);
     if r < 0 { Err(r) } else { Ok(()) }

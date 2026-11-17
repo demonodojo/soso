@@ -1,0 +1,7 @@
+SOSOPKG v1
+nombre=soso-web
+version=1.0.1
+abi=1
+f 7648cb4b2068a085e424f2b855a87ca04c8ce21447f598868769dd1f00a58ba6 1866200 bin/soso-web
+f 00417099596973381c50faa4a2e015f2c67645c81fe73e2f7df0439e7fdc923e 1128 share/ejemplo/web-prueba.html
+f ae7b7855e115a5966d8b1b3f80f254ccc117ec86f9965e202ee2940453837280 759720 share/fonts/DejaVuSans.ttf

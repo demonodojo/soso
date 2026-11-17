@@ -997,8 +997,19 @@ pub fn take_vigilante_salto() -> bool {
 }
 
 /// Al morir el dueño, vuelve la consola de texto del kernel.
+///
+/// Se llama en **cada** muerte de proceso, así que sólo puede soltar si `pid`
+/// es el dueño. Un `swap(0)` previo a la comparación quitaba el framebuffer al
+/// escritorio en cuanto moría cualquier otro proceso: su `fb_keepalive` pasaba
+/// a dar `EPERM` (vigilante muerto), el teclado dejaba de ser suyo y, cuando el
+/// escritorio caía después, nadie devolvía la consola, que se quedaba en modo
+/// gráfico y parecía colgada.
 pub fn release_owner_if(pid: u64) {
-    if FB_OWNER.swap(0, Ordering::AcqRel) != pid {
+    if pid == 0
+        || FB_OWNER
+            .compare_exchange(pid, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+    {
         return;
     }
     GRAPHICS_MODE.store(false, Ordering::Relaxed);

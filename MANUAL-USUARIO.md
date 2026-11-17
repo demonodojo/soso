@@ -915,7 +915,7 @@ Sal en el escritorio admite operadores `% & | ^ << >>`, el tipo `Bytes` y
 ### soso-web — navegador mínimo
 
 ```sh
-soso-pkg instalar /share/paquetes/soso-web/1.0.0   # si no viene precargado en la imagen
+soso-pkg instalar /share/paquetes/soso-web/1.0.1   # si no viene precargado en la imagen
 soso-web https://example.com          # modo lectura (texto en consola; vía sosh / paquetes/comandos)
 soso-web --local /var/paquetes/soso-web/share/ejemplo/web-prueba.html
 soso-web --grafico https://example.com  # ventana WM o pantalla completa
@@ -1161,7 +1161,7 @@ dice de cuál sale cada paquete.
 Para probar sin red: `soso-pkg instalar /share/paquetes-prueba/v1` (fixture en la
 imagen de prueba). El navegador **soso-web** suele venir precargado en
 `/var/paquetes/soso-web/`; también puedes instalarlo con
-`soso-pkg instalar /share/paquetes/soso-web/1.0.0`. Sin `--forzar` solo se instala una versión **mayor**; para
+`soso-pkg instalar /share/paquetes/soso-web/1.0.1`. Sin `--forzar` solo se instala una versión **mayor**; para
 reinstalar o bajar versión, añade `--forzar`. `--origen DIR` usa un índice y
 paquetes locales en lugar de HTTPS; se puede repetir para combinar varios.
 
