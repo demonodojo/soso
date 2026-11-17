@@ -114,7 +114,8 @@ fn main(args: &[String]) -> u8 {
         return 0;
     }
     if let Some(modo) = cmd.strip_prefix("sig-") {
-        return modo_senal(modo);
+        let padre = args.get(1).and_then(|a| a.parse::<i64>().ok());
+        return modo_senal(modo, padre);
     }
     println!("init: args desconocidos {args:?} (usa: test)");
     2
@@ -385,7 +386,53 @@ fn esperar(pid: i64, flags: u64) -> Option<(u8, u8)> {
     }
 }
 
+/// Lanza `/bin/init sig-<modo>` y espera a que el hijo diga (USR2) que ya
+/// tiene sus manejadores. Con un `sleep_ms` fijo, en un runner lento de CI
+/// la primera señal llegaba antes que `sigaction` y la acción por defecto lo
+/// mataba (USR1 → 138) sin dejar rastro en el serie: el padre veía ESRCH en
+/// el `kill` siguiente o un recuento que no cuadraba.
+fn lanzar_listo(modo: &str) -> Result<i64, String> {
+    let _ = senal::tomar(abi::SIGUSR2);
+    let h = sys::spawn("/bin/init", &alloc::format!("sig-{modo} {}", sys::getpid()));
+    if h <= 0 {
+        return Err(alloc::format!("spawn sig-{modo} ({h})"));
+    }
+    esperar_aviso(h).map(|()| h).map_err(|e| alloc::format!("sig-{modo}: {e}"))
+}
+
+/// Espera el USR2 con que un hijo de `modo_senal` confirma que está listo o
+/// que ya atendió una señal.
+fn esperar_aviso(h: i64) -> Result<(), String> {
+    let fin = sys::uptime_ms() + 60_000;
+    while !senal::tomar(abi::SIGUSR2) {
+        if sys::kill(h, abi::SIGPROBE) < 0 {
+            return Err(alloc::format!("murió sin avisar: {:?}", esperar(h, 0)));
+        }
+        if sys::uptime_ms() > fin {
+            let _ = sys::kill(h, abi::SIGKILL);
+            let _ = esperar(h, 0);
+            return Err("no avisó en 60 s".into());
+        }
+        let _ = sys::sleep_ms(10);
+    }
+    Ok(())
+}
+
+/// Lado del hijo de `esperar_aviso`.
+fn avisar(padre: Option<i64>) {
+    if let Some(p) = padre {
+        let _ = sys::kill(p, abi::SIGUSR2);
+    }
+}
+
 fn suite_senales() -> u8 {
+    check!(senal::capturar(abi::SIGUSR2).is_ok(), "capturar USR2 (avisos de los hijos)");
+    let r = suite_senales_casos();
+    let _ = senal::por_defecto(abi::SIGUSR2);
+    r
+}
+
+fn suite_senales_casos() -> u8 {
     use abi::{WAIT_CONT, WAIT_EXIT, WAIT_STOP};
     let salida = |code: u8| Some((WAIT_EXIT, code));
 
@@ -399,24 +446,42 @@ fn suite_senales() -> u8 {
     check!(ahora & abi::sig_bit(abi::SIGKILL) == 0, "SIGKILL no se puede bloquear");
 
     // 1. Un manejador cuenta las señales que le llegan.
-    let h = sys::spawn("/bin/init", "sig-usr1");
-    check!(h > 0, "spawn sig-usr1");
-    let _ = sys::sleep_ms(200);
-    for _ in 0..3 {
+    //    El hijo confirma cada una: dos USR1 sin atender se funden en uno.
+    let h = match lanzar_listo("usr1") {
+        Ok(h) => h,
+        Err(e) => {
+            println!("init: FALLO  {e}");
+            return 1;
+        }
+    };
+    for i in 0..3 {
         let _ = sys::kill(h, abi::SIGUSR1);
-        let _ = sys::sleep_ms(100);
+        if let Err(e) = esperar_aviso(h) {
+            println!("init: FALLO  sig-usr1 tras el USR1 #{i}: {e}");
+            return 1;
+        }
     }
     check!(esperar(h, 0) == salida(3), "manejador de USR1 ejecutado 3 veces");
 
     // 2. Una espera interrumpida por un manejador vuelve con EINTR.
-    let h = sys::spawn("/bin/init", "sig-eintr");
-    let _ = sys::sleep_ms(200);
+    let h = match lanzar_listo("eintr") {
+        Ok(h) => h,
+        Err(e) => {
+            println!("init: FALLO  {e}");
+            return 1;
+        }
+    };
     let _ = sys::kill(h, abi::SIGUSR1);
     check!(esperar(h, 0) == salida(42), "sleep interrumpido devuelve EINTR");
 
     // 3. Ignorada no mata; KILL sí.
-    let h = sys::spawn("/bin/init", "sig-ign");
-    let _ = sys::sleep_ms(200);
+    let h = match lanzar_listo("ign") {
+        Ok(h) => h,
+        Err(e) => {
+            println!("init: FALLO  {e}");
+            return 1;
+        }
+    };
     check!(sys::kill(h, abi::SIGTERM) > 0, "TERM a un proceso que la ignora");
     let _ = sys::sleep_ms(100);
     check!(sys::kill(h, abi::SIGPROBE) > 0, "sigue vivo tras TERM ignorada");
@@ -432,15 +497,21 @@ fn suite_senales() -> u8 {
     //    que los pisan, llegando en mitad del bucle (camino del temporizador).
     //    Señales iguales pendientes se funden en una, así que no se exige un
     //    número exacto de manejadores: USR2 dice al hijo que ya está.
-    let h = sys::spawn("/bin/init", "sig-ymm");
-    let _ = sys::sleep_ms(100);
-    if sys::kill(h, abi::SIGPROBE) < 0 {
-        let r = esperar(h, 0);
-        check!(false, "sig-ymm murió antes de tiempo: {r:?}");
-    }
+    let h = match lanzar_listo("ymm") {
+        Ok(h) => h,
+        Err(e) => {
+            println!("init: FALLO  {e}");
+            return 1;
+        }
+    };
     for i in 0..50 {
         let r = sys::kill(h, abi::SIGUSR1);
-        check!(r > 0, "kill USR1 #{i} a sig-ymm ({r})");
+        if r <= 0 {
+            // El hijo sale solo si ve un YMM o un registro cambiados tras un
+            // manejador: su código (1 = YMM, 2 = registro) dice cuál.
+            let c = esperar(h, 0);
+            check!(false, "sig-ymm salió tras el USR1 #{i}: {c:?} (1 = YMM pisado, 2 = registro pisado)");
+        }
         let _ = sys::sleep_ms(20);
     }
     let _ = sys::kill(h, abi::SIGUSR2);
@@ -560,11 +631,14 @@ fn marco_valido() -> abi::SigFrame {
     abi::SigFrame { restaurador: 0, sig: 0, mascara: 0, _reservado: 0, regs, fpu }
 }
 
-fn modo_senal(modo: &str) -> u8 {
+/// Hijos de `suite_senales`. `padre` es el pid al que avisar (USR2) en cuanto
+/// los manejadores están puestos; ver `lanzar_listo`.
+fn modo_senal(modo: &str, padre: Option<i64>) -> u8 {
     let usr1 = abi::sig_bit(abi::SIGUSR1);
     match modo {
         "usr1" => {
             let _ = senal::capturar(abi::SIGUSR1);
+            avisar(padre);
             let mut n = 0u8;
             while n < 3 {
                 if sys::sleep_ms(20_000) == 0 {
@@ -572,17 +646,20 @@ fn modo_senal(modo: &str) -> u8 {
                 }
                 if senal::tomar(abi::SIGUSR1) {
                     n += 1;
+                    avisar(padre);
                 }
             }
             n
         }
         "eintr" => {
             let _ = senal::capturar(abi::SIGUSR1);
+            avisar(padre);
             let r = sys::sleep_ms(30_000);
             if r == -abi::EINTR && senal::tomar(abi::SIGUSR1) { 42 } else { 1 }
         }
         "ign" => {
             let _ = senal::ignorar(abi::SIGTERM);
+            avisar(padre);
             let _ = sys::sleep_ms(30_000);
             0
         }
@@ -608,6 +685,7 @@ fn modo_senal(modo: &str) -> u8 {
         "ymm" => {
             let _ = senal::accion(abi::SIGUSR1, senal::Accion::Manejar(ensuciar));
             let _ = senal::capturar(abi::SIGUSR2);
+            avisar(padre);
             let pat = [7.25f32; 8];
             let fin = sys::uptime_ms() + 30_000;
             while sys::uptime_ms() < fin {

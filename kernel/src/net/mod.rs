@@ -967,10 +967,14 @@ pub fn tcp_listen(port: u16) -> Result<usize, i64> {
 }
 
 pub fn tcp_connect(remote: soso_abi::SockAddr) -> Result<usize, i64> {
-    crate::mm::heap::vigilar();
     if loopback::is_loopback_addr(&remote.addr) {
         return tcp_connect_loopback(remote.port);
     }
+    // La vigilancia del heap (soso-pf-red) sigue la red de verdad, no el
+    // loopback: una vez encendida no se apaga, y en un kernel `debug` bajo TCG
+    // sus auditorías en cada `net::poll` se comían el tick entero. Tras los
+    // connect a 127.0.0.1 de `init test`, ningún proceso volvía a avanzar.
+    crate::mm::heap::vigilar();
     let net = NET.get().ok_or(-soso_abi::EIO)?;
     let mut n = net.lock();
     let NetStack {
