@@ -155,7 +155,10 @@ fn main() -> Int ! io, alloc
                                     peer = tcp_peer_pid(wm)
                                     if peer >= 0
                                         _gr = shm_grant(sid, peer)
-                                    _e = msg_encode_comp_escena(escena, sid, sw, sh, stride, bpp, fmt, gpu_ok)
+                                    # Ancho y alto de ESTE búfer, no de la pantalla:
+                                    # con NVDisplay es el de la cabeza y el WM
+                                    # debe saber que no le cabe la pantalla entera.
+                                    _e = msg_encode_comp_escena(escena, sid, gw, gh, stride, bpp, fmt, gpu_ok)
                                     _w = write_fd(wm, escena, msg_len())
                                     if _w == msg_len()
                                         _s = comp_servir_wm(wm, compos, clen, st, tab, gbuf, pbuf)

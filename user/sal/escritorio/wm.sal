@@ -1974,14 +1974,18 @@ fn wm_comp_flush_scene(st: &mut Estado) -> Int ! io, alloc
         0
     0
 
-fn wm_comp_attach(st: &mut Estado, plen: Int) -> Int ! io, alloc
+# -1: no hay compositor (o no contestó a tiempo). -2: lo hay pero su búfer no
+# es del tamaño de la pantalla (con NVDisplay es el de la cabeza, 640x480):
+# pintar encima la pantalla entera se salía de la memoria compartida y el WM
+# moría con un page fault en `memcpy` nada más arrancar, sólo en placa.
+fn wm_comp_attach(st: &mut Estado, sw: Int, sh: Int) -> Int ! io, alloc
     fd = tcp_connect(comp_puerto(), 200)
     if fd < 0
         -1
     else
         buf_own = bytes_new(msg_len())
         buf = bytes_ptr(buf_own)
-        n = read_fd(fd, buf, msg_len())
+        n = read_timeout_fd(fd, buf, msg_len(), 2000)
         if n != msg_len()
             close_fd(fd)
             -1
@@ -1990,42 +1994,63 @@ fn wm_comp_attach(st: &mut Estado, plen: Int) -> Int ! io, alloc
                 close_fd(fd)
                 -1
             else
-                sid = msg_get_u32(buf, 4)
-                gok = msg_get_u32(buf, comp_escena_gpu_ok_off())
-                ptr = shm_map(sid)
-                if ptr < 0
+                if wm_comp_tamano_ok(buf, sw, sh) == 0
                     close_fd(fd)
-                    -1
+                    -2
                 else
-                    st.comp_fd = fd
-                    st.comp_gpu_ok = gok
-                    ptr
+                    wm_comp_attach_escena(st, fd, buf)
+
+fn wm_comp_tamano_ok(buf: Int, sw: Int, sh: Int) -> Int ! io, alloc
+    if msg_get_u32(buf, 8) != sw
+        0
+    else
+        if msg_get_u32(buf, 12) != sh
+            0
+        else
+            1
+
+fn wm_comp_attach_escena(st: &mut Estado, fd: Int, buf: Int) -> Int ! io, alloc
+    sid = msg_get_u32(buf, 4)
+    gok = msg_get_u32(buf, comp_escena_gpu_ok_off())
+    ptr = shm_map(sid)
+    if ptr < 0
+        close_fd(fd)
+        -1
+    else
+        st.comp_fd = fd
+        st.comp_gpu_ok = gok
+        ptr
 
 fn wm_comp_ensure(st: &mut Estado, sw: Int, sh: Int, stride: Int, sin_comp: Int) -> Int ! io, alloc
     if sin_comp != 0
         -1
     else
-        ptr = wm_comp_attach(st, sw * sh * 4)
+        ptr = wm_comp_attach(st, sw, sh)
         if ptr >= 0
             fd = st.comp_fd
             _i = wm_comp_gpu_init(st, fd, sw, sh, stride)
             ptr
         else
-            _sp = spawn_io_full(d"/bin/soso-comp", fd_tty_heredado(), fd_tty_heredado(), fd_tty_heredado(), fd_kernel_log())
-            t0 = uptime_ms()
-            res = -1
-            done = 0
-            while done == 0
-                if uptime_ms() - t0 > 5000
-                    done = 1
-                if done == 0
-                    ptr = wm_comp_attach(st, sw * sh * 4)
-                    if ptr >= 0
-                        fd = st.comp_fd
-                        _i = wm_comp_gpu_init(st, fd, sw, sh, stride)
-                        res = ptr
+            if ptr == -2
+                -1
+            else
+                _sp = spawn_io_full(d"/bin/soso-comp", fd_tty_heredado(), fd_tty_heredado(), fd_tty_heredado(), fd_kernel_log())
+                t0 = uptime_ms()
+                res = -1
+                done = 0
+                while done == 0
+                    if uptime_ms() - t0 > 5000
                         done = 1
-            res
+                    if done == 0
+                        ptr = wm_comp_attach(st, sw, sh)
+                        if ptr >= 0
+                            fd = st.comp_fd
+                            _i = wm_comp_gpu_init(st, fd, sw, sh, stride)
+                            res = ptr
+                            done = 1
+                        if ptr == -2
+                            done = 1
+                res
 
 fn wm_comp_flush(st: &mut Estado, compos: Int, clen: Int) -> Int ! io, alloc
     if wm_comp_gpu_mode(st) != 0

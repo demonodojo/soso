@@ -16,7 +16,7 @@ pub const SOSO_ED_VERSION: &str = "0.1.1";
 /// Cliente de actualizaciones OTA, instalable/actualizable sin cambiar kernel ni rootfs.
 pub const SOSO_UPDATE_PACKAGE_VERSION: &str = "0.1.1";
 pub const SOSO_PKG_VERSION: &str = "0.4.0";
-pub const SOSO_WM_VERSION: &str = "0.1.0";
+pub const SOSO_WM_VERSION: &str = "0.1.1";
 /// Editor vi escrito en Sal (repositorio hermano `../salvi`).
 pub const SALVI_VERSION: &str = "0.1.0";
 const SALVI_NOMBRE: &str = "salvi";
