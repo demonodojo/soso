@@ -956,6 +956,11 @@ fn run_shard_sys(slot: &QemuSlot, key: &Path, report: &Report, filter: &TestFilt
                 ssh_soso_pkg_origenes(key, port)
             });
         });
+        filter.if_step(sid, "soso-pkg: gana la versión más nueva", || {
+            report.paso_ssh_sys(&mut qemu, slot, sid, "soso-pkg: gana la versión más nueva", || {
+                ssh_soso_pkg_sistema_mas_nuevo(key, port)
+            });
+        });
         filter.if_step(sid, "opencode-sal: instalar y --version", || {
             report.paso_ssh_sys(&mut qemu, slot, sid, "opencode-sal: instalar y --version", || {
                 ssh_opencode_sal(key, port)
@@ -2781,6 +2786,39 @@ exit
     }
     if !marca("BORRADO_OK") {
         return Err(format!("borrar demo falló; stdout: {texto:?}"));
+    }
+    Ok(())
+}
+
+/// Un paquete de sistema más viejo que lo que trae el propio sistema no pisa
+/// su fichero: ni al instalarlo, ni en las órdenes siguientes, ni al borrarlo
+/// (antes `borrar` reponía lo que había antes de instalar). La imagen trae
+/// `soso-ed` 0.1.1 en `/bin` y en su índice, y el paquete 0.1.0 a mano.
+fn ssh_soso_pkg_sistema_mas_nuevo(key: &Path, ssh_port: u16) -> Result<(), String> {
+    let guion = "\
+ls /bin/soso-ed
+soso-pkg instalar /share/paquetes/soso-ed/0.1.0
+soso-pkg listar
+ls /bin/soso-ed
+soso-pkg borrar soso-ed && echo BORRA_ED
+ls /bin/soso-ed
+exit
+";
+    let texto = ssh_guion(key, ssh_port, guion, Duration::from_secs(120))?;
+    if !texto.contains("el sistema ya trae soso-ed 0.1.1") {
+        return Err(format!("soso-pkg no cedió al sistema; stdout: {texto:?}"));
+    }
+    if !texto.lines().any(|l| l.trim() == "BORRA_ED") {
+        return Err(format!("borrar soso-ed falló; stdout: {texto:?}"));
+    }
+    // Las líneas de `ls` (`- <tamaño>  /bin/soso-ed`), no el eco de la orden.
+    let tamanos: Vec<&str> = texto
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("- ") && l.ends_with("/bin/soso-ed"))
+        .collect();
+    if tamanos.len() != 3 || tamanos.iter().any(|l| *l != tamanos[0]) {
+        return Err(format!("/bin/soso-ed cambió (antes, instalado, borrado: {tamanos:?}); stdout: {texto:?}"));
     }
     Ok(())
 }

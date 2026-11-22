@@ -104,10 +104,14 @@ struct AddrSpaceInner {
     id: u64,
     pml4: PhysFrame,
     mmap: Mutex<MmapBook>,
+    /// Inodo del ELF que se carga bajo demanda (0 si se leyó entero); se
+    /// retiene en el VFS para que reemplazar el fichero no lo deje sin páginas.
+    inodo_elf: AtomicU64,
 }
 
 impl Drop for AddrSpaceInner {
     fn drop(&mut self) {
+        crate::vfs::soltar_inodo(*self.inodo_elf.get_mut());
         let shm_regions: Vec<MmapRegion> = self
             .mmap
             .lock()
@@ -228,6 +232,7 @@ impl AddrSpace {
                     regions: Vec::new(),
                     next: soso_abi::MMAP_BASE,
                 }),
+                inodo_elf: AtomicU64::new(0),
             }),
         })
     }
@@ -256,6 +261,13 @@ impl AddrSpace {
 
     pub fn id(&self) -> u64 {
         self.inner.id
+    }
+
+    /// Este espacio lee su ELF de `ino` bajo demanda (ver `vfs::retener_inodo`).
+    pub fn retener_elf(&self, ino: u64) {
+        if self.inner.inodo_elf.swap(ino, Ordering::AcqRel) == 0 {
+            crate::vfs::retener_inodo(ino);
+        }
     }
 
     pub fn mapper(&self) -> OffsetPageTable<'static> {

@@ -1381,7 +1381,14 @@ fn sys_read(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i6
             super::LecturaTty::Nada => {}
         }
         // Sin datos: a dormir hasta que lleguen (el scheduler hace la copia).
-        super::block_current(ctx_from_frame(f), State::WaitingTty { buf, len });
+        super::block_current(
+            ctx_from_frame(f),
+            State::WaitingTty {
+                buf,
+                len,
+                deadline_ms: 0,
+            },
+        );
     }
     with_fd(fd, |f| match f {
         Fd::File { inode, pos } => {
@@ -3004,6 +3011,33 @@ fn sys_read_timeout(
                 accept: false,
                 connect: false,
                 result_fd: 0,
+                deadline_ms: socket_deadline(timeout_ms),
+            },
+        );
+    }
+    // La tty también admite plazo. Lo necesita un lector de teclas que, tras
+    // un ESC suelto, espera unos milisegundos por si el resto de la secuencia
+    // viene en otra lectura (flechas, Home/End, Supr).
+    let tty = with_fd(fd, |f| Ok(matches!(f, Fd::Tty)))?;
+    if tty {
+        if len == 0 {
+            return Ok(0);
+        }
+        let mut dst = user_slice_mut(buf, len)?;
+        let console = super::with_current(|p| p.console);
+        match super::tty_tomar(console, dst.as_mut_slice()) {
+            super::LecturaTty::Datos(n) => {
+                dst.flush()?;
+                return Ok(n);
+            }
+            super::LecturaTty::Eof => return Ok(0),
+            super::LecturaTty::Nada => {}
+        }
+        super::block_current(
+            ctx_from_frame(f),
+            State::WaitingTty {
+                buf,
+                len,
                 deadline_ms: socket_deadline(timeout_ms),
             },
         );

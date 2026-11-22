@@ -11,7 +11,7 @@ previos para poder restaurarlos al desinstalar.
 | Fase | Contenido | Estado |
 |------|-----------|--------|
 | P0 | Contrato `paquete.txt` / `paquete.pack`, índice, `soso-pkg-core`, cliente `soso-pkg` (local + HTTPS), índice de comandos, sosh | Hecho |
-| P1 | Repositorio publicado, `cargo xtask pkg-pack`, paquetes `soso-ed`, `soso-pkg`, `soso-update`, `soso-wm` y `sal` con destino sistema | En curso: índice público raw de GitHub y paquetes de sistema publicados en `rootfs/share/paquetes/`; `soso-update` se actualiza por este gestor y se excluye de los packs OTA; `soso-web` y `opencode-sal` siguen empaquetables; **varios orígenes** (`soso-pkg` 0.4.0) y `sal` publicado desde su propio repositorio |
+| P1 | Repositorio publicado, `cargo xtask pkg-pack`, paquetes `soso-ed`, `soso-pkg`, `soso-update`, `soso-wm` y `sal` con destino sistema | En curso: índice público raw de GitHub y paquetes de sistema publicados en `rootfs/share/paquetes/`; `soso-update` se actualiza por este gestor y se excluye de los packs OTA; `soso-web` y `opencode-sal` siguen empaquetables; **varios orígenes** (`soso-pkg` 0.4.0) y `sal` publicado desde su propio repositorio; **el sistema no se degrada** (`soso-pkg` 0.4.1: gana la versión más nueva) |
 | P2 | Servicios/demonios, `.desktop` / escritorio | Pendiente |
 | P3 | Descarga por rangos (packs > 64 MiB) | Pendiente |
 
@@ -50,6 +50,21 @@ que sólo entiende `url=`, siga leyendo el repositorio de soso; para llegar a
 `sal` primero hay que actualizar `soso-pkg`.
 - Paquetes de sistema: copia de seguridad en `.respaldo/` dentro del paquete;
   `soso-pkg` la restaura al desinstalar.
+
+## El sistema y los paquetes de sistema
+
+Desde `soso-pkg` 0.4.1, un paquete `destino=sistema` no pisa una versión más
+nueva que ya trae el sistema. El gestor lee el índice local
+(`/share/paquetes/indice.txt`, que llega con cada actualización), compara con
+la versión del paquete y, si la del sistema es mayor, **cede**: deja los
+ficheros del sistema en su sitio y los anota como respaldo del paquete, para
+que `borrar` no reponga una versión vieja. Si empatan o alguna versión no se
+entiende, manda el paquete, que es lo que pidió el usuario.
+
+La comprobación se aplica al instalar y al activar paquetes instalados por un
+gestor anterior, así que una OTA que renueve p. ej. `/bin/soso-ed` no queda
+degradada en el siguiente arranque ni en la siguiente orden. La regla vive en
+`soso_pkg_core::oferta::manda_el_sistema`.
 
 ## Comandos de usuario
 
@@ -128,6 +143,9 @@ soso-pkg borrar <nombre>
 - Guest: fase `soso-pkg` en `cargo xtask test` (fixture en `/share/paquetes-prueba`);
   `soso-pkg: varios orígenes` instala `demo` de `origen-b` con su dependencia
   `demo-base` de `origen-a`, tras un origen inexistente;
+  `soso-pkg: gana la versión más nueva` instala un `soso-ed` 0.1.0 frente al
+  0.1.1 del índice del sistema y comprueba que `/bin/soso-ed` no cambia ni al
+  instalar ni al borrar (`cargo xtask test -- --guest sys --only "soso-pkg: gana"`);
   fases `soso-web` / `soso-wm` usan rutas bajo `/var/paquetes/soso-web/`
 
 ## Relación con otros planes

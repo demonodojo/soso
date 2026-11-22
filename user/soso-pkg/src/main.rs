@@ -530,9 +530,17 @@ fn aplicar_manifiesto(man: Manifest, man_text: &str, pack: &[u8], forzar: bool) 
         println!("soso-pkg: {msg}");
         return 1;
     }
-    if man.destino_sistema && !activar_destinos_sistema(&man).is_empty() {
-        println!("soso-pkg: no pude activar todos los ficheros del sistema");
-        return 1;
+    if man.destino_sistema {
+        if let Some(v) = sistema_mas_nuevo(indice_del_sistema().as_ref(), &man) {
+            ceder_al_sistema(&man);
+            println!(
+                "soso-pkg: el sistema ya trae {} {v}, más nueva; se queda la del sistema",
+                man.nombre
+            );
+        } else if !activar_destinos_sistema(&man).is_empty() {
+            println!("soso-pkg: no pude activar todos los ficheros del sistema");
+            return 1;
+        }
     }
     if let Err(msg) = reconstruir_comandos() {
         println!("soso-pkg: {msg}");
@@ -682,10 +690,50 @@ fn activar_destinos_sistema(man: &Manifest) -> Vec<String> {
     errores
 }
 
+/// Índice de los paquetes que trae el propio sistema (llega con cada
+/// actualización): de ahí sale qué versión de cada programa es la del sistema.
+const INDICE_DEL_SISTEMA: &str = "/share/paquetes/indice.txt";
+
+fn indice_del_sistema() -> Option<soso_pkg_core::Indice> {
+    let bytes = fs::read_bytes(INDICE_DEL_SISTEMA, MAX_TXT)?;
+    soso_pkg_core::Indice::parse(core::str::from_utf8(&bytes).ok()?).ok()
+}
+
+fn sistema_mas_nuevo(idx: Option<&soso_pkg_core::Indice>, man: &Manifest) -> Option<String> {
+    let del_sistema = idx?.mejor(&man.nombre)?.version_raw.clone();
+    soso_pkg_core::manda_el_sistema(&man.version_raw, Some(&del_sistema)).then_some(del_sistema)
+}
+
+/// El sistema trae una versión más nueva que el paquete: sus ficheros se
+/// quedan y pasan a ser lo que restaura `borrar`, que si no repondría lo que
+/// había antes de instalar el paquete.
+fn ceder_al_sistema(man: &Manifest) {
+    let raiz = format!("/var/paquetes/{}", man.nombre);
+    for f in &man.files {
+        let Some(destino) = soso_pkg_core::rutas::ruta_destino_sistema(&f.path) else {
+            continue;
+        };
+        let Some(actual) = fs::read_bytes(&destino, MAX_PACK_SIZE as usize) else {
+            continue;
+        };
+        let backup = format!("{raiz}/.respaldo/{}", f.path);
+        let igual = fs::size(&backup) == Some(actual.len() as u64)
+            && fs::read_bytes(&backup, actual.len() + 1).as_deref() == Some(&actual[..]);
+        if !igual {
+            let _ = escribir_ruta_sistema(&backup, &actual);
+        }
+        let ausente = format!("{backup}.ausente");
+        if fs::exists(&ausente) {
+            let _ = fs::unlink(&ausente);
+        }
+    }
+}
+
 /// Permite que un soso-pkg antiguo instale esta versión en `/var/paquetes`;
 /// al ejecutarla por primera vez, la versión nueva activa los destinos de
 /// sistema y conserva el binario que había antes.
 fn activar_paquetes_sistema_instalados() {
+    let idx = indice_del_sistema();
     for nombre in fs::list_dir("/var/paquetes") {
         if nombre.starts_with('.') {
             continue;
@@ -694,6 +742,12 @@ fn activar_paquetes_sistema_instalados() {
             continue;
         };
         if !man.destino_sistema {
+            continue;
+        }
+        // Una actualización del sistema trajo una versión más nueva que la
+        // del paquete: reponer la del paquete la degradaría en cada orden.
+        if sistema_mas_nuevo(idx.as_ref(), &man).is_some() {
+            ceder_al_sistema(&man);
             continue;
         }
         let raiz = format!("/var/paquetes/{nombre}");

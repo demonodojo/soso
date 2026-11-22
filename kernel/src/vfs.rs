@@ -24,6 +24,114 @@ fn encode(model_idx: u32, entry: u32) -> u64 {
     SOSOMFS_BIT | ((model_idx as u64) << 32) | (entry as u64)
 }
 
+// ---- ejecutables en marcha cuyo fichero se reemplaza ----
+//
+// Un ELF grande se carga **bajo demanda**: cada falta de página lee su trozo
+// del inodo. Si mientras tanto alguien reemplaza o borra el fichero (instalar
+// un paquete de sistema, `soso-pkg` reescribiéndose a sí mismo), sosofs suelta
+// ese inodo y la siguiente falta muere con «lectura FS falló». Como en Unix, el
+// contenido tiene que seguir vivo mientras lo use un proceso: antes de soltar un
+// inodo en uso se copia entero a memoria, y las lecturas de ese inodo salen de
+// la copia hasta que el último espacio de direcciones que lo usa desaparece.
+// Los números de inodo de sosofs no se reutilizan, así que la copia no puede
+// tapar a un fichero nuevo.
+
+/// Inodos de sosofs con un ELF cargado bajo demanda → espacios que lo usan.
+static EN_USO: spin::Mutex<alloc::collections::BTreeMap<u64, u32>> =
+    spin::Mutex::new(alloc::collections::BTreeMap::new());
+/// Contenido de los inodos en uso que ya no existen en sosofs.
+static HUERFANOS: spin::Mutex<alloc::collections::BTreeMap<u64, Vec<u8>>> =
+    spin::Mutex::new(alloc::collections::BTreeMap::new());
+/// Atajo para no tomar el candado en cada lectura cuando no hay ninguno.
+static HAY_HUERFANOS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Un espacio de direcciones empieza a leer páginas de `ino` bajo demanda.
+pub fn retener_inodo(ino: u64) {
+    if ino == 0 || is_sosomfs(ino) {
+        return;
+    }
+    *EN_USO.lock().entry(ino).or_insert(0) += 1;
+}
+
+/// El espacio que lo retenía ha desaparecido. Con el último se libera la copia.
+pub fn soltar_inodo(ino: u64) {
+    if ino == 0 || is_sosomfs(ino) {
+        return;
+    }
+    let ultimo = {
+        let mut en_uso = EN_USO.lock();
+        match en_uso.get_mut(&ino) {
+            Some(n) if *n > 1 => {
+                *n -= 1;
+                false
+            }
+            Some(_) => {
+                en_uso.remove(&ino);
+                true
+            }
+            None => false,
+        }
+    };
+    if ultimo && HAY_HUERFANOS.load(core::sync::atomic::Ordering::Acquire) {
+        // Fuera del candado: soltar varios MiB no debe alargar la sección crítica.
+        let copia = {
+            let mut h = HUERFANOS.lock();
+            let copia = h.remove(&ino);
+            HAY_HUERFANOS.store(!h.is_empty(), core::sync::atomic::Ordering::Release);
+            copia
+        };
+        drop(copia);
+    }
+}
+
+/// Si `name` en `dir` es un ejecutable en uso, guarda su contenido antes de
+/// que sosofs lo suelte. Se llama con el candado de sosofs cogido, así que no
+/// hay hueco entre la copia y el reemplazo.
+fn conservar_si_en_uso(fs: &mut crate::fs::Fs, dir: u64, name: &str) {
+    let Ok(ino) = fs.lookup(dir, name) else {
+        return;
+    };
+    if !EN_USO.lock().contains_key(&ino) || HUERFANOS.lock().contains_key(&ino) {
+        return;
+    }
+    let Ok(st) = fs.stat_inode(ino) else {
+        return;
+    };
+    if st.file_type != FT_FILE {
+        return;
+    }
+    let size = st.size.get() as usize;
+    let mut copia = Vec::new();
+    if copia.try_reserve_exact(size).is_err() {
+        crate::println!("vfs: sin memoria para conservar el ejecutable en uso (ino={ino})");
+        return;
+    }
+    copia.resize(size, 0);
+    if fs.read_file_range(ino, 0, size, &mut copia).is_err() {
+        crate::println!("vfs: no pude conservar el ejecutable en uso (ino={ino})");
+        return;
+    }
+    HUERFANOS.lock().insert(ino, copia);
+    HAY_HUERFANOS.store(true, core::sync::atomic::Ordering::Release);
+}
+
+/// Lectura desde la copia de un inodo que ya no está en sosofs.
+fn leer_huerfano(ino: u64, offset: usize, len: usize, out: &mut [u8]) -> Option<Result<(), SosoFsError>> {
+    if !HAY_HUERFANOS.load(core::sync::atomic::Ordering::Acquire) {
+        return None;
+    }
+    let h = HUERFANOS.lock();
+    let copia = h.get(&ino)?;
+    let fin = offset.checked_add(len)?;
+    Some(match (copia.get(offset..fin), out.get_mut(..len)) {
+        (Some(src), Some(dst)) => {
+            dst.copy_from_slice(src);
+            Ok(())
+        }
+        _ => Err(SosoFsError::Corrupt),
+    })
+}
+
 pub fn is_models_path(path: &str) -> bool {
     path == "/models" || path.starts_with("/models/")
 }
@@ -209,6 +317,9 @@ pub fn read_file(ino: u64) -> Result<Vec<u8>, SosoFsError> {
 
 pub fn read_file_range(ino: u64, offset: usize, len: usize, out: &mut [u8]) -> Result<(), SosoFsError> {
     if !is_sosomfs(ino) {
+        if let Some(r) = leer_huerfano(ino, offset, len, out) {
+            return r;
+        }
         let fs = crate::fs::FS.get().ok_or(SosoFsError::Io)?;
         return fs.lock().read_file_range(ino, offset, len, out);
     }
@@ -297,7 +408,9 @@ pub fn create_file(dir: u64, name: &str, data: &[u8], mtime: u64) -> Result<u64,
         return Err(SosoFsError::Io);
     }
     let fs = crate::fs::FS.get().ok_or(SosoFsError::Io)?;
-    fs.lock().create_file(dir, name, data, mtime)
+    let mut fs = fs.lock();
+    conservar_si_en_uso(&mut fs, dir, name);
+    fs.create_file(dir, name, data, mtime)
 }
 
 pub fn append_file(ino: u64, data: &[u8], mtime: u64) -> Result<(), SosoFsError> {
@@ -321,7 +434,9 @@ pub fn unlink(dir: u64, name: &str) -> Result<(), SosoFsError> {
         return Err(SosoFsError::Io);
     }
     let fs = crate::fs::FS.get().ok_or(SosoFsError::Io)?;
-    fs.lock().unlink(dir, name)
+    let mut fs = fs.lock();
+    conservar_si_en_uso(&mut fs, dir, name);
+    fs.unlink(dir, name)
 }
 
 pub fn rename(
@@ -335,7 +450,9 @@ pub fn rename(
         return Err(SosoFsError::Io);
     }
     let fs = crate::fs::FS.get().ok_or(SosoFsError::Io)?;
-    fs.lock().rename(old_dir, old_name, new_dir, new_name, mtime)
+    let mut fs = fs.lock();
+    conservar_si_en_uso(&mut fs, new_dir, new_name);
+    fs.rename(old_dir, old_name, new_dir, new_name, mtime)
 }
 
 pub fn truncate_path(path: &str, size: u64, mtime: u64) -> Result<(), SosoFsError> {

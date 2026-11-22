@@ -51,6 +51,24 @@ fn main(args: &[String]) -> u8 {
         let _ = sys::sleep_ms(ms);
         return 0;
     }
+    if cmd == "leer-texto" {
+        // Espera a que el padre reemplace el fichero del que se lanzó y luego
+        // toca cada página de su código: las que aún no se habían cargado
+        // tienen que salir del contenido que el kernel conservó.
+        // Un estático con valor inicial va en `.data`; `link.ld` pone código y
+        // `.rodata` contiguos desde 0x400000 y `.data` alineado detrás.
+        static mut EN_DATA: u64 = 1;
+        let _ = sys::sleep_ms(500);
+        let fin = core::ptr::addr_of!(EN_DATA) as u64 & !0xfff;
+        let mut suma = 0u8;
+        let mut va = 0x40_0000u64;
+        while va < fin {
+            suma = suma.wrapping_add(unsafe { core::ptr::read_volatile(va as *const u8) });
+            va += 4096;
+        }
+        core::hint::black_box(suma);
+        return 0;
+    }
     if cmd == "crash" {
         // Para probar que una falta de usuario mata al proceso, no al kernel.
         unsafe { core::ptr::read_volatile(core::ptr::null::<u8>()) };
@@ -376,6 +394,39 @@ fn fpu_stress(seed: u8) -> u8 {
 use libsoso::senal;
 
 /// Espera a un hijo concreto con `waitpid` y devuelve `(tipo, código)`.
+/// Copia un fichero entero; devuelve los bytes copiados.
+fn copiar_fichero(origen: &str, destino: &str) -> Result<usize, i64> {
+    let fd = sys::open(origen, abi::O_RDONLY);
+    if fd < 0 {
+        return Err(fd);
+    }
+    let mut datos = alloc::vec::Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = sys::read(fd as u64, &mut buf);
+        if n < 0 {
+            sys::close(fd as u64);
+            return Err(n);
+        }
+        if n == 0 {
+            break;
+        }
+        datos.extend_from_slice(&buf[..n as usize]);
+    }
+    sys::close(fd as u64);
+    let fd = sys::open(destino, abi::O_WRONLY);
+    if fd < 0 {
+        return Err(fd);
+    }
+    let r = sys::write_all(fd as u64, &datos);
+    let c = sys::close(fd as u64);
+    r?;
+    if c < 0 {
+        return Err(c);
+    }
+    Ok(datos.len())
+}
+
 fn esperar(pid: i64, flags: u64) -> Option<(u8, u8)> {
     loop {
         match sys::waitpid(pid, flags) {
@@ -1136,6 +1187,30 @@ fn suite() -> u8 {
         let suelta = sys::fb_set_mode(abi::FB_MODE_CONSOLE);
         check!(sigue.is_ok(), "framebuffer: sigue siendo dueño tras morir otro proceso ({sigue:?})");
         check!(suelta.is_ok(), "framebuffer: el dueño devuelve la consola ({suelta:?})");
+    }
+
+    // Reemplazar el ejecutable de un proceso en marcha no lo mata: los ELF
+    // grandes se cargan bajo demanda y, antes, la primera página que faltaba
+    // tras el reemplazo era «lectura FS falló» (`soso-pkg` instalándose a sí
+    // mismo). `/bin/init` pasa del umbral de carga perezosa.
+    match copiar_fichero("/bin/init", "/tmp/init-copia") {
+        Ok(n) if n as u64 > abi::LAZY_FILE_THRESHOLD => {
+            let h = sys::spawn("/tmp/init-copia", "leer-texto");
+            check!(h > 0, "spawn de la copia de init ({h})");
+            let _ = sys::sleep_ms(100);
+            let fd = sys::open("/tmp/init-copia", abi::O_WRONLY);
+            let reemplazo = fd >= 0
+                && sys::write(fd as u64, b"reemplazado") == 11
+                && sys::close(fd as u64) == 0;
+            check!(reemplazo, "reemplazar el ejecutable en marcha");
+            let fin = esperar(h, 0);
+            check!(
+                fin == Some((abi::WAIT_EXIT, 0)),
+                "el proceso sobrevive a que reemplacen su ejecutable ({fin:?})"
+            );
+            let _ = sys::unlink("/tmp/init-copia");
+        }
+        r => check!(false, "copiar /bin/init: {r:?}"),
     }
 
     // Dos hijos de CPU pura: su salida intercalada demuestra la preempción.

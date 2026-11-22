@@ -1126,6 +1126,11 @@ conserva el fichero anterior y lo restaura al desinstalar. Los comandos de
 paquete también se pueden ejecutar desde **sosh** mediante el mapa de
 `/var/paquetes/comandos`.
 
+Si el propio sistema trae una versión **más nueva** del programa (por ejemplo
+tras una actualización del sistema), el paquete no la sustituye: se queda la del
+sistema, y `soso-pkg borrar` tampoco repone la versión antigua. Con la misma
+versión, o si alguna no se puede leer, manda el paquete.
+
 ```sh
 soso-pkg listar
 soso-pkg buscar [texto]              # en todos los repositorios configurados

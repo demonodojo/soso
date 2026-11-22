@@ -28,7 +28,7 @@ pub use manifest::{
     Dependency, FileEntry, MANIFEST_MAGIC, MANIFEST_MAGIC_V2, Manifest, ParseManifestError,
     ValidateError,
 };
-pub use oferta::{AccionInstalacion, decidir, parse_version};
+pub use oferta::{AccionInstalacion, decidir, manda_el_sistema, parse_version};
 pub use pack::PackReader;
 pub use rutas::{RutaError, nombre_valido, ruta_valida};
 pub use urls::{artefacto_remoto, indice_url};

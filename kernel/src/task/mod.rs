@@ -53,7 +53,9 @@ pub enum State {
     /// `nuevo` = contestar con `waitpid_pack` (si no, el `wait_pack` viejo).
     WaitingChild { filtro: i64, flags: u64, nuevo: bool },
     /// read() de la tty sin datos: (puntero, longitud) del buffer usuario.
-    WaitingTty { buf: u64, len: u64 },
+    /// `deadline_ms` es 0 para un `read` normal; con `read_timeout` es el
+    /// instante (uptime) en que se contesta EAGAIN si no llegó nada.
+    WaitingTty { buf: u64, len: u64, deadline_ms: u64 },
     /// read()/write() de un pipe sin datos o sin espacio.
     WaitingPipe {
         pipe_id: pipe::PipeId,
@@ -1329,6 +1331,7 @@ pub fn spawn_console_io_cwd(
             crate::println!("spawn: elf inválido: {e}");
             -abi::EINVAL
         })?;
+        space.retener_elf(ino);
         let (entry, brk, tls) = r;
         for va in (STACK_TOP - STACK_SIZE..STACK_TOP).step_by(4096) {
             space.ensure_mapped(va).ok_or(-abi::ENOMEM)?;
@@ -1876,15 +1879,16 @@ extern "C" fn schedule_inner() -> ! {
                 p.ctx.rax = (-soso_abi::ETIMEDOUT) as u64;
             }
         }
-        // Despertar a cada lector de tty cuya consola ya tenga datos.
+        // Despertar a cada lector de tty cuya consola ya tenga datos, o al que
+        // se le venció el plazo de `read_timeout` (EAGAIN, como en pipe/socket).
         for i in 0..procs.len() {
-            if let State::WaitingTty { buf, len } = procs[i].state
+            if let State::WaitingTty { buf, len, .. } = procs[i].state
                 && procs[i].console.has_input()
             {
                 // La copia necesita su espacio activo.
                 procs[i].space.as_ref().unwrap().activate();
                 // Y revalidar el rango, igual que en pipe y socket: se comprobó al
-                // entrar en `sys_read`, pero otro hilo pudo desmapearlo durante la
+                // entrar en la syscall, pero otro hilo pudo desmapearlo durante la
                 // espera y `tty_read_into` escribe con un puntero pelado.
                 if !procs[i].space.as_ref().unwrap().range_ok(buf, len, true) {
                     procs[i].ctx.rax = (-soso_abi::EFAULT) as u64;
@@ -1911,6 +1915,12 @@ extern "C" fn schedule_inner() -> ! {
                     }
                     LecturaTty::Nada => {}
                 }
+            } else if let State::WaitingTty { deadline_ms, .. } = procs[i].state
+                && deadline_ms != 0
+                && now >= deadline_ms
+            {
+                procs[i].ctx.rax = (-soso_abi::EAGAIN) as u64;
+                procs[i].state = State::Runnable;
             }
         }
         // Despertar lectores/escritores de pipe cuando haya datos, espacio o EOF.
