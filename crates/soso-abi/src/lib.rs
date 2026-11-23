@@ -134,6 +134,12 @@ pub const SYS_ALARM: u64 = 111;
 /// a uno del grupo `-pid` (`pid < -1`) o del grupo propio (`0`). Devuelve
 /// [`waitpid_pack`]; con [`WNOHANG`] y nada que recoger, `0`.
 pub const SYS_WAITPID: u64 = 112;
+/// `write(fd, buf, len)` con plazo en ms para un socket TCP: si en ese tiempo
+/// no cabe ni un byte devuelve `EAGAIN` sin haber escrito nada; con `0` no
+/// duerme. Puede escribir menos de `len`, como `write`. Con otro tipo de fd es
+/// un `write` normal. Sirve para que un servidor no se quede colgado con un
+/// cliente que no lee (el `write` normal espera hasta 30 s).
+pub const SYS_WRITE_TIMEOUT: u64 = 113;
 /// Abre un pseudo-terminal: devuelve `(fd_maestro << 32) | ranura`.
 pub const SYS_PTY_OPEN: u64 = 98;
 /// Reserva memoria compartida (`len` alineado); devuelve `id`.

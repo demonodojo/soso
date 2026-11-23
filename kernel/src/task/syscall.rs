@@ -255,6 +255,7 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         }
         abi::SYS_READ => sys_read(f, a1, a2, a3),
         abi::SYS_WRITE => sys_write(f, a1, a2, a3),
+        abi::SYS_WRITE_TIMEOUT => sys_write_plazo(f, a1, a2, a3, Some(a4)),
         abi::SYS_OPEN => {
             // glibc `close` es la syscall 3 de Linux. Aquí el 3 es
             // `open` (puntero, longitud, flags). Un descriptor cabe
@@ -1117,6 +1118,18 @@ fn epipe() -> i64 {
 }
 
 fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i64> {
+    sys_write_plazo(f, fd, buf, len, None)
+}
+
+/// `write`; `plazo_ms` (sólo `SYS_WRITE_TIMEOUT`) cambia cuánto espera un
+/// socket TCP sin sitio: `Some(0)` no duerme. El resto de fds no lo mira.
+fn sys_write_plazo(
+    f: &mut SyscallFrame,
+    fd: u64,
+    buf: u64,
+    len: u64,
+    plazo_ms: Option<u64>,
+) -> Result<u64, i64> {
     // Escritura corta por encima del techo, igual que `sys_read`.
     let len = len.min(MAX_SYSCALL_BUF);
     let pipe_id = with_fd(fd, |slot| {
@@ -1181,6 +1194,9 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
         if n > 0 {
             return Ok(n);
         }
+        if plazo_ms == Some(0) {
+            return Err(-abi::EAGAIN);
+        }
         // Sin plazo, un `can_send` que no vuelve deja el proceso dormido para
         // siempre. El ClientHello del handshake se escribe **antes** de la
         // lectura con plazo: si esta escritura no regresa, ese plazo no llega
@@ -1197,7 +1213,7 @@ fn sys_write(f: &mut SyscallFrame, fd: u64, buf: u64, len: u64) -> Result<u64, i
                 accept: false,
                 connect: false,
                 result_fd: 0,
-                deadline_ms: socket_deadline(TCP_WRITE_DEADLINE_MS),
+                deadline_ms: socket_deadline(plazo_ms.unwrap_or(TCP_WRITE_DEADLINE_MS)),
             },
         );
     }

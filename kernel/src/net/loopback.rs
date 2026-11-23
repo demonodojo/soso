@@ -48,18 +48,24 @@ impl LoopPair {
         pair.server_pid = pid;
     }
 
+    /// Suelta lo que **`side` ya ha leído**: el cliente lee `s2c` y el
+    /// servidor `c2s`. Estaba al revés: cada lectura compactaba la dirección
+    /// contraria, así que lo leído sólo se liberaba cuando leía el otro extremo.
+    /// Un emisor cuyo par no le contesta nunca (el WM con un cliente que sólo
+    /// recibe ratón, el WM con el compositor) veía el búfer lleno al pasar de
+    /// 64 KiB enviados y se quedaba bloqueado en `write`.
     fn compact(side: LoopSide, pair: &mut LoopPair) {
         match side {
             LoopSide::Client => {
-                if pair.c2s_read > 0 {
-                    pair.c2s.drain(0..pair.c2s_read);
-                    pair.c2s_read = 0;
-                }
-            }
-            LoopSide::Server => {
                 if pair.s2c_read > 0 {
                     pair.s2c.drain(0..pair.s2c_read);
                     pair.s2c_read = 0;
+                }
+            }
+            LoopSide::Server => {
+                if pair.c2s_read > 0 {
+                    pair.c2s.drain(0..pair.c2s_read);
+                    pair.c2s_read = 0;
                 }
             }
         }

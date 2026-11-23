@@ -394,6 +394,28 @@ fn fpu_stress(seed: u8) -> u8 {
 use libsoso::senal;
 
 /// Espera a un hijo concreto con `waitpid` y devuelve `(tipo, código)`.
+/// `SYS_WRITE_TIMEOUT` a pelo: sólo lo usa esta prueba, y meterlo en libsoso
+/// cambiaría los binarios de todos los paquetes que la enlazan.
+fn write_timeout(fd: u64, buf: &[u8], plazo_ms: u64) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") abi::SYS_WRITE_TIMEOUT => ret,
+            inlateout("rdi") fd => _,
+            inlateout("rsi") buf.as_ptr() as u64 => _,
+            inlateout("rdx") buf.len() as u64 => _,
+            inlateout("r10") plazo_ms => _,
+            lateout("rcx") _,
+            lateout("r11") _,
+            lateout("r8") _,
+            lateout("r9") _,
+            clobber_abi("C"),
+        );
+    }
+    ret
+}
+
 /// Copia un fichero entero; devuelve los bytes copiados.
 fn copiar_fichero(origen: &str, destino: &str) -> Result<usize, i64> {
     let fd = sys::open(origen, abi::O_RDONLY);
@@ -2527,6 +2549,40 @@ fn suite() -> u8 {
         check!(client2 >= 0, "segundo tcp_connect loopback (rc={client2})");
         let server2 = sys::tcp_accept(listener, 5_000);
         check!(server2 >= 0, "segundo tcp_accept loopback (rc={server2})");
+        // Un par que no lee: llenar su socket con `write_timeout` no puede
+        // bloquear (el `write` normal esperaría hasta 30 s). Así el escritorio
+        // no se queda colgado con un cliente atascado.
+        {
+            let trozo = [0x5au8; 4096];
+            let t0 = sys::uptime_ms();
+            let mut total = 0usize;
+            let mut rc = 0i64;
+            while total < 1 << 20 {
+                rc = write_timeout(server2 as u64, &trozo, 0);
+                if rc <= 0 {
+                    break;
+                }
+                total += rc as usize;
+            }
+            check!(
+                rc == -(abi::EAGAIN as i64) && total > 0,
+                "write_timeout(0) con el socket lleno da EAGAIN (rc={rc}, {total} bytes)"
+            );
+            let t1 = sys::uptime_ms();
+            let rc = write_timeout(server2 as u64, &trozo, 200);
+            let espera = sys::uptime_ms() - t1;
+            check!(
+                rc == -(abi::EAGAIN as i64) && (150..5_000).contains(&espera),
+                "write_timeout(200) espera su plazo y da EAGAIN (rc={rc}, {espera} ms)"
+            );
+            check!(t1 - t0 < 5_000, "llenar el socket sin bloquear ({} ms)", t1 - t0);
+            // Al leer el otro extremo vuelve a caber.
+            let mut basura = [0u8; 4096];
+            let n = sys::read_timeout(client2 as u64, &mut basura, 1_000);
+            check!(n > 0, "leer del par lleno (n={n})");
+            let rc = write_timeout(server2 as u64, &trozo[..16], 0);
+            check!(rc == 16, "tras leer, write_timeout vuelve a escribir (rc={rc})");
+        }
         let _ = sys::close(client2 as u64);
         let _ = sys::close(server2 as u64);
         let _ = sys::close(listener);
