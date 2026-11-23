@@ -25,6 +25,9 @@ fn sys_uptime_ms() -> Int
 fn sys_read_timeout() -> Int
     32
 
+fn sys_write_timeout() -> Int
+    113
+
 fn sys_tcp_listen() -> Int
     30
 
@@ -396,6 +399,11 @@ fn close_fd(fd: Int) -> Int ! io
 
 fn read_timeout_fd(fd: Int, buf_ptr: Int, len: Int, ms: Int) -> Int ! io
     syscall(sys_read_timeout(), fd, buf_ptr, len, ms, 0, 0)
+
+# `write` con plazo para sockets TCP: si en `ms` no cabe nada devuelve -11
+# (EAGAIN) sin escribir; con 0 no espera. Otros fds: `write` normal.
+fn write_timeout_fd(fd: Int, buf_ptr: Int, len: Int, ms: Int) -> Int ! io
+    syscall(sys_write_timeout(), fd, buf_ptr, len, ms, 0, 0)
 
 fn tcp_listen(port: Int) -> Int ! io
     syscall(sys_tcp_listen(), port, 0, 0, 0, 0, 0)

@@ -161,6 +161,10 @@ fn comp_escena_bind(st: Int, tab: Int, id: Int, sid: Int, w: Int, h: Int, stride
         0
     else
         clen = stride * h
+        # Rebind de una superficie que ya existía (la ventana cambió de tamaño):
+        # la textura vieja se suelta y el daño pendiente se olvida. Si no, se
+        # subía el rectángulo viejo desde un búfer nuevo y más pequeño.
+        old = comp_surf_get(tab, slot, comp_surf_tex())
         tex = gpu_alloc_vram(clen)
         if tex < 0
             0
@@ -175,6 +179,12 @@ fn comp_escena_bind(st: Int, tab: Int, id: Int, sid: Int, w: Int, h: Int, stride
                 _w = comp_surf_set(tab, slot, comp_surf_w(), w)
                 _h = comp_surf_set(tab, slot, comp_surf_h(), h)
                 _s = comp_surf_set(tab, slot, comp_surf_stride(), stride)
+                _x0 = comp_surf_set(tab, slot, comp_surf_dx0(), 0)
+                _y0 = comp_surf_set(tab, slot, comp_surf_dy0(), 0)
+                _x1 = comp_surf_set(tab, slot, comp_surf_dx1(), 0)
+                _y1 = comp_surf_set(tab, slot, comp_surf_dy1(), 0)
+                if old > 0
+                    _of = gpu_free(old)
                 1
 
 fn comp_escena_geom(tab: Int, id: Int, x: Int, y: Int, w: Int, h: Int, flags: Int, z: Int) -> Int ! alloc

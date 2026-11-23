@@ -40,6 +40,27 @@ fn comp_geom_opaque() -> Int
 fn comp_commit_clear_rt() -> Int
     1
 
+# PRESENT_ACK (comp → WM): 1 si el fotograma se presentó (COMMIT o FRAME), 0 si no.
+# Sin esta respuesta el WM no sabe si el compositor sigue vivo: si no llega,
+# baja de camino (GPU → CPU sobre el compositor → sin compositor) en vez de
+# quedarse esperando o pintando a un socket muerto.
+fn op_comp_present_ack() -> Int
+    39
+
+fn comp_ack_plazo_ms() -> Int
+    400
+
+# Fallos de ACK seguidos que se toleran antes de bajar de camino.
+fn comp_fallos_max() -> Int
+    3
+
+# 0 = seguir; 1 = bajar de GPU a CPU sobre el compositor; 2 = soltarlo.
+fn comp_bajar_camino(con_gpu: Int) -> Int
+    if con_gpu != 0
+        1
+    else
+        2
+
 fn comp_escena_gpu_ok_off() -> Int
     28
 
@@ -112,5 +133,10 @@ fn msg_encode_comp_prims(ptr: Int, len: Int, x: Int, y: Int, w: Int, h: Int, fla
 
 fn msg_encode_comp_prims_ack(ptr: Int, ok: Int) -> Int ! alloc
     _o = msg_set_op(ptr, op_comp_prims_ack())
+    _k = msg_set_u32(ptr, 4, ok)
+    0
+
+fn msg_encode_comp_present_ack(ptr: Int, ok: Int) -> Int ! alloc
+    _o = msg_set_op(ptr, op_comp_present_ack())
     _k = msg_set_u32(ptr, 4, ok)
     0

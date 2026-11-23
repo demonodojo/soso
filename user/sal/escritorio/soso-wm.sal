@@ -265,6 +265,10 @@ fn bucle_grafico(ejecutar: String) -> Int ! io, alloc
             rc = 3
         if fb_info_leer(info) != 0
             _m = fb_set_mode(fb_mode_graficos())
+            # Vigilante desde ya, no desde el primer tick: si el arranque se
+            # queda colgado (compositor, GPU) el kernel mata al WM y devuelve la
+            # consola. Holgado: conectar con el compositor puede llevar ~7 s.
+            _ka = fb_keepalive(wm_keepalive_arranque_ms())
             sw = fb_info_ancho(info)
             sh = fb_info_alto(info)
             stride = fb_info_stride(info)
@@ -615,6 +619,10 @@ fn fotograma() -> Int ! io, alloc
             rc = 3
         if fb_info_leer(info) != 0
             _m = fb_set_mode(fb_mode_graficos())
+            # Vigilante desde ya, no desde el primer tick: si el arranque se
+            # queda colgado (compositor, GPU) el kernel mata al WM y devuelve la
+            # consola. Holgado: conectar con el compositor puede llevar ~7 s.
+            _ka = fb_keepalive(wm_keepalive_arranque_ms())
             sw = fb_info_ancho(info)
             sh = fb_info_alto(info)
             stride = fb_info_stride(info)

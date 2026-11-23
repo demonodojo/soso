@@ -24,6 +24,17 @@ fn comp_leer_exacto(fd: Int, dst: Int, len: Int) -> Int ! io, alloc
 # PRIMS: el WM manda una lista de primitivas (comando GPRIM) para pintarla en la GPU. Devuelve 0 si
 # el socket se rompió. Responde siempre con PRIMS_ACK: 1 = pintado; 0 = el WM debe pintar en CPU.
 # El primer rechazo del kernel (GPU sin el kernel SASS) se recuerda y no se vuelve a intentar.
+# PRESENT_ACK: el WM espera esta respuesta tras cada FRAME/COMMIT. Es la señal de
+# vida del compositor; si no llega, el WM baja de camino en vez de colgarse.
+fn comp_responder_present(wm_fd: Int, st: Int, ok: Int) -> Int ! io, alloc
+    ack = st + comp_st_msg()
+    _e = msg_encode_comp_present_ack(ack, ok)
+    w = write_fd(wm_fd, ack, msg_len())
+    if w == msg_len()
+        1
+    else
+        0
+
 fn comp_prims_servir(wm_fd: Int, st: Int, msg: Int, pbuf: Int) -> Int ! io, alloc
     len = msg_get_u32(msg, 4)
     if len < comp_gprim_hdr_len()
@@ -75,10 +86,14 @@ fn comp_servir_wm(wm_fd: Int, compos: Int, clen: Int, st: Int, tab: Int, gbuf: I
                 h = msg_get_u32(msg, 16)
                 if w > 0
                     if h > 0
+                        pok = 0
                         if comp_st_get(st, comp_st_gpu_ok()) != 0
-                            _g = comp_gpu_present(st, compos, x, y, w, h)
+                            pok = comp_gpu_present(st, compos, x, y, w, h)
                         else
-                            _p = fb_present_rect(compos, clen, x, y, w, h)
+                            rp = fb_present_rect(compos, clen, x, y, w, h)
+                            if rp >= 0
+                                pok = 1
+                        _a = comp_responder_present(wm_fd, st, pok)
             else
                 if op == op_comp_bind()
                     _b = comp_escena_bind(st, tab, msg_get_u32(msg, 4), msg_get_u32(msg, 8), msg_get_u32(msg, 12), msg_get_u32(msg, 16), msg_get_u32(msg, 20))
@@ -94,7 +109,8 @@ fn comp_servir_wm(wm_fd: Int, compos: Int, clen: Int, st: Int, tab: Int, gbuf: I
                                 clr = 0
                                 if fl == comp_commit_clear_rt()
                                     clr = 1
-                                _c = comp_escena_commit(st, tab, gbuf, msg_get_u32(msg, 4), msg_get_u32(msg, 8), msg_get_u32(msg, 12), msg_get_u32(msg, 16), clr)
+                                cok = comp_escena_commit(st, tab, gbuf, msg_get_u32(msg, 4), msg_get_u32(msg, 8), msg_get_u32(msg, 12), msg_get_u32(msg, 16), clr)
+                                _a = comp_responder_present(wm_fd, st, cok)
                             else
                                 if op == op_comp_prims()
                                     seguir = comp_prims_servir(wm_fd, st, msg, pbuf)

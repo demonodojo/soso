@@ -161,6 +161,8 @@ struct Estado
     pw: Int
     ph: Int
     pfmt: Int
+    comp_fallos: Int
+    cli_atasco: Int
 
 init Estado(evt_buf: Int, msg_buf: Int) ! alloc
     Estado(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -169,7 +171,8 @@ init Estado(evt_buf: Int, msg_buf: Int) ! alloc
            Fuentes.new(), 0, 0, -1, -1, 0,
            bytes_ptr(bytes_new(wm_cursor_bak_len())), 0, 0, 0,
            -1, 0, 0, 0, esc_nueva(wm_escena_cap()), -1, -1, 0, 0, 0, 0,
-           bytes_ptr(bytes_new(prims_fondo_buf_len())), 0, 0, 0)
+           bytes_ptr(bytes_new(prims_fondo_buf_len())), 0, 0, 0, 0,
+           bytes_ptr(bytes_new(tab_cap() * 4)))
 
 fn wm_escena_cap() -> Int
     160
@@ -642,7 +645,7 @@ fn wm_broadcast_tema(st: &mut Estado) -> Int ! io, alloc
                     fd = st.tab.fd(i)
                     msg = st.msg_buf
                     _e = msg_encode_tema(msg, wm_tema_id(st))
-                    _w = write_fd(fd, msg, msg_len())
+                    _w = wm_cli_enviar(st, fd, msg)
         i = i + 1
     0
 
@@ -670,7 +673,7 @@ fn wm_enviar_escala_slot(st: &mut Estado, i: Int) -> Int ! io, alloc
             nv = wm_tab_escala(st, i)
             msg = st.msg_buf
             _e = msg_encode_escala(msg, nv, fuente_gw(nv), fuente_gh(nv))
-            _w = write_fd(fd, msg, msg_len())
+            _w = wm_cli_enviar(st, fd, msg)
     0
 
 fn wm_redim_todos_por_barra(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
@@ -1053,6 +1056,11 @@ fn wm_cerrar_indice(st: &mut Estado, i: Int) -> Int ! io, alloc
             if nn > 0
                 nfi = st.tab.z_get(nn - 1)
         st.focus = nfi
+        # La superficie de la ventana cerrada sigue con su última geometría en el
+        # compositor: sin ocultarla se queda pintada encima de todo hasta que el
+        # hueco se reutilice (una ventana fantasma que no se va).
+        if wm_comp_gpu_mode(st) != 0
+            _oh = wm_comp_send_geom(st, st.comp_fd, wm_surf_win(i), 0, 0, 0, 0, comp_geom_hidden(), 50)
         _rp = wm_pedir_repintar(st)
         if i == st.ss_slot
             _sr = wm_ss_reset(st)
@@ -1065,7 +1073,7 @@ fn wm_cerrar_pestana(st: &mut Estado, m: Int) -> Int ! io, alloc
         fd = st.tab.fd(m)
         msg = st.msg_buf
         _e = msg_set_op(msg, op_cerrar_wm())
-        _w = write_fd(fd, msg, msg_len())
+        _w = wm_cli_enviar(st, fd, msg)
     wm_cerrar_indice(st, m)
 
 # Cierra la ventana entera: primero las pestañas no cabecera, al final la cabecera.
@@ -1169,7 +1177,7 @@ fn wm_repintar_slot_vis(st: &mut Estado, i: Int, compos: Int, clen: Int, sw: Int
             _we = wm_comp_win_ensure(st, fd, i, stride)
             _wg = wm_comp_sync_win_geom(st, fd, i, zix)
             c = wm_comp_tgt(st, compos, wm_surf_win(i))
-            cl = ww * wh * 4
+            cl = wm_surf_len(stride, wh)
             px = 0
             py = 0
         if completo != 0
@@ -1241,7 +1249,7 @@ fn wm_compose(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride:
             st.comp_need_clear = 1
             if st.prims != 1
                 fondo_tgt = wm_comp_tgt(st, compos, wm_surf_fondo())
-                fondo_cl = sw * sh * 4
+                fondo_cl = wm_surf_len(stride, sh)
                 _fe = wm_surf_ensure(st, fd, wm_surf_fondo(), sw, sh, stride)
                 _pf = wm_pintar_fondo_gpu(st, fondo_tgt, fondo_cl, sw, sh, stride, bpp, fmt)
                 _gf = wm_comp_send_geom(st, fd, wm_surf_fondo(), 0, 0, sw, sh, comp_geom_opaque(), 0)
@@ -1253,7 +1261,7 @@ fn wm_compose(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride:
         bar_tgt = wm_comp_tgt(st, compos, wm_surf_bar())
         bar_cl = clen
         if gmode != 0
-            bar_cl = sw * bh * 4
+            bar_cl = wm_surf_len(stride, bh)
         _bar = wm_pintar_barra(st, bar_tgt, bar_cl, sw, sh, stride, bpp, fmt)
         if gmode != 0
             _bd = wm_comp_dmap_surf(st, fd, wm_surf_bar(), 0, 0, sw, bh, 0, 0)
@@ -1276,7 +1284,7 @@ fn wm_compose(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride:
             if st.menu != 0
                 mw = lanz_menu_ancho(gw, gh, tema)
                 mh = lanz_menu_alto(gh)
-                mcl = mw * mh * 4
+                mcl = wm_surf_len(stride, mh)
                 mt = wm_comp_tgt(st, compos, wm_surf_menu())
                 _ml = wm_pintar_menu_local(st, mt, mcl, stride, bpp, fmt, sw, sh)
                 mx0 = lanz_menu_x0(gw)
@@ -1292,7 +1300,7 @@ fn wm_compose(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride:
             else
                 mw2 = lanz_menu_ancho(gw, gh, tema)
                 mh2 = lanz_menu_alto(gh)
-                mcl = mw2 * mh2 * 4
+                mcl = wm_surf_len(stride, mh2)
                 mt = wm_comp_tgt(st, compos, wm_surf_menu())
                 _ml2 = wm_pintar_menu_local(st, mt, mcl, stride, bpp, fmt, sw, sh)
                 mx02 = lanz_menu_x0(gw)
@@ -1310,7 +1318,7 @@ fn wm_compose(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride:
         mx = st.mx
         my = st.my
         _cg = wm_comp_send_geom(st, fd, wm_surf_cursor(), mx, my, wm_cursor_w(), wm_cursor_h(), 0, 60)
-        _cur = wm_pintar_cursor_buf(st, cur_tgt, cur_cl, wm_cursor_w() * 4, bpp, fmt, 0, 0)
+        _cur = wm_pintar_cursor_buf(st, cur_tgt, cur_cl, wm_cursor_w(), bpp, fmt, 0, 0)
         _cd = wm_comp_dmap_surf(st, fd, wm_surf_cursor(), 0, 0, wm_cursor_w(), wm_cursor_h(), mx, my)
     _cm = wm_cursor_marcar(st, st.mx, st.my)
     0
@@ -1390,7 +1398,11 @@ fn wm_term_redimensionar_uno(st: &mut Estado, i: Int) -> Int ! io, alloc
             1
 
 fn wm_repintar_ventana(st: &mut Estado, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc, io
-    if st.tab.grupo_panel_activo(i) == i
+    # En GPU la ventana no vive en `compos` sino en su superficie, y quien la
+    # pinta y le manda geometría y z es el repintado completo.
+    if wm_comp_gpu_mode(st) != 0
+        wm_pedir_repintar(st)
+    elsif st.tab.grupo_panel_activo(i) == i
         wm_repintar_ventana_vis(st, i, compos, clen, sw, sh, stride, bpp, fmt)
     else
         wm_pedir_repintar(st)
@@ -1819,48 +1831,95 @@ fn wm_comp_tgt(st: &mut Estado, compos: Int, surf_id: Int) -> Int ! alloc
 fn wm_comp_send_bind(st: &mut Estado, fd: Int, id: Int, sid: Int, w: Int, h: Int, stride: Int) -> Int ! io, alloc
     m = st.msg_buf
     _e = msg_encode_comp_bind(m, id, sid, w, h, stride)
-    _w = write_fd(fd, m, msg_len())
+    _w = wm_comp_escribir(st, fd, m, msg_len())
     0
 
 fn wm_comp_send_geom(st: &mut Estado, fd: Int, id: Int, x: Int, y: Int, w: Int, h: Int, flags: Int, z: Int) -> Int ! io, alloc
     m = st.msg_buf
     _e = msg_encode_comp_geom(m, id, x, y, w, h, flags, z)
-    _w = write_fd(fd, m, msg_len())
+    _w = wm_comp_escribir(st, fd, m, msg_len())
     0
 
 fn wm_comp_send_dmap(st: &mut Estado, fd: Int, id: Int, x: Int, y: Int, w: Int, h: Int) -> Int ! io, alloc
     m = st.msg_buf
     _e = msg_encode_comp_dmap(m, id, x, y, w, h)
-    _w = write_fd(fd, m, msg_len())
+    _w = wm_comp_escribir(st, fd, m, msg_len())
     0
 
 fn wm_comp_send_commit(st: &mut Estado, fd: Int, x: Int, y: Int, w: Int, h: Int, flags: Int) -> Int ! io, alloc
     m = st.msg_buf
     _e = msg_encode_comp_commit(m, x, y, w, h, flags)
-    _w = write_fd(fd, m, msg_len())
+    _w = wm_comp_escribir(st, fd, m, msg_len())
     0
 
+# Una superficie ya creada NO se reutiliza si cambió de tamaño: maximizar o
+# redimensionar dejaba el búfer viejo con la geometría nueva y el WM pintaba
+# fuera de la memoria compartida (page fault). Se crea otra, se ata al mismo
+# id y sólo entonces se suelta la anterior.
 fn wm_surf_ensure(st: &mut Estado, fd: Int, surf_id: Int, w: Int, h: Int, stride: Int) -> Int ! io, alloc
     sid = st.surfs.get_sid(surf_id)
+    igual = 0
     if sid > 0
+        if st.surfs.get_w(surf_id) == w
+            if st.surfs.get_h(surf_id) == h
+                if st.surfs.get_stride(surf_id) == stride
+                    igual = 1
+    if igual != 0
         st.surfs.get_ptr(surf_id)
+    elsif sid > 0
+        wm_surf_rehacer(st, fd, surf_id, w, h, stride)
     else
-        clen = stride * h
-        nsid = shm_create(clen)
-        if nsid < 0
+        wm_surf_nueva(st, fd, surf_id, w, h, stride)
+
+# `stride` va en PÍXELES, como todo el pintado del WM. El pitch que ve el
+# compositor y el tamaño del SHM van en BYTES: con el stride en píxeles el
+# búfer se quedaba a la cuarta parte y el WM escribía fuera de la memoria
+# compartida en cuanto pintaba la primera ventana.
+fn wm_surf_pitch(stride_px: Int) -> Int
+    stride_px * 4
+
+fn wm_surf_len(stride_px: Int, h: Int) -> Int
+    wm_surf_pitch(stride_px) * h
+
+fn wm_surf_nueva(st: &mut Estado, fd: Int, surf_id: Int, w: Int, h: Int, stride: Int) -> Int ! io, alloc
+    clen = wm_surf_len(stride, h)
+    nsid = shm_create(clen)
+    if nsid < 0
+        0
+    else
+        ptr = shm_map(nsid)
+        if ptr < 0
             0
         else
-            ptr = shm_map(nsid)
-            if ptr < 0
-                0
-            else
-                _a = st.surfs.set_sid(surf_id, nsid)
-                _a = st.surfs.set_ptr(surf_id, ptr)
-                _a = st.surfs.set_w(surf_id, w)
-                _a = st.surfs.set_h(surf_id, h)
-                _a = st.surfs.set_stride(surf_id, stride)
-                _b = wm_comp_send_bind(st, fd, surf_id, nsid, w, h, stride)
-                ptr
+            _a = st.surfs.set_sid(surf_id, nsid)
+            _a = st.surfs.set_ptr(surf_id, ptr)
+            _a = st.surfs.set_w(surf_id, w)
+            _a = st.surfs.set_h(surf_id, h)
+            _a = st.surfs.set_stride(surf_id, stride)
+            _b = wm_comp_send_bind(st, fd, surf_id, nsid, w, h, wm_surf_pitch(stride))
+            ptr
+
+fn wm_surf_rehacer(st: &mut Estado, fd: Int, surf_id: Int, w: Int, h: Int, stride: Int) -> Int ! io, alloc
+    viejo = st.surfs.get_sid(surf_id)
+    clen = wm_surf_len(stride, h)
+    nsid = shm_create(clen)
+    if nsid < 0
+        st.surfs.get_ptr(surf_id)
+    else
+        ptr = shm_map(nsid)
+        if ptr < 0
+            _f = shm_free(nsid)
+            st.surfs.get_ptr(surf_id)
+        else
+            _a = st.surfs.set_sid(surf_id, nsid)
+            _a = st.surfs.set_ptr(surf_id, ptr)
+            _a = st.surfs.set_w(surf_id, w)
+            _a = st.surfs.set_h(surf_id, h)
+            _a = st.surfs.set_stride(surf_id, stride)
+            _b = wm_comp_send_bind(st, fd, surf_id, nsid, w, h, wm_surf_pitch(stride))
+            if viejo > 0
+                _o = shm_free(viejo)
+            ptr
 
 fn wm_comp_gpu_init(st: &mut Estado, fd: Int, sw: Int, sh: Int, stride: Int) -> Int ! io, alloc
     if wm_comp_gpu_mode(st) == 0
@@ -1870,21 +1929,31 @@ fn wm_comp_gpu_init(st: &mut Estado, fd: Int, sw: Int, sh: Int, stride: Int) -> 
         gh = wm_gh_wm(st)
         tema = wm_tema_id(st)
         bh = wm_bar_h(st)
-        _fon = wm_surf_ensure(st, fd, wm_surf_fondo(), sw, sh, stride)
-        _bar = wm_surf_ensure(st, fd, wm_surf_bar(), sw, bh, stride)
+        fon = wm_surf_ensure(st, fd, wm_surf_fondo(), sw, sh, stride)
+        bar = wm_surf_ensure(st, fd, wm_surf_bar(), sw, bh, stride)
         mw = lanz_menu_ancho(gw, gh, tema)
         mh = lanz_menu_alto(gh)
-        _men = wm_surf_ensure(st, fd, wm_surf_menu(), mw, mh, stride)
+        men = wm_surf_ensure(st, fd, wm_surf_menu(), mw, mh, stride)
         cw = wm_cursor_w()
         ch = wm_cursor_h()
-        cstride = cw * 4
-        _cur = wm_surf_ensure(st, fd, wm_surf_cursor(), cw, ch, cstride)
-        _gf = wm_comp_send_geom(st, fd, wm_surf_fondo(), 0, 0, sw, sh, comp_geom_opaque(), 0)
-        _g0 = wm_comp_send_geom(st, fd, wm_surf_bar(), 0, 0, sw, bh, comp_geom_opaque(), 5)
-        _g1 = wm_comp_send_geom(st, fd, wm_surf_menu(), 0, 0, 0, 0, comp_geom_hidden(), 50)
-        _g2 = wm_comp_send_geom(st, fd, wm_surf_cursor(), 0, 0, cw, ch, 0, 60)
-        st.comp_need_clear = 1
-        1
+        cur = wm_surf_ensure(st, fd, wm_surf_cursor(), cw, ch, cw)
+        # Sin las cuatro superficies no hay escena GPU: el llamante baja a CPU
+        # sobre el compositor en vez de quedarse con una pantalla que no pinta.
+        if fon <= 0
+            0
+        elsif bar <= 0
+            0
+        elsif men <= 0
+            0
+        elsif cur <= 0
+            0
+        else
+            _gf = wm_comp_send_geom(st, fd, wm_surf_fondo(), 0, 0, sw, sh, comp_geom_opaque(), 0)
+            _g0 = wm_comp_send_geom(st, fd, wm_surf_bar(), 0, 0, sw, bh, comp_geom_opaque(), 5)
+            _g1 = wm_comp_send_geom(st, fd, wm_surf_menu(), 0, 0, 0, 0, comp_geom_hidden(), 50)
+            _g2 = wm_comp_send_geom(st, fd, wm_surf_cursor(), 0, 0, cw, ch, 0, 60)
+            st.comp_need_clear = 1
+            1
 
 fn wm_comp_dmap_surf(st: &mut Estado, fd: Int, surf_id: Int, x0: Int, y0: Int, x1: Int, y1: Int, gx: Int, gy: Int) -> Int ! io, alloc
     if x1 > x0
@@ -1922,17 +1991,103 @@ fn wm_prims_fondo(st: &mut Estado, fd: Int, x0: Int, y0: Int, x1: Int, y1: Int) 
         total = prims_fondo_comando(buf, st.pfmt, x0, ya, x1 - x0, y1 - ya, bh, st.pw, st.ph, tema_fondo_arriba(tema), tema_fondo_abajo(tema))
         m = st.msg_buf
         _e = msg_encode_comp_prims(m, total, x0, ya, x1 - x0, y1 - ya, comp_gprim_flag_no_present())
-        w1 = write_fd(fd, m, msg_len())
-        w2 = write_fd(fd, buf, total)
+        w1 = wm_comp_escribir(st, fd, m, msg_len())
+        w2 = 0
+        if w1 == msg_len()
+            w2 = wm_comp_escribir(st, fd, buf, total)
         r = 0
         if w1 == msg_len()
             if w2 == total
-                n = read_timeout_fd(fd, m, msg_len(), 500)
-                if n == msg_len()
-                    if msg_get_op(m) == op_comp_prims_ack()
-                        if msg_get_u32(m, 4) != 0
-                            r = 1
+                if wm_comp_esperar(st, fd, op_comp_prims_ack(), 500) > 0
+                    r = 1
         r
+
+# Espera la respuesta `op` del compositor y devuelve su valor (u32 en +4), o -1
+# si no llega a tiempo. Descarta por el camino las respuestas de otro tipo: una
+# que llegó tarde a su espera (PRIMS_ACK tras su plazo) desalineaba todas las
+# siguientes y cada fotograma contaba como fallo.
+fn wm_comp_esperar(st: &mut Estado, fd: Int, op: Int, plazo: Int) -> Int ! io, alloc
+    m = st.msg_buf
+    r = -1
+    vueltas = 0
+    while vueltas < 4
+        n = read_timeout_fd(fd, m, msg_len(), plazo)
+        if n != msg_len()
+            vueltas = 4
+        elsif msg_get_op(m) == op
+            r = msg_get_u32(m, 4)
+            vueltas = 4
+        else
+            vueltas = vueltas + 1
+    r
+
+# PRESENT_ACK: si el compositor no contesta a tiempo, el WM no se queda
+# esperando ni pintando a un socket muerto; baja de camino (ver wm_comp_bajar).
+# Un ACK con 0 (el compositor no pudo presentar) también es un fallo: si la GPU
+# no presenta, la pantalla se queda congelada aunque el compositor conteste.
+fn wm_comp_ack_ok(st: &mut Estado, fd: Int) -> Int ! io, alloc
+    if fd != st.comp_fd
+        1
+    elsif wm_comp_esperar(st, fd, op_comp_present_ack(), comp_ack_plazo_ms()) > 0
+        1
+    else
+        0
+
+# Escribir al compositor con plazo: uno colgado no puede dejar al WM esperando
+# 30 s en un `write` (el vigilante lo mataría a los 5). Si no cabe, cuenta como
+# un fallo más; medio mensaje escrito parte el flujo y lo suelta sin más.
+fn wm_comp_plazo_escritura_ms() -> Int
+    200
+
+fn wm_comp_escribir(st: &mut Estado, fd: Int, buf: Int, len: Int) -> Int ! io, alloc
+    if fd < 0
+        -1
+    elsif fd != st.comp_fd
+        # Ya se soltó en este mismo tick: no se espera a un fd cerrado.
+        -1
+    else
+        w = write_timeout_fd(fd, buf, len, wm_comp_plazo_escritura_ms())
+        if w == len
+            w
+        elsif w > 0
+            st.comp_gpu_ok = 0
+            _b = wm_comp_bajar(st)
+            w
+        else
+            _f = wm_comp_fallo(st)
+            w
+
+fn wm_comp_fallo(st: &mut Estado) -> Int ! io, alloc
+    st.comp_fallos = st.comp_fallos + 1
+    if st.comp_fallos >= comp_fallos_max()
+        wm_comp_bajar(st)
+    else
+        0
+
+# GPU → CPU sobre el compositor → sin compositor. Limpia el daño para no
+# presentar en este mismo tick el búfer que todavía no se ha repintado.
+fn wm_comp_bajar(st: &mut Estado) -> Int ! io, alloc
+    paso = comp_bajar_camino(wm_comp_gpu_mode(st))
+    st.comp_fallos = 0
+    st.fondo = 0
+    st.bak_ok = 0
+    st.repintar = 1
+    st.comp_need_clear = 0
+    st.dx0 = 0
+    st.dy0 = 0
+    st.dx1 = 0
+    st.dy1 = 0
+    if paso == 1
+        st.comp_gpu_ok = 0
+        st.prims = 2
+        _lm = print_str(d"soso-wm: el compositor no presentó; sigo con CPU sobre él\n")
+    if paso == 2
+        fd = st.comp_fd
+        if fd >= 0
+            _c = close_fd(fd)
+        st.comp_fd = -1
+        _lm2 = print_str(d"soso-wm: sin compositor; presento yo con el framebuffer\n")
+    0
 
 fn wm_comp_flush_scene(st: &mut Estado) -> Int ! io, alloc
     fd = st.comp_fd
@@ -1970,6 +2125,8 @@ fn wm_comp_flush_scene(st: &mut Estado) -> Int ! io, alloc
                 st.dy0 = 0
                 st.dx1 = 0
                 st.dy1 = 0
+                if wm_comp_ack_ok(st, fd) == 0
+                    _fa = wm_comp_fallo(st)
                 0
         0
     0
@@ -2028,7 +2185,10 @@ fn wm_comp_ensure(st: &mut Estado, sw: Int, sh: Int, stride: Int, sin_comp: Int)
         ptr = wm_comp_attach(st, sw, sh)
         if ptr >= 0
             fd = st.comp_fd
-            _i = wm_comp_gpu_init(st, fd, sw, sh, stride)
+            gi = wm_comp_gpu_init(st, fd, sw, sh, stride)
+            if gi == 0
+                if st.comp_gpu_ok != 0
+                    st.comp_gpu_ok = 0
             ptr
         else
             if ptr == -2
@@ -2045,7 +2205,10 @@ fn wm_comp_ensure(st: &mut Estado, sw: Int, sh: Int, stride: Int, sin_comp: Int)
                         ptr = wm_comp_attach(st, sw, sh)
                         if ptr >= 0
                             fd = st.comp_fd
-                            _i = wm_comp_gpu_init(st, fd, sw, sh, stride)
+                            gi = wm_comp_gpu_init(st, fd, sw, sh, stride)
+                            if gi == 0
+                                if st.comp_gpu_ok != 0
+                                    st.comp_gpu_ok = 0
                             res = ptr
                             done = 1
                         if ptr == -2
@@ -2078,11 +2241,13 @@ fn wm_comp_flush(st: &mut Estado, compos: Int, clen: Int) -> Int ! io, alloc
                 if y1 > y0
                     m = st.msg_buf
                     _e = msg_encode_comp_frame(m, x0, y0, x1 - x0, y1 - y0)
-                    _w = write_fd(fd, m, msg_len())
+                    _w = wm_comp_escribir(st, fd, m, msg_len())
                     st.dx0 = 0
                     st.dy0 = 0
                     st.dx1 = 0
                     st.dy1 = 0
+                    if wm_comp_ack_ok(st, fd) == 0
+                        _fa = wm_comp_fallo(st)
     0
 
 fn wm_flush_dirty(st: &mut Estado, compos: Int, clen: Int) -> Int ! io, alloc
@@ -2103,12 +2268,12 @@ fn wm_cerrar_cliente(st: &mut Estado) -> Int ! io, alloc
 fn wm_enviar_ventana(st: &mut Estado, fd: Int, id: Int, shm: Int, cw: Int, ch: Int, fmt: Int) -> Int ! io, alloc
     m = msg_nuevo()
     _e = msg_encode_ventana(m, id, shm, cw, ch, fmt, wm_tema_id(st), wm_escala_apps(st))
-    write_fd(fd, m, msg_len())
+    wm_cli_enviar(st, fd, m)
 
-fn wm_enviar_foco(fd: Int) -> Int ! io, alloc
+fn wm_enviar_foco(st: &mut Estado, fd: Int) -> Int ! io, alloc
     m = msg_nuevo()
     _e = msg_set_op(m, op_foco())
-    write_fd(fd, m, msg_len())
+    wm_cli_enviar(st, fd, m)
 
 fn wm_cliente_cw(ww: Int) -> Int
     c = ww - 8
@@ -2159,7 +2324,7 @@ fn wm_redim_slot_uno(st: &mut Estado, i: Int, fmt: Int, compos: Int, clen: Int, 
                     old = st.tab.shm_id(i)
                     msg = st.msg_buf
                     _e = msg_encode_redim(msg, cw, ch, sid)
-                    _w = write_fd(fd, msg, msg_len())
+                    _w = wm_cli_enviar(st, fd, msg)
                     if old > 0
                         _f = shm_free(old)
                     _a = st.tab.set_shm_id(i, sid)
@@ -2206,7 +2371,7 @@ fn wm_on_crear(st: &mut Estado, fd: Int, msg: Int, fmt: Int, sw: Int, sh: Int) -
 fn wm_on_crear_repintar(st: &mut Estado, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     fd = st.cli_fd
     _r = wm_repintar_ventana(st, i, compos, clen, sw, sh, stride, bpp, fmt)
-    _f = wm_enviar_foco(fd)
+    _f = wm_enviar_foco(st, fd)
     0
 
 fn wm_on_danio(st: &mut Estado, i: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int, msg: Int) -> Int ! io, alloc
@@ -2227,7 +2392,25 @@ fn wm_on_danio_vis(st: &mut Estado, i: Int, compos: Int, clen: Int, stride: Int,
         ch = st.ch
         shm = st.shm_ptr
         slen = cw * ch * 4
-        if wm_es_ss(st, i) == 0
+        if wm_comp_gpu_mode(st) != 0
+            # En GPU el daño tiene que ir a la superficie de la ventana y subir
+            # con DMA; pintarlo en `compos` dejaba la ventana congelada porque
+            # el compositor sólo dibuja sus superficies.
+            bh = wm_bar_h(st)
+            ww = st.tab.ww(i)
+            wh = st.tab.wh(i)
+            fd = st.comp_fd
+            _we = wm_comp_win_ensure(st, fd, i, stride)
+            tgt = wm_comp_tgt(st, compos, wm_surf_win(i))
+            tl = wm_surf_len(stride, wh)
+            ox = 4
+            oy = bh
+            if wm_es_ss(st, i) != 0
+                ox = 0
+                oy = 0
+            _b = copiar_rect(tgt, tl, stride, shm, slen, cw, bpp, fmt, ox + dx, oy + dy, dx, dy, dw, dh)
+            _dm = wm_comp_dmap_surf(st, fd, wm_surf_win(i), ox + dx, oy + dy, ox + dx + dw, oy + dy + dh, wx + ox + dx, wy + oy + dy)
+        elsif wm_es_ss(st, i) == 0
             _b = wm_blit_cliente(st, compos, clen, stride, bpp, fmt, wx, wy, cw, ch, shm, slen, dx, dy, dw, dh)
             _d = wm_marcar_dirty(st, wx + dx, wy + wm_bar_h(st) + dy, wx + dx + dw, wy + wm_bar_h(st) + dy + dh)
         else
@@ -2280,7 +2463,7 @@ fn wm_dispatch_msg(st: &mut Estado, i: Int, compos: Int, clen: Int, stride: Int,
                     # Entra como pestaña: toma el tamaño de la ventana, no el que pidió.
                     _ig = wm_integrar(st, i, tg)
                     _rs = wm_redim_slot_uno(st, i, fmt, compos, clen, sw, sh, stride, bpp)
-                    _fo = wm_enviar_foco(fd)
+                    _fo = wm_enviar_foco(st, fd)
                 elsif wm_es_ss(st, i) == 0
                     _r = wm_on_crear_repintar(st, i, compos, clen, sw, sh, stride, bpp, fmt)
                 if wm_es_ss(st, i) != 0
@@ -2343,7 +2526,7 @@ fn wm_reenviar_raton_slot(st: &mut Estado, i0: Int, x: Int, y: Int, botones: Int
                             fd = st.tab.fd(i)
                             msg = st.msg_buf
                             _e = msg_encode_raton(msg, lx, ly, botones)
-                            _w = write_fd(fd, msg, msg_len())
+                            _w = wm_cli_enviar(st, fd, msg)
     0
 
 # Maximiza o restaura. Maximizada ocupa todo salvo la barra superior; la geometría
@@ -2943,7 +3126,7 @@ fn wm_reenviar_tecla(st: &mut Estado, key: Int, mods: Int) -> Int ! io, alloc
         fd = st.cli_fd
         msg = st.msg_buf
         _e = msg_encode_tecla(msg, key, mods)
-        _w = write_fd(fd, msg, msg_len())
+        _w = wm_cli_enviar(st, fd, msg)
     0
 
 fn wm_tecla_foco(st: &mut Estado, key: Int) -> Int ! io, alloc
@@ -2961,7 +3144,7 @@ fn wm_tecla_foco(st: &mut Estado, key: Int) -> Int ! io, alloc
             _s = st.cargar_panel(fi)
             msg = st.msg_buf
             _e = msg_encode_tecla(msg, key, 0)
-            _w = write_fd(st.cli_fd, msg, msg_len())
+            _w = wm_cli_enviar(st, st.cli_fd, msg)
             _t = st.guardar_panel(fi)
     0
 
@@ -3153,7 +3336,7 @@ fn wm_activar_pestana(st: &mut Estado, h: Int, k: Int) -> Int ! io, alloc
     if m >= 0
         _g = st.tab.grupo_activar(m)
         if st.tab.tipo(m) == tab_tipo_cli()
-            _f = wm_enviar_foco(st.tab.fd(m))
+            _f = wm_enviar_foco(st, st.tab.fd(m))
         _rp = wm_pedir_repintar(st)
     0
 
@@ -3362,11 +3545,82 @@ fn wm_slot_atender(st: &mut Estado, i: Int, compos: Int, clen: Int, stride: Int,
         if st.tab.tipo(i) == tab_tipo_term()
             _t = wm_slot_atender_term(st, i, compos, clen, stride, bpp, fmt)
         if st.tab.tipo(i) == tab_tipo_cli()
-            _a = wm_atender_cliente_tab(st, i, compos, clen, stride, bpp, fmt, sw, sh)
-            if st.tab.fase(i) == 0
-                if st.tab.fd(i) <= 0
-                    _c = wm_cerrar_indice(st, i)
+            if wm_cli_hay_que_cortar(st, i) != 0
+                _l = write_str_fd(3, d"soso-wm: cliente atascado, lo desconecto\n")
+                _m = wm_cli_marcar(st, i, 0)
+                _x = wm_cerrar_indice(st, i)
+            else
+                _a = wm_atender_cliente_tab(st, i, compos, clen, stride, bpp, fmt, sw, sh)
+                if st.tab.fase(i) == 0
+                    if st.tab.fd(i) <= 0
+                        _c = wm_cerrar_indice(st, i)
     0
+
+# ---- envío a clientes sin colgarse -------------------------------------------
+# Un `write` normal a un cliente que no lee (colgado, parado con Ctrl-Z) se
+# queda esperando hasta 30 s en cuanto su socket se llena, y el vigilante del
+# kernel mata al escritorio entero a los 5 s. Cada envío espera como mucho
+# `wm_cli_plazo_ms`; si no cabe, el mensaje se descarta y el cliente queda
+# atascado: mientras lo esté no se le espera, y si sigue así
+# `wm_cli_atasco_max_ms` se le desconecta. Las terminales no pasan por aquí:
+# escribir en un PTY no bloquea.
+
+fn wm_cli_plazo_ms() -> Int
+    5
+
+fn wm_cli_atasco_max_ms() -> Int
+    3000
+
+# Marca por ranura (u32): 0 = al día; 1 = mensaje partido, hay que cortar ya;
+# si no, centésimas de segundo (+2) desde que no cabe nada.
+fn wm_cli_atasco(st: &mut Estado, i: Int) -> Int ! alloc
+    msg_get_u32(st.cli_atasco, i * 4)
+
+fn wm_cli_marcar(st: &mut Estado, i: Int, v: Int) -> Int ! alloc
+    msg_set_u32(st.cli_atasco, i * 4, v)
+
+fn wm_cli_ahora() -> Int ! io
+    uptime_ms() / 10 + 2
+
+fn wm_cli_slot_de_fd(st: &mut Estado, fd: Int) -> Int
+    r = -1
+    i = 0
+    while i < tab_cap()
+        if r < 0
+            if st.tab.slot_activo(i) != 0
+                if st.tab.tipo(i) == tab_tipo_cli()
+                    if st.tab.fd(i) == fd
+                        r = i
+        i = i + 1
+    r
+
+fn wm_cli_enviar(st: &mut Estado, fd: Int, m: Int) -> Int ! io, alloc
+    i = wm_cli_slot_de_fd(st, fd)
+    plazo = wm_cli_plazo_ms()
+    if i >= 0
+        if wm_cli_atasco(st, i) != 0
+            plazo = 0
+    w = write_timeout_fd(fd, m, msg_len(), plazo)
+    if i >= 0
+        if w == msg_len()
+            _a = wm_cli_marcar(st, i, 0)
+        elsif w > 0
+            # Medio mensaje en el socket: el resto del flujo ya no se entiende.
+            _b = wm_cli_marcar(st, i, 1)
+        elsif wm_cli_atasco(st, i) == 0
+            _c = wm_cli_marcar(st, i, wm_cli_ahora())
+    w
+
+fn wm_cli_hay_que_cortar(st: &mut Estado, i: Int) -> Int ! io, alloc
+    a = wm_cli_atasco(st, i)
+    if a == 0
+        0
+    elsif a == 1
+        1
+    elsif (wm_cli_ahora() - a) * 10 >= wm_cli_atasco_max_ms()
+        1
+    else
+        0
 
 fn wm_aceptar_cliente(st: &mut Estado, acc: Int) -> Int ! io, alloc
     si = st.tab.buscar_libre()
@@ -3374,6 +3628,7 @@ fn wm_aceptar_cliente(st: &mut Estado, acc: Int) -> Int ! io, alloc
     if si < 0
         _x = close_fd(acc)
     if si >= 0
+        _m = wm_cli_marcar(st, si, 0)
         _a = st.tab.set_tipo(si, tab_tipo_cli())
         _a = st.tab.set_fd(si, acc)
         _a = st.tab.set_fase(si, 0)
@@ -3483,7 +3738,7 @@ fn wm_sync_visibilidad(st: &mut Estado) -> Int ! io, alloc
                         if enviar != 0
                             m = msg_nuevo()
                             _e = msg_encode_visible(m, vis)
-                            _w = write_fd(st.tab.fd(i), m, msg_len())
+                            _w = wm_cli_enviar(st, st.tab.fd(i), m)
             if st.tab.grupo_panel_activo(st.tab.grupo_cab(i)) == i
                 if st.tab.pend(i) != 0
                     _a = st.tab.set_pend(i, 0)
@@ -3496,6 +3751,10 @@ fn wm_sync_visibilidad(st: &mut Estado) -> Int ! io, alloc
 # sólo su grupo y recupera la consola. El tick normal son 10 ms.
 fn wm_keepalive_ms() -> Int
     5000
+
+# El del arranque, hasta el primer tick (ver `bucle_grafico`).
+fn wm_keepalive_arranque_ms() -> Int
+    20000
 
 fn wm_tick(st: &mut Estado, listener: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     _ka = fb_keepalive(wm_keepalive_ms())

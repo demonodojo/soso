@@ -8,15 +8,15 @@ use soso_abi::ABI_VERSION;
 use soso_pkg_core::comandos::reconstruir;
 use soso_pkg_core::empaquetar;
 
-pub const SOSO_WEB_VERSION: &str = "1.0.1";
+pub const SOSO_WEB_VERSION: &str = "1.0.2";
 const SOSO_WEB_NOMBRE: &str = "soso-web";
 pub const OPENCODE_SAL_VERSION: &str = "1.0.0";
 const OPENCODE_SAL_NOMBRE: &str = "opencode-sal";
 pub const SOSO_ED_VERSION: &str = "0.1.1";
 /// Cliente de actualizaciones OTA, instalable/actualizable sin cambiar kernel ni rootfs.
-pub const SOSO_UPDATE_PACKAGE_VERSION: &str = "0.1.1";
-pub const SOSO_PKG_VERSION: &str = "0.4.1";
-pub const SOSO_WM_VERSION: &str = "0.1.1";
+pub const SOSO_UPDATE_PACKAGE_VERSION: &str = "0.1.2";
+pub const SOSO_PKG_VERSION: &str = "0.4.2";
+pub const SOSO_WM_VERSION: &str = "0.1.2";
 /// Editor vi escrito en Sal (repositorio hermano `../salvi`).
 pub const SALVI_VERSION: &str = "0.1.0";
 const SALVI_NOMBRE: &str = "salvi";

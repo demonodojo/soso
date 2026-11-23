@@ -800,8 +800,8 @@ method Tabla.cerrar_slot(&mut self, i: Int) -> Int ! io, alloc
 
 # ---- Z-order -----------------------------------------------------------------
 
-method Tabla.z_get(&mut self, k: Int) -> Int
-    list_get(&mut self.z, k)
+method Tabla.z_get(&self, k: Int) -> Int
+    list_get(&self.z, k)
 
 method Tabla.z_set(&mut self, k: Int, v: Int) -> Int
     list_set(&mut self.z, k, v)

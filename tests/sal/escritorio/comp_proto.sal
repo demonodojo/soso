@@ -41,4 +41,18 @@ fn main() -> Int ! alloc
                                     if msg_get_op(m) != 38
                                         11
                                     else
-                                        0
+                                        _pa = msg_encode_comp_present_ack(m, 1)
+                                        if msg_get_op(m) != 39
+                                            12
+                                        elsif msg_get_u32(m, 4) != 1
+                                            13
+                                        elsif comp_bajar_camino(1) != 1
+                                            14
+                                        elsif comp_bajar_camino(0) != 2
+                                            15
+                                        elsif comp_fallos_max() < 2
+                                            16
+                                        elsif comp_ack_plazo_ms() < 100
+                                            17
+                                        else
+                                            0
