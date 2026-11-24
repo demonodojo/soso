@@ -1,7 +1,7 @@
 //! HTTPS para índice y paquetes.
 
 use alloc::vec::Vec;
-use libsoso::{println, sys};
+use libsoso::{logln, sys};
 use soso_abi::SockAddr;
 use soso_http::TcpTransport;
 
@@ -61,16 +61,16 @@ fn map_http_err(e: soso_http::HttpError) -> &'static str {
         soso_http::HttpError::Clock => "reloj",
         soso_http::HttpError::Dns => "DNS",
         soso_http::HttpError::Tls(motivo) => {
-            println!("  red: TLS — {motivo}");
+            logln!("  red: TLS — {motivo}");
             "TLS"
         }
         soso_http::HttpError::Parse => "HTTP",
         soso_http::HttpError::ParseDetail(d) => {
-            println!("  red: HTTP — {d}");
+            logln!("  red: HTTP — {d}");
             "HTTP"
         }
         soso_http::HttpError::Io(donde) => {
-            println!("  red: E/S — {donde}");
+            logln!("  red: E/S — {donde}");
             "red"
         }
     }

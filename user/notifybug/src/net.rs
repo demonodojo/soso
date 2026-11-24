@@ -1,6 +1,6 @@
 //! HTTPS (POST a la API de GitHub).
 
-use libsoso::{abi, println, sys};
+use libsoso::{abi, logln, sys};
 use soso_abi::SockAddr;
 use soso_http::{FullResponse, HttpError, TcpTransport};
 
@@ -54,7 +54,7 @@ impl TcpTransport for Net {
     }
 
     fn log_red(&self, msg: &str) {
-        println!("  red: handshake TLS — {msg}");
+        logln!("  red: handshake TLS — {msg}");
     }
 }
 
@@ -69,16 +69,16 @@ pub fn map_http_err(e: HttpError) -> &'static str {
         HttpError::Clock => "reloj del sistema no utilizable (TLS)",
         HttpError::Dns => "no pude resolver api.github.com",
         HttpError::Tls(motivo) => {
-            println!("  red: TLS falló — {motivo}");
+            logln!("  red: TLS falló — {motivo}");
             "TLS"
         }
         HttpError::Parse => "HTTP rechazado o redirección (notifybug no sigue redirects)",
         HttpError::ParseDetail(detail) => {
-            println!("  red: HTTP parse — {detail}");
+            logln!("  red: HTTP parse — {detail}");
             "HTTP parse"
         }
         HttpError::Io(donde) => {
-            println!("  red: E/S falló — {donde}");
+            logln!("  red: E/S falló — {donde}");
             "red"
         }
     }

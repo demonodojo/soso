@@ -163,6 +163,13 @@ struct Estado
     pfmt: Int
     comp_fallos: Int
     cli_atasco: Int
+    # Daño por región (ver `wm_danar`): hasta `wm_reg_max()` rectángulos en
+    # `reg_buf`, y el búfer auxiliar donde se pinta cada uno.
+    reg_n: Int
+    reg_buf: Int
+    scr_ptr: Int
+    scr_cap: Int
+    ctx_sel: Int
 
 init Estado(evt_buf: Int, msg_buf: Int) ! alloc
     Estado(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -172,7 +179,8 @@ init Estado(evt_buf: Int, msg_buf: Int) ! alloc
            bytes_ptr(bytes_new(wm_cursor_bak_len())), 0, 0, 0,
            -1, 0, 0, 0, esc_nueva(wm_escena_cap()), -1, -1, 0, 0, 0, 0,
            bytes_ptr(bytes_new(prims_fondo_buf_len())), 0, 0, 0, 0,
-           bytes_ptr(bytes_new(tab_cap() * 4)))
+           bytes_ptr(bytes_new(tab_cap() * 4)),
+           0, bytes_ptr(bytes_new(wm_reg_max() * 32)), 0, 0, -1)
 
 fn wm_escena_cap() -> Int
     160
@@ -255,6 +263,293 @@ fn wm_pedir_repintar(st: &mut Estado) -> Int ! alloc
     st.repintar = 1
     st.bak_ok = 0
     0
+
+# Ranura de un valor de hover (`ranura * escala + zona`; 0 = ninguno), o -1.
+fn wm_hover_ranura(v: Int, escala: Int) -> Int
+    if v <= 0
+        -1
+    else
+        v / escala
+
+# ---------------------------------------------------------------------------
+# Daño por región
+#
+# Como los compositores actuales (wlroots, KWin, Mutter): quien cambia algo
+# declara qué rectángulo de pantalla ha quedado mal («daño») en vez de pedir el
+# repintado entero, y el fotograma recompone sólo esos rectángulos —fondo,
+# barra y ventanas en orden z, recortados— y vuelca sólo eso. Muchos
+# rectángulos pequeños cuestan más que uno que los envuelva («queso suizo»):
+# se guardan como mucho `wm_reg_max()`, fundiendo los que se tocan, y si el
+# daño pasa de media pantalla sale más barato el repintado completo.
+#
+# Cada región se pinta en un búfer auxiliar cuyo `stride` es el ancho de la
+# región: todos los pintores recortan ya contra `stride` y la longitud del
+# búfer, así que el texto, las sombras y las esquinas no se salen, y las
+# mezclas con alfa caen sobre un fondo recién pintado. Después se copia a
+# `compos`. Sólo CPU: con el compositor GPU se repinta todo como antes.
+# ---------------------------------------------------------------------------
+
+fn wm_reg_max() -> Int
+    4
+
+fn wm_reg_get(st: &mut Estado, k: Int, c: Int) -> Int ! alloc
+    bytes_get_i64(bytes_view_mem(st.reg_buf, wm_reg_max() * 32), k * 32 + c * 8)
+
+fn wm_reg_set(st: &mut Estado, k: Int, x0: Int, y0: Int, x1: Int, y1: Int) -> Int ! alloc
+    b = bytes_view_mem(st.reg_buf, wm_reg_max() * 32)
+    _a = bytes_set_i64(b, k * 32, x0)
+    _b = bytes_set_i64(b, k * 32 + 8, y0)
+    _c = bytes_set_i64(b, k * 32 + 16, x1)
+    _d = bytes_set_i64(b, k * 32 + 24, y1)
+    0
+
+fn wm_reg_area(st: &mut Estado, k: Int) -> Int ! alloc
+    (wm_reg_get(st, k, 2) - wm_reg_get(st, k, 0)) * (wm_reg_get(st, k, 3) - wm_reg_get(st, k, 1))
+
+# Área del rectángulo que envuelve la región `k` y el rectángulo dado.
+fn wm_reg_area_union(st: &mut Estado, k: Int, x0: Int, y0: Int, x1: Int, y1: Int) -> Int ! alloc
+    (max(x1, wm_reg_get(st, k, 2)) - min(x0, wm_reg_get(st, k, 0))) * (max(y1, wm_reg_get(st, k, 3)) - min(y0, wm_reg_get(st, k, 1)))
+
+fn wm_reg_fundir(st: &mut Estado, k: Int, x0: Int, y0: Int, x1: Int, y1: Int) -> Int ! alloc
+    wm_reg_set(st, k, min(x0, wm_reg_get(st, k, 0)), min(y0, wm_reg_get(st, k, 1)), max(x1, wm_reg_get(st, k, 2)), max(y1, wm_reg_get(st, k, 3)))
+
+fn wm_rects_cortan(ax0: Int, ay0: Int, ax1: Int, ay1: Int, bx0: Int, by0: Int, bx1: Int, by1: Int) -> Int
+    if ax0 >= bx1
+        0
+    elsif bx0 >= ax1
+        0
+    elsif ay0 >= by1
+        0
+    elsif by0 >= ay1
+        0
+    else
+        1
+
+# Declara dañado el rectángulo de pantalla `x0,y0`–`x1,y1`.
+fn wm_danar(st: &mut Estado, x0: Int, y0: Int, x1: Int, y1: Int) -> Int ! alloc
+    sw = st.pw
+    sh = st.ph
+    if st.repintar != 0
+        0
+    elsif wm_comp_gpu_mode(st) != 0
+        wm_pedir_repintar(st)
+    elsif sw <= 0
+        wm_pedir_repintar(st)
+    elsif st.ss_slot >= 0
+        wm_pedir_repintar(st)
+    else
+        ax0 = max(0, x0)
+        ay0 = max(0, y0)
+        ax1 = min(sw, x1)
+        ay1 = min(sh, y1)
+        bh = wm_bar_h(st)
+        # La barra se pinta a coordenadas absolutas: una región que la toca se
+        # amplía a la franja entera de arriba, que se pinta sin trasladar.
+        if ay0 < bh
+            ax0 = 0
+            ay0 = 0
+            ax1 = sw
+            ay1 = max(ay1, bh)
+        # El menú contextual mezcla sus esquinas con lo de debajo y se repinta
+        # entero en cada fotograma: si la región lo toca, que lo cubra entero.
+        if st.ctx >= 0
+            cx0 = st.ctx_x - 2
+            cy0 = st.ctx_y - 2
+            cx1 = st.ctx_x + ctx_ancho(st) + 2
+            cy1 = st.ctx_y + ctx_alto(st) + 2
+            if wm_rects_cortan(ax0, ay0, ax1, ay1, cx0, cy0, cx1, cy1) != 0
+                ax0 = max(0, min(ax0, cx0))
+                ay0 = max(0, min(ay0, cy0))
+                ax1 = min(sw, max(ax1, cx1))
+                ay1 = min(sh, max(ay1, cy1))
+        if ax1 <= ax0
+            0
+        elsif ay1 <= ay0
+            0
+        else
+            wm_danar_rect(st, ax0, ay0, ax1, ay1, sw, sh)
+
+fn wm_danar_rect(st: &mut Estado, x0: Int, y0: Int, x1: Int, y1: Int, sw: Int, sh: Int) -> Int ! alloc
+    # Fundir con la primera que toque (o con la que menos crezca si no caben).
+    hecho = 0
+    k = 0
+    while k < st.reg_n
+        if hecho == 0
+            if wm_rects_cortan(x0, y0, x1, y1, wm_reg_get(st, k, 0) - 1, wm_reg_get(st, k, 1) - 1, wm_reg_get(st, k, 2) + 1, wm_reg_get(st, k, 3) + 1) != 0
+                _f = wm_reg_fundir(st, k, x0, y0, x1, y1)
+                hecho = 1
+        k = k + 1
+    if hecho == 0
+        if st.reg_n < wm_reg_max()
+            _s = wm_reg_set(st, st.reg_n, x0, y0, x1, y1)
+            st.reg_n = st.reg_n + 1
+        else
+            mejor = 0
+            coste = -1
+            k = 0
+            while k < st.reg_n
+                c = wm_reg_area_union(st, k, x0, y0, x1, y1) - wm_reg_area(st, k)
+                if coste < 0
+                    coste = c
+                    mejor = k
+                elsif c < coste
+                    coste = c
+                    mejor = k
+                k = k + 1
+            _f2 = wm_reg_fundir(st, mejor, x0, y0, x1, y1)
+    total = 0
+    k = 0
+    while k < st.reg_n
+        total = total + wm_reg_area(st, k)
+        k = k + 1
+    if total * 2 > sw * sh
+        st.reg_n = 0
+        wm_pedir_repintar(st)
+    else
+        0
+
+# Margen de la sombra de una ventana alrededor de su rectángulo.
+fn wm_sombra_margen() -> Int
+    wm_sombra_ext(1) + wm_sombra_dy()
+
+# Daña la ventana `i` entera, con su sombra.
+fn wm_danar_ventana(st: &mut Estado, i: Int) -> Int ! alloc
+    if i < 0
+        0
+    elsif st.tab.slot_activo(i) == 0
+        0
+    else
+        m = wm_sombra_margen()
+        wx = st.tab.wx(i)
+        wy = st.tab.wy(i)
+        wm_danar(st, wx - m, wy - m, wx + st.tab.ww(i) + m, wy + st.tab.wh(i) + m)
+
+# Daña sólo la barra de título de la ventana `i`.
+fn wm_danar_cabecera(st: &mut Estado, i: Int) -> Int ! alloc
+    if i < 0
+        0
+    elsif st.tab.slot_activo(i) == 0
+        0
+    else
+        wx = st.tab.wx(i)
+        wy = st.tab.wy(i)
+        wm_danar(st, wx, wy, wx + st.tab.ww(i), wy + wm_bar_h(st))
+
+fn wm_danar_barra(st: &mut Estado) -> Int ! alloc
+    wm_danar(st, 0, 0, st.pw, wm_bar_h(st))
+
+fn wm_danar_menu(st: &mut Estado) -> Int ! alloc
+    gw = wm_gw_wm(st)
+    gh = wm_gh_wm(st)
+    x0 = lanz_menu_x0(gw)
+    y0 = lanz_menu_y0(gh)
+    _b = wm_danar_barra(st)
+    wm_danar(st, x0 - 2, y0, x0 + lanz_menu_ancho(gw, gh, wm_tema_id(st)) + 2, y0 + lanz_menu_alto(gh) + 2)
+
+fn wm_danar_ctx(st: &mut Estado) -> Int ! alloc
+    if st.ctx < 0
+        0
+    else
+        wm_danar(st, st.ctx_x - 2, st.ctx_y - 2, st.ctx_x + ctx_ancho(st) + 2, st.ctx_y + ctx_alto(st) + 2)
+
+# Búfer auxiliar de al menos `n` bytes.
+fn wm_scr(st: &mut Estado, n: Int) -> Int ! alloc
+    if n > st.scr_cap
+        st.scr_ptr = bytes_ptr(bytes_new(n))
+        st.scr_cap = n
+    st.scr_ptr
+
+# Fondo (el mismo degradado que `wm_pintar_fondo`) de la región, trasladado.
+fn wm_fondo_region(st: &mut Estado, b: Int, bl: Int, rw: Int, rh: Int, bpp: Int, fmt: Int, rx0: Int, ry0: Int, sh: Int) -> Int ! alloc
+    bh = wm_bar_h(st)
+    t = wm_tema_id(st)
+    ar = tema_fondo_arriba(t)
+    ab = tema_fondo_abajo(t)
+    y = max(ry0, bh)
+    yf = min(ry0 + rh, sh)
+    while y < yf
+        c = color_interp(ar, ab, y - bh, sh - bh - 1)
+        _r = rellenar_rect(b, bl, rw, rh, rw, bpp, fmt, 0, y - ry0, rw, y - ry0 + 1, c)
+        y = y + 1
+    0
+
+# Contenido (rejilla de terminal o píxeles del cliente) de la ventana `i` en la
+# región, trasladado. La rejilla se pinta entera y no consume su marca de filas
+# sucias, que es del camino normal.
+fn wm_contenido_region(st: &mut Estado, i: Int, b: Int, bl: Int, rw: Int, rh: Int, bpp: Int, fmt: Int, rx0: Int, ry0: Int) -> Int ! io, alloc
+    a = st.tab.grupo_panel_activo(i)
+    wx = st.tab.wx(i)
+    wy = st.tab.wy(i)
+    ww = st.tab.ww(i)
+    wh = st.tab.wh(i)
+    bh = wm_bar_h(st)
+    if st.tab.tipo(a) == tab_tipo_term()
+        nv = wm_tab_escala(st, a)
+        psf = wm_psf_slot(st, nv)
+        plen = wm_psf_len_slot(st, nv)
+        gw = wm_tab_gw(st, a)
+        gh = wm_tab_gh(st, a)
+        if psf > 0
+            grid = st.tab.shm_ptr(a)
+            cols = wm_term_cols(ww, gw)
+            rows = wm_term_rows(wh, gh, bh)
+            dr = st.tab.term_dirty(a)
+            _t = st.tab.term_pintar(a, grid, cols * rows * celda_bytes(), cols, rows, psf, plen, gw, gh, wm_tema_id(st), b, bl, rw, rh, rw, bpp, fmt, wx + 4 - rx0, wy + bh + 4 - ry0, 1)
+            _d = st.tab.term_set_dirty(a, dr)
+    if st.tab.tipo(a) == tab_tipo_cli()
+        if st.tab.fase(a) == 2
+            cw = st.tab.cw(a)
+            ch = st.tab.ch(a)
+            dx = wx + 4
+            dy = wy + bh
+            if wm_es_ss(st, i) != 0
+                dx = wx
+                dy = wy
+            ix0 = max(dx, rx0)
+            iy0 = max(dy, ry0)
+            ix1 = min(dx + cw, rx0 + rw)
+            iy1 = min(dy + ch, ry0 + rh)
+            if ix1 > ix0
+                if iy1 > iy0
+                    _c = copiar_rect(b, bl, rw, st.tab.shm_ptr(a), cw * ch * 4, cw, bpp, fmt, ix0 - rx0, iy0 - ry0, ix0 - dx, iy0 - dy, ix1 - ix0, iy1 - iy0)
+    0
+
+# Recompone la región `k` en el búfer auxiliar y la copia a `compos`.
+fn wm_repintar_region(st: &mut Estado, k: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
+    rx0 = wm_reg_get(st, k, 0)
+    ry0 = wm_reg_get(st, k, 1)
+    rx1 = wm_reg_get(st, k, 2)
+    ry1 = wm_reg_get(st, k, 3)
+    rw = rx1 - rx0
+    rh = ry1 - ry0
+    if rw <= 0
+        0
+    elsif rh <= 0
+        0
+    else
+        bl = rw * rh * bpp
+        b = wm_scr(st, bl)
+        _f = wm_fondo_region(st, b, bl, rw, rh, bpp, fmt, rx0, ry0, sh)
+        if ry0 < wm_bar_h(st)
+            # Sólo llega aquí ampliada a la franja de arriba: rx0 = ry0 = 0.
+            _ba = wm_pintar_barra(st, b, bl, sw, sh, rw, bpp, fmt)
+        m = wm_sombra_margen()
+        z = 0
+        while z < st.tab.nz()
+            i = st.tab.z_get(z)
+            if st.tab.slot_activo(i) != 0
+                if wm_oculta(st, i) == 0
+                    wx = st.tab.wx(i)
+                    wy = st.tab.wy(i)
+                    ww = st.tab.ww(i)
+                    wh = st.tab.wh(i)
+                    if wm_rects_cortan(wx - m, wy - m, wx + ww + m, wy + wh + m, rx0, ry0, rx1, ry1) != 0
+                        if wm_es_ss(st, i) == 0
+                            _m = wm_pintar_marco(b, bl, rw, rh, rw, bpp, fmt, wx - rx0, wy - ry0, ww, wh, st, i)
+                        _c = wm_contenido_region(st, i, b, bl, rw, rh, bpp, fmt, rx0, ry0)
+            z = z + 1
+        _cp = copiar_rect(compos, clen, stride, b, bl, rw, bpp, fmt, rx0, ry0, 0, 0, rw, rh)
+        wm_marcar_dirty(st, rx0, ry0, rx1, ry1)
 
 fn wm_cursor_bak(st: &mut Estado) -> Int ! alloc
     st.cursor_bak
@@ -962,14 +1257,9 @@ fn wm_pintar_menu_local(st: &mut Estado, compos: Int, clen: Int, stride: Int, bp
     0
 
 fn wm_menu_poner(st: &mut Estado, abierto: Int) -> Int ! alloc
-    st.menu = abierto
-    _rp = wm_pedir_repintar(st)
-    gw = wm_gw_wm(st)
-    gh = wm_gh_wm(st)
-    tema = wm_tema_id(st)
-    x0 = lanz_menu_x0(gw)
-    y0 = lanz_menu_y0(gh)
-    _d = wm_marcar_dirty(st, x0, y0, x0 + lanz_menu_ancho(gw, gh, tema), y0 + lanz_menu_alto(gh))
+    if abierto != st.menu
+        st.menu = abierto
+        _d = wm_danar_menu(st)
     0
 
 fn wm_ejecutar(st: &mut Estado, accion: Int, sw: Int, sh: Int) -> Int ! io, alloc
@@ -1008,10 +1298,21 @@ fn wm_hit_test(st: &mut Estado, x: Int, y: Int) -> Int ! alloc
 
 fn wm_foco_a(st: &mut Estado, i: Int) -> Int ! alloc
     if st.tab.slot_activo(i) != 0
-        _q = wm_quitar_min(st, i)
-        st.focus = i
-        _u = st.tab.z_subir(st.tab.nz(), i)
-        _rp = wm_pedir_repintar(st)
+        cambia = 1
+        if st.focus == i
+            if wm_oculta(st, i) == 0
+                if st.tab.nz() > 0
+                    if st.tab.z_get(st.tab.nz() - 1) == i
+                        cambia = 0
+        if cambia != 0
+            # La que pierde el foco cambia de marco y de sombra; la que lo gana
+            # sube encima de todo; la barra resalta otra ventana.
+            _da = wm_danar_ventana(st, st.focus)
+            _q = wm_quitar_min(st, i)
+            st.focus = i
+            _u = st.tab.z_subir(st.tab.nz(), i)
+            _db = wm_danar_ventana(st, i)
+            _dc = wm_danar_barra(st)
     0
 
 fn wm_oculta(st: &mut Estado, i: Int) -> Int ! alloc
@@ -1033,6 +1334,9 @@ fn wm_quitar_min(st: &mut Estado, i: Int) -> Int ! alloc
 
 fn wm_cerrar_indice(st: &mut Estado, i: Int) -> Int ! io, alloc
     fi = st.focus
+    # Antes de tocar nada: dónde estaba (cierre de ventana o de pestaña).
+    _dv = wm_danar_ventana(st, st.tab.grupo_cab(i))
+    _db = wm_danar_barra(st)
     # Si cierra la cabecera de una ventana con más pestañas, otra pasa a ser la cabecera
     # y ocupa su sitio en el orden de ventanas.
     h = st.tab.grupo_cab(i)
@@ -1061,7 +1365,8 @@ fn wm_cerrar_indice(st: &mut Estado, i: Int) -> Int ! io, alloc
         # hueco se reutilice (una ventana fantasma que no se va).
         if wm_comp_gpu_mode(st) != 0
             _oh = wm_comp_send_geom(st, st.comp_fd, wm_surf_win(i), 0, 0, 0, 0, comp_geom_hidden(), 50)
-        _rp = wm_pedir_repintar(st)
+        # La que hereda el foco cambia de marco y de sombra.
+        _df = wm_danar_ventana(st, nfi)
         if i == st.ss_slot
             _sr = wm_ss_reset(st)
             st.ss_last = uptime_ms()
@@ -1277,6 +1582,14 @@ fn wm_compose(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride:
         i = st.tab.z_get(k)
         _r = wm_repintar_slot(st, i, compos, clen, sw, sh, stride, bpp, fmt, completo, k)
         k = k + 1
+    # Regiones dañadas (ver `wm_danar`); con repintado completo sobran.
+    if completo == 0
+        if gmode == 0
+            r = 0
+            while r < st.reg_n
+                _rg = wm_repintar_region(st, r, compos, clen, sw, sh, stride, bpp, fmt)
+                r = r + 1
+    st.reg_n = 0
     if completo != 0
         if gmode == 0
             _men = wm_pintar_menu(st, compos, clen, sw, sh, stride, bpp, fmt)
@@ -2576,9 +2889,11 @@ fn wm_minimizar(st: &mut Estado, i: Int) -> Int ! alloc
     est = st.tab.estado(i)
     if (est & estado_min()) == 0
         _a = st.tab.set_estado(i, est + estado_min())
+    _dv = wm_danar_ventana(st, i)
+    _db = wm_danar_barra(st)
     if st.focus == i
         st.focus = wm_foco_visible(st)
-    _rp = wm_pedir_repintar(st)
+        _df = wm_danar_ventana(st, st.focus)
     0
 
 # Lista de ventanas en la barra superior, a la derecha de los lanzadores.
@@ -2852,12 +3167,14 @@ fn ctx_item(st: &mut Estado, x: Int, y: Int) -> Int ! alloc
 
 fn wm_ctx_cerrar(st: &mut Estado) -> Int ! alloc
     if st.ctx >= 0
-        _d = wm_marcar_dirty(st, st.ctx_x, st.ctx_y, st.ctx_x + ctx_ancho(st), st.ctx_y + ctx_alto(st))
+        _d = wm_danar_ctx(st)
         st.ctx = -1
-        _r = wm_pedir_repintar(st)
+        st.ctx_sel = -1
     0
 
 fn wm_ctx_abrir_modo(st: &mut Estado, m: Int, modo: Int, x: Int, y: Int, sw: Int, sh: Int) -> Int ! alloc
+    # Si ya había uno abierto, su caja (con su modo y tamaño) queda dañada.
+    _da = wm_danar_ctx(st)
     st.ctx_modo = modo
     # El tamaño depende del modo y de `m`: se fija antes de calcularlo.
     st.ctx = m
@@ -2869,8 +3186,8 @@ fn wm_ctx_abrir_modo(st: &mut Estado, m: Int, modo: Int, x: Int, y: Int, sw: Int
         cy = sh - ctx_alto(st)
     st.ctx_x = cx
     st.ctx_y = cy
-    _d = wm_marcar_dirty(st, cx, cy, cx + ctx_ancho(st), cy + ctx_alto(st))
-    _r = wm_pedir_repintar(st)
+    st.ctx_sel = ctx_item(st, st.mx, st.my)
+    _d = wm_danar_ctx(st)
     0
 
 fn wm_ctx_abrir(st: &mut Estado, m: Int, x: Int, y: Int, sw: Int, sh: Int) -> Int ! alloc
@@ -2946,16 +3263,24 @@ fn wm_ctx_ejecutar(st: &mut Estado, m: Int, k: Int, compos: Int, clen: Int, sw: 
 
 fn wm_raton_mover(st: &mut Estado, x: Int, y: Int, botones: Int, sw: Int, sh: Int) -> Int ! io, alloc
     _c = wm_cursor_actualizar(st, x, y, sw, sh)
+    # El hover de un botón o una pestaña sólo cambia la cabecera de esa
+    # ventana (la que lo pierde y la que lo gana): repintar la pantalla entera
+    # costaba ~65 ms por cada zona que cruzaba el puntero.
     hv = wm_hover_boton(st, st.mx, st.my)
     if hv != st.hover
+        _ha = wm_danar_cabecera(st, wm_hover_ranura(st.hover, 8))
+        _hb = wm_danar_cabecera(st, wm_hover_ranura(hv, 8))
         st.hover = hv
-        _hp = wm_pedir_repintar(st)
     hp = wm_hover_pest(st, st.mx, st.my)
     if hp != st.hover_pest
+        _hc = wm_danar_cabecera(st, wm_hover_ranura(st.hover_pest, 1000))
+        _hd = wm_danar_cabecera(st, wm_hover_ranura(hp, 1000))
         st.hover_pest = hp
-        _hr = wm_pedir_repintar(st)
     if st.ctx >= 0
-        _hc = wm_pedir_repintar(st)
+        cs = ctx_item(st, st.mx, st.my)
+        if cs != st.ctx_sel
+            st.ctx_sel = cs
+            _hx = wm_danar_ctx(st)
     dix = st.drag_ix
     if dix >= 0
         if botones != 0
@@ -2966,6 +3291,9 @@ fn wm_raton_mover(st: &mut Estado, x: Int, y: Int, botones: Int, sw: Int, sh: In
             wh = st.tab.wh(dix)
             if dk == 10
                 _pa = wm_pest_arrastrar(st, dix, x, y, sh)
+            # Mover o redimensionar daña dónde estaba y dónde queda.
+            if dk != 10
+                _dv = wm_danar_ventana(st, dix)
             if dk == 1
                 _dr = wm_drop_fijar(st, wm_destino_soltar(st, x, y, dix))
                 nx = x - st.grab_x
@@ -3003,8 +3331,11 @@ fn wm_raton_mover(st: &mut Estado, x: Int, y: Int, botones: Int, sw: Int, sh: In
                 _a = st.tab.set_wx(dix, nx2)
                 _a = st.tab.set_ww(dix, nw)
                 _a = st.tab.set_wh(dix, nh)
-            _d = wm_marcar_dirty(st, 0, wm_bar_h(st), sw, sh)
-            _rp = wm_pedir_repintar(st)
+            if dk == 10
+                _d = wm_marcar_dirty(st, 0, wm_bar_h(st), sw, sh)
+                _rp = wm_pedir_repintar(st)
+            else
+                _dn = wm_danar_ventana(st, dix)
     if dix < 0
         fi = st.focus
         if fi >= 0
@@ -3231,10 +3562,12 @@ fn wm_foco_siguiente(st: &mut Estado) -> Int ! alloc
                 if k + 1 < st.tab.nz()
                     nfi = st.tab.z_get(k + 1)
             k = k + 1
+        _da = wm_danar_ventana(st, fi)
         _q = wm_quitar_min(st, nfi)
         st.focus = nfi
         _u = st.tab.z_subir(st.tab.nz(), nfi)
-        _rp = wm_pedir_repintar(st)
+        _dn = wm_danar_ventana(st, nfi)
+        _db = wm_danar_barra(st)
     nfi
 
 # Crea un panel de terminal (PTY + sosh) sin colocarlo todavía en ninguna ventana.
@@ -3337,7 +3670,9 @@ fn wm_activar_pestana(st: &mut Estado, h: Int, k: Int) -> Int ! io, alloc
         _g = st.tab.grupo_activar(m)
         if st.tab.tipo(m) == tab_tipo_cli()
             _f = wm_enviar_foco(st, st.tab.fd(m))
-        _rp = wm_pedir_repintar(st)
+        # Cambian la tira de pestañas y el contenido; la sombra no.
+        _dv = wm_danar(st, st.tab.wx(cab), st.tab.wy(cab), st.tab.wx(cab) + st.tab.ww(cab), st.tab.wy(cab) + st.tab.wh(cab))
+        _db = wm_danar_barra(st)
     0
 
 # Alt+1..9, Ctrl+Tab: pestaña `k` (o relativa) de la ventana con foco.
@@ -3429,7 +3764,7 @@ fn wm_slot_atender_term(st: &mut Estado, i: Int, compos: Int, clen: Int, stride:
                 if st.tab.grupo_panel_activo(i) != i
                     if st.tab.pend(i) == 0
                         _a = st.tab.set_pend(i, 1)
-                        _rp = wm_pedir_repintar(st)
+                        _rp = wm_danar_cabecera(st, st.tab.grupo_cab(i))
                 wx = st.tab.wx(i)
                 wy = st.tab.wy(i)
                 ww = st.tab.ww(i)
@@ -3760,7 +4095,7 @@ fn wm_sync_visibilidad(st: &mut Estado) -> Int ! io, alloc
             if st.tab.grupo_panel_activo(st.tab.grupo_cab(i)) == i
                 if st.tab.pend(i) != 0
                     _a = st.tab.set_pend(i, 0)
-                    _r = wm_pedir_repintar(st)
+                    _r = wm_danar_cabecera(st, st.tab.grupo_cab(i))
         i = i + 1
     0
 

@@ -487,6 +487,9 @@ method Term.feed_byte(&mut self, ptr: Int, len: Int, w: Int, h: Int, byte: Int) 
 
 method Term.pintar(&mut self, grid: Int, glen: Int, cols: Int, rows: Int, psf: Int, psflen: Int, gw: Int, gh: Int, tema: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, ox: Int, oy: Int, force: Int) -> Int ! alloc
     dr = self.dirty
+    # Filas y celdas que caen enteras fuera del búfer (una región recortada del
+    # WM) no se leen ni se pintan.
+    alto_buf = clen / (stride * bpp)
     row = 0
     while row < rows
         pinta = 0
@@ -496,8 +499,14 @@ method Term.pintar(&mut self, grid: Int, glen: Int, cols: Int, rows: Int, psf: I
             pinta = 1
         if dr == row
             pinta = 1
+        if oy + row * gh >= alto_buf
+            pinta = 0
+        if oy + row * gh + gh <= 0
+            pinta = 0
         if pinta != 0
             col = 0
+            if ox < 0
+                col = max(0, (0 - ox) / gw)
             while col < cols
                 cp = term_leer_cp(grid, glen, cols, col, row)
                 fg = term_leer_fg(grid, glen, cols, col, row)
@@ -512,6 +521,8 @@ method Term.pintar(&mut self, grid: Int, glen: Int, cols: Int, rows: Int, psf: I
                 py = oy + row * gh
                 _f = fuente_dibujar(psf, psflen, compos, clen, stride, bpp, fmt, cp, rgb_fg, rgb_bg, px, py)
                 col = col + 1
+                if px + gw >= stride
+                    col = cols
         row = row + 1
     if dr >= 0
         self.dirty = -2

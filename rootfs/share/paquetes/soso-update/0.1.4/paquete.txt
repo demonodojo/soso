@@ -1,0 +1,6 @@
+SOSOPKG v1
+nombre=soso-update
+version=0.1.4
+abi=1
+destino=sistema
+f 17d4c29e8f4010315c0de2f11b69fa3a1c56eb7822c90a0d9a598751c9b756bc 1788248 bin/soso-update

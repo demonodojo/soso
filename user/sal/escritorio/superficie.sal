@@ -93,15 +93,34 @@ fn rellenar_rect(ptr: Int, len: Int, ancho: Int, alto: Int, stride_px: Int, bpp:
     colb = xb - xa
     if colb <= 0
         0
+    elsif yb <= ya
+        0
     else
         v = pixel_u32_le(rgb, fmt)
         b = bytes_view_mem(ptr, len)
-        y = ya
+        # Una fila rellenada y las demás copiadas: `bytes_copy` es un memcpy y
+        # `bytes_fill_u32` un bucle de 4 en 4 bytes (unas 30 veces más lento).
+        off0 = pix_idx(stride_px, bpp, xa, ya)
+        _f = fila_rellenar_u32(ptr, len, off0, colb, v)
+        nb = colb * 4
+        y = ya + 1
         while y < yb
-            off = pix_idx(stride_px, bpp, xa, y)
-            bytes_fill_u32(b, off, colb, v)
+            bytes_copy(b, pix_idx(stride_px, bpp, xa, y), b, off0, nb)
             y = y + 1
         0
+
+# `n` píxeles de 32 bits desde `off`: unos pocos con `bytes_fill_u32` y el
+# resto duplicando lo ya escrito con `bytes_copy` (log2(n) copias).
+fn fila_rellenar_u32(ptr: Int, len: Int, off: Int, n: Int, v: Int) -> Int ! alloc
+    b = bytes_view_mem(ptr, len)
+    k = min(n, 16)
+    bytes_fill_u32(b, off, k, v)
+    hecho = k
+    while hecho < n
+        c = min(hecho, n - hecho)
+        bytes_copy(b, off + hecho * 4, b, off, c * 4)
+        hecho = hecho + c
+    0
 
 fn rellenar_rect_alfa(ptr: Int, len: Int, ancho: Int, alto: Int, stride_px: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, rgb: Int, alfa: Int) -> Int ! alloc
     ya = max(0, y0)

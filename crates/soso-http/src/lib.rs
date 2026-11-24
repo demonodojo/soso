@@ -43,7 +43,7 @@ pub trait TcpTransport {
     fn read_timeout(&self, fd: u64, buf: &mut [u8], timeout_ms: u64) -> i64;
     fn write_all(&self, fd: u64, data: &[u8]) -> Result<(), i64>;
     fn close(&self, fd: u64);
-    /// Traza de red opcional (userspace imprime en consola).
+    /// Traza de red opcional (userspace la manda al canal de log, no a la consola).
     fn log_red(&self, _msg: &str) {}
 }
 

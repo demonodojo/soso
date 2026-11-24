@@ -868,6 +868,7 @@ incluir `3D clear verificado (H1 GO)` tras el arranque.
 
 ```text
 soso-wm                 # gestor de ventanas (terminales y clientes gráficos)
+soso-wm --sin-comp      # igual, pero sin compositor ni GPU: pinta por el framebuffer de arranque
 soso-wm --prueba        # autoprueba en RAM; debe imprimir `soso-wm: prueba OK`
 soso-wm --prueba-web    # cliente gráfico mínimo; imprime `soso-wm: prueba-web OK`
 soso-wm --fotograma     # un instante de escritorio y vuelve a la consola; imprime `soso-wm: fotograma OK`
@@ -877,6 +878,8 @@ soso-wm --prueba-layout # mosaico, arrastre y geometría flotante; imprime `soso
 En modo gráfico el teclado lo consume el WM. **Ctrl+C** (y el resto de combinaciones con Ctrl que no son atajos del escritorio, como Ctrl+D o Ctrl+Z) va a la ventana con foco: en una terminal interrumpe el programa en marcha sin cerrar el escritorio.
 Salir: **Alt+Mayús+E** o **Salir del escritorio** en el menú (vuelta a consola); **Ctrl+Alt+Retroceso** si no responde. **Alt+Intro** abre una terminal.
 Un programa a pantalla completa sin escritorio (p. ej. `soso-web --grafico`) sí se cierra con **Ctrl+C**.
+
+Si el escritorio da problemas con la GPU (pantalla congelada o en negro, sólo en máquinas con NVIDIA), arráncalo con `soso-wm --sin-comp`: no lanza el compositor `soso-comp` ni se conecta a uno que ya esté en marcha, y pinta como en una máquina sin GPU. Ventanas, terminales y aplicaciones funcionan igual; sólo se pierde el dibujo acelerado.
 
 El WM dibuja un **puntero** en pantalla. Entrada: ratón **PS/2** (aux), **USB HID** relativo
 (p. ej. `usb-mouse` en QEMU) e informes **HID absolutos** (coordenadas de pantalla). En placa,

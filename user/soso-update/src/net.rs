@@ -1,7 +1,7 @@
 //! HTTPS para descargas de actualización.
 
 use alloc::vec::Vec;
-use libsoso::{abi, println, sys};
+use libsoso::{abi, logln, sys};
 use soso_abi::SockAddr;
 use soso_update_core::descarga;
 use soso_http::TcpTransport;
@@ -58,29 +58,29 @@ pub fn encender_traza() {
 /// se paraba **después** de resolver el origen.
 impl TcpTransport for Net {
     fn log_red(&self, msg: &str) {
-        println!("  red: handshake TLS — {msg}");
+        logln!("  red: handshake TLS — {msg}");
     }
 
     fn dns_resolve(&self, host: &str, out: &mut [u8; 4]) -> Result<(), i64> {
         let r = sys::dns_resolve(host, out);
         match r {
-            Ok(()) => println!(
+            Ok(()) => logln!(
                 "  red: {host} → {}.{}.{}.{}",
                 out[0], out[1], out[2], out[3]
             ),
             Err(e) if e == -(abi::EINTR as i64) => {
-                println!("  red: interrumpido resolviendo {host}");
+                logln!("  red: interrumpido resolviendo {host}");
             }
             Err(e) if e == -(abi::ETIMEDOUT as i64) => {
-                println!("  red: timeout resolviendo {host}");
+                logln!("  red: timeout resolviendo {host}");
             }
-            Err(e) => println!("  red: no pude resolver {host} (errno {})", -e),
+            Err(e) => logln!("  red: no pude resolver {host} (errno {})", -e),
         }
         r
     }
 
     fn tcp_connect(&self, addr: SockAddr, timeout_ms: u64) -> Result<u64, i64> {
-        println!(
+        logln!(
             "  red: conectando a {}.{}.{}.{}:{}…",
             addr.addr[0], addr.addr[1], addr.addr[2], addr.addr[3], addr.port
         );
@@ -93,10 +93,10 @@ impl TcpTransport for Net {
                 110 => "timeout de conexión",
                 _ => "E/S de red",
             };
-            println!("  red: {msg} (errno {e})");
+            logln!("  red: {msg} (errno {e})");
             Err(fd)
         } else {
-            println!("  red: conectado (fd {fd})");
+            logln!("  red: conectado (fd {fd})");
             Ok(fd as u64)
         }
     }
@@ -105,7 +105,7 @@ impl TcpTransport for Net {
         let t0 = ahora_ms();
         let n = sys::read_timeout(fd, buf, timeout_ms);
         if TRAZA_BYTES.load(core::sync::atomic::Ordering::Relaxed) {
-            println!("  red: read(fd {fd}, {timeout_ms}ms) = {n} en {}ms", ahora_ms() - t0);
+            logln!("  red: read(fd {fd}, {timeout_ms}ms) = {n} en {}ms", ahora_ms() - t0);
         }
         n
     }
@@ -113,10 +113,10 @@ impl TcpTransport for Net {
     fn write_all(&self, fd: u64, data: &[u8]) -> Result<(), i64> {
         let r = sys::write_all(fd, data);
         if TRAZA_BYTES.load(core::sync::atomic::Ordering::Relaxed) {
-            println!("  red: write(fd {fd}, {} B) = {:?}", data.len(), r);
+            logln!("  red: write(fd {fd}, {} B) = {:?}", data.len(), r);
         }
         if r == Err(-(abi::EINTR as i64)) {
-            println!("  red: interrumpido escribiendo");
+            logln!("  red: interrumpido escribiendo");
         }
         r
     }
@@ -236,16 +236,16 @@ fn map_http_err(e: soso_http::HttpError) -> &'static str {
         soso_http::HttpError::Dns => "DNS",
         // El motivo viaja con el error: se enseña, que para eso está.
         soso_http::HttpError::Tls(motivo) => {
-            println!("  red: TLS falló — {motivo}");
+            logln!("  red: TLS falló — {motivo}");
             "TLS"
         }
         soso_http::HttpError::Parse => "HTTP parse",
         soso_http::HttpError::ParseDetail(detail) => {
-            println!("  red: HTTP parse — {detail}");
+            logln!("  red: HTTP parse — {detail}");
             "HTTP parse"
         }
         soso_http::HttpError::Io(donde) => {
-            println!("  red: E/S falló — {donde}");
+            logln!("  red: E/S falló — {donde}");
             match donde {
                 "plazo agotado esperando bytes del cuerpo HTTP" => {
                     "plazo agotado en la descarga HTTP"

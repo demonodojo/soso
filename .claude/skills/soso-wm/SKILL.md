@@ -127,6 +127,11 @@ cargo xtask test               # guest: init test + WM (SSH)
 | `soso-wm --prueba-web` | (W8 navegador; ver xtask test) |
 | `soso-wm --fotograma` | `soso-wm: fotograma OK` |
 
+**`soso-wm --sin-comp`**: escritorio normal sin compositor. `wm_comp_ensure` devuelve -1 sin
+lanzar `soso-comp` ni conectarse a uno vivo; con `comp_fd < 0` no hay modo GPU
+(`wm_comp_gpu_mode` = 0) y `wm_comp_flush` presenta con `fb_present_rect` (GOP). Es la
+salida para descartar la GPU/NVDisplay en placa.
+
 Visual QEMU: `cargo xtask fb-shot` (skill **soso-dev**).
 
 **Mirar el escritorio sin ventana:** `scripts/wm-probe.py` arranca soso con monitor y QMP
@@ -145,6 +150,36 @@ Ojo: los PNG se leen con la herramienta Read; GTK/Wayland no hace falta para nad
 3. **Cliente Rust:** preferir `libsoso::ventana` y el mismo layout de mensajes que `proto.sal`.
 4. **Compositor GPU:** no duplicar present en el WM; escena y scanout viven en **`soso-comp`**
    (skill **soso-comp**).
+
+## Repintado: daño por región (CPU)
+
+Quien cambia algo **declara el rectángulo dañado** con `wm_danar(st, x0,y0,x1,y1)`
+(o `wm_danar_ventana` con sombra, `wm_danar_cabecera`, `wm_danar_barra`,
+`wm_danar_menu`, `wm_danar_ctx`) en vez de `wm_pedir_repintar`, que repinta la
+pantalla entera. Así lo hacen wlroots, KWin y Mutter.
+
+- Hasta `wm_reg_max()` = 4 rectángulos en `reg_buf`. Los que se tocan se funden; si
+  no caben, se funde con el que menos crezca; si el total pasa de media pantalla,
+  se pide el repintado completo.
+- `wm_repintar_region` pinta fondo → barra → ventanas en orden z (marco con
+  sombra + contenido) en un **búfer auxiliar de stride = ancho de la región** y lo
+  copia a `compos`. Todos los pintores recortan contra `stride` y la longitud del
+  búfer, así que nada se sale y las mezclas con alfa caen sobre fondo recién
+  pintado. La rejilla de terminal se pinta con `force` sin consumir su marca de
+  filas sucias (se guarda y restaura).
+- Una región que toca la barra se amplía a la franja completa de arriba
+  (`0,0,sw,…`): la barra se pinta a coordenadas absolutas. Una que toca el menú
+  contextual lo cubre entero (sus esquinas se mezclan y se repinta cada fotograma).
+- Sólo CPU. Con compositor GPU o salvapantallas, `wm_danar` cae al repintado completo.
+- Comprobar un cambio: captura tras la acción, `Alt+D` dos veces (repintado
+  completo con el mismo tema) y otra captura: **0 píxeles distintos**.
+- Coste en QEMU (TCG): hover de cabecera 2–3 ms, arrastre de una terminal
+  13–17 ms, repintado completo ~25 ms.
+
+Rellenar: `bytes_fill_u32` del runtime de Sal escribe de 4 en 4 bytes y es unas
+30 veces más lento que `bytes_copy` (memcpy). `rellenar_rect` rellena 16 píxeles,
+los duplica con copias dentro de la fila (`fila_rellenar_u32`) y copia esa fila a
+las demás. No vuelvas a llamar a `bytes_fill_u32` por filas en rutas calientes.
 
 ## Errores frecuentes
 
@@ -169,8 +204,9 @@ Ojo: los PNG se leen con la herramienta Read; GTK/Wayland no hace falta para nad
   (dos oráculos: fuente de 1 bit y de cobertura; tiene que dar 0 píxeles distintos) y
   después hay que regenerar el SASS con `python3 tools/gpu-prim/cubin.py`.
 - Sombra de ventanas: primitiva `esc_k_sombra` (distancia al rectángulo redondeado),
-  sólo en repintado completo. `wm_pintar_marco_s(…, 0)` al repintar una ventana suelta
-  sin fondo: se mezcla con lo que hay debajo y repetirla la oscurece.
+  sólo sobre fondo recién pintado (repintado completo o región). `wm_pintar_marco_s(…, 0)`
+  al repintar una ventana suelta sin fondo: se mezcla con lo que hay debajo y repetirla
+  la oscurece.
 - Romper alineación de offsets en mensajes de 32 B entre Sal y Rust.
 - Pruebas guest que ejecutan `soso-wm` en background (`&`) → timeouts en xtask.
 - Asumir GPU: en QEMU el compositor puede caer a blit CPU/SHM; path VRAM requiere lxdde
