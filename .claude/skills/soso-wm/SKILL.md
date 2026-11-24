@@ -132,6 +132,13 @@ lanzar `soso-comp` ni conectarse a uno vivo; con `comp_fd < 0` no hay modo GPU
 (`wm_comp_gpu_mode` = 0) y `wm_comp_flush` presenta con `fb_present_rect` (GOP). Es la
 salida para descartar la GPU/NVDisplay en placa.
 
+**`soso-wm --escena-cpu`**: lanza `soso-comp --escena-cpu`, que dice `gpu_ok=1` al WM pero
+compone la escena (BIND/GEOM/DMAP/COMMIT) **en CPU**, con texturas propias que sólo cambian
+con el daño subido, como la VRAM. Es la única forma de probar el camino GPU del WM en QEMU
+(no hay `gfx3d`). Sólo actúa si no hay GPU de verdad. Con `scripts/wm-probe.py --wm-args
+--escena-cpu …`. Las capturas en modo escena no tienen sombras ni esquinas redondeadas por
+fuera: si ves sombras, el WM ha bajado a CPU (mira `soso-wm:` y `sal panic` en el serial).
+
 Visual QEMU: `cargo xtask fb-shot` (skill **soso-dev**).
 
 **Mirar el escritorio sin ventana:** `scripts/wm-probe.py` arranca soso con monitor y QMP
@@ -170,7 +177,8 @@ pantalla entera. Así lo hacen wlroots, KWin y Mutter.
 - Una región que toca la barra se amplía a la franja completa de arriba
   (`0,0,sw,…`): la barra se pinta a coordenadas absolutas. Una que toca el menú
   contextual lo cubre entero (sus esquinas se mezclan y se repinta cada fotograma).
-- Sólo CPU. Con compositor GPU o salvapantallas, `wm_danar` cae al repintado completo.
+- En modo escena GPU los mismos `wm_danar_*` marcan qué superficies repintar (ver
+  «Repintado con escena GPU»). Con salvapantallas, `wm_danar` cae al repintado completo.
 - Comprobar un cambio: captura tras la acción, `Alt+D` dos veces (repintado
   completo con el mismo tema) y otra captura: **0 píxeles distintos**.
 - Coste en QEMU (TCG): hover de cabecera 2–3 ms, arrastre de una terminal
@@ -198,6 +206,33 @@ su sombra**, lo roza.
   `wm_slot_atender_term` marca la fila vieja y la nueva; `Term.pintar` sólo pinta el
   cursor si su fila se ha pintado.
 - `wm_repintar_ventana` (crear cliente, título) es un daño de ventana con sombra.
+
+### Repintado con escena GPU
+
+Cada cosa es una superficie del compositor: barra 0, menú/ctx 1, puntero 2, ventanas
+`3+i`, fondo 18. El WM sólo repinta y sube (`DMAP`) la superficie que cambia
+(`wm_gpu_parcial`):
+
+- `g_rep` (bit por grupo de pestañas): ventana entera. `g_cab`: sólo la cabecera
+  (`bh0` filas), p. ej. hover. `g_bar`: la barra. `g_pop`: menú o ctx.
+- **Mover una ventana sólo cambia su geometría**: el arrastre no daña nada y
+  `wm_comp_send_geom` manda `GEOM` sin repintar. Lleva una caché por superficie
+  (`geo_buf`, `wm_geo_*`): no manda nada si no cambia, y si cambia marca para el
+  present el rectángulo visible viejo y el nuevo. Se olvida (`wm_geo_olvidar`) al
+  enganchar y en el repintado completo.
+- **El puntero se pinta y sube una vez** (`cur_ok`); moverlo es un `GEOM`.
+- El ctx comparte la superficie 1 con el lanzador (`wm_gpu_emergente`): un borde
+  de 1 px relleno con `tema_borde` y `wm_pintar_ctx_en` con origen desplazado.
+- La escena no mezcla alfa (`submit_3d_blit_tex` es opaco): el puntero sale con
+  fondo negro en su caja de 12×16 y el ctx con esquinas casi rectas. No es un fallo
+  del daño.
+- La SHM de cada superficie se concede al compositor (`wm_surf_conceder` →
+  `shm_grant` con `tcp_peer_pid`). Sin eso todos los `BIND` fallaban y la escena
+  no pintaba nada.
+- `wm_comp_ensure` duerme 50 ms entre intentos de enganche: el bucle sin pausa
+  dejaba sin CPU al compositor, que no llegaba a escuchar en 5 s.
+
+Comprobar: el mismo método de `Alt+D` dos veces con `--wm-args --escena-cpu` (0 píxeles).
 
 Rellenar: `bytes_fill_u32` del runtime de Sal escribe de 4 en 4 bytes y es unas
 30 veces más lento que `bytes_copy` (memcpy). `rellenar_rect` rellena 16 píxeles,

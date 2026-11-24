@@ -69,10 +69,19 @@ cargo xtask check
 
 Integración guest con GPU real: VFIO + `gfx3d` (skill **soso-gpu**); QEMU suele quedarse en GOP.
 
+**Escena en CPU (`soso-comp --escena-cpu`)**: sin GPU de verdad, contesta `gpu_ok=1` al WM
+y ejecuta el mismo `GSCEN` en CPU (`comp_gscen_cpu`: borrado opcional, quads opacos en orden
+recortados a la pantalla, `fb_present_rect`). `comp_st_cpu()` lo marca. Cada superficie
+tiene una «textura» propia (`bytes_new`, capacidad en `comp_surf_tcap`, se reutiliza si
+cabe) que sólo se actualiza con el daño subido (`DMAP` + `COMMIT`), igual que la VRAM: así
+un `DMAP` olvidado en el WM se ve también en QEMU. Lo lanza `soso-wm --escena-cpu`; las
+pruebas, con `scripts/wm-probe.py --wm-args --escena-cpu`.
+
 ## Convenciones
 
 - **Daño mínimo:** COMMIT lleva rect; GSCEN solo incluye quads visibles tras clip.
-- **Opaco:** barra/menú/ventanas sólidas usan `GEOM_OPAQUE`; cursor no.
+- **Opaco:** barra/menú/ventanas sólidas usan `GEOM_OPAQUE`; cursor no. Aun así el blit
+  de `GSCEN` es opaco para todos: el puntero sale con fondo negro.
 - **WM escena SHM:** dimensiones lógicas `sw×sh` del FB; RT GPU puede ser menor si NVDisplay
   (`comp_scanout_fb_*` en policy).
 - No añadir KMS/DRM Linux; solo syscalls soso existentes.
@@ -82,3 +91,8 @@ Integración guest con GPU real: VFIO + `gfx3d` (skill **soso-gpu**); QEMU suele
 - Cambiar tamaño de quad GSCEN sin actualizar kernel `GSCEN_QUAD` / tests.
 - Present full-frame cuando el daño es pequeño (regresión perf; NVDisplay usa tile CE).
 - Confundir puerto **7430** (clientes WM) con **7432** (compositor).
+- `BIND` con `shm_map` = -1: el WM no concedió la SHM (`shm_grant` al pid de
+  `tcp_peer_pid`). Si `tcp_peer_pid` da `EAGAIN` en el lado que conecta, el
+  `accept` lo resolvió el planificador sin apuntar el pid del servidor
+  (`tcp_loopback_fijar_servidor`). La superficie queda con stride 0 y antes
+  el `commit` moría con `sal panic: bytes: out of bounds`.

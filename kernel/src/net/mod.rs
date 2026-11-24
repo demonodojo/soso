@@ -1029,6 +1029,25 @@ fn tcp_connect_loopback(port: u16) -> Result<usize, i64> {
     Ok(client_slot)
 }
 
+/// Apunta `pid` como servidor del par loopback del slot (lado servidor). La
+/// aceptación que resuelve el planificador para un proceso bloqueado en
+/// `accept` no corre en ese proceso.
+pub fn tcp_loopback_fijar_servidor(slot: usize, pid: u64) {
+    let Some(net) = NET.get() else { return };
+    let pair = {
+        let n = net.lock();
+        n.user_tcp
+            .entries
+            .get(slot)
+            .and_then(|e| e.as_ref())
+            .filter(|e| e.loopback)
+            .and_then(|e| e.loop_pair)
+    };
+    if let Some(pair_id) = pair {
+        loopback::bind_server_pid(pair_id, pid);
+    }
+}
+
 /// Acepta una conexión loopback pendiente. Devuelve el slot del lado servidor.
 pub fn tcp_accept_loopback(listener_slot: usize) -> Result<usize, i64> {
     let slot = loopback::take_pending(listener_slot).ok_or(-soso_abi::EAGAIN)?;

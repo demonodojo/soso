@@ -2071,6 +2071,11 @@ extern "C" fn schedule_inner() -> ! {
                             procs[i].state = State::Runnable;
                         }
                         Ok(Some(server_slot)) => {
+                            // Aceptada desde aquí, `current_pid()` no es quien
+                            // acepta: sin esto el cliente no sabía con quién
+                            // hablaba (`tcp_peer_pid` = EAGAIN) y no podía
+                            // concederle su memoria compartida.
+                            crate::net::tcp_loopback_fijar_servidor(server_slot, procs[i].pid);
                             if let Some(fd) =
                                 syscall::alloc_fd_for_process(&mut procs[i], Fd::Tcp { slot: server_slot })
                             {

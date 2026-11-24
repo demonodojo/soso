@@ -4,7 +4,7 @@ fn comp_gfram_len() -> Int
     61
 
 fn comp_st_size() -> Int
-    198
+    206
 
 fn comp_st_gpu_ok() -> Int
     0
@@ -39,6 +39,12 @@ fn comp_st_tex_h() -> Int
 # Estado de GPRIM: 0 sin probar, 1 el kernel de la GPU lo acepta, -1 lo ha rechazado (se acabó).
 fn comp_st_gprim() -> Int
     190
+
+# 1 = escena compuesta en CPU (`soso-comp --escena-cpu`): el WM la ve como GPU
+# —superficies, geometría, daño por superficie, COMMIT— y aquí se hace con
+# copias de memoria. `gpu_ok` sigue a 0: nada de esto pasa por `gpu_submit`.
+fn comp_st_cpu() -> Int
+    198
 
 fn comp_st_get(st: Int, off: Int) -> Int ! alloc
     bytes_get_i64(bytes_view_mem(st, comp_st_size()), off)

@@ -5,7 +5,10 @@ Sirve para *mirar* el escritorio (cursor, menús, ventanas) sin una sesión
 gráfica: arranca `cargo xtask run` con monitor y QMP, teclea `soso-wm` por el
 monitor y vuelca PNG que se pueden abrir con cualquier visor.
 
-    scripts/wm-probe.py [--out DIR] [--no-wm] [--keep] PASO...
+    scripts/wm-probe.py [--out DIR] [--no-wm] [--wm-args ARGS] [--keep] PASO...
+
+`--wm-args "--escena-cpu"` arranca `soso-wm --escena-cpu` (escena del compositor
+compuesta en CPU: el camino GPU del WM sin GPU).
 
 Pasos (se ejecutan en orden):
     key:alt-ret        una tecla del monitor de QEMU (sendkey)
@@ -92,12 +95,15 @@ def main():
     args = sys.argv[1:]
     out = ROOT / "target/wm-probe"
     abrir_wm, mantener = True, False
+    wm_args = ""
     while args and args[0].startswith("--"):
         a = args.pop(0)
         if a == "--out":
             out = Path(args.pop(0))
         elif a == "--no-wm":
             abrir_wm = False
+        elif a == "--wm-args":
+            wm_args = " " + args.pop(0)
         elif a == "--keep":
             mantener = True
         else:
@@ -122,7 +128,7 @@ def main():
                 mon.cmd("sendkey " + (TECLAS.get(ch) or ch), 0.15)
 
         if abrir_wm:
-            teclear("soso-wm\n")
+            teclear("soso-wm" + wm_args + "\n")
             esperar(lambda: "listen puerto 7430" in serie.read_text(errors="ignore"), 60, "soso-wm")
             time.sleep(3)
         for paso in args:

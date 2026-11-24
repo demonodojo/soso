@@ -8,6 +8,15 @@ import "comp_gprim_layout.sal"
 fn comp_puerto() -> Int
     7432
 
+fn comp_arg_flag(nombre: String) -> Int ! io, alloc
+    a = 1
+    ok = 0
+    while a < argc()
+        if str_eq(argv(a), nombre) != 0
+            ok = 1
+        a = a + 1
+    ok
+
 # Lee exactamente `len` bytes del socket en `dst`; devuelve 1 si llegaron todos.
 fn comp_leer_exacto(fd: Int, dst: Int, len: Int) -> Int ! io, alloc
     got = 0
@@ -109,7 +118,7 @@ fn comp_servir_wm(wm_fd: Int, compos: Int, clen: Int, st: Int, tab: Int, gbuf: I
                                 clr = 0
                                 if fl == comp_commit_clear_rt()
                                     clr = 1
-                                cok = comp_escena_commit(st, tab, gbuf, msg_get_u32(msg, 4), msg_get_u32(msg, 8), msg_get_u32(msg, 12), msg_get_u32(msg, 16), clr)
+                                cok = comp_escena_commit(st, tab, gbuf, msg_get_u32(msg, 4), msg_get_u32(msg, 8), msg_get_u32(msg, 12), msg_get_u32(msg, 16), clr, compos, clen)
                                 _a = comp_responder_present(wm_fd, st, cok)
                             else
                                 if op == op_comp_prims()
@@ -160,6 +169,14 @@ fn main() -> Int ! io, alloc
                         _z = comp_escena_init_tab(tab)
                         _gi = comp_gpu_try_init(st, clen, gw, gh, gpitch)
                         gpu_ok = comp_st_get(st, comp_st_gpu_ok())
+                        # Escena en CPU (pruebas sin GPU): el WM habla el mismo
+                        # protocolo que con GPU y el resultado se compara con su
+                        # camino CPU. Sólo si no hay GPU de verdad.
+                        if gpu_ok == 0
+                            if comp_arg_flag(d"--escena-cpu") != 0
+                                _cp = comp_gpu_patch_gfram(st, 0, 0, gw, gh, gpitch, 0)
+                                _cs = comp_st_set(st, comp_st_cpu(), 1)
+                                gpu_ok = 1
                         listener = tcp_listen(comp_puerto())
                         if listener < 0
                             1

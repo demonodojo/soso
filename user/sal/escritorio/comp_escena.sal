@@ -2,12 +2,13 @@ import "soso.sal"
 import "comp_gfram_layout.sal"
 import "comp_gscen_layout.sal"
 import "comp_clip.sal"
+import "superficie.sal"
 
 fn comp_surf_max() -> Int
     19
 
 fn comp_surf_slot() -> Int
-    128
+    136
 
 fn comp_surf_tab_bytes() -> Int
     comp_surf_max() * comp_surf_slot()
@@ -59,6 +60,11 @@ fn comp_surf_dx1() -> Int
 
 fn comp_surf_dy1() -> Int
     120
+
+# Escena en CPU: capacidad en bytes de la «textura» del hueco (la copia que
+# hace de VRAM). Se reutiliza mientras quepa: un rebind no pierde memoria.
+fn comp_surf_tcap() -> Int
+    128
 
 fn comp_surf_off(slot: Int, field: Int) -> Int
     slot * comp_surf_slot() + field
@@ -152,6 +158,7 @@ fn comp_escena_init_tab(tab: Int) -> Int ! alloc
     s = 0
     while s < comp_surf_max()
         _i = comp_surf_set(tab, s, comp_surf_id(), -1)
+        _t = comp_surf_set(tab, s, comp_surf_tcap(), 0)
         s = s + 1
     0
 
@@ -165,13 +172,26 @@ fn comp_escena_bind(st: Int, tab: Int, id: Int, sid: Int, w: Int, h: Int, stride
         # la textura vieja se suelta y el daño pendiente se olvida. Si no, se
         # subía el rectángulo viejo desde un búfer nuevo y más pequeño.
         old = comp_surf_get(tab, slot, comp_surf_tex())
-        tex = gpu_alloc_vram(clen)
+        en_cpu = comp_st_get(st, comp_st_cpu())
+        tex = -1
+        if en_cpu != 0
+            # La textura es memoria propia: sólo cambia con el daño subido
+            # (DMAP + COMMIT), como la VRAM. Leer la SHM del WM directamente
+            # escondería un DMAP olvidado.
+            if comp_surf_get(tab, slot, comp_surf_tcap()) >= clen
+                tex = old
+            else
+                tex = bytes_ptr(bytes_new(clen))
+                _tc = comp_surf_set(tab, slot, comp_surf_tcap(), clen)
+        else
+            tex = gpu_alloc_vram(clen)
         if tex < 0
             0
         else
             ptr = shm_map(sid)
             if ptr < 0
-                _f = gpu_free(tex)
+                if en_cpu == 0
+                    _f = gpu_free(tex)
                 0
             else
                 _t = comp_surf_set(tab, slot, comp_surf_tex(), tex)
@@ -183,8 +203,9 @@ fn comp_escena_bind(st: Int, tab: Int, id: Int, sid: Int, w: Int, h: Int, stride
                 _y0 = comp_surf_set(tab, slot, comp_surf_dy0(), 0)
                 _x1 = comp_surf_set(tab, slot, comp_surf_dx1(), 0)
                 _y1 = comp_surf_set(tab, slot, comp_surf_dy1(), 0)
-                if old > 0
-                    _of = gpu_free(old)
+                if en_cpu == 0
+                    if old > 0
+                        _of = gpu_free(old)
                 1
 
 fn comp_escena_geom(tab: Int, id: Int, x: Int, y: Int, w: Int, h: Int, flags: Int, z: Int) -> Int ! alloc
@@ -222,9 +243,19 @@ fn comp_escena_upload_dirty(st: Int, tab: Int) -> Int ! io, alloc
                     tex = comp_surf_get(tab, s, comp_surf_tex())
                     ptr = comp_surf_get(tab, s, comp_surf_ptr())
                     stride = comp_surf_get(tab, s, comp_surf_stride())
-                    _p = comp_guprc_patch(gup, tex, ptr, stride, x0, y0, x1 - x0, y1 - y0)
-                    if gpu_submit(gup, comp_guprc_len()) < 0
-                        ok = 0
+                    if comp_st_get(st, comp_st_cpu()) != 0
+                        th = comp_surf_get(tab, s, comp_surf_h())
+                        tl = stride * th
+                        # Recortado a la superficie (un BIND fallido la deja a 0).
+                        cx1 = min(x1, stride / 4)
+                        cy1 = min(y1, th)
+                        if cx1 > x0
+                            if cy1 > y0
+                                _cp = copiar_rect(tex, tl, stride / 4, ptr, tl, stride / 4, 4, 0, x0, y0, x0, y0, cx1 - x0, cy1 - y0)
+                    else
+                        _p = comp_guprc_patch(gup, tex, ptr, stride, x0, y0, x1 - x0, y1 - y0)
+                        if gpu_submit(gup, comp_guprc_len()) < 0
+                            ok = 0
                     _c = comp_surf_set(tab, s, comp_surf_dx0(), 0)
                     _d = comp_surf_set(tab, s, comp_surf_dy0(), 0)
                     _e = comp_surf_set(tab, s, comp_surf_dx1(), 0)
@@ -237,8 +268,18 @@ fn comp_escena_emit_quad(gbuf: Int, n: Int, tab: Int, s: Int, dx: Int, dy: Int, 
     tsp = comp_surf_get(tab, s, comp_surf_stride())
     comp_gscen_patch_quad(gbuf, n, tex, dx, dy, w, h, tsp, sx, sy)
 
-fn comp_escena_commit(st: Int, tab: Int, gbuf: Int, px: Int, py: Int, pw: Int, ph: Int, clear_rt: Int) -> Int ! io, alloc
-    if comp_st_get(st, comp_st_gpu_ok()) == 0
+# 1 si hay escena que componer: en la GPU, o en CPU con `--escena-cpu`.
+fn comp_escena_activa(st: Int) -> Int ! alloc
+    if comp_st_get(st, comp_st_gpu_ok()) != 0
+        1
+    elsif comp_st_get(st, comp_st_cpu()) != 0
+        1
+    else
+        0
+
+# `compos`/`clen`: el RT cuando la escena se compone en CPU.
+fn comp_escena_commit(st: Int, tab: Int, gbuf: Int, px: Int, py: Int, pw: Int, ph: Int, clear_rt: Int, compos: Int, clen: Int) -> Int ! io, alloc
+    if comp_escena_activa(st) == 0
         0
     else
         _u = comp_escena_upload_dirty(st, tab)
@@ -289,7 +330,62 @@ fn comp_escena_commit(st: Int, tab: Int, gbuf: Int, px: Int, py: Int, pw: Int, p
             z = z + 1
         _h = comp_gscen_patch_hdr(gbuf, rt, fb_w, fb_h, pitch, px, py, pw, ph, flags, rgba, n)
         cmd_len = comp_gscen_hdr_len() + n * comp_gscen_quad_len()
-        if gpu_submit(gbuf, cmd_len) < 0
+        if comp_st_get(st, comp_st_cpu()) != 0
+            comp_gscen_cpu(gbuf, compos, clen)
+        elsif gpu_submit(gbuf, cmd_len) < 0
             0
         else
             1
+
+fn comp_u32_con_signo(v: Int) -> Int
+    if v >= 2147483648
+        v - 4294967296
+    else
+        v
+
+# Ejecuta en CPU el mismo comando `GSCEN` que iría al kernel (borrado opcional
+# del RT, quads opacos en orden y present del rectángulo): RT = `compos`.
+fn comp_gscen_cpu(gbuf: Int, compos: Int, clen: Int) -> Int ! io, alloc
+    b = bytes_view_mem(gbuf, comp_gscen_buf_len())
+    fb_w = bytes_get_u32(b, 13)
+    fb_h = bytes_get_u32(b, 17)
+    pitch = bytes_get_u32(b, 21)
+    px = bytes_get_u32(b, 25)
+    py = bytes_get_u32(b, 29)
+    pw = bytes_get_u32(b, 33)
+    ph = bytes_get_u32(b, 37)
+    n = bytes_get_u8(b, 49)
+    if (bytes_get_u32(b, 41) & comp_gscen_flag_clear()) != 0
+        _c = rellenar_rect(compos, clen, fb_w, fb_h, pitch, 4, 0, 0, 0, fb_w, fb_h, 0)
+    q = 0
+    while q < n
+        off = comp_gscen_hdr_len() + q * comp_gscen_quad_len()
+        tex = bytes_get_i64(b, off)
+        tp = bytes_get_u32(b, off + 24) / 4
+        dx = comp_u32_con_signo(bytes_get_u32(b, off + 8))
+        dy = comp_u32_con_signo(bytes_get_u32(b, off + 12))
+        w = bytes_get_u32(b, off + 16)
+        h = bytes_get_u32(b, off + 20)
+        sx = bytes_get_u32(b, off + 28)
+        sy = bytes_get_u32(b, off + 32)
+        # Recorte a la pantalla: una ventana puede quedar medio fuera.
+        if dx < 0
+            sx = sx - dx
+            w = w + dx
+            dx = 0
+        if dy < 0
+            sy = sy - dy
+            h = h + dy
+            dy = 0
+        w = min(w, fb_w - dx)
+        h = min(h, fb_h - dy)
+        if w > 0
+            if h > 0
+                # La textura tiene al menos las filas que se leen.
+                tl = tp * 4 * (sy + h)
+                _q = copiar_rect(compos, clen, pitch, tex, tl, tp, 4, 0, dx, dy, sx, sy, w, h)
+        q = q + 1
+    if fb_present_rect(compos, clen, px, py, pw, ph) >= 0
+        1
+    else
+        0

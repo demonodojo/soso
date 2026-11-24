@@ -1,0 +1,6 @@
+SOSOPKG v1
+nombre=soso-wm
+version=0.1.6
+abi=1
+destino=sistema
+f 899cb70f1844daa669d7dcdbcf8b0aecafa0ef480702503ad1f503eea42dd182 718360 bin/soso-wm

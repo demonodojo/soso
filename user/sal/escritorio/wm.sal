@@ -170,6 +170,15 @@ struct Estado
     scr_ptr: Int
     scr_cap: Int
     ctx_sel: Int
+    # Escena GPU (también la de `--escena-cpu`): repintados pendientes por
+    # superficie y la última geometría mandada de cada una.
+    escena_cpu: Int
+    g_rep: Int
+    g_cab: Int
+    g_bar: Int
+    g_pop: Int
+    geo_buf: Int
+    cur_ok: Int
 
 init Estado(evt_buf: Int, msg_buf: Int) ! alloc
     Estado(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -180,7 +189,8 @@ init Estado(evt_buf: Int, msg_buf: Int) ! alloc
            -1, 0, 0, 0, esc_nueva(wm_escena_cap()), -1, -1, 0, 0, 0, 0,
            bytes_ptr(bytes_new(prims_fondo_buf_len())), 0, 0, 0, 0,
            bytes_ptr(bytes_new(tab_cap() * 4)),
-           0, bytes_ptr(bytes_new(wm_reg_max() * 32)), 0, 0, -1)
+           0, bytes_ptr(bytes_new(wm_reg_max() * 32)), 0, 0, -1,
+           0, 0, 0, 0, 0, bytes_ptr(bytes_new(wm_geo_bytes())), 0)
 
 fn wm_escena_cap() -> Int
     160
@@ -412,12 +422,45 @@ fn wm_danar_rect(st: &mut Estado, x0: Int, y0: Int, x1: Int, y1: Int, sw: Int, s
 fn wm_sombra_margen() -> Int
     wm_sombra_ext(1) + wm_sombra_dy()
 
+# ---------------------------------------------------------------------------
+# Daño en la escena GPU
+#
+# Con compositor cada ventana, la barra, el menú y el puntero son superficies
+# propias: el compositor las recompone en orden z y conserva su contenido. Mover
+# o subir una ventana es sólo geometría (`wm_comp_send_geom` la compara con la
+# última mandada y daña lo que cambia), y lo que cambia de aspecto se repinta en
+# su superficie y se sube (DMAP) sólo eso: la ventana entera (`g_rep`), su
+# cabecera (`g_cab`), la barra (`g_bar`) o el menú emergente (`g_pop`).
+# ---------------------------------------------------------------------------
+
+# 1 si el daño puede ir por superficie (escena GPU y sin salvapantallas).
+fn wm_gpu_parcial(st: &mut Estado) -> Int ! alloc
+    if wm_comp_gpu_mode(st) == 0
+        0
+    elsif st.ss_slot >= 0
+        0
+    elsif st.pw <= 0
+        0
+    else
+        1
+
+fn wm_bit(i: Int) -> Int
+    1 << i
+
+# Superficie de la ventana `i` (su cabeza de grupo) a repintar entera.
+fn wm_gpu_rep(st: &mut Estado, i: Int) -> Int ! alloc
+    if i >= 0
+        st.g_rep = st.g_rep | wm_bit(st.tab.grupo_cab(i))
+    0
+
 # Daña la ventana `i` entera, con su sombra.
 fn wm_danar_ventana(st: &mut Estado, i: Int) -> Int ! alloc
     if i < 0
         0
     elsif st.tab.slot_activo(i) == 0
         0
+    elsif wm_gpu_parcial(st) != 0
+        wm_gpu_rep(st, i)
     else
         m = wm_sombra_margen()
         wx = st.tab.wx(i)
@@ -430,15 +473,26 @@ fn wm_danar_cabecera(st: &mut Estado, i: Int) -> Int ! alloc
         0
     elsif st.tab.slot_activo(i) == 0
         0
+    elsif wm_gpu_parcial(st) != 0
+        st.g_cab = st.g_cab | wm_bit(st.tab.grupo_cab(i))
+        0
     else
         wx = st.tab.wx(i)
         wy = st.tab.wy(i)
         wm_danar(st, wx, wy, wx + st.tab.ww(i), wy + wm_bar_h(st))
 
 fn wm_danar_barra(st: &mut Estado) -> Int ! alloc
-    wm_danar(st, 0, 0, st.pw, wm_bar_h(st))
+    if wm_gpu_parcial(st) != 0
+        st.g_bar = 1
+        0
+    else
+        wm_danar(st, 0, 0, st.pw, wm_bar_h(st))
 
 fn wm_danar_menu(st: &mut Estado) -> Int ! alloc
+    if wm_gpu_parcial(st) != 0
+        st.g_bar = 1
+        st.g_pop = 1
+        return 0
     gw = wm_gw_wm(st)
     gh = wm_gh_wm(st)
     x0 = lanz_menu_x0(gw)
@@ -448,6 +502,9 @@ fn wm_danar_menu(st: &mut Estado) -> Int ! alloc
 
 fn wm_danar_ctx(st: &mut Estado) -> Int ! alloc
     if st.ctx < 0
+        0
+    elsif wm_gpu_parcial(st) != 0
+        st.g_pop = 1
         0
     else
         wm_danar(st, st.ctx_x - 2, st.ctx_y - 2, st.ctx_x + ctx_ancho(st) + 2, st.ctx_y + ctx_alto(st) + 2)
@@ -668,7 +725,10 @@ fn wm_cursor_restaurar(st: &mut Estado, compos: Int, clen: Int, stride: Int, bpp
         cw = wm_cursor_ancho_visible(ox, stride)
         ch = wm_cursor_alto_visible(oy, stride, bpp, clen)
         _c = copiar_rect(compos, clen, stride, bak, wm_cursor_bak_len(), wm_cursor_w(), bpp, fmt, ox, oy, 0, 0, cw, ch)
-        _d = wm_cursor_marcar(st, ox, oy)
+        if ox != st.mx
+            _d = wm_cursor_marcar(st, ox, oy)
+        elsif oy != st.my
+            _d2 = wm_cursor_marcar(st, ox, oy)
         st.bak_ok = 0
     0
 
@@ -1593,16 +1653,33 @@ fn wm_repintar_slot_vis(st: &mut Estado, i: Int, compos: Int, clen: Int, sw: Int
         py = wy
         fd = st.comp_fd
         gmode = wm_comp_gpu_mode(st)
+        # `rep`: repintar la ventana entera (marco y contenido). En la escena GPU
+        # también fuera del repintado completo, si se pidió o la superficie es nueva.
+        rep = completo
+        cab = 0
         if gmode != 0
-            _we = wm_comp_win_ensure(st, fd, i, stride)
+            if wm_surf_ensure_cambia(st, fd, wm_surf_win(i), ww, wh, stride) != 0
+                rep = 1
+            if (st.g_rep & wm_bit(i)) != 0
+                rep = 1
+            if (st.g_cab & wm_bit(i)) != 0
+                cab = 1
+            st.g_rep = st.g_rep - (st.g_rep & wm_bit(i))
+            st.g_cab = st.g_cab - (st.g_cab & wm_bit(i))
             _wg = wm_comp_sync_win_geom(st, fd, i, zix)
             c = wm_comp_tgt(st, compos, wm_surf_win(i))
             cl = wm_surf_len(stride, wh)
             px = 0
             py = 0
-        if completo != 0
+        if rep != 0
             if wm_es_ss(st, i) == 0
                 _m = wm_pintar_marco(c, cl, sw, sh, stride, bpp, fmt, px, py, ww, wh, st, i)
+        elsif cab != 0
+            # Sólo la cabecera (hover, punto de actividad): el marco recortado a
+            # sus filas, que no tocan el contenido.
+            bh0 = wm_bar_h(st)
+            _mc = wm_pintar_marco(c, wm_surf_len(stride, bh0), sw, bh0, stride, bpp, fmt, px, py, ww, wh, st, i)
+            _dc = wm_comp_dmap_surf(st, fd, wm_surf_win(i), 0, 0, ww, bh0, wx, wy)
         if st.tab.tipo(a) == tab_tipo_term()
             nv = wm_tab_escala(st, a)
             psf = wm_psf_slot(st, nv)
@@ -1613,7 +1690,7 @@ fn wm_repintar_slot_vis(st: &mut Estado, i: Int, compos: Int, clen: Int, sw: Int
             tema = wm_tema_id(st)
             if psf > 0
                 grid = st.tab.shm_ptr(a)
-                if completo != 0
+                if rep != 0
                     _df = st.tab.term_set_dirty(a, -1)
                 if completo == 0
                     if gmode == 0
@@ -1622,7 +1699,7 @@ fn wm_repintar_slot_vis(st: &mut Estado, i: Int, compos: Int, clen: Int, sw: Int
                 cols = wm_term_cols(ww, gw)
                 rows = wm_term_rows(wh, gh, bh)
                 if dr != -2
-                    _t = st.tab.term_pintar(a, grid, cols * rows * celda_bytes(), cols, rows, psf, plen, gw, gh, tema, c, cl, sw, sh, stride, bpp, fmt, px + 4, py + bh + 4, completo)
+                    _t = st.tab.term_pintar(a, grid, cols * rows * celda_bytes(), cols, rows, psf, plen, gw, gh, tema, c, cl, sw, sh, stride, bpp, fmt, px + 4, py + bh + 4, rep)
                 if dr == -1
                     _d = wm_marcar_dirty(st, wx, wy, wx + ww, wy + wh)
                     if gmode != 0
@@ -1635,7 +1712,7 @@ fn wm_repintar_slot_vis(st: &mut Estado, i: Int, compos: Int, clen: Int, sw: Int
                         lry = bh + 4 + dr * gh
                         _dm2 = wm_comp_dmap_surf(st, fd, wm_surf_win(i), 0, lry, ww, lry + nf * gh, wx, wy)
         if st.tab.tipo(a) == tab_tipo_cli()
-            if completo != 0
+            if rep != 0
                 if st.tab.fase(a) == 2
                     cw = st.tab.cw(a)
                     ch = st.tab.ch(a)
@@ -1648,10 +1725,14 @@ fn wm_repintar_slot_vis(st: &mut Estado, i: Int, compos: Int, clen: Int, sw: Int
                     _d3 = wm_marcar_dirty(st, wx, wy, wx + ww, wy + wh)
                     if gmode != 0
                         _dm3 = wm_comp_dmap_surf(st, fd, wm_surf_win(i), 0, 0, ww, wh, wx, wy)
-        if completo != 0
+        if rep != 0
             if st.tab.tipo(a) != tab_tipo_term()
                 if st.tab.tipo(a) != tab_tipo_cli()
                     _d4 = wm_marcar_dirty(st, wx, wy, wx + ww, wy + wh)
+            # El marco también hay que subirlo (un cliente que aún no tiene
+            # píxeles, o un panel de otro tipo, no lo hacía).
+            if gmode != 0
+                _d5 = wm_comp_dmap_surf(st, fd, wm_surf_win(i), 0, 0, ww, wh, wx, wy)
     0
 
 # Filas sucias de una terminal fuera del repintado completo (CPU): si una
@@ -1692,6 +1773,12 @@ fn wm_compose(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride:
     if completo != 0
         bh = wm_bar_h(st)
         if gmode != 0
+            # Todo se repinta y se vuelve a mandar: lo pendiente sobra.
+            _go = wm_geo_olvidar(st)
+            st.g_rep = 0
+            st.g_cab = 0
+            st.g_bar = 0
+            st.cur_ok = 0
             st.comp_need_clear = 1
             if st.prims != 1
                 fondo_tgt = wm_comp_tgt(st, compos, wm_surf_fondo())
@@ -1717,6 +1804,24 @@ fn wm_compose(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride:
         st.fondo = 1
         st.repintar = 0
     if completo == 0
+        if gmode != 0
+            if st.g_bar != 0
+                bh2 = wm_bar_h(st)
+                _bar2 = wm_pintar_barra(st, wm_comp_tgt(st, compos, wm_surf_bar()), wm_surf_len(stride, bh2), sw, sh, stride, bpp, fmt)
+                _bd2 = wm_comp_dmap_surf(st, fd, wm_surf_bar(), 0, 0, sw, bh2, 0, 0)
+                st.g_bar = 0
+    # El puntero (CPU) sólo hay que volcarlo si se ha movido: si no, lo que se
+    # pinte debajo ya marca su rectángulo.
+    cmov = 0
+    if st.mx != st.mx_prev
+        cmov = 1
+    if st.my != st.my_prev
+        cmov = 1
+    if st.bak_ok == 0
+        cmov = 1
+    if st.ss_slot >= 0
+        cmov = 1
+    if completo == 0
         if gmode == 0
             if st.ss_slot < 0
                 _re = wm_cursor_restaurar(st, compos, clen, stride, bpp, fmt)
@@ -1733,51 +1838,87 @@ fn wm_compose(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride:
                 _rg = wm_repintar_region(st, r, compos, clen, sw, sh, stride, bpp, fmt)
                 r = r + 1
     st.reg_n = 0
-    if completo != 0
-        if gmode == 0
+    if gmode == 0
+        if completo != 0
             _men = wm_pintar_menu(st, compos, clen, sw, sh, stride, bpp, fmt)
-        else
-            if st.menu != 0
-                mw = lanz_menu_ancho(gw, gh, tema)
-                mh = lanz_menu_alto(gh)
-                mcl = wm_surf_len(stride, mh)
-                mt = wm_comp_tgt(st, compos, wm_surf_menu())
-                _ml = wm_pintar_menu_local(st, mt, mcl, stride, bpp, fmt, sw, sh)
-                mx0 = lanz_menu_x0(gw)
-                my0 = lanz_menu_y0(gh)
-                _mg = wm_comp_send_geom(st, fd, wm_surf_menu(), mx0, my0, mw, mh, comp_geom_opaque(), 50)
-                _md = wm_comp_dmap_surf(st, fd, wm_surf_menu(), 0, 0, mw, mh, mx0, my0)
-            else
-                _mh = wm_comp_send_geom(st, fd, wm_surf_menu(), 0, 0, 0, 0, comp_geom_hidden(), 50)
-    if completo == 0
-        if st.menu != 0
-            if gmode == 0
-                _men2 = wm_pintar_menu(st, compos, clen, sw, sh, stride, bpp, fmt)
-            else
-                mw2 = lanz_menu_ancho(gw, gh, tema)
-                mh2 = lanz_menu_alto(gh)
-                mcl = wm_surf_len(stride, mh2)
-                mt = wm_comp_tgt(st, compos, wm_surf_menu())
-                _ml2 = wm_pintar_menu_local(st, mt, mcl, stride, bpp, fmt, sw, sh)
-                mx02 = lanz_menu_x0(gw)
-                my02 = lanz_menu_y0(gh)
-                _mg2 = wm_comp_send_geom(st, fd, wm_surf_menu(), mx02, my02, mw2, mh2, comp_geom_opaque(), 50)
-                _md2 = wm_comp_dmap_surf(st, fd, wm_surf_menu(), 0, 0, mw2, mh2, mx02, my02)
-    if gmode == 0
+        elsif st.menu != 0
+            _men2 = wm_pintar_menu(st, compos, clen, sw, sh, stride, bpp, fmt)
         _cxm = wm_pintar_ctx(st, compos, clen, sw, sh, stride, bpp, fmt)
-    if gmode == 0
         _cap = wm_cursor_capturar(st, compos, clen, stride, bpp, fmt)
         _cur = wm_pintar_cursor(st, compos, clen, sw, sh, stride, bpp, fmt)
+        if cmov != 0
+            _cm = wm_cursor_marcar(st, st.mx, st.my)
     else
-        cur_tgt = wm_comp_tgt(st, compos, wm_surf_cursor())
-        cur_cl = wm_cursor_w() * wm_cursor_h() * 4
-        mx = st.mx
-        my = st.my
-        _cg = wm_comp_send_geom(st, fd, wm_surf_cursor(), mx, my, wm_cursor_w(), wm_cursor_h(), 0, 60)
-        _cur = wm_pintar_cursor_buf(st, cur_tgt, cur_cl, wm_cursor_w(), bpp, fmt, 0, 0)
-        _cd = wm_comp_dmap_surf(st, fd, wm_surf_cursor(), 0, 0, wm_cursor_w(), wm_cursor_h(), mx, my)
-    _cm = wm_cursor_marcar(st, st.mx, st.my)
+        _em = wm_gpu_emergente(st, compos, sw, sh, stride, bpp, fmt, completo)
+        _gc = wm_gpu_cursor(st, compos, bpp, fmt)
     0
+
+# Menú emergente en la escena GPU: el contextual o el de aplicaciones comparten
+# la superficie del menú (un clic cierra el contextual, así que no conviven).
+# Sólo se repinta y se sube cuando algo lo pide (`g_pop`); si no, basta la
+# geometría. GSCEN no mezcla con alfa: las esquinas del contextual van sobre el
+# color del borde en vez de sobre lo que haya debajo.
+fn wm_gpu_emergente(st: &mut Estado, compos: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, completo: Int) -> Int ! io, alloc
+    fd = st.comp_fd
+    sid = wm_surf_menu()
+    pinta = st.g_pop
+    if completo != 0
+        pinta = 1
+    if st.ctx >= 0
+        w = ctx_ancho(st) + 2
+        h = ctx_alto(st) + 2
+        x0 = st.ctx_x - 1
+        y0 = st.ctx_y - 1
+        if wm_surf_ensure_cambia(st, fd, sid, w, h, stride) != 0
+            pinta = 1
+        if pinta != 0
+            t = wm_comp_tgt(st, compos, sid)
+            cl = wm_surf_len(stride, h)
+            _f = rellenar_rect(t, cl, w, h, stride, bpp, fmt, 0, 0, w, h, tema_borde(wm_tema_id(st), 0))
+            _p = wm_pintar_ctx_en(st, t, cl, w, h, stride, bpp, fmt, x0, y0)
+            _d = wm_comp_dmap_surf(st, fd, sid, 0, 0, w, h, x0, y0)
+        _g = wm_comp_send_geom(st, fd, sid, x0, y0, w, h, comp_geom_opaque(), 50)
+    elsif st.menu != 0
+        gw = wm_gw_wm(st)
+        gh = wm_gh_wm(st)
+        mw = lanz_menu_ancho(gw, gh, wm_tema_id(st))
+        mh = lanz_menu_alto(gh)
+        mx0 = lanz_menu_x0(gw)
+        my0 = lanz_menu_y0(gh)
+        if wm_surf_ensure_cambia(st, fd, sid, mw, mh, stride) != 0
+            pinta = 1
+        if pinta != 0
+            mt = wm_comp_tgt(st, compos, sid)
+            _ml = wm_pintar_menu_local(st, mt, wm_surf_len(stride, mh), stride, bpp, fmt, sw, sh)
+            _md = wm_comp_dmap_surf(st, fd, sid, 0, 0, mw, mh, mx0, my0)
+        _mg = wm_comp_send_geom(st, fd, sid, mx0, my0, mw, mh, comp_geom_opaque(), 50)
+    else
+        _mh = wm_comp_send_geom(st, fd, sid, 0, 0, 0, 0, comp_geom_hidden(), 50)
+    st.g_pop = 0
+    0
+
+# Puntero en la escena GPU: la superficie se pinta una vez y moverlo es sólo
+# geometría (antes se repintaba, se subía y se presentaba en cada fotograma).
+fn wm_gpu_cursor(st: &mut Estado, compos: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
+    fd = st.comp_fd
+    sid = wm_surf_cursor()
+    cw = wm_cursor_w()
+    ch = wm_cursor_h()
+    if st.cur_ok == 0
+        t = wm_comp_tgt(st, compos, sid)
+        _p = wm_pintar_cursor_buf(st, t, cw * ch * 4, cw, bpp, fmt, 0, 0)
+        _d = wm_comp_dmap_surf(st, fd, sid, 0, 0, cw, ch, st.mx, st.my)
+        st.cur_ok = 1
+    wm_comp_send_geom(st, fd, sid, st.mx, st.my, cw, ch, 0, 60)
+
+# Como `wm_surf_ensure`, pero dice si la superficie es nueva (y está por pintar).
+fn wm_surf_ensure_cambia(st: &mut Estado, fd: Int, surf_id: Int, w: Int, h: Int, stride: Int) -> Int ! io, alloc
+    antes = st.surfs.get_sid(surf_id)
+    _e = wm_surf_ensure(st, fd, surf_id, w, h, stride)
+    if st.surfs.get_sid(surf_id) != antes
+        1
+    else
+        0
 
 fn wm_marcar_dirty(st: &mut Estado, x0: Int, y0: Int, x1: Int, y1: Int) -> Int ! alloc
     if st.dx1 <= st.dx0
@@ -1857,7 +1998,12 @@ fn wm_repintar_ventana(st: &mut Estado, i: Int, compos: Int, clen: Int, sw: Int,
     # En GPU la ventana no vive en `compos` sino en su superficie, y quien la
     # pinta y le manda geometría y z es el repintado completo.
     if wm_comp_gpu_mode(st) != 0
-        wm_pedir_repintar(st)
+        if wm_gpu_parcial(st) == 0
+            wm_pedir_repintar(st)
+        elsif st.tab.grupo_panel_activo(i) == i
+            wm_gpu_rep(st, i)
+        else
+            0
     elsif st.tab.grupo_panel_activo(i) != i
         wm_pedir_repintar(st)
     elsif st.ss_slot >= 0
@@ -2295,7 +2441,77 @@ fn wm_comp_send_bind(st: &mut Estado, fd: Int, id: Int, sid: Int, w: Int, h: Int
     _w = wm_comp_escribir(st, fd, m, msg_len())
     0
 
+# Caché de la última geometría mandada por superficie: (válida, x, y, w, h, flags, z).
+fn wm_geo_n() -> Int
+    20
+
+fn wm_geo_bytes() -> Int
+    wm_geo_n() * 56
+
+fn wm_geo_get(st: &mut Estado, id: Int, c: Int) -> Int ! alloc
+    bytes_get_i64(bytes_view_mem(st.geo_buf, wm_geo_bytes()), id * 56 + c * 8)
+
+fn wm_geo_set(st: &mut Estado, id: Int, c: Int, v: Int) -> Int ! alloc
+    bytes_set_i64(bytes_view_mem(st.geo_buf, wm_geo_bytes()), id * 56 + c * 8, v)
+    0
+
+# Olvida todas: la siguiente geometría de cada superficie se manda sí o sí.
+fn wm_geo_olvidar(st: &mut Estado) -> Int ! alloc
+    k = 0
+    while k < wm_geo_n()
+        _v = wm_geo_set(st, k, 0, 0)
+        k = k + 1
+    0
+
+fn wm_geo_visible(w: Int, h: Int, flags: Int) -> Int
+    if (flags & comp_geom_hidden()) != 0
+        0
+    elsif w <= 0
+        0
+    elsif h <= 0
+        0
+    else
+        1
+
+# Manda la geometría sólo si cambió, y daña lo que ocupaba antes y lo que ocupa
+# ahora: el COMMIT recompone ese rectángulo con lo que haya debajo.
 fn wm_comp_send_geom(st: &mut Estado, fd: Int, id: Int, x: Int, y: Int, w: Int, h: Int, flags: Int, z: Int) -> Int ! io, alloc
+    if id < 0
+        wm_comp_send_geom_ya(st, fd, id, x, y, w, h, flags, z)
+    elsif id >= wm_geo_n()
+        wm_comp_send_geom_ya(st, fd, id, x, y, w, h, flags, z)
+    else
+        igual = 0
+        if wm_geo_get(st, id, 0) != 0
+            if wm_geo_get(st, id, 1) == x
+                if wm_geo_get(st, id, 2) == y
+                    if wm_geo_get(st, id, 3) == w
+                        if wm_geo_get(st, id, 4) == h
+                            if wm_geo_get(st, id, 5) == flags
+                                if wm_geo_get(st, id, 6) == z
+                                    igual = 1
+        if igual != 0
+            0
+        else
+            if wm_geo_get(st, id, 0) != 0
+                ow = wm_geo_get(st, id, 3)
+                oh = wm_geo_get(st, id, 4)
+                if wm_geo_visible(ow, oh, wm_geo_get(st, id, 5)) != 0
+                    ox = wm_geo_get(st, id, 1)
+                    oy = wm_geo_get(st, id, 2)
+                    _do = wm_marcar_dirty(st, ox, oy, ox + ow, oy + oh)
+            if wm_geo_visible(w, h, flags) != 0
+                _dn = wm_marcar_dirty(st, x, y, x + w, y + h)
+            _a = wm_geo_set(st, id, 0, 1)
+            _b = wm_geo_set(st, id, 1, x)
+            _c = wm_geo_set(st, id, 2, y)
+            _d = wm_geo_set(st, id, 3, w)
+            _e = wm_geo_set(st, id, 4, h)
+            _f = wm_geo_set(st, id, 5, flags)
+            _g = wm_geo_set(st, id, 6, z)
+            wm_comp_send_geom_ya(st, fd, id, x, y, w, h, flags, z)
+
+fn wm_comp_send_geom_ya(st: &mut Estado, fd: Int, id: Int, x: Int, y: Int, w: Int, h: Int, flags: Int, z: Int) -> Int ! io, alloc
     m = st.msg_buf
     _e = msg_encode_comp_geom(m, id, x, y, w, h, flags, z)
     _w = wm_comp_escribir(st, fd, m, msg_len())
@@ -2342,12 +2558,22 @@ fn wm_surf_pitch(stride_px: Int) -> Int
 fn wm_surf_len(stride_px: Int, h: Int) -> Int
     wm_surf_pitch(stride_px) * h
 
+# El compositor sólo puede mapear la SHM de una superficie si se la concedemos:
+# sin esto todos los BIND fallaban en él y la escena GPU no llegaba a pintar.
+fn wm_surf_conceder(fd: Int, sid: Int) -> Int ! io, alloc
+    peer = tcp_peer_pid(fd)
+    if peer >= 0
+        shm_grant(sid, peer)
+    else
+        -1
+
 fn wm_surf_nueva(st: &mut Estado, fd: Int, surf_id: Int, w: Int, h: Int, stride: Int) -> Int ! io, alloc
     clen = wm_surf_len(stride, h)
     nsid = shm_create(clen)
     if nsid < 0
         0
     else
+        _g = wm_surf_conceder(fd, nsid)
         ptr = shm_map(nsid)
         if ptr < 0
             0
@@ -2367,6 +2593,7 @@ fn wm_surf_rehacer(st: &mut Estado, fd: Int, surf_id: Int, w: Int, h: Int, strid
     if nsid < 0
         st.surfs.get_ptr(surf_id)
     else
+        _g = wm_surf_conceder(fd, nsid)
         ptr = shm_map(nsid)
         if ptr < 0
             _f = shm_free(nsid)
@@ -2637,7 +2864,15 @@ fn wm_comp_attach_escena(st: &mut Estado, fd: Int, buf: Int) -> Int ! io, alloc
     else
         st.comp_fd = fd
         st.comp_gpu_ok = gok
+        _go = wm_geo_olvidar(st)
+        st.cur_ok = 0
         ptr
+
+fn wm_comp_lanzar(st: &mut Estado) -> Int ! io, alloc
+    if st.escena_cpu != 0
+        spawn_io_argv(d"/bin/soso-comp", d"--escena-cpu", d"", d"", d"", d"", 2, fd_tty_heredado(), fd_tty_heredado(), fd_tty_heredado(), fd_kernel_log())
+    else
+        spawn_io_full(d"/bin/soso-comp", fd_tty_heredado(), fd_tty_heredado(), fd_tty_heredado(), fd_kernel_log())
 
 fn wm_comp_ensure(st: &mut Estado, sw: Int, sh: Int, stride: Int, sin_comp: Int) -> Int ! io, alloc
     if sin_comp != 0
@@ -2655,7 +2890,7 @@ fn wm_comp_ensure(st: &mut Estado, sw: Int, sh: Int, stride: Int, sin_comp: Int)
             if ptr == -2
                 -1
             else
-                _sp = spawn_io_full(d"/bin/soso-comp", fd_tty_heredado(), fd_tty_heredado(), fd_tty_heredado(), fd_kernel_log())
+                _sp = wm_comp_lanzar(st)
                 t0 = uptime_ms()
                 res = -1
                 done = 0
@@ -2663,6 +2898,9 @@ fn wm_comp_ensure(st: &mut Estado, sw: Int, sh: Int, stride: Int, sin_comp: Int)
                     if uptime_ms() - t0 > 5000
                         done = 1
                     if done == 0
+                        # Sin pausa el reintento le quita la CPU al compositor
+                        # que está arrancando y no llega a escuchar a tiempo.
+                        sleep_ms(50)
                         ptr = wm_comp_attach(st, sw, sh)
                         if ptr >= 0
                             fd = st.comp_fd
@@ -3365,14 +3603,22 @@ fn wm_lista_abrir(st: &mut Estado, cab: Int, sw: Int, sh: Int) -> Int ! alloc
     wm_ctx_abrir_modo(st, cab, 1, pest_lista_x(wx, ww, gh), wy + wm_bar_h(st), sw, sh)
 
 fn wm_pintar_ctx(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
+    _p = wm_pintar_ctx_en(st, compos, clen, sw, sh, stride, bpp, fmt, 0, 0)
+    if st.ctx >= 0
+        _d = wm_marcar_dirty(st, st.ctx_x - 1, st.ctx_y - 1, st.ctx_x + ctx_ancho(st) + 1, st.ctx_y + ctx_alto(st) + 1)
+    0
+
+# Pinta el menú contextual trasladado por (-ox, -oy): 0,0 en pantalla; su caja
+# en una superficie propia en la escena GPU.
+fn wm_pintar_ctx_en(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, ox: Int, oy: Int) -> Int ! io, alloc
     m = st.ctx
     if m >= 0
         gw = wm_gw_wm(st)
         gh = wm_gh_wm(st)
         tema = wm_tema_id(st)
         radio = metrica_radio(gh)
-        cx = st.ctx_x
-        cy = st.ctx_y
+        cx = st.ctx_x - ox
+        cy = st.ctx_y - oy
         w = ctx_ancho(st)
         h = ctx_alto(st)
         ia = ctx_item_alto(st)
@@ -3396,7 +3642,6 @@ fn wm_pintar_ctx(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stri
             else
                 _t = wm_texto(st, compos, clen, stride, bpp, fmt, ctx_texto(k), cx + lanz_margen(gw), iy + (ia - gh) / 2, wm_color_texto_barra(st), bg)
             k = k + 1
-        _d = wm_marcar_dirty(st, cx - 1, cy - 1, cx + w + 1, cy + h + 1)
     0
 
 # Ejecuta la acción `k` del menú contextual sobre el panel `m`.
@@ -3444,6 +3689,10 @@ fn wm_raton_mover(st: &mut Estado, x: Int, y: Int, botones: Int, sw: Int, sh: In
         if cs != st.ctx_sel
             st.ctx_sel = cs
             _hx = wm_danar_ctx(st)
+    # El menú de aplicaciones resalta lo que hay bajo el puntero.
+    if st.menu != 0
+        if wm_gpu_parcial(st) != 0
+            st.g_pop = 1
     dix = st.drag_ix
     if dix >= 0
         if botones != 0
@@ -3454,9 +3703,14 @@ fn wm_raton_mover(st: &mut Estado, x: Int, y: Int, botones: Int, sw: Int, sh: In
             wh = st.tab.wh(dix)
             if dk == 10
                 _pa = wm_pest_arrastrar(st, dix, x, y, sh)
-            # Mover o redimensionar daña dónde estaba y dónde queda.
+            # Mover o redimensionar daña dónde estaba y dónde queda. En la
+            # escena GPU mover es sólo geometría: no hay nada que repintar.
+            solo_geom = 0
+            if dk == 1
+                solo_geom = wm_gpu_parcial(st)
             if dk != 10
-                _dv = wm_danar_ventana(st, dix)
+                if solo_geom == 0
+                    _dv = wm_danar_ventana(st, dix)
             if dk == 1
                 _dr = wm_drop_fijar(st, wm_destino_soltar(st, x, y, dix))
                 nx = x - st.grab_x
@@ -3497,7 +3751,7 @@ fn wm_raton_mover(st: &mut Estado, x: Int, y: Int, botones: Int, sw: Int, sh: In
             if dk == 10
                 _d = wm_marcar_dirty(st, 0, wm_bar_h(st), sw, sh)
                 _rp = wm_pedir_repintar(st)
-            else
+            elsif solo_geom == 0
                 _dn = wm_danar_ventana(st, dix)
     if dix < 0
         fi = st.focus
@@ -3834,7 +4088,10 @@ fn wm_activar_pestana(st: &mut Estado, h: Int, k: Int) -> Int ! io, alloc
         if st.tab.tipo(m) == tab_tipo_cli()
             _f = wm_enviar_foco(st, st.tab.fd(m))
         # Cambian la tira de pestañas y el contenido; la sombra no.
-        _dv = wm_danar(st, st.tab.wx(cab), st.tab.wy(cab), st.tab.wx(cab) + st.tab.ww(cab), st.tab.wy(cab) + st.tab.wh(cab))
+        if wm_gpu_parcial(st) != 0
+            _gr = wm_gpu_rep(st, cab)
+        else
+            _dv = wm_danar(st, st.tab.wx(cab), st.tab.wy(cab), st.tab.wx(cab) + st.tab.ww(cab), st.tab.wy(cab) + st.tab.wh(cab))
         _db = wm_danar_barra(st)
     0
 

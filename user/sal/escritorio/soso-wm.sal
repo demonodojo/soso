@@ -290,6 +290,8 @@ fn bucle_grafico(ejecutar: String) -> Int ! io, alloc
             msg = bytes_ptr(msg_own)
             st = Estado.new(evt, msg)
             sin_comp = arg_flag(d"--sin-comp")
+            # Pruebas: el compositor compone la escena «GPU» en CPU (ver soso-comp).
+            st.escena_cpu = arg_flag(d"--escena-cpu")
             compos = wm_comp_ensure(&mut st, sw, sh, stride, sin_comp)
             if compos < 0
                 compos_own = bytes_new(plen)
