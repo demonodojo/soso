@@ -3,4 +3,4 @@ nombre=soso-pkg
 version=0.4.2
 abi=1
 destino=sistema
-f 7bac45dbb19c705474267516ccf1905cf548ef602bdbe8a8aed4d9eaef603a81 1653496 bin/soso-pkg
+f 1ae10faeca73cfecf1f4f46598725d4d0e231d05e51fd62c5f9e8c30770d3ffd 1653504 bin/soso-pkg

@@ -392,6 +392,7 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_PTY_OPEN => sys_pty_open(),
         abi::SYS_PTY_RESIZE => sys_pty_resize(a1, a2, a3),
         abi::SYS_TTY_SIZE => sys_tty_size(),
+        abi::SYS_ISATTY => sys_isatty(a1),
         abi::SYS_SIGACTION => sys_sigaction(a1, a2, a3, a4),
         abi::SYS_SIGRETURN => sys_sigreturn(f),
         abi::SYS_SIGPROCMASK => sys_sigprocmask(a1, a2),
@@ -3428,6 +3429,15 @@ fn sys_tty_size() -> Result<u64, i64> {
         _ => (80, 24),
     };
     Ok((u64::from(rows) << 32) | u64::from(cols))
+}
+
+/// `isatty(3)`: `Fd::Tty` es la consola del proceso y `PtyMaster` el maestro
+/// de un pseudo-terminal; un fd cerrado o fuera de rango también da 0, no
+/// `EBADF`, que es lo que espera `isatty`.
+fn sys_isatty(fd: u64) -> Result<u64, i64> {
+    let es_tty = with_fd(fd, |slot| Ok(matches!(slot, Fd::Tty | Fd::PtyMaster(_))))
+        .unwrap_or(false);
+    Ok(u64::from(es_tty))
 }
 
 fn sys_shm_create(len: u64) -> Result<u64, i64> {

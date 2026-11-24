@@ -1,0 +1,31 @@
+# Tamaño de la terminal del proceso: syscall 106 de soso (columnas en los 32
+# bits bajos, filas en los altos). Sustituye a `ioctl(TIOCGWINSZ)` en Sal.
+# Se importa como "io/tty.sal" desde un paquete que dependa de `std/io`.
+
+fn tty_size_packed() -> Int ! io
+    syscall(106, 0, 0, 0, 0, 0, 0)
+
+# `isatty(3)`: 1 si el fd es la consola del proceso o el maestro de un PTY.
+fn tty_isatty(fd: Int) -> Int ! io
+    if fd < 0
+        0
+    else
+        v = syscall(114, fd, 0, 0, 0, 0, 0)
+        if v > 0
+            1
+        else
+            0
+
+fn tty_cols() -> Int ! io
+    v = tty_size_packed()
+    if v < 0
+        0
+    else
+        v % 4294967296
+
+fn tty_rows() -> Int ! io
+    v = tty_size_packed()
+    if v < 0
+        0
+    else
+        v / 4294967296

@@ -431,6 +431,11 @@ pub fn install(root: &Path) -> bool {
             }
         }
     }
+    // Módulo propio de soso (tamaño de terminal) sobre el `std/io` de Sal.
+    changed |= copiar(
+        &root.join("user/sal/std/io/tty.sal"),
+        &share_std.join("tty.sal"),
+    );
     if fs::read(prepared.join("native/source.lock")).ok()
         == fs::read(prepared.join("source.lock")).ok()
     {

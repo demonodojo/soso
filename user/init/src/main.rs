@@ -69,6 +69,18 @@ fn main(args: &[String]) -> u8 {
         core::hint::black_box(suma);
         return 0;
     }
+    if cmd == "fb-abandona" {
+        // Toma la pantalla y termina sin devolverla: con `exit` normal o con
+        // una falta (255). 3 = no pudo tomarla.
+        if sys::fb_set_mode(abi::FB_MODE_GRAPHICS).is_err() {
+            return 3;
+        }
+        let _ = sys::fb_keepalive(5_000);
+        if op == "fallo" {
+            unsafe { core::ptr::read_volatile(core::ptr::null::<u8>()) };
+        }
+        return 0;
+    }
     if cmd == "crash" {
         // Para probar que una falta de usuario mata al proceso, no al kernel.
         unsafe { core::ptr::read_volatile(core::ptr::null::<u8>()) };
@@ -447,6 +459,11 @@ fn copiar_fichero(origen: &str, destino: &str) -> Result<usize, i64> {
         return Err(c);
     }
     Ok(datos.len())
+}
+
+fn pantalla_en_grafico() -> bool {
+    let mut info = abi::FbInfo::default();
+    sys::fb_info(&mut info) >= 0 && info._pad & abi::FB_INFO_GRAFICO != 0
 }
 
 fn esperar(pid: i64, flags: u64) -> Option<(u8, u8)> {
@@ -1209,6 +1226,29 @@ fn suite() -> u8 {
         let suelta = sys::fb_set_mode(abi::FB_MODE_CONSOLE);
         check!(sigue.is_ok(), "framebuffer: sigue siendo dueño tras morir otro proceso ({sigue:?})");
         check!(suelta.is_ok(), "framebuffer: el dueño devuelve la consola ({suelta:?})");
+    }
+
+    // Un dueño que termina sin devolver la consola —`exit` normal o una falta—
+    // no la deja en modo gráfico. Sólo se soltaba al morir por señal: un
+    // escritorio que fallaba dejaba la pantalla congelada y el teclado en
+    // exclusiva para un proceso muerto, y ni Ctrl+Alt+Retroceso la recuperaba.
+    if sys::fb_set_mode(abi::FB_MODE_GRAPHICS).is_ok() {
+        let marca = pantalla_en_grafico();
+        let _ = sys::fb_set_mode(abi::FB_MODE_CONSOLE);
+        check!(marca, "framebuffer: fb_info indica el modo gráfico");
+        check!(!pantalla_en_grafico(), "framebuffer: fb_info indica la consola");
+        for (modo, esperado) in [("sale", 0u8), ("fallo", 255u8)] {
+            let h = sys::spawn("/bin/init", &alloc::format!("fb-abandona {modo}"));
+            let r = esperar(h, 0);
+            check!(
+                r == Some((abi::WAIT_EXIT, esperado)),
+                "framebuffer: el hijo tomó la pantalla y terminó ({modo}: {r:?})"
+            );
+            check!(
+                !pantalla_en_grafico(),
+                "framebuffer: vuelve la consola si el dueño termina sin soltarla ({modo})"
+            );
+        }
     }
 
     // Reemplazar el ejecutable de un proceso en marcha no lo mata: los ELF

@@ -18,7 +18,9 @@ La revisión integrada es `7090ba44030bac0272cdb8ed112e328dcc8c96e7`.
 instrucción `syscall` con la ABI de soso: `rdi`/`rsi`/`rdx`/`r10`). La E/S de
 biblioteca está en `sal/std/io` y se copia a `/usr/share/sal/std/io`; un proyecto
 la importa como `io/…` si está en `sal_modules/io` o como dependencia `path` de
-`Sal.toml`. Las banderas de `open` son las de soso (`O_CREAT` = 4, `O_TRUNC` = 8),
+`Sal.toml`. soso añade `std/io/tty.sal` (`tty_cols`, `tty_rows`, `tty_isatty`)
+sobre las syscalls 106 y 114; se importa igual que el resto del paquete `io`.
+Las banderas de `open` son las de soso (`O_CREAT` = 4, `O_TRUNC` = 8),
 no las de Linux.
 
 `7090ba4` (`sal modules`, 30 de octubre) añade paquetes (`Sal.toml` / `Sal.lock`),

@@ -3,4 +3,4 @@ nombre=soso-update
 version=0.1.2
 abi=1
 destino=sistema
-f c8aea09d5c4d25dfaaf93a9b00339d74ec617cdd9007981f1c011824641dd595 1789128 bin/soso-update
+f 7fcbb06fc36f93d844920431337a27f954ca72b4a617812535642bc9b25afb39 1789128 bin/soso-update

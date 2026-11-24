@@ -3447,6 +3447,25 @@ fn wm_tecla_es_q(key: Int) -> Int
     else
         0
 
+# Con Ctrl, el código de control que no es atajo del WM es de la ventana con
+# foco: Ctrl-C (3) interrumpe en la terminal, Ctrl-D, Ctrl-Z, Ctrl-U… Antes se
+# tragaban todos, y Ctrl-C además cerraba el escritorio entero. Atajos: Ctrl+Tab
+# (9) y Ctrl+Mayús+T (20); el zoom usa teclas imprimibles.
+fn wm_ctrl_para_foco(key: Int, mods: Int) -> Int
+    if key <= 0
+        0
+    elsif key >= 32
+        0
+    elsif key == 9
+        0
+    elsif key == 20
+        if (mods & mod_shift()) != 0
+            0
+        else
+            1
+    else
+        1
+
 # La «t» llega como 116, 84 (con Mayús) o 20 (código de control con Ctrl).
 fn wm_tecla_es_t(key: Int) -> Int
     if key == 116
@@ -3470,9 +3489,6 @@ fn wm_input(st: &mut Estado, evt: Int, evt_len: Int, n: Int, compos: Int, clen: 
             if input_event_pressed(evt, evt_len, i) != 0
                 key = input_event_key(evt, evt_len, i)
                 mods = input_event_button(evt, evt_len, i)
-                if (mods & mod_ctrl()) != 0
-                    if key == 3
-                        st.salir = 1
                 if (mods & mod_alt()) != 0
                     if (mods & mod_shift()) != 0
                         if key == 101
@@ -3527,6 +3543,8 @@ fn wm_input(st: &mut Estado, evt: Int, evt_len: Int, n: Int, compos: Int, clen: 
                         zv = zoom_tecla(key, mods)
                         if zoom_sentido(zv) != zoom_sentido_nada()
                             _z = wm_zoom_aplicar(st, zv, compos, clen, sw, sh, stride, bpp, fmt)
+                        if wm_ctrl_para_foco(key, mods) != 0
+                            _cf = wm_tecla_foco(st, key)
                     else
                         consumidos = wm_tecla_foco_secuencia(st, evt, evt_len, i, n)
                         if consumidos > 0

@@ -170,6 +170,9 @@ static SENALES_TTY: AtomicU64 = AtomicU64::new(0);
 /// Ctrl+Alt+Retroceso: el handler de teclado no mata procesos; lo hace el scheduler.
 static FB_CAD: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
+/// Ctrl-C con el teclado en exclusiva de la pantalla: va sólo al dueño.
+static FB_SIGINT: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
 /// Contexto de usuario para reanudar con iretq. El orden de los 15
 /// registros coincide con los push del timer_isr (memoria ascendente).
@@ -355,6 +358,16 @@ pub fn senal_de_tecla(b: u8) -> Option<u64> {
         0x1C => Some(soso_abi::SIGQUIT),
         _ => None,
     }
+}
+
+/// IRQ teclado: Ctrl-C con la pantalla en modo gráfico exclusivo. La señal va
+/// **sólo al dueño de la pantalla**, no al grupo en primer plano de la consola:
+/// el escritorio la ignora para que Ctrl-C llegue a su terminal como tecla, y
+/// mandarla al grupo mataba también al compositor y a las aplicaciones que
+/// lanzó. Un programa a pantalla completa que no la ignore sigue saliendo con
+/// Ctrl-C. Sólo toca un atómico: corre dentro de la IRQ.
+pub fn note_framebuffer_sigint() {
+    FB_SIGINT.store(true, core::sync::atomic::Ordering::Relaxed);
 }
 
 pub fn note_framebuffer_cad() {
@@ -713,6 +726,24 @@ fn poll_fb_watchdog(procs: &mut Vec<Process>) {
     signal_pgid(procs, pgid, soso_abi::SIGKILL as u8);
 }
 
+/// Red de seguridad: si el dueño de la pantalla ya no vive (o es un zombi),
+/// vuelve la consola. Cada muerte la suelta por su cuenta; esto cubre un camino
+/// que se olvide de hacerlo. Sin ella, Ctrl+Alt+Retroceso y el vigilante
+/// buscaban a un dueño que ya no estaba —o mataban al grupo de su zombi, que
+/// podía ser el de la shell— y la consola no volvía nunca.
+fn soltar_pantalla_sin_dueno(procs: &[Process]) {
+    let owner = crate::drivers::fb::framebuffer_owner();
+    if owner == 0 {
+        return;
+    }
+    let vivo = procs
+        .iter()
+        .any(|p| p.pid == owner && !matches!(p.state, State::Zombie(_)));
+    if !vivo {
+        crate::drivers::fb::release_owner_if(owner);
+    }
+}
+
 fn poll_pending_tty_signals(procs: &mut Vec<Process>) {
     let mut senales = SENALES_TTY.swap(0, Ordering::Relaxed);
     while senales != 0 {
@@ -721,6 +752,13 @@ fn poll_pending_tty_signals(procs: &mut Vec<Process>) {
         let pgid = Console::Serial.fg_pgid();
         if pgid != 0 {
             signal_pgid(procs, pgid, sig);
+        }
+    }
+    soltar_pantalla_sin_dueno(procs);
+    if FB_SIGINT.swap(false, core::sync::atomic::Ordering::Relaxed) {
+        let owner = crate::drivers::fb::framebuffer_owner();
+        if owner != 0 {
+            signal_one(procs, owner, soso_abi::SIGINT as u8);
         }
     }
     if FB_CAD.swap(false, core::sync::atomic::Ordering::Relaxed) {
@@ -1565,6 +1603,11 @@ pub fn exit_current(code: u8) -> ! {
         let is_thread = procs[idx].is_thread;
         let join_uaddr = procs[idx].join_uaddr;
         let join_pml4 = procs[idx].space.as_ref().map(|s| s.pml4_phys());
+        // La pantalla vuelve a la consola también con un `exit` (normal, por
+        // fallo con 255 o por pánico con 101). Sólo se soltaba al morir por
+        // señal: un escritorio que fallaba dejaba la consola en modo gráfico y
+        // el teclado en exclusiva para un proceso muerto, sin salida posible.
+        crate::drivers::fb::release_owner_if(pid);
         if is_thread {
             futex::forget_pid(pid);
             fcache::soltar_todos(pid);

@@ -874,8 +874,9 @@ soso-wm --fotograma     # un instante de escritorio y vuelve a la consola; impri
 soso-wm --prueba-layout # mosaico, arrastre y geometría flotante; imprime `soso-wm: prueba-layout OK`
 ```
 
-En modo gráfico el teclado lo consume el WM, pero **Ctrl+C** también envía SIGINT al grupo en primer plano (p. ej. cierra `soso-wm` y devuelve el prompt de la shell que lo lanzó).
-Salir: **Ctrl+C**, **Alt+Mayús+E** (vuelta a consola), o **Alt+Intro** para una terminal.
+En modo gráfico el teclado lo consume el WM. **Ctrl+C** (y el resto de combinaciones con Ctrl que no son atajos del escritorio, como Ctrl+D o Ctrl+Z) va a la ventana con foco: en una terminal interrumpe el programa en marcha sin cerrar el escritorio.
+Salir: **Alt+Mayús+E** o **Salir del escritorio** en el menú (vuelta a consola); **Ctrl+Alt+Retroceso** si no responde. **Alt+Intro** abre una terminal.
+Un programa a pantalla completa sin escritorio (p. ej. `soso-web --grafico`) sí se cierra con **Ctrl+C**.
 
 El WM dibuja un **puntero** en pantalla. Entrada: ratón **PS/2** (aux), **USB HID** relativo
 (p. ej. `usb-mouse` en QEMU) e informes **HID absolutos** (coordenadas de pantalla). En placa,
@@ -895,6 +896,8 @@ un clic. Un clic fuera del menú lo cierra.
 **Ctrl+Alt+Retroceso** recupera la consola si el gestor deja de responder (PS/2 y teclado USB); el kernel mata al dueño de pantalla y repinta la consola de texto.
 
 El escritorio además **se vigila solo**: mientras tiene la pantalla promete al kernel una señal de vida cada pocos milisegundos y, si pasa **5 s** sin darla (se quedó bloqueado con un cliente que no lee, o girando), el kernel mata **sólo su grupo de procesos** y vuelve la consola de texto con la shell intacta. Después se relanza `soso-wm` normalmente. Lo mismo vale para cualquier programa que tome la pantalla completa (`soso-web --grafico` sin gestor) si llama a la señal de vida.
+
+Si el escritorio (o cualquier programa a pantalla completa) **falla y se cierra**, la consola de texto vuelve sola y el teclado responde otra vez; no hace falta ninguna tecla. Si `soso-wm` dice `la pantalla ya la tiene otro programa`, es que otro proceso está en modo gráfico: ciérralo (o pulsa **Ctrl+Alt+Retroceso**) y vuelve a lanzarlo.
 
 Arranque recomendado para navegar en ventana:
 

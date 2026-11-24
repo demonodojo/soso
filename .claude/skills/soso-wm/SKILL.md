@@ -50,19 +50,26 @@ Tests layout Rust: `cargo test -p soso-wm-proto`.
 ## Kernel / FB
 
 - Un proceso es **dueño** del modo gráfico (`SYS_FB_SET_MODE`, `fb_present` / rect).
-- `Ctrl+Alt+Retroceso` mata al dueño (consola).
+- `Ctrl+Alt+Retroceso` mata al grupo del dueño y vuelve la consola (PS/2 y USB, Alt izquierdo con cualquier Ctrl).
 - **Vigilante del dueño**: `wm_tick` llama a `fb_keepalive(5000)` (`SYS_FB_KEEPALIVE=104`).
   Si pasan 5 s sin señal, `poll_fb_watchdog` (scheduler) mata con `SIGKILL` **sólo el
   grupo del dueño** y `release_owner_if` devuelve la consola: un WM colgado no se lleva
   la shell. Un tick normal son 10 ms; no subir de ~5 s el plazo sin medirlo.
-- **Vigilante del dueño**: `wm_tick` llama a `fb_keepalive(5000)` (`SYS_FB_KEEPALIVE=104`).
-  Si pasan 5 s sin señal, `poll_fb_watchdog` (scheduler) mata con `SIGKILL` **sólo el
-  grupo del dueño** y `release_owner_if` devuelve la consola: un WM colgado no se lleva
-  la shell. Un tick normal son 10 ms; no subir de ~5 s el plazo sin medirlo.
-- **Vigilante del dueño**: `wm_tick` llama a `fb_keepalive(5000)` (`SYS_FB_KEEPALIVE=104`).
-  Si pasan 5 s sin señal, `poll_fb_watchdog` (scheduler) mata con `SIGKILL` **sólo el
-  grupo del dueño** y `release_owner_if` devuelve la consola: un WM colgado no se lleva
-  la shell. Un tick normal son 10 ms; no subir de ~5 s el plazo sin medirlo.
+- **La consola vuelve con cualquier final del dueño**: muerte por señal, `exit` normal,
+  falta (255) o pánico (101); `exit_current` también llama a `release_owner_if`. Antes
+  sólo se soltaba por señal, y un WM que fallaba dejaba la pantalla congelada con el
+  teclado en exclusiva para un proceso muerto. Red de seguridad en el scheduler
+  (`soltar_pantalla_sin_dueno`): un dueño que no vive o es zombi se suelta solo.
+  `fb_info` marca el modo gráfico con `FB_INFO_GRAFICO` en `_pad` (prueba en `init test`).
+- El WM no arranca (rc 5) si `fb_set_mode` falla porque otro tiene la pantalla, y
+  devuelve la consola en todos sus caminos de salida (también sin puerto, rc 4).
+- **Ctrl-C con la pantalla en exclusiva** va sólo al dueño (`FB_SIGINT` →
+  `signal_one(owner, SIGINT)`), no al grupo en primer plano de la consola. El WM lo
+  ignora (`senal_ignorar(sig_int())` en `bucle_grafico`) y reenvía a la ventana con foco
+  los códigos de control que no son atajos suyos (`wm_ctrl_para_foco`: todo 1–31 salvo
+  Ctrl+Tab y Ctrl+Mayús+T). Así Ctrl-C interrumpe en la terminal sin cerrar el
+  escritorio ni matar al compositor y las apps de su grupo; un programa a pantalla
+  completa que no lo ignore (`soso-web --grafico`) sigue saliendo con Ctrl-C.
 - Entrada exclusiva mientras el WM tiene el FB (`fb_input_exclusive`).
 
 ## Atajos de teclado (usuario)

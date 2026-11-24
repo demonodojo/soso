@@ -32,6 +32,144 @@ mod font12x12;
 
 const CELL_SPACE: u16 = b' ' as u16;
 
+/// Atributos de una celda: color del texto (bits 0–4), del fondo (bits 5–9)
+/// —índice de la paleta ANSI de 16, o `COLOR_DEF`— y vídeo inverso (bit 10).
+const COLOR_DEF: u16 = 16;
+const ATTR_DEF: u16 = COLOR_DEF | (COLOR_DEF << 5);
+const ATTR_INV: u16 = 1 << 10;
+const NEGRO: (u8, u8, u8) = (0, 0, 0);
+
+/// Paleta ANSI (0–7 normales, 8–15 brillantes).
+const PALETA: [(u8, u8, u8); 16] = [
+    (0x00, 0x00, 0x00),
+    (0xcd, 0x31, 0x31),
+    (0x0d, 0xbc, 0x79),
+    (0xe5, 0xe5, 0x10),
+    (0x3b, 0x78, 0xff),
+    (0xbc, 0x3f, 0xbc),
+    (0x11, 0xa8, 0xcd),
+    (0xe5, 0xe5, 0xe5),
+    (0x76, 0x76, 0x76),
+    (0xf1, 0x4c, 0x4c),
+    (0x23, 0xd1, 0x8b),
+    (0xf5, 0xf5, 0x43),
+    (0x5c, 0x9c, 0xff),
+    (0xd6, 0x70, 0xd6),
+    (0x29, 0xb8, 0xdb),
+    (0xff, 0xff, 0xff),
+];
+
+/// Colores de texto y fondo de una celda, con el inverso aplicado.
+fn colores(attr: u16) -> ((u8, u8, u8), (u8, u8, u8)) {
+    let fi = (attr & 0x1f) as usize;
+    let bi = ((attr >> 5) & 0x1f) as usize;
+    let fg = PALETA.get(fi).copied().unwrap_or(FG);
+    let bg = PALETA.get(bi).copied().unwrap_or(NEGRO);
+    if attr & ATTR_INV != 0 {
+        (bg, fg)
+    } else {
+        (fg, bg)
+    }
+}
+
+/// Intérprete de secuencias de escape: lo justo para un programa de pantalla
+/// completa (salvi): CSI `H f A B C D G d J K m` y los privados `?25` (cursor)
+/// y `?1049` (pantalla alternativa). Lo demás se consume sin pintar nada.
+#[derive(Clone, Copy)]
+struct Esc {
+    /// 0 = texto, 1 = tras ESC, 2 = dentro de CSI.
+    modo: u8,
+    privado: bool,
+    p: [u16; 8],
+    n: usize,
+    cur: u16,
+    hay: bool,
+}
+
+impl Esc {
+    const fn new() -> Self {
+        Self {
+            modo: 0,
+            privado: false,
+            p: [0; 8],
+            n: 0,
+            cur: 0,
+            hay: false,
+        }
+    }
+
+    fn param(&self, i: usize, def: usize) -> usize {
+        if i < self.n && self.p[i] != 0 {
+            self.p[i] as usize
+        } else {
+            def
+        }
+    }
+
+    fn cerrar_param(&mut self) {
+        if self.n < self.p.len() {
+            self.p[self.n] = self.cur;
+            self.n += 1;
+        }
+        self.cur = 0;
+        self.hay = false;
+    }
+
+    /// Consume un byte. Devuelve el comando final de una CSI completa.
+    fn byte(&mut self, b: u8) -> Option<u8> {
+        match self.modo {
+            0 => {
+                self.modo = 1;
+                None
+            }
+            1 => {
+                if b == b'[' {
+                    *self = Esc::new();
+                    self.modo = 2;
+                } else if b != 0x1b {
+                    self.modo = 0;
+                }
+                None
+            }
+            _ => match b {
+                b'0'..=b'9' => {
+                    self.cur = self.cur.saturating_mul(10).saturating_add((b - b'0') as u16);
+                    self.hay = true;
+                    None
+                }
+                b';' => {
+                    self.cerrar_param();
+                    None
+                }
+                0x3c..=0x3f => {
+                    self.privado = true;
+                    None
+                }
+                0x1b => {
+                    self.modo = 1;
+                    None
+                }
+                0x40..=0x7e => {
+                    if self.hay || self.n > 0 {
+                        self.cerrar_param();
+                    }
+                    self.modo = 0;
+                    Some(b)
+                }
+                _ => None,
+            },
+        }
+    }
+}
+
+/// Pantalla guardada por `ESC [ ? 1049 h`.
+struct PantallaGuardada {
+    text: Vec<[u16; COLS]>,
+    attrs: Vec<[u16; COLS]>,
+    row: usize,
+    col: usize,
+}
+
 struct Utf8Acc {
     buf: [u8; 4],
     len: u8,
@@ -142,6 +280,13 @@ struct FbState {
     glyph_w: usize,
     glyph_h: usize,
     text: Vec<[u16; COLS]>,
+    /// Atributos de cada celda (`ATTR_*`), paralelos a `text`.
+    attrs: Vec<[u16; COLS]>,
+    /// Atributos con que se escribe ahora (SGR).
+    attr: u16,
+    esc: Esc,
+    cursor_visible: bool,
+    alt: Option<PantallaGuardada>,
     rowbuf: Vec<u8>,
     /// Una línea física, para volcar rotado con escrituras secuenciales.
     linebuf: Vec<u8>,
@@ -459,6 +604,11 @@ pub fn init(buffer_start: u64, info: FrameBufferInfo) {
         glyph_w,
         glyph_h,
         text: alloc::vec![[CELL_SPACE; COLS]; ROWS],
+        attrs: alloc::vec![[ATTR_DEF; COLS]; ROWS],
+        attr: ATTR_DEF,
+        esc: Esc::new(),
+        cursor_visible: true,
+        alt: None,
         rowbuf,
         linebuf,
         utf8: Utf8Acc::new(),
@@ -596,7 +746,8 @@ fn paint_glyph(st: &mut FbState, row: usize, col: usize, cp: u16) {
     let y0 = row * st.cell_h;
     let bpp = st.info.bytes_per_pixel;
     let bpl = bytes_per_logical_line(st);
-    let px = pack_pixel(st, FG.0, FG.1, FG.2);
+    let (fg, _) = colores(st.attrs[row][col]);
+    let px = pack_pixel(st, fg.0, fg.1, fg.2);
     let native = glyph_native(st);
     unsafe {
         for gy in 0..st.glyph_h {
@@ -637,15 +788,16 @@ fn paint_glyph(st: &mut FbState, row: usize, col: usize, cp: u16) {
 }
 
 fn clear_cell(st: &mut FbState, row: usize, col: usize) {
+    let (_, bg) = colores(st.attrs[row][col]);
     fill_rect(
         st,
         col * st.cell_w,
         row * st.cell_h,
         st.cell_w,
         st.cell_h,
-        0,
-        0,
-        0,
+        bg.0,
+        bg.1,
+        bg.2,
     );
 }
 
@@ -670,16 +822,31 @@ fn paint_row(st: &mut FbState, row: usize) {
     }
     let cols = max_cols(st);
     let bpp = st.info.bytes_per_pixel;
-    let px = pack_pixel(st, FG.0, FG.1, FG.2);
 
     let mut buf = core::mem::take(&mut st.rowbuf);
     buf[..bytes].fill(0);
     for c in 0..cols {
         let cp = st.text[row][c];
+        let (fg, bg) = colores(st.attrs[row][c]);
+        let x0 = c * st.cell_w;
+        if bg != NEGRO {
+            let bpx = pack_pixel(st, bg.0, bg.1, bg.2);
+            let w = st.cell_w.min(st.log_w.saturating_sub(x0));
+            for y in 0..h {
+                let mut off = y * bpl + x0 * bpp;
+                for _ in 0..w {
+                    if off + bpp > bytes {
+                        break;
+                    }
+                    buf[off..off + bpp].copy_from_slice(&bpx[..bpp]);
+                    off += bpp;
+                }
+            }
+        }
         if cp == CELL_SPACE || cp == 0 {
             continue;
         }
-        let x0 = c * st.cell_w;
+        let px = pack_pixel(st, fg.0, fg.1, fg.2);
         let native = glyph_native(st);
         for gy in 0..st.glyph_h {
             let bits = glyph_row_cp(st, cp, gy);
@@ -720,7 +887,10 @@ fn paint_row(st: &mut FbState, row: usize) {
 }
 
 fn fila_vacia(st: &FbState, row: usize) -> bool {
-    st.text[row].iter().all(|&c| c == CELL_SPACE || c == 0)
+    st.text[row]
+        .iter()
+        .zip(st.attrs[row].iter())
+        .all(|(&c, &a)| (c == CELL_SPACE || c == 0) && colores(a).1 == NEGRO)
 }
 
 /// Aplica al shadow un scroll de `scroll_lines` filas de texto y lo vuelca
@@ -769,9 +939,11 @@ fn scroll_text(st: &mut FbState, n: usize) {
     let n = n.min(rows);
     for r in 0..rows - n {
         st.text[r] = st.text[r + n];
+        st.attrs[r] = st.attrs[r + n];
     }
     for r in rows - n..rows {
         st.text[r] = [CELL_SPACE; COLS];
+        st.attrs[r] = [ATTR_DEF; COLS];
     }
 }
 
@@ -815,6 +987,9 @@ fn erase_cursor(st: &mut FbState) {
 }
 
 fn draw_cursor(st: &mut FbState) {
+    if !st.cursor_visible {
+        return;
+    }
     let y0 = st.row * st.cell_h;
     let bar_h = (st.cell_h / 6).max(1);
     let bar_y = y0 + st.cell_h.saturating_sub(bar_h);
@@ -837,6 +1012,7 @@ fn draw_codepoint(st: &mut FbState, cp: u16, defer_paint: bool) -> usize {
         if st.col > 0 {
             st.col -= 1;
             st.text[st.row][st.col] = CELL_SPACE;
+            st.attrs[st.row][st.col] = ATTR_DEF;
             if !defer_paint {
                 clear_cell(st, st.row, st.col);
             }
@@ -847,21 +1023,11 @@ fn draw_codepoint(st: &mut FbState, cp: u16, defer_paint: bool) -> usize {
         st.col = 0;
         return avanzar_fila(st, rows);
     }
+    // Retorno de carro de terminal: sólo lleva el cursor al principio. Antes
+    // borraba la fila, y un programa que pinta la pantalla con `texto ESC[K
+    // \r\n` se borraba cada línea según la escribía.
     if cp == b'\r' as u16 {
         st.col = 0;
-        st.text[st.row] = [CELL_SPACE; COLS];
-        if !defer_paint {
-            fill_rect(
-                st,
-                0,
-                st.row * st.cell_h,
-                st.log_w,
-                st.cell_h.min(st.log_h.saturating_sub(st.row * st.cell_h)),
-                0,
-                0,
-                0,
-            );
-        }
         return 0;
     }
 
@@ -872,6 +1038,7 @@ fn draw_codepoint(st: &mut FbState, cp: u16, defer_paint: bool) -> usize {
     let row = st.row;
     let col = st.col;
     st.text[row][col] = cp;
+    st.attrs[row][col] = st.attr;
     if !defer_paint && scrolled == 0 {
         clear_cell(st, row, col);
         paint_glyph(st, row, col, cp);
@@ -882,6 +1049,162 @@ fn draw_codepoint(st: &mut FbState, cp: u16, defer_paint: bool) -> usize {
         scrolled += avanzar_fila(st, rows);
     }
     scrolled
+}
+
+/// Deja en blanco las celdas `c0..c1` de la fila `row` y las pinta de negro.
+fn borrar_celdas(st: &mut FbState, row: usize, c0: usize, c1: usize) {
+    let c1 = c1.min(max_cols(st));
+    if c0 >= c1 || row >= max_rows(st) {
+        return;
+    }
+    for c in c0..c1 {
+        st.text[row][c] = CELL_SPACE;
+        st.attrs[row][c] = ATTR_DEF;
+    }
+    let (cw, ch) = (st.cell_w, st.cell_h);
+    fill_rect(st, c0 * cw, row * ch, (c1 - c0) * cw, ch, 0, 0, 0);
+}
+
+fn borrar_todo(st: &mut FbState) {
+    for r in 0..ROWS {
+        st.text[r] = [CELL_SPACE; COLS];
+        st.attrs[r] = [ATTR_DEF; COLS];
+    }
+    st.shadow.fill(0);
+    flush_all(st);
+}
+
+/// Vuelve a rasterizar la pantalla entera desde `text`/`attrs`.
+fn repintar_todo(st: &mut FbState) {
+    repintar_shadow(st);
+    flush_all(st);
+}
+
+/// Rehace el shadow entero desde el texto, sin volcarlo.
+fn repintar_shadow(st: &mut FbState) {
+    st.shadow.fill(0);
+    for r in 0..max_rows(st) {
+        if !fila_vacia(st, r) {
+            paint_row(st, r);
+        }
+    }
+}
+
+/// Vuelve la consola de texto tras el modo gráfico. El dueño pinta sus
+/// fotogramas en este mismo shadow (`present_from_user`), así que no basta con
+/// volcarlo: el último fotograma del escritorio se quedaba de fondo bajo el
+/// texto. Se repinta entero desde `text`/`attrs`.
+fn volver_consola(st: &mut FbState) {
+    repintar_shadow(st);
+    draw_cursor(st);
+    flush_all(st);
+}
+
+fn sgr(st: &mut FbState, p: usize) {
+    let a = st.attr;
+    st.attr = match p {
+        0 => ATTR_DEF,
+        7 => a | ATTR_INV,
+        27 => a & !ATTR_INV,
+        30..=37 => (a & !0x1f) | (p - 30) as u16,
+        90..=97 => (a & !0x1f) | (p - 90 + 8) as u16,
+        39 => (a & !0x1f) | COLOR_DEF,
+        40..=47 => (a & !(0x1f << 5)) | (((p - 40) as u16) << 5),
+        100..=107 => (a & !(0x1f << 5)) | (((p - 100 + 8) as u16) << 5),
+        49 => (a & !(0x1f << 5)) | (COLOR_DEF << 5),
+        _ => a,
+    };
+}
+
+/// Ejecuta una CSI completa (`st.esc` tiene sus parámetros).
+fn csi(st: &mut FbState, cmd: u8) {
+    let rows = max_rows(st);
+    let cols = max_cols(st);
+    if rows == 0 || cols == 0 {
+        return;
+    }
+    let e = st.esc;
+    if e.privado {
+        let activar = match cmd {
+            b'h' => true,
+            b'l' => false,
+            _ => return,
+        };
+        for i in 0..e.n.max(1) {
+            match e.param(i, 0) {
+                25 => st.cursor_visible = activar,
+                47 | 1047 | 1049 => {
+                    if activar && st.alt.is_none() {
+                        st.alt = Some(PantallaGuardada {
+                            text: st.text.clone(),
+                            attrs: st.attrs.clone(),
+                            row: st.row,
+                            col: st.col,
+                        });
+                        borrar_todo(st);
+                        st.row = 0;
+                        st.col = 0;
+                    } else if !activar {
+                        if let Some(g) = st.alt.take() {
+                            st.text = g.text;
+                            st.attrs = g.attrs;
+                            st.row = g.row.min(rows - 1);
+                            st.col = g.col.min(cols - 1);
+                            repintar_todo(st);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        return;
+    }
+    match cmd {
+        b'H' | b'f' => {
+            st.row = (e.param(0, 1) - 1).min(rows - 1);
+            st.col = (e.param(1, 1) - 1).min(cols - 1);
+        }
+        b'A' => st.row = st.row.saturating_sub(e.param(0, 1)),
+        b'B' => st.row = (st.row + e.param(0, 1)).min(rows - 1),
+        b'C' => st.col = (st.col + e.param(0, 1)).min(cols - 1),
+        b'D' => st.col = st.col.saturating_sub(e.param(0, 1)),
+        b'G' => st.col = (e.param(0, 1) - 1).min(cols - 1),
+        b'd' => st.row = (e.param(0, 1) - 1).min(rows - 1),
+        b'J' => match e.param(0, 0) {
+            0 => {
+                let (r, c) = (st.row, st.col);
+                borrar_celdas(st, r, c, cols);
+                for f in r + 1..rows {
+                    borrar_celdas(st, f, 0, cols);
+                }
+            }
+            1 => {
+                let (r, c) = (st.row, st.col);
+                for f in 0..r {
+                    borrar_celdas(st, f, 0, cols);
+                }
+                borrar_celdas(st, r, 0, c + 1);
+            }
+            _ => borrar_todo(st),
+        },
+        b'K' => {
+            let (r, c) = (st.row, st.col);
+            match e.param(0, 0) {
+                0 => borrar_celdas(st, r, c, cols),
+                1 => borrar_celdas(st, r, 0, c + 1),
+                _ => borrar_celdas(st, r, 0, cols),
+            }
+        }
+        b'm' => {
+            if e.n == 0 {
+                sgr(st, 0);
+            }
+            for i in 0..e.n {
+                sgr(st, e.p[i] as usize);
+            }
+        }
+        _ => {}
+    }
 }
 
 pub unsafe fn force_unlock() {
@@ -901,6 +1224,20 @@ pub fn write_bytes(s: &[u8]) {
 
     let mut scroll_lines = 0usize;
     for &b in s {
+        if st.esc.modo != 0 || b == 0x1b {
+            st.utf8.reset();
+            if let Some(cmd) = st.esc.byte(b) {
+                // Una CSI puede mover el cursor a filas que el scroll
+                // pendiente aún no ha repintado: se vuelca antes.
+                if scroll_lines > 0 {
+                    sync_rows_after_scroll(st, scroll_lines);
+                    st.last_scroll_ns = crate::arch::tsc::now_ns();
+                    scroll_lines = 0;
+                }
+                csi(st, cmd);
+            }
+            continue;
+        }
         if let Some(cp) = st.utf8.feed(b) {
             scroll_lines += draw_codepoint(st, cp, scroll_lines > 0);
         }
@@ -944,9 +1281,7 @@ pub fn set_graphics_mode_for(pid: u64, on: bool) -> Result<(), i64> {
     KEEPALIVE_MS.store(0, Ordering::Relaxed);
     let mut guard = FB.lock();
     if let Some(st) = guard.as_mut() {
-        erase_cursor(st);
-        draw_cursor(st);
-        flush_all(st);
+        volver_consola(st);
     }
     Ok(())
 }
@@ -1016,9 +1351,7 @@ pub fn release_owner_if(pid: u64) {
     KEEPALIVE_MS.store(0, Ordering::Relaxed);
     let mut guard = FB.lock();
     if let Some(st) = guard.as_mut() {
-        erase_cursor(st);
-        draw_cursor(st);
-        flush_all(st);
+        volver_consola(st);
     }
 }
 
@@ -1051,6 +1384,7 @@ pub fn user_info(out: &mut FbInfo) -> bool {
     // Geometría lógica: userspace pinta en la misma orientación que la
     // consola y es `present_from_user` quien aplica la rotación.
     out.present = 1;
+    out._pad = if graphics_mode() { soso_abi::FB_INFO_GRAFICO } else { 0 };
     out.pixel_format = pixel_format_tag(st.info.pixel_format);
     out.bytes_per_pixel = st.info.bytes_per_pixel as u8;
     out.width = st.log_w as u32;

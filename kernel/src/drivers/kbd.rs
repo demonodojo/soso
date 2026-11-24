@@ -278,8 +278,10 @@ fn ctrl_byte(out: keymap::KeyOutput) -> keymap::KeyOutput {
     }
 }
 
+/// Ctrl-C con el teclado en exclusiva de la pantalla: SIGINT sólo al dueño
+/// (ver `task::note_framebuffer_sigint`). La tecla le llega además como evento.
 fn anotar_ctrl_c() {
-    crate::task::note_serial_signal(soso_abi::SIGINT);
+    crate::task::note_framebuffer_sigint();
     crate::task::kick_scheduler();
 }
 
@@ -549,11 +551,13 @@ fn handle_scancode_try(sc: u8) {
 
 #[cfg(feature = "drv-usb")]
 fn usb_cad(evt: &crate::drivers::usb_storage::UsbKbdEvent) -> bool {
-    use xhci_nostd::hid::{MOD_LEFT_ALT, MOD_LEFT_CTRL};
+    use xhci_nostd::hid::{MOD_LEFT_ALT, MOD_LEFT_CTRL, MOD_RIGHT_CTRL};
     if !evt.pressed || evt.scancode != 0x2A {
         return false;
     }
-    evt.modifiers & MOD_LEFT_CTRL != 0 && evt.modifiers & MOD_LEFT_ALT != 0
+    // Cualquiera de los dos Ctrl, como en PS/2 (`km.ctrl()`); el Alt derecho
+    // es AltGr y no cuenta.
+    evt.modifiers & (MOD_LEFT_CTRL | MOD_RIGHT_CTRL) != 0 && evt.modifiers & MOD_LEFT_ALT != 0
 }
 
 #[cfg(feature = "drv-usb")]

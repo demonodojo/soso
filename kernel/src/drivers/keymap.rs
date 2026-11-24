@@ -178,6 +178,9 @@ impl KeymapState {
             0x50 => return KeyOutput::Csi(b'B'),
             0x4B => return KeyOutput::Csi(b'D'),
             0x4D => return KeyOutput::Csi(b'C'),
+            // Esc (también HID 0x29). Sin esto no generaba nada y un editor
+            // modal como salvi no podía salir del modo inserción.
+            0x01 => return KeyOutput::Byte(0x1b),
             _ => {}
         }
         match layout() {

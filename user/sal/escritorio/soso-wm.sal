@@ -264,11 +264,20 @@ fn bucle_grafico(ejecutar: String) -> Int ! io, alloc
         if fb_info_leer(info) == 0
             rc = 3
         if fb_info_leer(info) != 0
-            _m = fb_set_mode(fb_mode_graficos())
+            # Con la pantalla en manos de otro (EBUSY) el WM no pintaría nada y
+            # se quedaría ocupando el puerto, invisible: mejor no arrancar.
+            if fb_set_mode(fb_mode_graficos()) < 0
+                _pe = print_str(d"soso-wm: la pantalla ya la tiene otro programa\n")
+                return 5
             # Vigilante desde ya, no desde el primer tick: si el arranque se
             # queda colgado (compositor, GPU) el kernel mata al WM y devuelve la
             # consola. Holgado: conectar con el compositor puede llevar ~7 s.
             _ka = fb_keepalive(wm_keepalive_arranque_ms())
+            # Ctrl-C es de la terminal con foco, no del escritorio: el kernel
+            # manda el SIGINT del teclado al dueño de la pantalla, y la tecla
+            # llega igual como evento. Para salir: Alt+Mayús+E, el menú o
+            # Ctrl+Alt+Retroceso.
+            _si = senal_ignorar(sig_int())
             sw = fb_info_ancho(info)
             sh = fb_info_alto(info)
             stride = fb_info_stride(info)
@@ -294,8 +303,10 @@ fn bucle_grafico(ejecutar: String) -> Int ! io, alloc
                 _d0 = wm_marcar_dirty(&mut st, 0, 0, sw, sh)
                 _sp = lanzar_ejecutar()
                 _loop = bucle_wm(&mut st, listener, compos, plen, sw, sh, stride, bpp, fmt)
-                _c = fb_set_mode(fb_mode_consola())
                 close_fd(listener)
+            # En todos los caminos, también sin puerto (rc 4): salir dejando la
+            # pantalla en modo gráfico la congelaba.
+            _c = fb_set_mode(fb_mode_consola())
     rc
 
 fn arg_flag(nombre: String) -> Int ! io, alloc
@@ -618,7 +629,11 @@ fn fotograma() -> Int ! io, alloc
         if fb_info_leer(info) == 0
             rc = 3
         if fb_info_leer(info) != 0
-            _m = fb_set_mode(fb_mode_graficos())
+            # Con la pantalla en manos de otro (EBUSY) el WM no pintaría nada y
+            # se quedaría ocupando el puerto, invisible: mejor no arrancar.
+            if fb_set_mode(fb_mode_graficos()) < 0
+                _pe = print_str(d"soso-wm: la pantalla ya la tiene otro programa\n")
+                return 5
             # Vigilante desde ya, no desde el primer tick: si el arranque se
             # queda colgado (compositor, GPU) el kernel mata al WM y devuelve la
             # consola. Holgado: conectar con el compositor puede llevar ~7 s.
@@ -649,8 +664,8 @@ fn fotograma() -> Int ! io, alloc
                     n = n + 1
                 _pr = print_str(d"soso-wm: fotograma OK\n")
                 rc = 0
-                _c = fb_set_mode(fb_mode_consola())
                 close_fd(listener)
+            _c = fb_set_mode(fb_mode_consola())
     rc
 
 fn main() -> Int ! io, alloc

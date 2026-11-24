@@ -156,6 +156,10 @@ fn term_leer_fg(ptr: Int, len: Int, w: Int, col: Int, row: Int) -> Int ! alloc
     b = bytes_view_mem(ptr, len)
     bytes_get_u8(b, term_idx(w, col, row) + 4)
 
+fn term_leer_attr(ptr: Int, len: Int, w: Int, col: Int, row: Int) -> Int ! alloc
+    b = bytes_view_mem(ptr, len)
+    bytes_get_u8(b, term_idx(w, col, row) + 6)
+
 fn term_leer_bg(ptr: Int, len: Int, w: Int, col: Int, row: Int) -> Int ! alloc
     b = bytes_view_mem(ptr, len)
     bytes_get_u8(b, term_idx(w, col, row) + 5)
@@ -317,6 +321,12 @@ method Term.csi_color(&mut self, p: Int) -> Int
     0
 
 method Term.csi_fin(&mut self, ptr: Int, len: Int, w: Int, h: Int, cmd: Int) -> Int ! alloc
+    # Secuencia privada (`ESC [ ? …`: cursor visible, pantalla alternativa):
+    # se consume entera sin pintar nada.
+    if self.mode == 3
+        self.csi_n = 0
+        self.mode = 0
+        return 0
     if cmd == 72
         if self.csi_n >= 2
             self.cursor = term_pack_cursor(self.csi_param(1) - 1, self.csi_param(0) - 1)
@@ -388,6 +398,10 @@ method Term.csi_byte(&mut self, ptr: Int, len: Int, w: Int, h: Int, b: Int) -> I
             else
                 cur = cur * 10 + (b - 48)
             self.csi_cur = cur
+        elsif b >= 60 && b <= 63
+            self.mode = 3
+        elsif b < 64
+            0
         else
             if b == 59
                 n = self.csi_n
@@ -488,6 +502,10 @@ method Term.pintar(&mut self, grid: Int, glen: Int, cols: Int, rows: Int, psf: I
                 cp = term_leer_cp(grid, glen, cols, col, row)
                 fg = term_leer_fg(grid, glen, cols, col, row)
                 bg_i = term_leer_bg(grid, glen, cols, col, row)
+                if (term_leer_attr(grid, glen, cols, col, row) & attr_inv()) != 0
+                    t = fg
+                    fg = bg_i
+                    bg_i = t
                 rgb_fg = tema_term_rgb(tema, fg)
                 rgb_bg = tema_term_rgb(tema, bg_i)
                 px = ox + col * gw

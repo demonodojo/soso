@@ -140,6 +140,10 @@ pub const SYS_WAITPID: u64 = 112;
 /// un `write` normal. Sirve para que un servidor no se quede colgado con un
 /// cliente que no lee (el `write` normal espera hasta 30 s).
 pub const SYS_WRITE_TIMEOUT: u64 = 113;
+/// `(fd)` → `1` si el descriptor es una terminal (consola del proceso o
+/// maestro de PTY), `0` si no. Un fd cerrado o fuera de rango no es error:
+/// también devuelve `0`, como `isatty(3)`.
+pub const SYS_ISATTY: u64 = 114;
 /// Abre un pseudo-terminal: devuelve `(fd_maestro << 32) | ranura`.
 pub const SYS_PTY_OPEN: u64 = 98;
 /// Reserva memoria compartida (`len` alineado); devuelve `id`.
@@ -339,6 +343,10 @@ pub const FB_FMT_U8: u8 = 2;
 
 pub const FB_MODE_CONSOLE: u64 = 0;
 pub const FB_MODE_GRAPHICS: u64 = 1;
+
+/// Bit de `FbInfo::_pad`: algún proceso tiene la pantalla en modo gráfico.
+/// Un kernel anterior lo deja siempre a 0.
+pub const FB_INFO_GRAFICO: u8 = 1 << 0;
 
 #[derive(Clone, Copy, Default)]
 #[repr(C)]

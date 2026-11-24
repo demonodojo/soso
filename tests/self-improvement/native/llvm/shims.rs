@@ -38,6 +38,8 @@ const SYS_SCHED_YIELD: u64 = 77;
 const SYS_MPROTECT: u64 = 80;
 const SYS_FTRUNCATE: u64 = 94;
 const SYS_EXIT_GROUP: u64 = 95;
+const SYS_TTY_SIZE: u64 = 106;
+const SYS_ISATTY: u64 = 114;
 
 const ENOENT: i32 = 2;
 const EBADF: i32 = 9;
@@ -252,13 +254,33 @@ pub unsafe extern "C" fn fcntl(_fd: c_int, cmd: c_int, _arg: c_long) -> c_int {
     }
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ioctl(_fd: c_int, _req: u64, _arg: u64) -> c_int {
-    unsafe { fallo(ENOTTY) as c_int }
+pub unsafe extern "C" fn ioctl(fd: c_int, req: u64, arg: u64) -> c_int {
+    const TIOCGWINSZ: u64 = 0x5413;
+    if req != TIOCGWINSZ || arg == 0 || fd < 0 || unsafe { isatty(fd) } == 0 {
+        return unsafe { fallo(ENOTTY) as c_int };
+    }
+    let v = unsafe { sys(SYS_TTY_SIZE, 0, 0, 0, 0) };
+    if v < 0 {
+        return -1;
+    }
+    let v = v as u64;
+    // `struct winsize`: fila, columna, xpixel, ypixel (cuatro `u16`).
+    let ws = arg as *mut u16;
+    unsafe {
+        ws.write((v >> 32) as u16);
+        ws.add(1).write((v & 0xffff) as u16);
+        ws.add(2).write(0);
+        ws.add(3).write(0);
+    }
+    0
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn isatty(_fd: c_int) -> c_int {
-    unsafe { fallo(ENOTTY) as c_int; }
-    0
+pub unsafe extern "C" fn isatty(fd: c_int) -> c_int {
+    if fd < 0 {
+        return 0;
+    }
+    let v = unsafe { sys(SYS_ISATTY, fd as u64, 0, 0, 0) };
+    if v > 0 { 1 } else { 0 }
 }
 
 // ---- nombres, metadatos ----

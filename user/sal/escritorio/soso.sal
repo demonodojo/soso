@@ -61,6 +61,12 @@ fn sys_fb_present_rect() -> Int
 fn sys_fb_keepalive() -> Int
     104
 
+fn sys_sigaction() -> Int
+    107
+
+fn sig_int() -> Int
+    2
+
 fn sys_input_poll() -> Int
     65
 
@@ -446,6 +452,11 @@ fn tcp_peer_pid(fd: Int) -> Int ! io
 
 fn kill_pid(pid: Int, sig: Int) -> Int ! io
     syscall(sys_kill(), pid, sig, 0, 0, 0, 0)
+
+# Ignora la señal `sig` (SIG_IGN = 1). Un kernel sin manejadores devuelve
+# ENOSYS y todo sigue como antes.
+fn senal_ignorar(sig: Int) -> Int ! io
+    syscall(sys_sigaction(), sig, 1, 0, 0, 0, 0)
 
 fn sleep_ms(ms: Int) -> Int ! io
     syscall(sys_sleep_ms(), ms, 0, 0, 0, 0, 0)

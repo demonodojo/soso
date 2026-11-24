@@ -111,6 +111,9 @@ pub const SYS_FB_KEEPALIVE: u64 = 104;
 pub const SYS_PTY_RESIZE: u64 = 105;
 /// Devuelve el tamaño de la consola actual: filas en los 32 bits altos, columnas en los bajos.
 pub const SYS_TTY_SIZE: u64 = 106;
+/// `(fd)` → `1` si el descriptor es una terminal (consola del proceso o
+/// maestro de PTY), `0` si no. Un fd cerrado o fuera de rango también da `0`.
+pub const SYS_ISATTY: u64 = 114;
 /// `(sig, manejador, flags, restaurador)` → manejador anterior.
 ///
 /// `manejador` es [`SIG_DFL`], [`SIG_IGN`] o la dirección de un
