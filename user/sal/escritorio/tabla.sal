@@ -875,6 +875,15 @@ method Tabla.term_set_dirty(&mut self, i: Int, v: Int) -> Int
     p.term.dirty = v
     0
 
+# Última fila sucia (vale cuando `term_dirty >= 0`).
+method Tabla.term_dirty_hasta(&mut self, i: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.term.dirty_hasta
+
+method Tabla.term_marcar_fila(&mut self, i: Int, row: Int) -> Int
+    p = list_get(&mut self.ps, i)
+    p.term.marcar_fila(row)
+
 method Tabla.term_cols(&mut self, i: Int) -> Int
     p = list_get(&mut self.ps, i)
     p.term.cols

@@ -176,6 +176,29 @@ pantalla entera. Así lo hacen wlroots, KWin y Mutter.
 - Coste en QEMU (TCG): hover de cabecera 2–3 ms, arrastre de una terminal
   13–17 ms, repintado completo ~25 ms.
 
+### Oclusión
+
+Una ventana es opaca salvo sus esquinas redondeadas; su núcleo opaco son dos
+rectángulos en cruz (`wm_cubre`). `wm_tapado(st, z, rect)` dice si alguna ventana
+visible por encima de la posición `z` lo cubre entero; `wm_estorba` si alguna, **con
+su sombra**, lo roza.
+
+- **Pintado directo fuera del repintado completo** (filas sucias de terminal en
+  `wm_term_incremental`, daño de cliente en `wm_on_danio_vis`): pasa por
+  `wm_pintar_o_danar`. Tapado → no se pinta. Rozado → `wm_danar` y lo recompone la
+  región en orden z. Libre → directo en `compos`. Antes, una terminal de abajo con
+  salida (un `ping`) pintaba sus filas y su cursor **encima** de la ventana con foco.
+  El daño de cliente que pisa el puntero (`mx_prev`/`my_prev`, con `bak_ok`) también
+  va como región: el puntero se restaura desde una copia vieja y lo taparía.
+- `wm_repintar_region` empieza por la ventana más alta que cubre la región entera y
+  entonces se salta fondo y barra. El repintado completo se salta el fondo bajo una
+  maximizada y las ventanas tapadas enteras con sombra (`wm_slot_tapado`).
+- Filas sucias de la terminal: `dirty` = -2 nada, -1 todo, ≥ 0 rango
+  `dirty..=dirty_hasta`. Cuando el cursor se mueve (también por CSI, sin escribir),
+  `wm_slot_atender_term` marca la fila vieja y la nueva; `Term.pintar` sólo pinta el
+  cursor si su fila se ha pintado.
+- `wm_repintar_ventana` (crear cliente, título) es un daño de ventana con sombra.
+
 Rellenar: `bytes_fill_u32` del runtime de Sal escribe de 4 en 4 bytes y es unas
 30 veces más lento que `bytes_copy` (memcpy). `rellenar_rect` rellena 16 píxeles,
 los duplica con copias dentro de la fila (`fila_rellenar_u32`) y copia esa fila a

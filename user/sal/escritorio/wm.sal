@@ -452,6 +452,92 @@ fn wm_danar_ctx(st: &mut Estado) -> Int ! alloc
     else
         wm_danar(st, st.ctx_x - 2, st.ctx_y - 2, st.ctx_x + ctx_ancho(st) + 2, st.ctx_y + ctx_alto(st) + 2)
 
+# ---------------------------------------------------------------------------
+# Oclusión
+#
+# Una ventana es opaca salvo en sus cuatro esquinas redondeadas: su núcleo
+# opaco son dos rectángulos en cruz (el de la ventana recortado por el radio a
+# izquierda y derecha, y el recortado arriba y abajo). Lo que cae entero dentro
+# del núcleo de una ventana de más arriba no se ve y no se pinta. Lo que sólo
+# la roza —o roza su sombra, que se mezcla con lo de debajo— no se puede pintar
+# directo en `compos` sin pisarla: va como daño y lo recompone `wm_repintar_region`
+# en orden z.
+# ---------------------------------------------------------------------------
+
+# Posición en la pila de la ventana (cabeza de grupo) del panel `i`, o -1.
+fn wm_z_de(st: &mut Estado, i: Int) -> Int ! alloc
+    h = st.tab.grupo_cab(i)
+    r = -1
+    k = 0
+    while k < st.tab.nz()
+        if st.tab.z_get(k) == h
+            r = k
+        k = k + 1
+    r
+
+# 1 si el rectángulo cae entero en el núcleo opaco de la ventana `i`.
+fn wm_cubre(st: &mut Estado, i: Int, x0: Int, y0: Int, x1: Int, y1: Int) -> Int ! alloc
+    wx = st.tab.wx(i)
+    wy = st.tab.wy(i)
+    wx1 = wx + st.tab.ww(i)
+    wy1 = wy + st.tab.wh(i)
+    r = metrica_radio(wm_gh_wm(st))
+    if wm_maximizada(st, i) != 0
+        r = 0
+    if wm_es_ss(st, i) != 0
+        r = 0
+    if x0 >= wx + r
+        if x1 <= wx1 - r
+            if y0 >= wy
+                if y1 <= wy1
+                    return 1
+    if x0 >= wx
+        if x1 <= wx1
+            if y0 >= wy + r
+                if y1 <= wy1 - r
+                    return 1
+    0
+
+# 1 si alguna ventana visible por encima de la posición `z` tapa el rectángulo.
+fn wm_tapado(st: &mut Estado, z: Int, x0: Int, y0: Int, x1: Int, y1: Int) -> Int ! alloc
+    r = 0
+    k = z + 1
+    while k < st.tab.nz()
+        if r == 0
+            i = st.tab.z_get(k)
+            if st.tab.slot_activo(i) != 0
+                if wm_oculta(st, i) == 0
+                    r = wm_cubre(st, i, x0, y0, x1, y1)
+        k = k + 1
+    r
+
+# 1 si alguna ventana visible por encima de `z`, con su sombra, toca el rectángulo.
+fn wm_estorba(st: &mut Estado, z: Int, x0: Int, y0: Int, x1: Int, y1: Int) -> Int ! alloc
+    m = wm_sombra_margen()
+    r = 0
+    k = z + 1
+    while k < st.tab.nz()
+        if r == 0
+            i = st.tab.z_get(k)
+            if st.tab.slot_activo(i) != 0
+                if wm_oculta(st, i) == 0
+                    wx = st.tab.wx(i)
+                    wy = st.tab.wy(i)
+                    r = wm_rects_cortan(wx - m, wy - m, wx + st.tab.ww(i) + m, wy + st.tab.wh(i) + m, x0, y0, x1, y1)
+        k = k + 1
+    r
+
+# Cómo pintar un rectángulo de la ventana en la posición `z` (sólo CPU):
+# 0 = directo en `compos`, 1 = no se ve, 2 = ya va como daño de región.
+fn wm_pintar_o_danar(st: &mut Estado, z: Int, x0: Int, y0: Int, x1: Int, y1: Int) -> Int ! alloc
+    if wm_tapado(st, z, x0, y0, x1, y1) != 0
+        1
+    elsif wm_estorba(st, z, x0, y0, x1, y1) != 0
+        _d = wm_danar(st, x0, y0, x1, y1)
+        2
+    else
+        0
+
 # Búfer auxiliar de al menos `n` bytes.
 fn wm_scr(st: &mut Estado, n: Int) -> Int ! alloc
     if n > st.scr_cap
@@ -529,12 +615,23 @@ fn wm_repintar_region(st: &mut Estado, k: Int, compos: Int, clen: Int, sw: Int, 
     else
         bl = rw * rh * bpp
         b = wm_scr(st, bl)
-        _f = wm_fondo_region(st, b, bl, rw, rh, bpp, fmt, rx0, ry0, sh)
-        if ry0 < wm_bar_h(st)
-            # Sólo llega aquí ampliada a la franja de arriba: rx0 = ry0 = 0.
-            _ba = wm_pintar_barra(st, b, bl, sw, sh, rw, bpp, fmt)
-        m = wm_sombra_margen()
+        # Lo que queda bajo la ventana más alta que cubre la región entera no se ve.
         z = 0
+        zi = -1
+        while z < st.tab.nz()
+            i = st.tab.z_get(z)
+            if st.tab.slot_activo(i) != 0
+                if wm_oculta(st, i) == 0
+                    if wm_cubre(st, i, rx0, ry0, rx1, ry1) != 0
+                        zi = z
+            z = z + 1
+        if zi < 0
+            _f = wm_fondo_region(st, b, bl, rw, rh, bpp, fmt, rx0, ry0, sh)
+            if ry0 < wm_bar_h(st)
+                # Sólo llega aquí ampliada a la franja de arriba: rx0 = ry0 = 0.
+                _ba = wm_pintar_barra(st, b, bl, sw, sh, rw, bpp, fmt)
+        m = wm_sombra_margen()
+        z = max(zi, 0)
         while z < st.tab.nz()
             i = st.tab.z_get(z)
             if st.tab.slot_activo(i) != 0
@@ -1460,10 +1557,28 @@ fn wm_repintar_slot(st: &mut Estado, i: Int, compos: Int, clen: Int, sw: Int, sh
             if wm_comp_gpu_mode(st) != 0
                 _oc = wm_comp_send_geom(st, st.comp_fd, wm_surf_win(i), 0, 0, 0, 0, comp_geom_hidden(), 50)
             0
+        elsif wm_slot_tapado(st, i, completo, zix) != 0
+            0
         else
             wm_repintar_slot_vis(st, i, compos, clen, sw, sh, stride, bpp, fmt, completo, zix)
     else
         0
+
+# En un repintado completo por CPU, una ventana tapada entera —sombra
+# incluida— por otra de más arriba no se pinta. Su rejilla queda marcada y el
+# camino incremental la descarta (ver `wm_term_incremental`).
+fn wm_slot_tapado(st: &mut Estado, i: Int, completo: Int, zix: Int) -> Int ! alloc
+    if completo == 0
+        0
+    elsif wm_comp_gpu_mode(st) != 0
+        0
+    elsif st.ss_slot >= 0
+        0
+    else
+        m = wm_sombra_margen()
+        wx = st.tab.wx(i)
+        wy = st.tab.wy(i)
+        wm_tapado(st, zix, wx - m, wy - m, wx + st.tab.ww(i) + m, wy + st.tab.wh(i) + m)
 
 fn wm_repintar_slot_vis(st: &mut Estado, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, completo: Int, zix: Int) -> Int ! io, alloc
     if st.tab.slot_activo(i) != 0
@@ -1500,20 +1615,25 @@ fn wm_repintar_slot_vis(st: &mut Estado, i: Int, compos: Int, clen: Int, sw: Int
                 grid = st.tab.shm_ptr(a)
                 if completo != 0
                     _df = st.tab.term_set_dirty(a, -1)
+                if completo == 0
+                    if gmode == 0
+                        _ti = wm_term_incremental(st, a, zix, wx, wy, ww, wh, gh, bh)
                 dr = st.tab.term_dirty(a)
                 cols = wm_term_cols(ww, gw)
                 rows = wm_term_rows(wh, gh, bh)
-                _t = st.tab.term_pintar(a, grid, cols * rows * celda_bytes(), cols, rows, psf, plen, gw, gh, tema, c, cl, sw, sh, stride, bpp, fmt, px + 4, py + bh + 4, completo)
+                if dr != -2
+                    _t = st.tab.term_pintar(a, grid, cols * rows * celda_bytes(), cols, rows, psf, plen, gw, gh, tema, c, cl, sw, sh, stride, bpp, fmt, px + 4, py + bh + 4, completo)
                 if dr == -1
                     _d = wm_marcar_dirty(st, wx, wy, wx + ww, wy + wh)
                     if gmode != 0
                         _dm = wm_comp_dmap_surf(st, fd, wm_surf_win(i), 0, 0, ww, wh, wx, wy)
                 if dr >= 0
+                    nf = st.tab.term_dirty_hasta(a) - dr + 1
                     ry = wy + bh + 4 + dr * gh
-                    _d2 = wm_marcar_dirty(st, wx, ry, wx + ww, ry + gh)
+                    _d2 = wm_marcar_dirty(st, wx, ry, wx + ww, ry + nf * gh)
                     if gmode != 0
                         lry = bh + 4 + dr * gh
-                        _dm2 = wm_comp_dmap_surf(st, fd, wm_surf_win(i), 0, lry, ww, lry + gh, wx, wy)
+                        _dm2 = wm_comp_dmap_surf(st, fd, wm_surf_win(i), 0, lry, ww, lry + nf * gh, wx, wy)
         if st.tab.tipo(a) == tab_tipo_cli()
             if completo != 0
                 if st.tab.fase(a) == 2
@@ -1533,6 +1653,27 @@ fn wm_repintar_slot_vis(st: &mut Estado, i: Int, compos: Int, clen: Int, sw: Int
                 if st.tab.tipo(a) != tab_tipo_cli()
                     _d4 = wm_marcar_dirty(st, wx, wy, wx + ww, wy + wh)
     0
+
+# Filas sucias de una terminal fuera del repintado completo (CPU): si una
+# ventana de más arriba las tapa se descartan; si sólo las roza, se convierten
+# en daño de región; si nada estorba, se pintan directas. Deja la marca a -2
+# cuando no hay que pintar nada aquí.
+fn wm_term_incremental(st: &mut Estado, a: Int, zix: Int, wx: Int, wy: Int, ww: Int, wh: Int, gh: Int, bh: Int) -> Int ! alloc
+    dr = st.tab.term_dirty(a)
+    if dr == -2
+        0
+    elsif st.ss_slot >= 0
+        0
+    else
+        y0 = wy + bh
+        y1 = wy + wh
+        if dr >= 0
+            y0 = wy + bh + 4 + dr * gh
+            y1 = wy + bh + 4 + (st.tab.term_dirty_hasta(a) + 1) * gh
+        modo = wm_pintar_o_danar(st, zix, wx, y0, wx + ww, y1)
+        if modo != 0
+            _d = st.tab.term_set_dirty(a, -2)
+        0
 
 fn wm_compose(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     st.pw = sw
@@ -1561,7 +1702,9 @@ fn wm_compose(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride:
                 _df = wm_comp_dmap_surf(st, fd, wm_surf_fondo(), 0, 0, sw, sh, 0, 0)
             _db = wm_marcar_dirty(st, 0, 0, sw, sh)
         else
-            _bg = wm_pintar_fondo(st, compos, clen, sw, sh, stride, bpp, fmt)
+            # Con una ventana maximizada encima, el fondo no se ve.
+            if wm_tapado(st, -1, 0, bh, sw, sh) == 0
+                _bg = wm_pintar_fondo(st, compos, clen, sw, sh, stride, bpp, fmt)
             _db = wm_marcar_dirty(st, 0, 0, sw, sh)
         bar_tgt = wm_comp_tgt(st, compos, wm_surf_bar())
         bar_cl = clen
@@ -1715,10 +1858,15 @@ fn wm_repintar_ventana(st: &mut Estado, i: Int, compos: Int, clen: Int, sw: Int,
     # pinta y le manda geometría y z es el repintado completo.
     if wm_comp_gpu_mode(st) != 0
         wm_pedir_repintar(st)
-    elsif st.tab.grupo_panel_activo(i) == i
+    elsif st.tab.grupo_panel_activo(i) != i
+        wm_pedir_repintar(st)
+    elsif st.ss_slot >= 0
         wm_repintar_ventana_vis(st, i, compos, clen, sw, sh, stride, bpp, fmt)
     else
-        wm_pedir_repintar(st)
+        # Como daño (con la geometría cargada en `st`): respeta lo que tenga
+        # encima y repinta la sombra sobre un fondo limpio.
+        m = wm_sombra_margen()
+        wm_danar(st, st.wx - m, st.wy - m, st.wx + st.ww + m, st.wy + st.wh + m)
 
 fn wm_repintar_ventana_vis(st: &mut Estado, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc, io
     wx = st.wx
@@ -2724,8 +2872,23 @@ fn wm_on_danio_vis(st: &mut Estado, i: Int, compos: Int, clen: Int, stride: Int,
             _b = copiar_rect(tgt, tl, stride, shm, slen, cw, bpp, fmt, ox + dx, oy + dy, dx, dy, dw, dh)
             _dm = wm_comp_dmap_surf(st, fd, wm_surf_win(i), ox + dx, oy + dy, ox + dx + dw, oy + dy + dh, wx + ox + dx, wy + oy + dy)
         elsif wm_es_ss(st, i) == 0
-            _b = wm_blit_cliente(st, compos, clen, stride, bpp, fmt, wx, wy, cw, ch, shm, slen, dx, dy, dw, dh)
-            _d = wm_marcar_dirty(st, wx + dx, wy + wm_bar_h(st) + dy, wx + dx + dw, wy + wm_bar_h(st) + dy + dh)
+            # Sólo directo si nada lo tapa ni lo roza, y tampoco el puntero: se
+            # restaura desde una copia de lo que había debajo y pisaría el daño.
+            x0 = wx + 4 + dx
+            y0 = wy + wm_bar_h(st) + dy
+            modo = 0
+            if st.ss_slot < 0
+                modo = wm_pintar_o_danar(st, wm_z_de(st, i), x0, y0, x0 + dw, y0 + dh)
+                if modo == 0
+                    if st.bak_ok != 0
+                        if wm_rects_cortan(x0, y0, x0 + dw, y0 + dh, st.mx_prev, st.my_prev, st.mx_prev + wm_cursor_w(), st.my_prev + wm_cursor_h()) != 0
+                            modo = 3
+                    if modo == 3
+                        _dc = wm_danar(st, x0, y0, x0 + dw, y0 + dh)
+                        modo = 2
+            if modo == 0
+                _b = wm_blit_cliente(st, compos, clen, stride, bpp, fmt, wx, wy, cw, ch, shm, slen, dx, dy, dw, dh)
+                _d = wm_marcar_dirty(st, x0, y0, x0 + dw, y0 + dh)
         else
             _b = wm_blit_cliente_pantalla(compos, clen, stride, bpp, fmt, wx, wy, cw, ch, shm, slen, dx, dy, dw, dh)
             _d = wm_marcar_dirty(st, wx + dx, wy + dy, wx + dx + dw, wy + dy + dh)
@@ -3753,6 +3916,7 @@ fn wm_slot_atender_term(st: &mut Estado, i: Int, compos: Int, clen: Int, stride:
                 cols = wm_term_cols(ww, gw)
                 rows = wm_term_rows(wh, gh, bh)
                 glen = cols * rows * celda_bytes()
+                antes = st.tab.term_cursor(i)
                 j = 0
                 while j < n
                     b = bytes_view_mem(buf, msg_len())
@@ -3761,16 +3925,15 @@ fn wm_slot_atender_term(st: &mut Estado, i: Int, compos: Int, clen: Int, stride:
                     j = j + 1
                 pos = st.tab.term_cursor(i)
                 _a = st.tab.set_term_pos(i, pos)
+                # El cursor se mueve también sin escribir (CSI): su fila vieja
+                # tiene que repintarse para borrarlo, y la nueva para pintarlo.
+                if pos != antes
+                    _m1 = st.tab.term_marcar_fila(i, term_cursor_row(antes))
+                    _m2 = st.tab.term_marcar_fila(i, term_cursor_row(pos))
                 if st.tab.grupo_panel_activo(i) != i
                     if st.tab.pend(i) == 0
                         _a = st.tab.set_pend(i, 1)
                         _rp = wm_danar_cabecera(st, st.tab.grupo_cab(i))
-                wx = st.tab.wx(i)
-                wy = st.tab.wy(i)
-                ww = st.tab.ww(i)
-                wh = st.tab.wh(i)
-                if st.tab.grupo_panel_activo(i) == i
-                    _d = wm_marcar_dirty(st, wx, wy, wx + ww, wy + wh)
     0
 
 # La «q» llega como 113, o 81 con Mayús.

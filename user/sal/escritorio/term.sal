@@ -41,6 +41,8 @@ struct Term
     hist_w: Int
     hist_cap: Int
     hist_head: Int
+    # Última fila sucia cuando `dirty >= 0`: las sucias son `dirty..=dirty_hasta`.
+    dirty_hasta: Int
 
 init Term(cols: Int, rows: Int) ! alloc
     csi = list_new[Int]()
@@ -51,7 +53,7 @@ init Term(cols: Int, rows: Int) ! alloc
     hw = cols * celda_bytes()
     hist = bytes_new(term_hist_cap() * hw)
     Term(cols, rows, 0, col_default_fg(), col_default_bg(), 0, 0, 0, 0,
-         csi, utf8_inicio(), -1, hist, cols, term_hist_cap(), 0)
+         csi, utf8_inicio(), -1, hist, cols, term_hist_cap(), 0, 0)
 
 method Term.csi_param(&self, i: Int) -> Int
     list_get(&self.csi, i)
@@ -60,17 +62,17 @@ method Term.set_csi_param(&mut self, i: Int, v: Int) -> Int
     list_set(&mut self.csi, i, v)
     0
 
+# `dirty`: -2 = nada, -1 = todo, >= 0 = filas `dirty..=dirty_hasta`.
 method Term.marcar_fila(&mut self, row: Int) -> Int
     if self.dirty == -1
         0
     elsif self.dirty >= 0
-        if self.dirty != row
-            self.dirty = -1
-            0
-        else
-            0
+        self.dirty = min(self.dirty, row)
+        self.dirty_hasta = max(self.dirty_hasta, row)
+        0
     else
         self.dirty = row
+        self.dirty_hasta = row
         0
 
 # Fuga intencional: capa SHM / grid del terminal (vida = panel).
@@ -487,6 +489,7 @@ method Term.feed_byte(&mut self, ptr: Int, len: Int, w: Int, h: Int, byte: Int) 
 
 method Term.pintar(&mut self, grid: Int, glen: Int, cols: Int, rows: Int, psf: Int, psflen: Int, gw: Int, gh: Int, tema: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, ox: Int, oy: Int, force: Int) -> Int ! alloc
     dr = self.dirty
+    dh = self.dirty_hasta
     # Filas y celdas que caen enteras fuera del búfer (una región recortada del
     # WM) no se leen ni se pintan.
     alto_buf = clen / (stride * bpp)
@@ -497,8 +500,10 @@ method Term.pintar(&mut self, grid: Int, glen: Int, cols: Int, rows: Int, psf: I
             pinta = 1
         if dr == -1
             pinta = 1
-        if dr == row
-            pinta = 1
+        if dr >= 0
+            if row >= dr
+                if row <= dh
+                    pinta = 1
         if oy + row * gh >= alto_buf
             pinta = 0
         if oy + row * gh + gh <= 0
@@ -528,12 +533,24 @@ method Term.pintar(&mut self, grid: Int, glen: Int, cols: Int, rows: Int, psf: I
         self.dirty = -2
     if dr == -1
         self.dirty = -2
+    # El cursor sólo se pinta si su fila se acaba de pintar: si no, sigue
+    # en pantalla, y en una ventana tapada no debe salir encima de otra.
     pos = self.cursor
     cc = term_cursor_col(pos)
     cr = term_cursor_row(pos)
-    cx = ox + cc * gw
-    cy = oy + cr * gh
-    _c = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, cx, cy, cx + 2, cy + gh, tema_term_cursor(tema))
+    pinta_c = 0
+    if force != 0
+        pinta_c = 1
+    if dr == -1
+        pinta_c = 1
+    if dr >= 0
+        if cr >= dr
+            if cr <= dh
+                pinta_c = 1
+    if pinta_c != 0
+        cx = ox + cc * gw
+        cy = oy + cr * gh
+        _c = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, cx, cy, cx + 2, cy + gh, tema_term_cursor(tema))
     0
 
 fn term_limpiar(ptr: Int, len: Int, w: Int, h: Int) -> Int ! alloc
