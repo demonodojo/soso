@@ -8,6 +8,10 @@ use soso_abi::ABI_VERSION;
 use soso_pkg_core::comandos::reconstruir;
 use soso_pkg_core::empaquetar;
 
+// Versiones **mínimas** de cada paquete. La que se materializa la decide
+// `version_destino`: si el contenido cambió y la última ya está publicada, el
+// build crea la siguiente patch sola. Subir una constante a mano sirve para un
+// minor o un major.
 pub const SOSO_WEB_VERSION: &str = "1.0.2";
 const SOSO_WEB_NOMBRE: &str = "soso-web";
 pub const OPENCODE_SAL_VERSION: &str = "1.0.0";
@@ -44,14 +48,19 @@ pub fn run(args: &[String]) {
         let out = args
             .iter()
             .skip(1)
-            .find_map(|a| a.strip_prefix("--out=").map(PathBuf::from))
-            .unwrap_or_else(|| {
-                root.join("rootfs/share/paquetes")
-                    .join(SALVI_NOMBRE)
-                    .join(SALVI_VERSION)
-            });
-        match materializar_salvi(&root, &out) {
-            Ok(()) => {
+            .find_map(|a| a.strip_prefix("--out=").map(PathBuf::from));
+        let hecho = construir_salvi(&root).and_then(|data| match out {
+            Some(out) => {
+                let (man_text, pack, _) = empaquetar_salvi(SALVI_VERSION, &data)?;
+                escribir_paquete(&out, &man_text, &pack).map(|()| out)
+            }
+            None => materializar_en_catalogo(&root, SALVI_NOMBRE, SALVI_VERSION, |v| {
+                empaquetar_salvi(v, &data)
+            })
+            .map(|(v, ..)| root.join("rootfs/share/paquetes").join(SALVI_NOMBRE).join(v)),
+        });
+        match hecho {
+            Ok(out) => {
                 if let Err(e) = generar_indice(&root) {
                     eprintln!("xtask pkg-pack: no pude actualizar indice.txt: {e}");
                     exit(1);
@@ -76,10 +85,13 @@ pub fn run(args: &[String]) {
         let out = args
             .iter()
             .skip(1)
-            .find_map(|a| a.strip_prefix("--out=").map(PathBuf::from))
-            .unwrap_or_else(|| root.join("rootfs/share/paquetes").join(pkg).join(version));
-        match materializar_bin_sistema(&root, pkg, version, pkg, &out) {
-            Ok(()) => {
+            .find_map(|a| a.strip_prefix("--out=").map(PathBuf::from));
+        let hecho = match out {
+            Some(out) => materializar_bin_sistema(&root, pkg, version, &out).map(|()| out),
+            None => materializar_bin_sistema_catalogo(&root, pkg, version),
+        };
+        match hecho {
+            Ok(out) => {
                 if let Err(e) = generar_indice(&root) {
                     eprintln!("xtask pkg-pack: no pude actualizar indice.txt: {e}");
                     exit(1);
@@ -109,13 +121,19 @@ pub fn run(args: &[String]) {
             } else {
                 None
             }
-        })
-        .unwrap_or_else(|| {
-            root.join("rootfs/share/paquetes/soso-web")
-                .join(SOSO_WEB_VERSION)
         });
-    match materializar_soso_web(&root, &out, false) {
-        Ok(()) => println!("xtask pkg-pack: {}", out.display()),
+    let hecho = match out {
+        Some(out) => materializar_soso_web(&root, &out, false).map(|()| out),
+        None => recoger_soso_web(&root).and_then(|files| {
+            materializar_en_catalogo(&root, SOSO_WEB_NOMBRE, SOSO_WEB_VERSION, |v| {
+                empaquetar::empaquetar(SOSO_WEB_NOMBRE, v, Some(ABI_VERSION), files.clone())
+                    .map_err(|e| format!("{e}"))
+            })
+            .map(|(v, ..)| root.join("rootfs/share/paquetes").join(SOSO_WEB_NOMBRE).join(v))
+        }),
+    };
+    match hecho {
+        Ok(out) => println!("xtask pkg-pack: {}", out.display()),
         Err(e) => {
             eprintln!("xtask pkg-pack: {e}");
             exit(1);
@@ -130,18 +148,173 @@ pub fn materializar_paquetes_sistema(root: &Path) -> Result<(), String> {
         ("soso-update", SOSO_UPDATE_PACKAGE_VERSION),
         ("soso-wm", SOSO_WM_VERSION),
     ] {
-        let dir = root
-            .join("rootfs/share/paquetes")
-            .join(nombre)
-            .join(version);
-        materializar_bin_sistema(root, nombre, version, nombre, &dir)?;
+        materializar_bin_sistema_catalogo(root, nombre, version)?;
     }
     generar_indice(root)
 }
 
+/// Paquete del sistema en el catálogo, con la versión que le toque.
+fn materializar_bin_sistema_catalogo(root: &Path, nombre: &str, base: &str) -> Result<PathBuf, String> {
+    let data = leer_bin_sistema(root, nombre)?;
+    let (version, _, _, _) = materializar_en_catalogo(root, nombre, base, |v| {
+        empaquetar_bin_sistema(nombre, v, &data)
+    })?;
+    Ok(root.join("rootfs/share/paquetes").join(nombre).join(version))
+}
+
+// ---- versión de cada paquete ------------------------------------------------
+//
+// Una versión **publicada** no cambia nunca: los clientes la identifican por su
+// número, y el build la reescribía en silencio cada vez que cambiaba el binario
+// (la std de Rust, soso-abi…). Así se colaron soso-pkg 0.4.2, soso-update 0.1.2
+// y soso-web 1.0.2 con otro contenido tras publicarse en v0.3.36.
+
+/// Etiqueta de la última release (`v*`) alcanzable desde HEAD.
+fn ultima_release(root: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["describe", "--tags", "--abbrev=0", "--match", "v*"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let tag = String::from_utf8(out.stdout).ok()?;
+    let tag = tag.trim();
+    (!tag.is_empty()).then(|| tag.to_string())
+}
+
+fn git_fichero(root: &Path, rev: &str, ruta: &str) -> Option<Vec<u8>> {
+    let out = std::process::Command::new("git")
+        .args(["show", &format!("{rev}:{ruta}")])
+        .current_dir(root)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    out.status.success().then_some(out.stdout)
+}
+
+/// Revisión donde está publicada `nombre`/`version`: la última release o, si
+/// no estaba ahí, HEAD (lo que ya está en `main` lo sirve el índice).
+fn publicada_en(root: &Path, revs: &[String], nombre: &str, version: &str) -> Option<String> {
+    let ruta = format!("rootfs/share/paquetes/{nombre}/{version}/paquete.txt");
+    revs.iter()
+        .find(|rev| git_fichero(root, rev, &ruta).is_some())
+        .cloned()
+}
+
+fn semver(v: &str) -> Option<(u64, u64, u64)> {
+    let mut it = v.split('.').map(|p| p.parse::<u64>().ok());
+    let r = (it.next()??, it.next()??, it.next()??);
+    it.next().is_none().then_some(r)
+}
+
+/// Deja cada versión publicada de `nombre` tal como se publicó: si el árbol la
+/// tiene distinta (un build anterior la pisó), la devuelve desde git.
+fn restaurar_publicadas(root: &Path, revs: &[String], nombre: &str) -> Result<(), String> {
+    let dir = root.join("rootfs/share/paquetes").join(nombre);
+    let Ok(entradas) = fs::read_dir(&dir) else {
+        return Ok(());
+    };
+    for e in entradas.flatten() {
+        let Some(version) = e.file_name().to_str().map(String::from) else {
+            continue;
+        };
+        if semver(&version).is_none() {
+            continue;
+        }
+        let Some(rev) = publicada_en(root, revs, nombre, &version) else {
+            continue;
+        };
+        for f in ["paquete.txt", "paquete.pack"] {
+            let ruta = format!("rootfs/share/paquetes/{nombre}/{version}/{f}");
+            let Some(publicado) = git_fichero(root, &rev, &ruta) else {
+                continue;
+            };
+            let local = root.join(&ruta);
+            if fs::read(&local).ok().as_deref() != Some(&publicado[..]) {
+                eprintln!("xtask: {nombre} {version} ya está publicada ({rev}): se restaura {f}");
+                fs::write(&local, &publicado).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Versión en la que debe quedar `nombre` con el contenido que produce
+/// `hacer(version)` (manifiesto en texto), y si hay que escribirla.
+///
+/// - Ninguna versión, o la mínima `base` por encima de todas: `base`.
+/// - La última no está publicada: se regenera en su sitio.
+/// - La última está publicada con el mismo contenido: no se toca.
+/// - La última está publicada con otro contenido: la siguiente patch.
+fn version_destino(
+    root: &Path,
+    revs: &[String],
+    nombre: &str,
+    base: &str,
+    hacer: &dyn Fn(&str) -> Result<String, String>,
+) -> Result<(String, bool), String> {
+    let dir = root.join("rootfs/share/paquetes").join(nombre);
+    let ultima = fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().join("paquete.txt").is_file())
+        .filter_map(|e| e.file_name().to_str().and_then(|v| semver(v).map(|t| (t, v.to_string()))))
+        .max();
+    let Some((tu, u)) = ultima else {
+        return Ok((base.to_string(), true));
+    };
+    let tb = semver(base).ok_or_else(|| format!("versión mínima inválida {base:?}"))?;
+    if tb > tu {
+        return Ok((base.to_string(), true));
+    }
+    if publicada_en(root, revs, nombre, &u).is_none() {
+        return Ok((u, true));
+    }
+    let publicado = fs::read(dir.join(&u).join("paquete.txt")).map_err(|e| e.to_string())?;
+    if hacer(&u)?.as_bytes() == &publicado[..] {
+        return Ok((u, false));
+    }
+    let nueva = format!("{}.{}.{}", tu.0, tu.1, tu.2 + 1);
+    eprintln!("xtask: {nombre} cambió y {u} ya está publicada: pasa a {nueva}");
+    Ok((nueva, true))
+}
+
+/// Materializa `nombre` en `rootfs/share/paquetes/<nombre>/<versión>` con la
+/// versión de [`version_destino`]. Devuelve la versión, el manifiesto en texto,
+/// el pack y el manifiesto.
+fn materializar_en_catalogo(
+    root: &Path,
+    nombre: &str,
+    base: &str,
+    hacer: impl Fn(&str) -> Result<(String, Vec<u8>, soso_pkg_core::Manifest), String>,
+) -> Result<(String, String, Vec<u8>, soso_pkg_core::Manifest), String> {
+    let revs: Vec<String> = ultima_release(root).into_iter().chain(["HEAD".to_string()]).collect();
+    restaurar_publicadas(root, &revs, nombre)?;
+    let (version, escribir) =
+        version_destino(root, &revs, nombre, base, &|v| hacer(v).map(|(t, _, _)| t))?;
+    let (man_text, pack, man) = hacer(&version)?;
+    if escribir {
+        let out = root.join("rootfs/share/paquetes").join(nombre).join(&version);
+        escribir_paquete(&out, &man_text, &pack)?;
+    }
+    Ok((version, man_text, pack, man))
+}
+
+fn escribir_paquete(out: &Path, man_text: &str, pack: &[u8]) -> Result<(), String> {
+    if out.exists() {
+        fs::remove_dir_all(out).map_err(|e| e.to_string())?;
+    }
+    fs::create_dir_all(out).map_err(|e| e.to_string())?;
+    fs::write(out.join("paquete.txt"), man_text).map_err(|e| e.to_string())?;
+    fs::write(out.join("paquete.pack"), pack).map_err(|e| e.to_string())
+}
+
 /// Paquete de aplicación (sin `destino=sistema`): queda en `/var/paquetes/salvi`
 /// y sosh lo encuentra por `/var/paquetes/comandos`. No se instala en la imagen.
-fn materializar_salvi(root: &Path, out: &Path) -> Result<(), String> {
+fn construir_salvi(root: &Path) -> Result<Vec<u8>, String> {
     let repo = root.join("../salvi");
     let script = repo.join("build.sh");
     if !script.is_file() {
@@ -158,53 +331,53 @@ fn materializar_salvi(root: &Path, out: &Path) -> Result<(), String> {
         return Err("build.sh de salvi falló (¿cargo xtask sal-build --cross-only?)".into());
     }
     let elf = repo.join("salvi-soso");
-    let data = fs::read(&elf).map_err(|_| format!("no hay {elf:?}"))?;
-    let (man_text, pack, _) = empaquetar::empaquetar(
-        SALVI_NOMBRE,
-        SALVI_VERSION,
-        Some(ABI_VERSION),
-        vec![("bin/salvi".into(), data)],
-    )
-    .map_err(|e| format!("{e}"))?;
-    if out.exists() {
-        fs::remove_dir_all(out).map_err(|e| e.to_string())?;
-    }
-    fs::create_dir_all(out).map_err(|e| e.to_string())?;
-    fs::write(out.join("paquete.txt"), &man_text).map_err(|e| e.to_string())?;
-    fs::write(out.join("paquete.pack"), &pack).map_err(|e| e.to_string())?;
-    Ok(())
+    fs::read(&elf).map_err(|_| format!("no hay {elf:?}"))
 }
 
-fn materializar_bin_sistema(
-    root: &Path,
-    nombre: &str,
+fn empaquetar_salvi(
     version: &str,
-    binario: &str,
-    out: &Path,
-) -> Result<(), String> {
+    data: &[u8],
+) -> Result<(String, Vec<u8>, soso_pkg_core::Manifest), String> {
+    empaquetar::empaquetar(
+        SALVI_NOMBRE,
+        version,
+        Some(ABI_VERSION),
+        vec![("bin/salvi".into(), data.to_vec())],
+    )
+    .map_err(|e| format!("{e}"))
+}
+
+fn leer_bin_sistema(root: &Path, binario: &str) -> Result<Vec<u8>, String> {
     let elf = if binario == "soso-wm" {
         root.join("rootfs/bin/soso-wm")
     } else {
         root.join("target/user/x86_64-soso-user/release")
             .join(binario)
     };
-    let data = fs::read(&elf).map_err(|_| format!("no hay {elf:?}; ejecuta build_user"))?;
+    fs::read(&elf).map_err(|_| format!("no hay {elf:?}; ejecuta build_user"))
+}
+
+fn empaquetar_bin_sistema(
+    nombre: &str,
+    version: &str,
+    data: &[u8],
+) -> Result<(String, Vec<u8>, soso_pkg_core::Manifest), String> {
     let (_, pack, mut man) = empaquetar::empaquetar(
         nombre,
         version,
         Some(ABI_VERSION),
-        vec![(format!("bin/{binario}"), data.clone())],
+        vec![(format!("bin/{nombre}"), data.to_vec())],
     )
     .map_err(|e| format!("{e}"))?;
     man.destino_sistema = true;
-    let man_text = man.format();
-    if out.exists() {
-        fs::remove_dir_all(out).map_err(|e| e.to_string())?;
-    }
-    fs::create_dir_all(out).map_err(|e| e.to_string())?;
-    fs::write(out.join("paquete.txt"), &man_text).map_err(|e| e.to_string())?;
-    fs::write(out.join("paquete.pack"), &pack).map_err(|e| e.to_string())?;
-    Ok(())
+    Ok((man.format(), pack, man))
+}
+
+/// Con `--out` explícito: la versión mínima, sin mirar el catálogo.
+fn materializar_bin_sistema(root: &Path, nombre: &str, version: &str, out: &Path) -> Result<(), String> {
+    let data = leer_bin_sistema(root, nombre)?;
+    let (man_text, pack, _) = empaquetar_bin_sistema(nombre, version, &data)?;
+    escribir_paquete(out, &man_text, &pack)
 }
 
 /// Índice HTTPS estático para servir este árbol con raw.githubusercontent.com.
@@ -268,10 +441,13 @@ pub fn generar_indice_en(base: &Path, publicado: impl Fn(&str) -> bool) -> Resul
 
 /// Catálogo en `share/` + copia instalada bajo `rootfs/var/paquetes/` (imagen live).
 pub fn materializar_soso_web_en_rootfs(root: &Path) -> Result<(), String> {
-    let cat = root
-        .join("rootfs/share/paquetes/soso-web")
-        .join(SOSO_WEB_VERSION);
-    materializar_soso_web(root, &cat, true)
+    let files = recoger_soso_web(root)?;
+    let (_, man_text, pack, man) =
+        materializar_en_catalogo(root, SOSO_WEB_NOMBRE, SOSO_WEB_VERSION, |v| {
+            empaquetar::empaquetar(SOSO_WEB_NOMBRE, v, Some(ABI_VERSION), files.clone())
+                .map_err(|e| format!("{e}"))
+        })?;
+    escribir_instalado(root, &man_text, &pack, &man)
 }
 
 fn materializar_soso_web(

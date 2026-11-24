@@ -108,6 +108,17 @@ soso-pkg borrar <nombre>
 - `cargo xtask pkg-pack soso-ed|soso-pkg|soso-update|soso-wm` genera su
   manifiesto y pack. La compilación genera los paquetes disponibles y actualiza
   `indice.txt`.
+- **La versión la decide el build, y una versión publicada no cambia nunca.**
+  Publicada = está en la última release (`v*`) o en HEAD. Con el contenido igual
+  al de la última versión publicada no se escribe nada; con otro contenido se crea
+  la siguiente patch; si la última aún no está publicada se regenera en su sitio.
+  Si el árbol tiene una versión publicada distinta de git, el build la restaura.
+  Las constantes de `xtask/src/pkg_pack.rs` son la versión **mínima**: subirlas
+  a mano sirve para un minor o un major. Vale para `soso-ed`, `soso-pkg`,
+  `soso-update`, `soso-wm`, `soso-web` y `salvi`; con `--out` se empaqueta la
+  mínima sin mirar el catálogo. (Antes el build reescribía la versión fija con el
+  binario nuevo: soso-pkg 0.4.2, soso-update 0.1.2 y soso-web 1.0.2 cambiaron
+  tras publicarse en v0.3.36 por un cambio en la std de Rust.)
 - El ejecutable base `soso-update` se conserva para instalaciones nuevas y el
   USB live, pero `cargo xtask release` lo excluye de `rootfs.pack`: una copia
   instalada como paquete se puede actualizar sin que una OTA la sobrescriba.

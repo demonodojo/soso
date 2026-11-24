@@ -432,6 +432,7 @@ fn valid_signal(sig: u64) -> Option<u8> {
 /// defecto termina, para o se ignora según [`senal::defecto`].
 fn signal_one(procs: &mut Vec<Process>, pid: u64, sig: u8) -> bool {
     use soso_abi as abi;
+
     let Some(idx) = procs.iter().position(|p| p.pid == pid) else {
         return false;
     };
@@ -1350,13 +1351,13 @@ pub fn spawn_console_io_cwd(
             abs
         }
     };
-    let (parent_pgid, parent_sid) = {
+    let (parent_pgid, parent_sid, parent_console) = {
         let procs = PROCS.lock();
         procs
             .iter()
             .find(|p| p.pid == parent)
-            .map(|p| (p.pgid, p.sid))
-            .unwrap_or((0, 0))
+            .map(|p| (p.pgid, p.sid, Some(p.console)))
+            .unwrap_or((0, 0, None))
     };
     let stdio_fds = syscall::build_child_fds(stdio)?;
     let space = AddrSpace::new().ok_or(-abi::ENOMEM)?;
@@ -1420,7 +1421,12 @@ pub fn spawn_console_io_cwd(
         is_thread: false,
         join_uaddr: 0,
     });
-    if matches!(console, Console::Pty(_)) {
+    // Sesión nueva sólo al **entrar** en el PTY (el WM lanza la shell de una
+    // terminal). Lo que esa shell lanza dentro del mismo PTY sigue en su
+    // sesión: si no, cada programa era líder de sesión y se le aplicaba la
+    // protección de «shell en primer plano» —Ctrl-Z no lo paraba y Ctrl-C le
+    // daba `EINTR` en vez de terminarlo— y además se ponía solo en primer plano.
+    if matches!(console, Console::Pty(_)) && parent_console != Some(console) {
         session_leader(pid, console);
     }
     crate::arch::apic::kick_idle_cpus();
