@@ -809,6 +809,7 @@ fn parse_pointer_layout(rdesc: &[u8]) -> Option<(Option<u8>, PointerLayoutKind)>
     // guarda el último, y `Usage(Tip) Usage(Confidence)` necesita el orden).
     let mut usos = [0u32; 16];
     let mut n_usos = 0usize;
+    let mut rango_usos: Option<(u32, u32)> = None;
 
     while i < rdesc.len() {
         let head = rdesc[i];
@@ -851,9 +852,18 @@ fn parse_pointer_layout(rdesc: &[u8]) -> Option<(Option<u8>, PointerLayoutKind)>
             (1, 2) => logical_max = aml_int(data, data_size),
             (2, 0) | (2, 1) | (2, 2) => {
                 usage_min = data;
-                if head >> 4 == 0 && n_usos < usos.len() {
-                    usos[n_usos] = data;
-                    n_usos += 1;
+                match tag {
+                    0 if n_usos < usos.len() => {
+                        usos[n_usos] = data;
+                        n_usos += 1;
+                    }
+                    1 => rango_usos = Some((data, data)),
+                    2 => {
+                        if let Some((lo, _)) = rango_usos {
+                            rango_usos = Some((lo, data));
+                        }
+                    }
+                    _ => {}
                 }
             }
             (0, 10) => {
@@ -897,37 +907,42 @@ fn parse_pointer_layout(rdesc: &[u8]) -> Option<(Option<u8>, PointerLayoutKind)>
                 }
                 let desktop_xy = usage_page == HID_USAGE_PAGE_GENERIC_DESKTOP
                     || usage_page == HID_USAGE_PAGE_DIGITIZER;
-                if desktop_xy && (usage_min == 0x30 || usage_min == 0x31) {
-                    let rel = report_size == 8 && logical_min < 0;
-                    if rel {
-                        if report_count >= 2 && (usage_min == 0x30 || usage_min == 0x31) {
-                            field.dx_offset = Some(byte_off);
-                            field.dy_offset = Some(byte_off + 1);
-                        } else if usage_min == 0x30 {
-                            field.dx_offset = Some(byte_off);
-                        } else if usage_min == 0x31 {
-                            field.dy_offset = Some(byte_off);
+                // Posición de X (0x30) e Y (0x31) dentro del campo: por la
+                // lista de usos (`X, Y, Wheel` en un campo de 3) o por el
+                // rango `Usage Minimum/Maximum`.
+                let pos = |u: u32| -> Option<usize> {
+                    let k = if n_usos > 0 {
+                        usos[..n_usos].iter().position(|&v| v == u)?
+                    } else {
+                        let (lo, hi) = rango_usos?;
+                        if !(lo..=hi).contains(&u) {
+                            return None;
                         }
-                    } else if report_size >= 8 {
-                        let max = logical_max.max(0) as u32;
-                        // Un touchpad de precisión repite X/Y por dedo: vale
-                        // el primero.
-                        let x_libre = field.x_bit_off.is_none();
-                        let y_libre = field.y_bit_off.is_none();
-                        if report_count >= 2 && x_libre && y_libre {
-                            field.x_bit_off = Some(bit_offset);
-                            field.x_bit_len = report_size as usize;
+                        (u - lo) as usize
+                    };
+                    ((k as u32) < report_count).then_some(k)
+                };
+                if desktop_xy && report_size >= 8 {
+                    let rel = report_size == 8 && logical_min < 0;
+                    let max = logical_max.max(0) as u32;
+                    let tam = report_size as usize;
+                    if let Some(k) = pos(0x30) {
+                        if rel && field.dx_offset.is_none() {
+                            field.dx_offset = Some(byte_off + k);
+                        } else if !rel && field.x_bit_off.is_none() {
+                            // Un touchpad de precisión repite X/Y por dedo:
+                            // vale el primero.
+                            field.x_bit_off = Some(bit_offset + k * tam);
+                            field.x_bit_len = tam;
                             field.x_log_max = max;
-                            field.y_bit_off = Some(bit_offset + report_size as usize);
-                            field.y_bit_len = report_size as usize;
-                            field.y_log_max = max;
-                        } else if usage_min == 0x30 && x_libre {
-                            field.x_bit_off = Some(bit_offset);
-                            field.x_bit_len = report_size as usize;
-                            field.x_log_max = max;
-                        } else if usage_min == 0x31 && y_libre {
-                            field.y_bit_off = Some(bit_offset);
-                            field.y_bit_len = report_size as usize;
+                        }
+                    }
+                    if let Some(k) = pos(0x31) {
+                        if rel && field.dy_offset.is_none() {
+                            field.dy_offset = Some(byte_off + k);
+                        } else if !rel && field.y_bit_off.is_none() {
+                            field.y_bit_off = Some(bit_offset + k * tam);
+                            field.y_bit_len = tam;
                             field.y_log_max = max;
                         }
                     }
@@ -939,6 +954,7 @@ fn parse_pointer_layout(rdesc: &[u8]) -> Option<(Option<u8>, PointerLayoutKind)>
         // Los usos son locales: los consume cada elemento principal.
         if item_type == 0 {
             n_usos = 0;
+            rango_usos = None;
         }
     }
 
@@ -1265,6 +1281,45 @@ mod tests {
             0xb1, 0x02, 0xc0,
         ]);
         d
+    }
+
+    /// Report descriptor real del touchpad I2C (esclavo 0x15) del portátil AMD
+    /// de pruebas, volcado por `hid_i2c` (v0.3.44).
+    const TOUCHPAD_PORTATIL: &[u8] = &[
+        0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x85, 0x01, 0x09, 0x01, 0xa1, 0x00, 0x05, 0x09, 0x19, 0x01, 0x29, 0x02, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x02, 0x81, 0x02, 0x95, 0x06, 0x81, 0x03,
+        0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x38, 0x15, 0x81, 0x25, 0x7f, 0x75, 0x08, 0x95, 0x03, 0x81, 0x06, 0x05, 0x0c, 0x0a, 0x38, 0x02, 0x95, 0x01, 0x81, 0x06, 0x75, 0x08, 0x95, 0x03, 0x81,
+        0x03, 0xc0, 0x06, 0x00, 0xff, 0x09, 0x01, 0x85, 0x08, 0x09, 0xc5, 0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x95, 0x04, 0xb1, 0x02, 0xc0, 0x05, 0x0d, 0x09, 0x05, 0xa1, 0x01, 0x85, 0x04, 0x09,
+        0x22, 0xa1, 0x02, 0x15, 0x00, 0x25, 0x01, 0x09, 0x47, 0x09, 0x42, 0x95, 0x02, 0x75, 0x01, 0x81, 0x02, 0x75, 0x01, 0x95, 0x02, 0x81, 0x03, 0x95, 0x01, 0x75, 0x04, 0x25, 0x0f, 0x09, 0x51, 0x81,
+        0x02, 0x05, 0x01, 0x15, 0x00, 0x26, 0xc4, 0x0f, 0x75, 0x10, 0x55, 0x0d, 0x65, 0x11, 0x09, 0x30, 0x35, 0x00, 0x46, 0x92, 0x31, 0x95, 0x01, 0x81, 0x02, 0x46, 0xe8, 0x1c, 0x26, 0xfb, 0x08, 0x26,
+        0xfb, 0x08, 0x09, 0x31, 0x81, 0x02, 0x05, 0x0d, 0x15, 0x00, 0x25, 0x64, 0x95, 0x03, 0xc0, 0x55, 0x0c, 0x66, 0x01, 0x10, 0x47, 0xff, 0xff, 0x00, 0x00, 0x27, 0xff, 0xff, 0x00, 0x00, 0x75, 0x10,
+        0x95, 0x01, 0x09, 0x56, 0x81, 0x02, 0x09, 0x54, 0x25, 0x7f, 0x95, 0x01, 0x75, 0x08, 0x81, 0x02, 0x05, 0x09, 0x09, 0x01, 0x25, 0x01, 0x75, 0x01, 0x95, 0x01, 0x81, 0x02, 0x95, 0x07, 0x81, 0x03,
+        0x09, 0xc5, 0x75, 0x08, 0x95, 0x04, 0x81, 0x03, 0x05, 0x0d, 0x85, 0x02, 0x09, 0x55, 0x09, 0x59, 0x75, 0x04, 0x95, 0x02, 0x25, 0x0f, 0xb1, 0x02, 0x85, 0x07, 0x09, 0x60, 0x75, 0x01, 0x95, 0x01,
+        0x15, 0x00, 0x25, 0x01, 0xb1, 0x02, 0x95, 0x0f, 0xb1, 0x03, 0x06, 0x00, 0xff, 0x06, 0x00, 0xff, 0x85, 0x06, 0x09, 0xc5, 0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x96, 0x00, 0x01, 0xb1, 0x02,
+        0x85, 0x0d, 0x09, 0xc4, 0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x95, 0x04, 0xb1, 0x02, 0x85, 0x0c, 0x09, 0xc6, 0x96, 0x48, 0x03, 0x75, 0x08, 0xb1, 0x02, 0x85, 0x0b, 0x09, 0xc7, 0x95, 0x82,
+        0x75, 0x08, 0xb1, 0x02, 0xc0, 0x05, 0x0d, 0x09, 0x0e, 0xa1, 0x01, 0x85, 0x03, 0x09, 0x22, 0xa1, 0x00, 0x09, 0x52, 0x15, 0x00, 0x25, 0x0a, 0x75, 0x10, 0x95, 0x01, 0xb1, 0x02, 0xc0, 0x09, 0x22,
+        0xa1, 0x00, 0x85, 0x05, 0x09, 0x57, 0x09, 0x58, 0x75, 0x01, 0x95, 0x02, 0x25, 0x03, 0xb1, 0x02, 0x95, 0x0e, 0xb1, 0x03, 0xc0, 0xc0, 0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0x85, 0x0e, 0x05, 0x07,
+        0x19, 0xe0, 0x29, 0xe7, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0x81, 0x03, 0x95, 0x05, 0x05, 0x08, 0x19, 0x01, 0x29, 0x05, 0x91, 0x02, 0x95, 0x01, 0x75, 0x03, 0x91, 0x01,
+        0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x26, 0xa4, 0x00, 0x05, 0x07, 0x19, 0x00, 0x2a, 0xa4, 0x00, 0x81, 0x00, 0xc0,
+    ];
+
+    #[test]
+    fn touchpad_del_portatil_usa_raton_con_rueda() {
+        let l = PointerReportLayout::from_descriptor(TOUCHPAD_PORTATIL).expect("puntero");
+        assert_eq!(l.report_id, Some(1));
+        assert_eq!(
+            l.kind,
+            PointerLayoutKind::Report {
+                report_len: 8,
+                buttons_offset: 0,
+                dx_offset: 1,
+                dy_offset: 2
+            }
+        );
+        // Informe real (sin el prefijo de longitud de HID-over-I2C).
+        let mut st = PointerState::new(l);
+        st.process_raw_report(&[0x01, 0x00, 0xf5, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        let e = st.next_event().expect("evento");
+        assert_eq!((e.dx, e.dy, e.buttons, e.absolute), (-11, -1, 0, false));
     }
 
     #[test]

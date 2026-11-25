@@ -117,6 +117,21 @@ fn gpio_irq() {
     crate::drivers::hid_i2c::marcar_irq_pendiente();
 }
 
+/// Bit de nivel del pin (`PIN_STS_OFF` en `pinctrl-amd`).
+const PIN_STS_OFF: u32 = 16;
+
+/// `Some(true)` si la línea de atención está activa (nivel bajo: la de
+/// HID-over-I2C lo es, y se queda así mientras haya un informe sin leer).
+/// `None` si no hay pin armado.
+pub fn atencion_activa() -> Option<bool> {
+    if !LISTO.load(Ordering::Acquire) {
+        return None;
+    }
+    let base = BASE.load(Ordering::Acquire);
+    let pin = PIN.load(Ordering::Acquire);
+    Some(rr(base, pin as u64 * 4) & (1 << PIN_STS_OFF) == 0)
+}
+
 #[allow(dead_code)]
 pub fn present() -> bool {
     LISTO.load(Ordering::Acquire)

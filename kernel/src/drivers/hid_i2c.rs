@@ -114,7 +114,10 @@ fn arm_attention(b: HidI2cBinding) -> bool {
     };
     match super::amd_gpio::arm_pin(gpio.mmio, gpio.len, pin, gsi, gpio.gsi_flags) {
         Ok(()) => {
-            crate::println!("hid-i2c: atención por amd-gpio pin={pin} gsi={gsi}");
+            crate::println!(
+                "hid-i2c: atención por amd-gpio pin={pin} gsi={gsi} (activa ahora: {:?}; en reposo debe ser false)",
+                super::amd_gpio::atencion_activa()
+            );
             true
         }
         Err(e) => {
@@ -154,6 +157,13 @@ fn sondear(por_irq: bool) {
     let Some(mut devs) = DEVICES.try_lock() else {
         return;
     };
+    // Con la línea de atención por GPIO, sólo hay informe si está activa.
+    // Leer con la línea inactiva (el flanco de subida al soltarla, o el
+    // sondeo de respaldo) devolvía otra vez el último informe: el puntero
+    // se movía solo.
+    if super::amd_gpio::atencion_activa() == Some(false) {
+        return;
+    }
     for dev in devs.iter_mut() {
         if dev.fallos >= MAX_FALLOS {
             continue;
