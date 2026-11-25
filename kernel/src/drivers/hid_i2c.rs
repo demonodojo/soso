@@ -24,6 +24,8 @@ pub fn tomar_irq_pendiente() -> bool {
 static HAY: AtomicBool = AtomicBool::new(false);
 /// Todos los touchpads avisan por IRQ: el sondeo es sólo de respaldo.
 static CON_ATENCION: AtomicBool = AtomicBool::new(true);
+/// La atención va por `amd_gpio`, que puede enmascararla si la línea no baja.
+static POR_GPIO: AtomicBool = AtomicBool::new(false);
 static ULTIMO_SONDEO: AtomicU64 = AtomicU64::new(0);
 /// Una lectura del informe son 3–6 ms de bus a 100 kHz: sondear en cada
 /// pasada del planificador se comía la CPU. Sin IRQ, cada 25 ms; con IRQ,
@@ -114,6 +116,7 @@ fn arm_attention(b: HidI2cBinding) -> bool {
     };
     match super::amd_gpio::arm_pin(gpio.mmio, gpio.len, pin, gsi, gpio.gsi_flags) {
         Ok(()) => {
+            POR_GPIO.store(true, Ordering::Relaxed);
             crate::println!(
                 "hid-i2c: atención por amd-gpio pin={pin} gsi={gsi} (activa ahora: {:?}; en reposo debe ser false)",
                 super::amd_gpio::atencion_activa()
@@ -143,7 +146,9 @@ fn sondear(por_irq: bool) {
     }
     let ahora = crate::arch::pit::uptime_ms();
     if !por_irq {
-        let periodo = if CON_ATENCION.load(Ordering::Relaxed) {
+        let gpio_caido =
+            POR_GPIO.load(Ordering::Relaxed) && super::amd_gpio::atencion_activa().is_none();
+        let periodo = if CON_ATENCION.load(Ordering::Relaxed) && !gpio_caido {
             SONDEO_CON_IRQ_MS
         } else {
             SONDEO_SIN_IRQ_MS

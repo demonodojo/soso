@@ -274,10 +274,23 @@ fn scan_extended_interrupt(aml: &[u8], from: usize) -> Option<(u32, u16)> {
     descriptores(aml, from, 0x89)
         .filter(|&(i, len)| len >= 6 && aml[i + 4] >= 1)
         .find_map(|(i, _)| {
-            let flags = aml[i + 3] as u16;
+            let flags = flags_madt(aml[i + 3]);
             let gsi = u32::from_le_bytes(aml[i + 5..i + 9].try_into().ok()?);
             (gsi != 0 && gsi < 4096).then_some((gsi, flags))
         })
+}
+
+/// Flags del descriptor `Interrupt` (bit 1: flanco; bit 2: activa en bajo)
+/// al formato MADT que espera `ioapic::route` (bits 0–1 polaridad, 2–3
+/// disparo; `0b11` = activa en bajo / nivel). Pasarlos tal cual convertía
+/// el «nivel, activa en bajo» del GPIO de AMD en «nivel, activa en alto»:
+/// la línea en reposo contaba como interrupción y la CPU no salía de ella.
+fn flags_madt(recurso: u8) -> u16 {
+    let flanco = recurso & 0b010 != 0;
+    let bajo = recurso & 0b100 != 0;
+    let polaridad = if bajo { 0b11 } else { 0b01 };
+    let disparo = if flanco { 0b01 } else { 0b11 };
+    polaridad | (disparo << 2)
 }
 
 /// GpioInt (0x8C, tipo de conexión 0 en el byte 4): primer pin. El

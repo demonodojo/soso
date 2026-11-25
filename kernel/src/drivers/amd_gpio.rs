@@ -30,6 +30,13 @@ const CLR_INTR_STAT: u32 = 1;
 static BASE: AtomicU64 = AtomicU64::new(0);
 static PIN: AtomicU16 = AtomicU16::new(0xffff);
 static LEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static GSI: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Freno contra una tormenta: interrupciones desde la última marca de tiempo.
+static RAFAGA: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static RAFAGA_DESDE: AtomicU64 = AtomicU64::new(0);
+/// Más de esto en menos de [`RAFAGA_MS`] es una línea que no baja.
+const RAFAGA_MAX: u32 = 2000;
+const RAFAGA_MS: u64 = 100;
 static LISTO: AtomicBool = AtomicBool::new(false);
 
 fn rr(base: u64, off: u64) -> u32 {
@@ -70,6 +77,7 @@ pub fn arm_pin(mmio: u64, mmio_len: u32, pin: u16, gsi: u32, gsi_flags: u16) -> 
         crate::klogln!("amd-gpio: {apagados} pin(es) con interrupción del firmware apagados");
     }
     LEN.store(mmio_len, Ordering::Release);
+    GSI.store(gsi, Ordering::Release);
     let Some(vec) = irq::allocate(gpio_irq) else {
         return Err("sin vector IRQ");
     };
@@ -96,6 +104,9 @@ fn gpio_irq() {
     let base = BASE.load(Ordering::Acquire);
     let pin = PIN.load(Ordering::Acquire);
     if base == 0 || pin == 0xffff {
+        return;
+    }
+    if tormenta() {
         return;
     }
     // Todos los pendientes, no sólo el nuestro: si quedara uno, la línea no
@@ -130,6 +141,25 @@ pub fn atencion_activa() -> Option<bool> {
     let base = BASE.load(Ordering::Acquire);
     let pin = PIN.load(Ordering::Acquire);
     Some(rr(base, pin as u64 * 4) & (1 << PIN_STS_OFF) == 0)
+}
+
+/// `true` (y la línea queda enmascarada) si llegan interrupciones sin parar:
+/// mejor un touchpad que sólo se sondea que una máquina atascada en la IRQ.
+fn tormenta() -> bool {
+    let n = RAFAGA.fetch_add(1, Ordering::Relaxed) + 1;
+    if n < RAFAGA_MAX {
+        return false;
+    }
+    let ahora = crate::arch::pit::uptime_ms();
+    let desde = RAFAGA_DESDE.swap(ahora, Ordering::Relaxed);
+    RAFAGA.store(0, Ordering::Relaxed);
+    if ahora.saturating_sub(desde) >= RAFAGA_MS {
+        return false;
+    }
+    let _ = ioapic::mask(GSI.load(Ordering::Acquire));
+    LISTO.store(false, Ordering::Release);
+    crate::klogln!("amd-gpio: la línea no baja ({RAFAGA_MAX} IRQ en <{RAFAGA_MS} ms); enmascarada, sólo sondeo");
+    true
 }
 
 #[allow(dead_code)]
