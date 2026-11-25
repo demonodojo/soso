@@ -76,7 +76,7 @@ pub fn discover_amd_gpio() -> Option<AmdGpioBlock> {
     });
     if let Some(b) = found {
         crate::klogln!(
-            "amd-gpio: AMDI0030 mmio={:#x} len={} gsi={:?}",
+            "amd-gpio: mmio={:#x} len={} gsi={:?}",
             b.mmio,
             b.len,
             b.gsi
@@ -85,9 +85,15 @@ pub fn discover_amd_gpio() -> Option<AmdGpioBlock> {
     found
 }
 
+/// Nombres del controlador GPIO de AMD según la generación.
+const AMD_GPIO_IDS: [&[u8]; 3] = [b"AMDI0030", b"AMD0030", b"AMDI0031"];
+
 fn scan_amd_gpio(aml: &[u8]) -> Option<AmdGpioBlock> {
-    for (off, _) in find_all(aml, b"AMDI0030") {
-        let (mmio, len) = scan_memory32fixed(aml, off)?;
+    let hits = AMD_GPIO_IDS.iter().flat_map(|id| find_all(aml, id));
+    for (off, _) in hits {
+        let Some((mmio, len)) = scan_memory32fixed(aml, off, 0x300) else {
+            continue;
+        };
         let (gsi, gsi_flags) = scan_extended_interrupt(aml, off)
             .map(|(g, f)| (Some(g), f))
             .unwrap_or((None, 0));
@@ -110,7 +116,7 @@ fn scan_aml(
     slaves: &mut Vec<(u8, Option<u32>, u16, Option<u16>)>,
 ) {
     for (off, _) in find_all(aml, b"AMDI0010") {
-        if let Some(pair) = scan_memory32fixed(aml, off) {
+        if let Some(pair) = scan_memory32fixed(aml, off, 0x1000) {
             if !mmios.iter().any(|m| m.0 == pair.0) {
                 mmios.push(pair);
             }
@@ -251,13 +257,14 @@ fn descriptores(aml: &[u8], from: usize, tag: u8) -> impl Iterator<Item = (usize
 }
 
 /// Memory32Fixed (0x86, longitud 9): información, base y tamaño.
-fn scan_memory32fixed(aml: &[u8], from: usize) -> Option<(u64, u32)> {
+/// `min_len`: el GPIO de AMD ocupa 0x400 bytes; un controlador I2C, 0x1000.
+fn scan_memory32fixed(aml: &[u8], from: usize, min_len: u32) -> Option<(u64, u32)> {
     descriptores(aml, from, 0x86)
         .filter(|&(_, len)| len == 9)
         .find_map(|(i, _)| {
             let addr = u32::from_le_bytes(aml[i + 4..i + 8].try_into().ok()?);
             let len = u32::from_le_bytes(aml[i + 8..i + 12].try_into().ok()?);
-            (addr != 0 && len >= 0x1000).then_some((u64::from(addr), len))
+            (addr != 0 && len >= min_len).then_some((u64::from(addr), len))
         })
 }
 

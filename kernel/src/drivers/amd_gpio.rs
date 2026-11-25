@@ -17,10 +17,19 @@ const INTERRUPT_MASK_OFF: u32 = 12;
 const INTERRUPT_STS_OFF: u32 = 28;
 
 const BOTH_EDGE: u32 = 0x2;
+
+/// Pines que se recorren al limpiar (bancos 0–2 de `pinctrl-amd`). El
+/// registro del pin 63 (0xfc) es `WAKE_INT_MASTER_REG`, no un pin.
+const PINES: u16 = 184;
+
+fn es_pin(p: u16, len: u32) -> bool {
+    p != 63 && (p as u32 + 1) * 4 <= len
+}
 const CLR_INTR_STAT: u32 = 1;
 
 static BASE: AtomicU64 = AtomicU64::new(0);
 static PIN: AtomicU16 = AtomicU16::new(0xffff);
+static LEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static LISTO: AtomicBool = AtomicBool::new(false);
 
 fn rr(base: u64, off: u64) -> u32 {
@@ -38,7 +47,29 @@ pub fn arm_pin(mmio: u64, mmio_len: u32, pin: u16, gsi: u32, gsi_flags: u16) -> 
     if mmio == 0 || mmio_len < 0x300 {
         return Err("mmio gpio corto");
     }
+    if !es_pin(pin, mmio_len) {
+        return Err("pin fuera del bloque");
+    }
     mm::ensure_mmio_mapped(mmio, mmio_len as u64);
+    // La línea es una para todos los pines: uno que dejó habilitado el
+    // firmware, con su estado pendiente, la tendría levantada para siempre.
+    // Como Linux al arrancar, se apagan las interrupciones de los demás.
+    let mut apagados = 0u32;
+    for p in 0..PINES {
+        if p == pin || !es_pin(p, mmio_len) {
+            continue;
+        }
+        let r = rr(mmio, p as u64 * 4);
+        let bits = (1 << INTERRUPT_ENABLE_OFF) | (1 << INTERRUPT_MASK_OFF);
+        if r & bits != 0 {
+            rw(mmio, p as u64 * 4, (r & !bits) | (CLR_INTR_STAT << INTERRUPT_STS_OFF));
+            apagados += 1;
+        }
+    }
+    if apagados != 0 {
+        crate::klogln!("amd-gpio: {apagados} pin(es) con interrupción del firmware apagados");
+    }
+    LEN.store(mmio_len, Ordering::Release);
     let Some(vec) = irq::allocate(gpio_irq) else {
         return Err("sin vector IRQ");
     };
@@ -67,10 +98,17 @@ fn gpio_irq() {
     if base == 0 || pin == 0xffff {
         return;
     }
-    let mut pin_reg = rr(base, pin as u64 * 4);
-    if pin_reg & (1 << INTERRUPT_STS_OFF) != 0 {
-        pin_reg |= CLR_INTR_STAT << INTERRUPT_STS_OFF;
-        rw(base, pin as u64 * 4, pin_reg);
+    // Todos los pendientes, no sólo el nuestro: si quedara uno, la línea no
+    // bajaría nunca.
+    let len = LEN.load(Ordering::Acquire);
+    for p in 0..PINES {
+        if !es_pin(p, len) {
+            continue;
+        }
+        let r = rr(base, p as u64 * 4);
+        if r & (1 << INTERRUPT_STS_OFF) != 0 {
+            rw(base, p as u64 * 4, r | (CLR_INTR_STAT << INTERRUPT_STS_OFF));
+        }
     }
     // EOI del bloque.
     let mut master = rr(base, WAKE_INT_MASTER_REG);

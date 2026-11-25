@@ -40,6 +40,8 @@ struct HidI2cDevice {
     max_input: u16,
     state: PointerState,
     fallos: u32,
+    /// Informes no vacíos que quedan por volcar al registro (diagnóstico).
+    volcar: u8,
 }
 
 static DEVICES: Mutex<Vec<HidI2cDevice>> = Mutex::new(Vec::new());
@@ -172,7 +174,18 @@ fn sondear(por_irq: bool) {
             continue;
         }
         dev.fallos = 0;
-        dev.state.process_raw_report(&buf[..len]);
+        // El informe de HID-over-I2C empieza con su longitud (2 bytes, que se
+        // cuentan). 0 o 2 = no hay nada; lo que sigue es Report ID + datos.
+        let total = u16::from_le_bytes([buf[0], buf[1]]) as usize;
+        if total <= 2 {
+            continue;
+        }
+        let informe = &buf[2..total.min(len)];
+        if dev.volcar > 0 {
+            dev.volcar -= 1;
+            crate::klogln!("hid-i2c: informe {:02x?}", informe);
+        }
+        dev.state.process_raw_report(informe);
         while let Some(evt) = dev.state.next_event() {
             super::mouse::apply_hid_pointer(evt);
         }
@@ -241,10 +254,15 @@ fn probe_binding(b: HidI2cBinding) -> Option<HidI2cDevice> {
         crate::klogln!("hid-i2c: report descriptor ilegible");
         return None;
     }
+    // El descriptor al registro, para poder analizarlo fuera de la placa.
+    for (n, trozo) in rdesc.chunks(32).enumerate() {
+        crate::klogln!("hid-i2c: rdesc {:04x}: {:02x?}", n * 32, trozo);
+    }
     let layout = PointerReportLayout::from_descriptor(&rdesc).unwrap_or_else(|| {
         crate::klogln!("hid-i2c: descriptor sin puntero; boot fallback");
         PointerReportLayout::boot()
     });
+    crate::klogln!("hid-i2c: formato {:?}", layout);
     Some(HidI2cDevice {
         bus,
         slave: b.slave,
@@ -252,5 +270,6 @@ fn probe_binding(b: HidI2cBinding) -> Option<HidI2cDevice> {
         max_input: hd.max_input.max(8),
         state: PointerState::new(layout),
         fallos: 0,
+        volcar: 8,
     })
 }

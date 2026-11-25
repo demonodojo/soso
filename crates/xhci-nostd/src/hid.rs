@@ -767,6 +767,29 @@ struct PointerFieldLayout {
     report_len: usize,
 }
 
+/// Guarda `field` como candidato si describe un puntero: absoluto si tiene X/Y
+/// de al menos 12 bits, relativo si tiene dx/dy.
+fn anotar_candidato(
+    id: Option<u8>,
+    mut field: PointerFieldLayout,
+    bit_offset: usize,
+    best_rel: &mut Option<(Option<u8>, PointerFieldLayout)>,
+    best_abs: &mut Option<(Option<u8>, PointerFieldLayout)>,
+) {
+    let report_len = (bit_offset + 7) / 8;
+    if report_len == 0 {
+        return;
+    }
+    field.report_len = report_len;
+    if field.x_bit_off.is_some() && field.y_bit_off.is_some() && field.x_bit_len >= 12 {
+        if best_abs.is_none() {
+            *best_abs = Some((id, field));
+        }
+    } else if field.dx_offset.is_some() && field.dy_offset.is_some() && best_rel.is_none() {
+        *best_rel = Some((id, field));
+    }
+}
+
 fn parse_pointer_layout(rdesc: &[u8]) -> Option<(Option<u8>, PointerLayoutKind)> {
     let mut best_rel: Option<(Option<u8>, PointerFieldLayout)> = None;
     let mut best_abs: Option<(Option<u8>, PointerFieldLayout)> = None;
@@ -782,6 +805,10 @@ fn parse_pointer_layout(rdesc: &[u8]) -> Option<(Option<u8>, PointerLayoutKind)>
     let mut in_pointer_app = false;
     let mut bit_offset: usize = 0;
     let mut field = PointerFieldLayout::default();
+    // Usos locales desde el último elemento principal (`usage_min` sólo
+    // guarda el último, y `Usage(Tip) Usage(Confidence)` necesita el orden).
+    let mut usos = [0u32; 16];
+    let mut n_usos = 0usize;
 
     while i < rdesc.len() {
         let head = rdesc[i];
@@ -808,6 +835,12 @@ fn parse_pointer_layout(rdesc: &[u8]) -> Option<(Option<u8>, PointerLayoutKind)>
         match (item_type, tag) {
             (1, 0) => usage_page = data as u16,
             (1, 8) => {
+                // Un Report ID nuevo dentro de la colección (en un touchpad de
+                // precisión, los de feature del final) no debe borrar lo ya
+                // visto: se anota antes como candidato.
+                if in_pointer_app {
+                    anotar_candidato(report_id, field, bit_offset, &mut best_rel, &mut best_abs);
+                }
                 report_id = Some(data as u8);
                 bit_offset = 0;
                 field = PointerFieldLayout::default();
@@ -816,7 +849,13 @@ fn parse_pointer_layout(rdesc: &[u8]) -> Option<(Option<u8>, PointerLayoutKind)>
             (1, 9) => report_count = data,
             (1, 1) => logical_min = aml_int(data, data_size),
             (1, 2) => logical_max = aml_int(data, data_size),
-            (2, 0) | (2, 1) | (2, 2) => usage_min = data,
+            (2, 0) | (2, 1) | (2, 2) => {
+                usage_min = data;
+                if head >> 4 == 0 && n_usos < usos.len() {
+                    usos[n_usos] = data;
+                    n_usos += 1;
+                }
+            }
             (0, 10) => {
                 collection_depth += 1;
                 if collection_depth == 1 {
@@ -833,21 +872,7 @@ fn parse_pointer_layout(rdesc: &[u8]) -> Option<(Option<u8>, PointerLayoutKind)>
             }
             (0, 12) => {
                 if in_pointer_app && collection_depth == 1 {
-                    let report_len = (bit_offset + 7) / 8;
-                    field.report_len = report_len;
-                    let id = report_id;
-                    if field.x_bit_off.is_some()
-                        && field.y_bit_off.is_some()
-                        && field.x_bit_len >= 12
-                        && report_len > 0
-                    {
-                        best_abs = Some((id, field));
-                    } else if field.dx_offset.is_some()
-                        && field.dy_offset.is_some()
-                        && report_len > 0
-                    {
-                        best_rel = Some((id, field));
-                    }
+                    anotar_candidato(report_id, field, bit_offset, &mut best_rel, &mut best_abs);
                     in_pointer_app = false;
                     field = PointerFieldLayout::default();
                     bit_offset = 0;
@@ -859,11 +884,16 @@ fn parse_pointer_layout(rdesc: &[u8]) -> Option<(Option<u8>, PointerLayoutKind)>
                 if usage_page == 0x09 && report_size == 1 && report_count <= 8 {
                     field.buttons_offset = Some(byte_off);
                 }
-                if usage_page == HID_USAGE_PAGE_DIGITIZER
-                    && usage_min == HID_USAGE_TIP_SWITCH as u32
-                    && report_size == 1
-                {
-                    field.tip_bit_off = Some(bit_offset);
+                if usage_page == HID_USAGE_PAGE_DIGITIZER && report_size == 1 {
+                    let pos = usos[..n_usos]
+                        .iter()
+                        .position(|&u| u == HID_USAGE_TIP_SWITCH as u32);
+                    // Con varios dedos, el primero.
+                    if let (Some(k), None) = (pos, field.tip_bit_off) {
+                        if (k as u32) < report_count {
+                            field.tip_bit_off = Some(bit_offset + k);
+                        }
+                    }
                 }
                 let desktop_xy = usage_page == HID_USAGE_PAGE_GENERIC_DESKTOP
                     || usage_page == HID_USAGE_PAGE_DIGITIZER;
@@ -880,18 +910,22 @@ fn parse_pointer_layout(rdesc: &[u8]) -> Option<(Option<u8>, PointerLayoutKind)>
                         }
                     } else if report_size >= 8 {
                         let max = logical_max.max(0) as u32;
-                        if report_count >= 2 {
+                        // Un touchpad de precisión repite X/Y por dedo: vale
+                        // el primero.
+                        let x_libre = field.x_bit_off.is_none();
+                        let y_libre = field.y_bit_off.is_none();
+                        if report_count >= 2 && x_libre && y_libre {
                             field.x_bit_off = Some(bit_offset);
                             field.x_bit_len = report_size as usize;
                             field.x_log_max = max;
                             field.y_bit_off = Some(bit_offset + report_size as usize);
                             field.y_bit_len = report_size as usize;
                             field.y_log_max = max;
-                        } else if usage_min == 0x30 {
+                        } else if usage_min == 0x30 && x_libre {
                             field.x_bit_off = Some(bit_offset);
                             field.x_bit_len = report_size as usize;
                             field.x_log_max = max;
-                        } else {
+                        } else if usage_min == 0x31 && y_libre {
                             field.y_bit_off = Some(bit_offset);
                             field.y_bit_len = report_size as usize;
                             field.y_log_max = max;
@@ -902,8 +936,25 @@ fn parse_pointer_layout(rdesc: &[u8]) -> Option<(Option<u8>, PointerLayoutKind)>
             }
             _ => {}
         }
+        // Los usos son locales: los consume cada elemento principal.
+        if item_type == 0 {
+            n_usos = 0;
+        }
     }
 
+    // Sin configurar su «Input Mode», un touchpad de precisión informa por la
+    // colección de ratón (relativa): si existe, es la que manda.
+    if let Some((id, f)) = best_rel {
+        return Some((
+            id,
+            PointerLayoutKind::Report {
+                report_len: f.report_len,
+                buttons_offset: f.buttons_offset.unwrap_or(0),
+                dx_offset: f.dx_offset?,
+                dy_offset: f.dy_offset?,
+            },
+        ));
+    }
     if let Some((id, f)) = best_abs {
         return Some((
             id,
@@ -920,16 +971,7 @@ fn parse_pointer_layout(rdesc: &[u8]) -> Option<(Option<u8>, PointerLayoutKind)>
             },
         ));
     }
-    let (_, f) = best_rel?;
-    Some((
-        report_id,
-        PointerLayoutKind::Report {
-            report_len: f.report_len,
-            buttons_offset: f.buttons_offset.unwrap_or(0),
-            dx_offset: f.dx_offset?,
-            dy_offset: f.dy_offset?,
-        },
-    ))
+    None
 }
 
 /// Procesa informes HID de ratón / touchpad (relativo).
@@ -1187,6 +1229,80 @@ mod tests {
                 buf[(bit_off + i) / 8] |= 1 << ((bit_off + i) % 8);
             }
         }
+    }
+
+    /// Colección de ratón (Report ID 1) de un touchpad de precisión.
+    const PTP_RATON: &[u8] = &[
+        0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x85, 0x01, 0x09, 0x01, 0xa1, 0x00, 0x05, 0x09,
+        0x19, 0x01, 0x29, 0x02, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x02, 0x81, 0x02,
+        0x95, 0x06, 0x81, 0x03, 0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x81, 0x25, 0x7f,
+        0x75, 0x08, 0x95, 0x02, 0x81, 0x06, 0xc0, 0xc0,
+    ];
+
+    /// Un dedo de la colección del pad: tip, confianza, id, relleno, X, Y.
+    const PTP_DEDO: &[u8] = &[
+        0x05, 0x0d, 0x09, 0x22, 0xa1, 0x02, 0x15, 0x00, 0x25, 0x01, 0x09, 0x47, 0x09, 0x42,
+        0x95, 0x02, 0x75, 0x01, 0x81, 0x02, 0x95, 0x01, 0x75, 0x03, 0x25, 0x05, 0x09, 0x51,
+        0x81, 0x02, 0x75, 0x01, 0x95, 0x03, 0x81, 0x03, 0x05, 0x01, 0x15, 0x00, 0x26, 0xe4,
+        0x0b, 0x75, 0x10, 0x55, 0x0e, 0x65, 0x11, 0x09, 0x30, 0x35, 0x00, 0x46, 0xf0, 0x01,
+        0x95, 0x01, 0x81, 0x02, 0x26, 0xd0, 0x06, 0x46, 0x2c, 0x01, 0x09, 0x31, 0x81, 0x02,
+        0xc0,
+    ];
+
+    /// Colección Touch Pad (Report ID 4) con dos dedos, y al final los
+    /// informes de feature con su propio Report ID (2 y 5).
+    fn ptp_pad() -> Vec<u8> {
+        let mut d = vec![0x05, 0x0d, 0x09, 0x05, 0xa1, 0x01, 0x85, 0x04];
+        d.extend_from_slice(PTP_DEDO);
+        d.extend_from_slice(PTP_DEDO);
+        d.extend_from_slice(&[
+            0x05, 0x0d, 0x55, 0x0c, 0x66, 0x01, 0x10, 0x47, 0xff, 0xff, 0x00, 0x00, 0x27, 0xff,
+            0xff, 0x00, 0x00, 0x75, 0x10, 0x95, 0x01, 0x09, 0x56, 0x81, 0x02, 0x09, 0x54, 0x25,
+            0x7f, 0x95, 0x01, 0x75, 0x08, 0x81, 0x02, 0x05, 0x09, 0x09, 0x01, 0x25, 0x01, 0x75,
+            0x01, 0x95, 0x01, 0x81, 0x02, 0x95, 0x07, 0x81, 0x03, 0x05, 0x0d, 0x85, 0x02, 0x09,
+            0x55, 0x09, 0x59, 0x75, 0x04, 0x95, 0x02, 0x25, 0x0f, 0xb1, 0x02, 0x06, 0x00, 0xff,
+            0x85, 0x05, 0x09, 0xc5, 0x15, 0x00, 0x26, 0xff, 0x00, 0x75, 0x08, 0x96, 0x00, 0x01,
+            0xb1, 0x02, 0xc0,
+        ]);
+        d
+    }
+
+    #[test]
+    fn touchpad_de_precision_usa_la_coleccion_de_raton() {
+        let mut d = PTP_RATON.to_vec();
+        d.extend(ptp_pad());
+        let l = PointerReportLayout::from_descriptor(&d).expect("puntero");
+        assert_eq!(l.report_id, Some(1));
+        assert_eq!(
+            l.kind,
+            PointerLayoutKind::Report {
+                report_len: 3,
+                buttons_offset: 0,
+                dx_offset: 1,
+                dy_offset: 2
+            }
+        );
+        let mut st = PointerState::new(l);
+        st.process_raw_report(&[0x01, 0x01, 0x05, 0xfd]);
+        let e = st.next_event().expect("evento");
+        assert_eq!((e.dx, e.dy, e.buttons, e.absolute), (5, 3, 1, false));
+        // Un informe del pad (Report ID 4) no se toma por uno de ratón.
+        st.process_raw_report(&[0x04, 0x03, 0x10, 0x00, 0x20, 0x00]);
+        assert!(st.next_event().is_none());
+    }
+
+    #[test]
+    fn touchpad_de_precision_sin_raton_toma_el_primer_dedo() {
+        let l = PointerReportLayout::from_descriptor(&ptp_pad()).expect("puntero");
+        assert_eq!(l.report_id, Some(4));
+        let PointerLayoutKind::ReportAbsolute {
+            x_bit_off, x_bit_len, y_bit_off, x_log_max, y_log_max, tip_bit_off, ..
+        } = l.kind
+        else {
+            panic!("se esperaba absoluto: {:?}", l.kind);
+        };
+        assert_eq!((x_bit_off, x_bit_len, y_bit_off), (8, 16, 24));
+        assert_eq!((x_log_max, y_log_max, tip_bit_off), (0x0be4, 0x06d0, Some(0)));
     }
 
     #[test]
