@@ -89,10 +89,18 @@ fn comp_servir_wm(wm_fd: Int, compos: Int, clen: Int, st: Int, tab: Int, gbuf: I
         if seguir != 0
             op = msg_get_op(msg)
             if op == op_comp_frame()
-                x = msg_get_u32(msg, 4)
-                y = msg_get_u32(msg, 8)
-                w = msg_get_u32(msg, 12)
-                h = msg_get_u32(msg, 16)
+                # Recortado a la pantalla: un WM que no recorta manda daño
+                # con x negativa (en u32) y el present fallaba.
+                fx = comp_u32_con_signo(msg_get_u32(msg, 4))
+                fy = comp_u32_con_signo(msg_get_u32(msg, 8))
+                x = max(0, fx)
+                y = max(0, fy)
+                w = min(comp_st_get(st, comp_st_fb_w()), fx + msg_get_u32(msg, 12)) - x
+                h = min(comp_st_get(st, comp_st_fb_h()), fy + msg_get_u32(msg, 16)) - y
+                if w <= 0
+                    _a0 = comp_responder_present(wm_fd, st, 1)
+                elsif h <= 0
+                    _a1 = comp_responder_present(wm_fd, st, 1)
                 if w > 0
                     if h > 0
                         pok = 0
@@ -169,6 +177,10 @@ fn main() -> Int ! io, alloc
                         _z = comp_escena_init_tab(tab)
                         _gi = comp_gpu_try_init(st, clen, gw, gh, gpitch)
                         gpu_ok = comp_st_get(st, comp_st_gpu_ok())
+                        # Tamaño del búfer también sin GPU: recorta los FRAME.
+                        if comp_st_get(st, comp_st_fb_w()) <= 0
+                            _sw = comp_st_set(st, comp_st_fb_w(), gw)
+                            _sh = comp_st_set(st, comp_st_fb_h(), gh)
                         # Escena en CPU (pruebas sin GPU): el WM habla el mismo
                         # protocolo que con GPU y el resultado se compara con su
                         # camino CPU. Sólo si no hay GPU de verdad.

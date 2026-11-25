@@ -33,7 +33,7 @@ struct Superficies
 init Superficies() ! alloc
     xs = list_new[Superficie]()
     i = 0
-    while i < 19
+    while i < wm_surf_max()
         _s = list_push(&mut xs, Superficie.new())
         i = i + 1
     Superficies(xs)
@@ -202,8 +202,9 @@ fn wm_escena_cap() -> Int
 fn comp_puerto() -> Int
     7432
 
+# Barra, menú, puntero, una por ranura (`3 + i`, `tab_cap` = 16) y el fondo.
 fn wm_surf_max() -> Int
-    19
+    20
 
 fn wm_surf_slot() -> Int
     48
@@ -238,8 +239,10 @@ fn wm_surf_menu() -> Int
 fn wm_surf_cursor() -> Int
     2
 
+# Detrás de las 16 ventanas: con 18, la ranura 15 compartía superficie con el
+# fondo y ocultar su ventana dejaba la pantalla en negro.
 fn wm_surf_fondo() -> Int
-    18
+    19
 
 fn wm_surf_win(i: Int) -> Int
     3 + i
@@ -1873,8 +1876,40 @@ fn wm_compose(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride:
         if cmov != 0
             _cm = wm_cursor_marcar(st, st.mx, st.my)
     else
+        _oh = wm_gpu_ocultar_fuera_de_z(st)
         _em = wm_gpu_emergente(st, compos, sw, sh, stride, bpp, fmt, completo)
         _gc = wm_gpu_cursor(st, compos, bpp, fmt)
+    0
+
+# ¿Es `i` una ventana de la lista z (cabecera de grupo)?
+fn wm_en_z(st: &mut Estado, i: Int) -> Int ! alloc
+    r = 0
+    k = 0
+    while k < st.tab.nz()
+        if st.tab.z_get(k) == i
+            r = 1
+        k = k + 1
+    r
+
+# Sólo las cabeceras de la lista z tienen ventana en la escena. Una ranura que
+# sale de ella sin cerrarse (al integrarse como pestaña en otro grupo) dejaba su
+# superficie en el compositor con la última geometría: una ventana congelada
+# encima del grupo que ni el repintado completo quitaba. Tras `wm_geo_olvidar`
+# no se sabe qué tiene el compositor, así que se vuelve a ocultar.
+fn wm_gpu_ocultar_fuera_de_z(st: &mut Estado) -> Int ! io, alloc
+    fd = st.comp_fd
+    i = 0
+    while i < tab_cap()
+        id = wm_surf_win(i)
+        if id < wm_geo_n()
+            if wm_en_z(st, i) == 0
+                oculta = 0
+                if wm_geo_get(st, id, 0) != 0
+                    if wm_geo_visible(wm_geo_get(st, id, 3), wm_geo_get(st, id, 4), wm_geo_get(st, id, 5)) == 0
+                        oculta = 1
+                if oculta == 0
+                    _g = wm_comp_send_geom(st, fd, id, 0, 0, 0, 0, comp_geom_hidden(), 50)
+        i = i + 1
     0
 
 # Menú emergente en la escena GPU: el contextual o el de aplicaciones comparten
@@ -1943,6 +1978,17 @@ fn wm_surf_ensure_cambia(st: &mut Estado, fd: Int, surf_id: Int, w: Int, h: Int,
         1
     else
         0
+
+# El daño de una ventana medio fuera de la pantalla se sale de ella, y un
+# present fuera de la pantalla falla: el WM creía muerto al compositor (con
+# escena o sin ella) en cuanto una ventana asomaba por la izquierda.
+fn wm_dirty_recortar(st: &mut Estado) -> Int ! alloc
+    if st.pw > 0
+        st.dx0 = max(0, st.dx0)
+        st.dy0 = max(0, st.dy0)
+        st.dx1 = min(st.pw, st.dx1)
+        st.dy1 = min(st.ph, st.dy1)
+    0
 
 fn wm_marcar_dirty(st: &mut Estado, x0: Int, y0: Int, x1: Int, y1: Int) -> Int ! alloc
     if st.dx1 <= st.dx0
@@ -2939,6 +2985,7 @@ fn wm_comp_ensure(st: &mut Estado, sw: Int, sh: Int, stride: Int, sin_comp: Int)
                 res
 
 fn wm_comp_flush(st: &mut Estado, compos: Int, clen: Int) -> Int ! io, alloc
+    _rc = wm_dirty_recortar(st)
     if wm_comp_gpu_mode(st) != 0
         wm_comp_flush_scene(st)
     fd = st.comp_fd

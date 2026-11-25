@@ -5,7 +5,7 @@ import "comp_clip.sal"
 import "superficie.sal"
 
 fn comp_surf_max() -> Int
-    19
+    20
 
 fn comp_surf_slot() -> Int
     136
@@ -213,8 +213,9 @@ fn comp_escena_geom(tab: Int, id: Int, x: Int, y: Int, w: Int, h: Int, flags: In
     if slot < 0
         0
     else
-        _x = comp_surf_set(tab, slot, comp_surf_gx(), x)
-        _y = comp_surf_set(tab, slot, comp_surf_gy(), y)
+        # Una ventana medio fuera de la pantalla llega con x/y negativas en u32.
+        _x = comp_surf_set(tab, slot, comp_surf_gx(), comp_u32_con_signo(x))
+        _y = comp_surf_set(tab, slot, comp_surf_gy(), comp_u32_con_signo(y))
         _w = comp_surf_set(tab, slot, comp_surf_gw(), w)
         _h = comp_surf_set(tab, slot, comp_surf_gh(), h)
         _f = comp_surf_set(tab, slot, comp_surf_flags(), flags)
@@ -291,8 +292,25 @@ fn comp_escena_commit(st: Int, tab: Int, gbuf: Int, px: Int, py: Int, pw: Int, p
         flags = 0
         if clear_rt != 0
             flags = comp_gscen_flag_clear()
-        cx1 = px + pw
-        cy1 = py + ph
+        # Present y quads, recortados a la pantalla: el kernel no admite
+        # destinos fuera del RT y `fb_present_rect` falla con ellos (el WM
+        # creía muerto al compositor en cuanto una ventana salía por un borde).
+        spx = comp_u32_con_signo(px)
+        spy = comp_u32_con_signo(py)
+        cx0 = max(0, spx)
+        cy0 = max(0, spy)
+        cx1 = min(fb_w, spx + pw)
+        cy1 = min(fb_h, spy + ph)
+        ppx = cx0
+        ppy = cy0
+        ppw = max(0, cx1 - cx0)
+        pph = max(0, cy1 - cy0)
+        # Con el RT borrado se recompone la pantalla entera.
+        if clear_rt != 0
+            cx0 = 0
+            cy0 = 0
+            cx1 = fb_w
+            cy1 = fb_h
         n = 0
         z = 0
         while z < 64
@@ -310,29 +328,29 @@ fn comp_escena_commit(st: Int, tab: Int, gbuf: Int, px: Int, py: Int, pw: Int, p
                                         if gh > 0
                                             gx = comp_surf_get(tab, s, comp_surf_gx())
                                             gy = comp_surf_get(tab, s, comp_surf_gy())
-                                            if clear_rt != 0
-                                                _q = comp_escena_emit_quad(gbuf, n, tab, s, gx, gy, gw, gh, 0, 0)
-                                                flags = flags | comp_escena_blend(fl, n)
-                                                n = n + 1
-                                            else
-                                                iw = comp_intersect_len(gx, gx + gw, px, cx1)
-                                                if iw > 0
-                                                    ih = comp_intersect_len(gy, gy + gh, py, cy1)
-                                                    if ih > 0
-                                                        ix = comp_intersect_x0(gx, px)
-                                                        iy = comp_intersect_x0(gy, py)
-                                                        sx = ix - gx
-                                                        sy = iy - gy
+                                            iw = comp_intersect_len(gx, gx + gw, cx0, cx1)
+                                            if iw > 0
+                                                ih = comp_intersect_len(gy, gy + gh, cy0, cy1)
+                                                if ih > 0
+                                                    ix = comp_intersect_x0(gx, cx0)
+                                                    iy = comp_intersect_x0(gy, cy0)
+                                                    occ = 0
+                                                    if clear_rt == 0
                                                         occ = comp_surf_occluded(tab, s, ix, iy, iw, ih, z)
-                                                        if occ == 0
-                                                            _q = comp_escena_emit_quad(gbuf, n, tab, s, ix, iy, iw, ih, sx, sy)
-                                                            flags = flags | comp_escena_blend(fl, n)
-                                                            n = n + 1
+                                                    if occ == 0
+                                                        _q = comp_escena_emit_quad(gbuf, n, tab, s, ix, iy, iw, ih, ix - gx, iy - gy)
+                                                        flags = flags | comp_escena_blend(fl, n)
+                                                        n = n + 1
                     s = s + 1
             z = z + 1
-        _h = comp_gscen_patch_hdr(gbuf, rt, fb_w, fb_h, pitch, px, py, pw, ph, flags, rgba, n)
+        _h = comp_gscen_patch_hdr(gbuf, rt, fb_w, fb_h, pitch, ppx, ppy, ppw, pph, flags, rgba, n)
         cmd_len = comp_gscen_hdr_len() + n * comp_gscen_quad_len()
-        if comp_st_get(st, comp_st_cpu()) != 0
+        # Nada en pantalla que presentar: no es un fallo del compositor.
+        if ppw == 0
+            1
+        elsif pph == 0
+            1
+        elsif comp_st_get(st, comp_st_cpu()) != 0
             comp_gscen_cpu(gbuf, compos, clen)
         elsif gpu_submit(gbuf, cmd_len) < 0
             0

@@ -238,7 +238,7 @@ derecha y sólo se veía a través de las esquinas del ctx.
 ### Repintado con escena GPU
 
 Cada cosa es una superficie del compositor: barra 0, menú/ctx 1, puntero 2, ventanas
-`3+i`, fondo 18. El WM sólo repinta y sube (`DMAP`) la superficie que cambia
+`3+i`, fondo 19 (con 18 chocaba con la ranura 15). El WM sólo repinta y sube (`DMAP`) la superficie que cambia
 (`wm_gpu_parcial`):
 
 - `g_rep` (bit por grupo de pestañas): ventana entera. `g_cab`: sólo la cabecera
@@ -259,6 +259,15 @@ Cada cosa es una superficie del compositor: barra 0, menú/ctx 1, puntero 2, ven
   no pintaba nada.
 - `wm_comp_ensure` duerme 50 ms entre intentos de enganche: el bucle sin pausa
   dejaba sin CPU al compositor, que no llegaba a escuchar en 5 s.
+- **Ventanas medio fuera de la pantalla.** `wm_dirty_recortar` recorta el daño a la
+  pantalla antes de presentar (escena, `FRAME` o framebuffer). El compositor lee con
+  signo las x/y de `GEOM`, `COMMIT` y `FRAME` (`comp_u32_con_signo`) y recorta cada
+  quad a la pantalla, también con el RT borrado. Antes, una ventana en x < 0 hacía
+  fallar el present, y el WM soltaba la escena y luego el compositor.
+- **Sólo las cabeceras de la lista z tienen superficie visible.**
+  `wm_gpu_ocultar_fuera_de_z` oculta en cada fotograma la de cualquier ranura que no
+  esté en z, y la vuelve a ocultar tras `wm_geo_olvidar`. Una ventana integrada como
+  pestaña en otro grupo dejaba su superficie congelada encima, y ni `Alt+D` la quitaba.
 
 Comprobar: el mismo método de `Alt+D` dos veces con `--wm-args --escena-cpu` (0 píxeles).
 
