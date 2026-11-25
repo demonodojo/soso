@@ -223,9 +223,9 @@ Cada cosa es una superficie del compositor: barra 0, menú/ctx 1, puntero 2, ven
 - **El puntero se pinta y sube una vez** (`cur_ok`); moverlo es un `GEOM`.
 - El ctx comparte la superficie 1 con el lanzador (`wm_gpu_emergente`): un borde
   de 1 px relleno con `tema_borde` y `wm_pintar_ctx_en` con origen desplazado.
-- La escena no mezcla alfa (`submit_3d_blit_tex` es opaco): el puntero sale con
-  fondo negro en su caja de 12×16 y el ctx con esquinas casi rectas. No es un fallo
-  del daño.
+- Las superficies sin `GEOM_OPAQUE` (sólo el puntero) se **mezclan con alfa**: el
+  píxel sin pintar tiene alfa 0 (`pixel_escribir` pone 255). El ctx sigue opaco,
+  con esquinas casi rectas.
 - La SHM de cada superficie se concede al compositor (`wm_surf_conceder` →
   `shm_grant` con `tcp_peer_pid`). Sin eso todos los `BIND` fallaban y la escena
   no pintaba nada.

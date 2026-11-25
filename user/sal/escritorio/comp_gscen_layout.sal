@@ -18,6 +18,38 @@ fn comp_gscen_buf_len() -> Int
 fn comp_gscen_flag_clear() -> Int
     1
 
+# Bit 8+i de los flags: el quad i se mezcla con alfa (byte 3) sobre el RT en vez
+# de copiarse (`soso_wm_proto::gscen::flag_blend`). Un kernel viejo lo ignora.
+fn comp_gscen_flag_blend(i: Int) -> Int
+    1 << (8 + i)
+
+# Mezcla un rectángulo de `src` sobre `dst` (4 bytes por píxel, alfa en el byte 3,
+# sin premultiplicar): alfa 0 no toca, el resultado queda opaco. Mismo cálculo que
+# `gscen::mezclar_fila` del kernel. Pitches en píxeles.
+fn comp_mezclar_rect(dst: Int, dlen: Int, dpitch: Int, src: Int, slen: Int, spitch: Int, dx: Int, dy: Int, sx: Int, sy: Int, w: Int, h: Int) -> Int ! alloc
+    d = bytes_view_mem(dst, dlen)
+    s = bytes_view_mem(src, slen)
+    row = 0
+    while row < h
+        col = 0
+        while col < w
+            so = ((sy + row) * spitch + sx + col) * 4
+            a = bytes_get_u8(s, so + 3)
+            if a != 0
+                dof = ((dy + row) * dpitch + dx + col) * 4
+                c = 0
+                while c < 3
+                    if a == 255
+                        _v = bytes_set_u8(d, dof + c, bytes_get_u8(s, so + c))
+                    else
+                        v = (bytes_get_u8(s, so + c) * a + bytes_get_u8(d, dof + c) * (255 - a) + 127) / 255
+                        _v2 = bytes_set_u8(d, dof + c, v)
+                    c = c + 1
+                _a = bytes_set_u8(d, dof + 3, 255)
+            col = col + 1
+        row = row + 1
+    0
+
 fn comp_gscen_patch_hdr(buf: Int, rt_h: Int, fb_w: Int, fb_h: Int, pitch: Int, px: Int, py: Int, pw: Int, ph: Int, flags: Int, rgba: Int, n: Int) -> Int ! alloc
     b = bytes_view_mem(buf, comp_gscen_buf_len())
     _t = bytes_set_u8(b, 0, 71)

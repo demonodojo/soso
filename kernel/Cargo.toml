@@ -64,6 +64,7 @@ soso-update-core = { path = "../crates/soso-update-core", default-features = fal
 # docs/PLAN-ACTUALIZACIONES.md y el techo de la imagen BIOS.
 
 soso-abi = { path = "../crates/soso-abi" }
+soso-wm-proto = { path = "../crates/soso-wm-proto" }
 soso-hw = { path = "../crates/soso-hw" }
 soso-wpa2 = { path = "../crates/soso-wpa2" }
 soso-red-core = { path = "../crates/soso-red-core" }

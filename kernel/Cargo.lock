@@ -516,6 +516,7 @@ dependencies = [
  "soso-red-core",
  "soso-resize-core",
  "soso-update-core",
+ "soso-wm-proto",
  "soso-wpa2",
  "sosofs",
  "sosomfs",
@@ -872,6 +873,10 @@ dependencies = [
  "crc",
  "sha2",
 ]
+
+[[package]]
+name = "soso-wm-proto"
+version = "0.1.0"
 
 [[package]]
 name = "soso-wpa2"

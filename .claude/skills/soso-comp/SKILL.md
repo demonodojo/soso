@@ -80,8 +80,15 @@ pruebas, con `scripts/wm-probe.py --wm-args --escena-cpu`.
 ## Convenciones
 
 - **Daño mínimo:** COMMIT lleva rect; GSCEN solo incluye quads visibles tras clip.
-- **Opaco:** barra/menú/ventanas sólidas usan `GEOM_OPAQUE`; cursor no. Aun así el blit
-  de `GSCEN` es opaco para todos: el puntero sale con fondo negro.
+- **Opaco:** barra/menú/ventanas sólidas usan `GEOM_OPAQUE`; cursor no. Un quad de una
+  superficie no opaca lleva el bit `8+i` en los flags de `GSCEN`
+  (`comp_gscen_flag_blend`, `gscen::flag_blend`) y se **mezcla con alfa** (byte 3,
+  sin premultiplicar). El CE sólo copia, así que el kernel baja a CPU el tramo de
+  páginas del RT y de la textura, mezcla (`gscen::mezclar_fila`) y sube el RT
+  (`mezclar_quad_cpu`, tope 4 MiB; si no cabe, copia opaco). Pensado para quads
+  pequeños: la mezcla no se acumula porque el fondo opaco va en el mismo commit.
+  La escena en CPU usa `comp_mezclar_rect`, el mismo cálculo (test
+  `comp_mezcla.sal` con los vectores del test de Rust).
 - **WM escena SHM:** dimensiones lógicas `sw×sh` del FB; RT GPU puede ser menor si NVDisplay
   (`comp_scanout_fb_*` en policy).
 - No añadir KMS/DRM Linux; solo syscalls soso existentes.

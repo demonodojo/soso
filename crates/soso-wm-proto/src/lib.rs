@@ -1,4 +1,9 @@
 //! Mensajes de 32 bytes en little-endian (mismo layout que `proto.sal`).
+//!
+//! `no_std` + `alloc`: el kernel lo usa para `GSCEN` (mezcla con alfa).
+#![cfg_attr(not(test), no_std)]
+
+extern crate alloc;
 
 pub mod gfram;
 pub mod gprim;

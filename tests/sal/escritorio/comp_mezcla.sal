@@ -1,0 +1,46 @@
+import "../../../user/sal/escritorio/comp_gscen_layout.sal"
+
+# Mismos vectores que `gscen::tests::mezcla_alfa` (crate soso-wm-proto): la mezcla
+# del kernel y la de la escena en CPU deben dar el mismo píxel.
+fn poner(ptr: Int, o: Int, p0: Int, p1: Int, p2: Int, p3: Int) -> Int ! alloc
+    b = bytes_view_mem(ptr, 12)
+    _a = bytes_set_u8(b, o, p0)
+    _b = bytes_set_u8(b, o + 1, p1)
+    _c = bytes_set_u8(b, o + 2, p2)
+    bytes_set_u8(b, o + 3, p3)
+
+fn igual(ptr: Int, o: Int, p0: Int, p1: Int, p2: Int, p3: Int) -> Int ! alloc
+    b = bytes_view_mem(ptr, 12)
+    if bytes_get_u8(b, o) != p0
+        0
+    elsif bytes_get_u8(b, o + 1) != p1
+        0
+    elsif bytes_get_u8(b, o + 2) != p2
+        0
+    elsif bytes_get_u8(b, o + 3) != p3
+        0
+    else
+        1
+
+fn main() -> Int ! alloc
+    dst = bytes_ptr(bytes_new(12))
+    src = bytes_ptr(bytes_new(12))
+    _d0 = poner(dst, 0, 10, 20, 30, 0)
+    _d1 = poner(dst, 4, 100, 100, 100, 255)
+    _d2 = poner(dst, 8, 200, 0, 50, 255)
+    _s0 = poner(src, 0, 99, 99, 99, 0)
+    _s1 = poner(src, 4, 0, 255, 0, 255)
+    _s2 = poner(src, 8, 0, 0, 255, 128)
+    _m = comp_mezclar_rect(dst, 12, 3, src, 12, 3, 0, 0, 0, 0, 3, 1)
+    if igual(dst, 0, 10, 20, 30, 0) == 0
+        1
+    elsif igual(dst, 4, 0, 255, 0, 255) == 0
+        2
+    elsif igual(dst, 8, 100, 0, 153, 255) == 0
+        3
+    elsif comp_gscen_flag_blend(0) != 256
+        4
+    elsif (comp_gscen_flag_blend(18) & comp_gscen_flag_clear()) != 0
+        5
+    else
+        0

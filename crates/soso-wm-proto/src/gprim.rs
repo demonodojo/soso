@@ -74,6 +74,8 @@ pub struct Escena<'a> {
     pub cells: &'a [[u32; 3]],
 }
 
+use alloc::vec::Vec;
+
 pub fn encode(e: &Escena) -> Vec<u8> {
     assert!(!e.prims.is_empty() && e.prims.len() <= MAX_PRIMS);
     let mut c = Vec::with_capacity(HEADER_LEN + e.prims.len() * PRIM_BYTES + 8 + e.psf.len() + e.cells.len() * CELL_BYTES + 3);

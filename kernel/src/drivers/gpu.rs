@@ -789,6 +789,110 @@ fn upload_compositor_rect_from_user(
     Ok(())
 }
 
+/// Tope del tramo que se baja a CPU para mezclar un quad: el puntero son unas
+/// pocas decenas de KiB. Algo mayor se copia opaco en vez de parar la escena.
+const MEZCLA_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// ¿Se puede mezclar en CPU este quad? Los tramos de páginas del RT y de la
+/// textura deben caber en sus búferes (los huecos de VRAM van redondeados a
+/// página, así que redondear la capacidad pedida hacia arriba es seguro).
+#[allow(clippy::too_many_arguments)]
+fn mezcla_cabe(
+    dx: u32,
+    dy: u32,
+    pitch: u32,
+    rt_cap: u64,
+    sx: u32,
+    sy: u32,
+    tex_pitch: u32,
+    tex_cap: u64,
+    w: u32,
+    h: u32,
+) -> bool {
+    use soso_wm_proto::gscen::tramo_paginas;
+    let pag = |n: u64| n.saturating_add(0xfff) & !0xfff;
+    match (tramo_paginas(dx, dy, w, h, pitch), tramo_paginas(sx, sy, w, h, tex_pitch)) {
+        (Some((r0, r1)), Some((t0, t1))) => {
+            r1 <= pag(rt_cap)
+                && t1 <= pag(tex_cap)
+                && r1 - r0 <= MEZCLA_MAX_BYTES
+                && t1 - t0 <= MEZCLA_MAX_BYTES
+        }
+        _ => false,
+    }
+}
+
+/// Búfer del kernel alineado a página: destino de las bajadas del CE, que van por
+/// páginas físicas enteras.
+#[cfg(feature = "lxdde")]
+struct BufPaginas {
+    ptr: *mut u8,
+    len: usize,
+}
+
+#[cfg(feature = "lxdde")]
+impl BufPaginas {
+    fn nuevo(len: usize) -> Result<Self, i64> {
+        let layout = core::alloc::Layout::from_size_align(len, 4096).map_err(|_| abi::EINVAL)?;
+        let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
+        if ptr.is_null() {
+            return Err(abi::ENOMEM);
+        }
+        Ok(Self { ptr, len })
+    }
+
+    fn bytes(&mut self) -> &mut [u8] {
+        unsafe { core::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+#[cfg(feature = "lxdde")]
+impl Drop for BufPaginas {
+    fn drop(&mut self) {
+        if let Ok(layout) = core::alloc::Layout::from_size_align(self.len, 4096) {
+            unsafe { alloc::alloc::dealloc(self.ptr, layout) };
+        }
+    }
+}
+
+/// Mezcla con alfa un quad sobre el RT. El CE sólo copia, así que se baja el
+/// tramo de páginas del RT y el de la textura, se mezcla en CPU
+/// (`gscen::mezclar_fila`) y se sube el tramo del RT. Las copias del CE de los
+/// quads anteriores son síncronas: el RT ya tiene lo que va debajo.
+#[cfg(feature = "lxdde")]
+#[allow(clippy::too_many_arguments)]
+fn mezclar_quad_cpu(
+    rt_va: u64,
+    pitch: u32,
+    dx: u32,
+    dy: u32,
+    tex_va: u64,
+    tex_pitch: u32,
+    sx: u32,
+    sy: u32,
+    w: u32,
+    h: u32,
+) -> Result<(), i64> {
+    use soso_wm_proto::gscen::{mezclar_fila, tramo_paginas};
+    let (r0, r1) = tramo_paginas(dx, dy, w, h, pitch).ok_or(abi::EINVAL)?;
+    let (t0, t1) = tramo_paginas(sx, sy, w, h, tex_pitch).ok_or(abi::EINVAL)?;
+    let mut rt = BufPaginas::nuevo((r1 - r0) as usize)?;
+    let mut tx = BufPaginas::nuevo((t1 - t0) as usize)?;
+    descargar_vram_a_shadow_at(rt_va, r0, rt.ptr as u64, rt.len)?;
+    descargar_vram_a_shadow_at(tex_va, t0, tx.ptr as u64, tx.len)?;
+    let fila = w as usize * 4;
+    {
+        let src = tx.bytes();
+        let dst = rt.bytes();
+        for row in 0..h as u64 {
+            let ro = ((u64::from(dy) + row) * u64::from(pitch) + u64::from(dx) * 4 - r0) as usize;
+            let to = ((u64::from(sy) + row) * u64::from(tex_pitch) + u64::from(sx) * 4 - t0) as usize;
+            mezclar_fila(&mut dst[ro..ro + fila], &src[to..to + fila]);
+        }
+    }
+    crate::lxdde::device_buf_upload_at(rt_va, r0, rt.bytes()).map_err(|_| abi::EIO)
+}
+
 #[cfg(feature = "lxdde")]
 fn descargar_rt_rect_a_shadow(
     rt_va: u64,
@@ -1346,6 +1450,7 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
             return Err(abi::EINVAL);
         }
         let mut quads = alloc::vec![];
+        let mut mezclas = alloc::vec![];
         for i in 0..n {
             let off = GSCEN_HDR + i * GSCEN_QUAD;
             let tex_h = u64::from_le_bytes(cmd[off..off + 8].try_into().unwrap_or([0; 8]));
@@ -1370,7 +1475,21 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
                 .and_then(|p| p.checked_add((sx as u64).checked_mul(4)?))
                 .ok_or(abi::EINVAL)?;
             let tex_src = tex_va.checked_add(src_off).ok_or(abi::EINVAL)?;
+            // Mezcla con alfa (el puntero): sólo si el tramo de páginas que toca
+            // cabe en los dos búferes; si no, se copia opaco como antes.
+            let mezcla = if soso_wm_proto::gscen::quad_blend(flags, i) {
+                let tex_cap = g
+                    .buffers
+                    .get(tex_h as usize)
+                    .and_then(|b| b.as_ref())
+                    .map(|b| b.len() as u64)
+                    .unwrap_or(0);
+                mezcla_cabe(dx, dy, pitch, cap, sx, sy, tex_pitch, tex_cap, w, h)
+            } else {
+                false
+            };
             quads.push((tex_src, dx, dy, w, h, tex_pitch));
+            mezclas.push((mezcla, tex_va, sx, sy));
         }
         drop(g);
         #[cfg(feature = "lxdde")]
@@ -1382,9 +1501,15 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
                 crate::lxdde::submit_3d_clear(rt_va, fb_w, fb_h, pitch, rgba)
                     .map_err(|_| abi::EIO)?;
             }
-            for (tex_va, dx, dy, w, h, tex_pitch) in quads {
-                crate::lxdde::submit_3d_blit_tex(rt_va, pitch, dx, dy, tex_va, tex_pitch, w, h)
-                    .map_err(|_| abi::EIO)?;
+            for ((tex_src, dx, dy, w, h, tex_pitch), (mezcla, tex_va, sx, sy)) in
+                quads.into_iter().zip(mezclas)
+            {
+                if mezcla {
+                    mezclar_quad_cpu(rt_va, pitch, dx, dy, tex_va, tex_pitch, sx, sy, w, h)?;
+                } else {
+                    crate::lxdde::submit_3d_blit_tex(rt_va, pitch, dx, dy, tex_src, tex_pitch, w, h)
+                        .map_err(|_| abi::EIO)?;
+                }
             }
             let full_pres =
                 pres_x == 0 && pres_y == 0 && pres_w == fb_w && pres_h == fb_h;
@@ -1401,7 +1526,7 @@ pub fn submit(cmd: &[u8]) -> Result<u64, i64> {
         }
         #[cfg(not(feature = "lxdde"))]
         {
-            let _ = (rt_va, frame_bytes, flags, rgba, n, pres_x, pres_y);
+            let _ = (rt_va, frame_bytes, flags, rgba, n, pres_x, pres_y, quads, mezclas);
             return Err(abi::ENOSYS);
         }
     }

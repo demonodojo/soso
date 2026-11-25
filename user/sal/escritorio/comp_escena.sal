@@ -312,6 +312,7 @@ fn comp_escena_commit(st: Int, tab: Int, gbuf: Int, px: Int, py: Int, pw: Int, p
                                             gy = comp_surf_get(tab, s, comp_surf_gy())
                                             if clear_rt != 0
                                                 _q = comp_escena_emit_quad(gbuf, n, tab, s, gx, gy, gw, gh, 0, 0)
+                                                flags = flags | comp_escena_blend(fl, n)
                                                 n = n + 1
                                             else
                                                 iw = comp_intersect_len(gx, gx + gw, px, cx1)
@@ -325,6 +326,7 @@ fn comp_escena_commit(st: Int, tab: Int, gbuf: Int, px: Int, py: Int, pw: Int, p
                                                         occ = comp_surf_occluded(tab, s, ix, iy, iw, ih, z)
                                                         if occ == 0
                                                             _q = comp_escena_emit_quad(gbuf, n, tab, s, ix, iy, iw, ih, sx, sy)
+                                                            flags = flags | comp_escena_blend(fl, n)
                                                             n = n + 1
                     s = s + 1
             z = z + 1
@@ -337,6 +339,15 @@ fn comp_escena_commit(st: Int, tab: Int, gbuf: Int, px: Int, py: Int, pw: Int, p
         else
             1
 
+# Una superficie no opaca (el puntero) se mezcla con alfa. Todo lo que va
+# debajo está en el mismo commit (el fondo opaco cubre la pantalla), así que la
+# mezcla nunca se acumula sobre sí misma.
+fn comp_escena_blend(fl: Int, n: Int) -> Int
+    if comp_surf_opaque(fl) != 0
+        0
+    else
+        comp_gscen_flag_blend(n)
+
 fn comp_u32_con_signo(v: Int) -> Int
     if v >= 2147483648
         v - 4294967296
@@ -344,7 +355,8 @@ fn comp_u32_con_signo(v: Int) -> Int
         v
 
 # Ejecuta en CPU el mismo comando `GSCEN` que iría al kernel (borrado opcional
-# del RT, quads opacos en orden y present del rectángulo): RT = `compos`.
+# del RT, quads en orden —copiados o mezclados con alfa— y present del
+# rectángulo): RT = `compos`.
 fn comp_gscen_cpu(gbuf: Int, compos: Int, clen: Int) -> Int ! io, alloc
     b = bytes_view_mem(gbuf, comp_gscen_buf_len())
     fb_w = bytes_get_u32(b, 13)
@@ -383,7 +395,10 @@ fn comp_gscen_cpu(gbuf: Int, compos: Int, clen: Int) -> Int ! io, alloc
             if h > 0
                 # La textura tiene al menos las filas que se leen.
                 tl = tp * 4 * (sy + h)
-                _q = copiar_rect(compos, clen, pitch, tex, tl, tp, 4, 0, dx, dy, sx, sy, w, h)
+                if (bytes_get_u32(b, 41) & comp_gscen_flag_blend(q)) != 0
+                    _m = comp_mezclar_rect(compos, clen, pitch, tex, tl, tp, dx, dy, sx, sy, w, h)
+                else
+                    _q = copiar_rect(compos, clen, pitch, tex, tl, tp, 4, 0, dx, dy, sx, sy, w, h)
         q = q + 1
     if fb_present_rect(compos, clen, px, py, pw, ph) >= 0
         1
