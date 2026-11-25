@@ -179,20 +179,51 @@ fn sondear(por_irq: bool) {
     }
 }
 
+/// Registros donde los fabricantes suelen poner el descriptor HID. El de
+/// verdad lo da el `_DSM` del dispositivo en ACPI, que no ejecutamos: se
+/// prueban estos y vale el primero con un descriptor bien formado.
+const REGISTROS_DESCRIPTOR: [u16; 5] = [0x0001, 0x0020, 0x0000, 0x0030, 0x0010];
+
+/// (registro, longitud) del descriptor HID: `wHIDDescLength` = 30 y
+/// `bcdVersion` = 1.00, como fija la especificación HID-over-I2C.
+fn buscar_descriptor(bus: &DesignWareI2c, b: HidI2cBinding) -> Option<(u16, usize)> {
+    let mut respondio = false;
+    for reg in REGISTROS_DESCRIPTOR {
+        let mut hdr = [0u8; 4];
+        if !bus.read_reg16(b.slave, reg, &mut hdr) {
+            continue;
+        }
+        respondio = true;
+        let len = u16::from_le_bytes([hdr[0], hdr[1]]);
+        let bcd = u16::from_le_bytes([hdr[2], hdr[3]]);
+        if len == 30 && bcd == 0x0100 {
+            crate::println!(
+                "hid-i2c: esclavo {:#04x} en mmio={:#x}: descriptor HID en el registro {reg:#06x}",
+                b.slave,
+                b.i2c_mmio
+            );
+            return Some((reg, len as usize));
+        }
+        crate::klogln!(
+            "hid-i2c: esclavo {:#04x} en mmio={:#x} registro {reg:#06x}: {:02x?}",
+            b.slave,
+            b.i2c_mmio,
+            hdr
+        );
+    }
+    if !respondio {
+        crate::klogln!("hid-i2c: esclavo {:#04x} no responde en mmio={:#x}", b.slave, b.i2c_mmio);
+    }
+    None
+}
+
 fn probe_binding(b: HidI2cBinding) -> Option<HidI2cDevice> {
     let bus = DesignWareI2c::new(b.i2c_mmio, b.i2c_len)?;
-    let mut hdr = [0u8; 6];
-    if !bus.read_reg16(b.slave, 0, &mut hdr) {
-        crate::klogln!("hid-i2c: esclavo {:#04x} sin HID descriptor", b.slave);
+    let Some((reg, desc_len)) = buscar_descriptor(&bus, b) else {
         return None;
-    }
-    let desc_len = u16::from_le_bytes([hdr[0], hdr[1]]) as usize;
-    if desc_len < core::mem::size_of::<HidDesc>() || desc_len > 256 {
-        crate::klogln!("hid-i2c: desc_len raro {desc_len}");
-        return None;
-    }
+    };
     let mut raw = vec![0u8; desc_len];
-    if !bus.read_reg16(b.slave, 0, &mut raw) {
+    if !bus.read_reg16(b.slave, reg, &mut raw) {
         return None;
     }
     let hd = unsafe { &*(raw.as_ptr() as *const HidDesc) };
