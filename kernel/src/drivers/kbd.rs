@@ -557,8 +557,10 @@ fn handle_scancode_try(sc: u8) {
 #[cfg(feature = "drv-usb")]
 fn usb_cad(evt: &crate::drivers::usb_storage::UsbKbdEvent) -> bool {
     use xhci_nostd::hid::{MOD_LEFT_ALT, MOD_LEFT_CTRL, MOD_RIGHT_CTRL};
-    // Retroceso (0x2A) y, como alias, Supr (0x4C).
-    if !evt.pressed || (evt.scancode != 0x2A && evt.scancode != 0x4C) {
+    // Retroceso (uso HID 0x2A) y, como alias, Supr (0x4C). Se mira el uso
+    // HID, no `scancode`: ese ya va traducido a PS/2 set 1, donde 0x2A es la
+    // Mayús izquierda, y con un teclado USB Ctrl+Alt+Retroceso no hacía nada.
+    if !evt.pressed || (evt.usage_id != 0x2A && evt.usage_id != 0x4C) {
         return false;
     }
     // Cualquiera de los dos Ctrl, como en PS/2 (`km.ctrl()`); el Alt derecho

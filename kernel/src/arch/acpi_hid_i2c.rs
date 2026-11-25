@@ -31,10 +31,12 @@ pub fn discover() -> Vec<HidI2cBinding> {
     acpi::each_table(b"SSDT", |aml| scan_aml(aml, &mut mmios, &mut slaves));
     if mmios.is_empty() {
         crate::klogln!("hid-i2c: sin AMDI0010 en ACPI");
+        informar_candidatos();
         return Vec::new();
     }
     if slaves.is_empty() {
         crate::klogln!("hid-i2c: sin PNP0C50 en ACPI");
+        informar_candidatos();
         return Vec::new();
     }
     let (i2c_mmio, i2c_len) = mmios[0];
@@ -117,6 +119,52 @@ fn scan_aml(
             }
         }
     }
+}
+
+/// Sin touchpad I2C: qué hay en las tablas que se le parezca. Sirve para
+/// saber qué identificador usa una placa que no conocemos (otro controlador
+/// I2C, o el touchpad declarado con `EISAID` en vez de con cadena).
+fn informar_candidatos() {
+    let mut ids: Vec<[u8; 8]> = Vec::new();
+    let mut pnp_cadena = 0usize;
+    let mut pnp_eisaid = 0usize;
+    let mut otros: Vec<&'static str> = Vec::new();
+    // `EISAID("PNP0C50")` en AML: DWordConst (0x0C) + 0x41 0xD0 0x0C 0x50.
+    const PNP0C50_EISAID: [u8; 5] = [0x0C, 0x41, 0xD0, 0x0C, 0x50];
+    const PREFIJOS: [&[u8]; 3] = [b"AMDI", b"AMD0", b"INT3"];
+    const NOMBRES: [&str; 8] = ["ACPI0C50", "MSFT0001", "ELAN", "SYNA", "ASUE", "FTCS", "PIXA", "GXTP"];
+    let mut mirar = |aml: &[u8]| {
+        for pre in PREFIJOS {
+            for (off, _) in find_all(aml, pre) {
+                if let Some(id) = aml.get(off..off + 8) {
+                    if id.iter().all(|b| b.is_ascii_alphanumeric()) {
+                        let mut k = [0u8; 8];
+                        k.copy_from_slice(id);
+                        if !ids.contains(&k) && ids.len() < 24 {
+                            ids.push(k);
+                        }
+                    }
+                }
+            }
+        }
+        pnp_cadena += find_all(aml, b"PNP0C50").len();
+        pnp_eisaid += find_all(aml, &PNP0C50_EISAID).len();
+        for n in NOMBRES {
+            if !otros.contains(&n) && !find_all(aml, n.as_bytes()).is_empty() {
+                otros.push(n);
+            }
+        }
+    };
+    acpi::each_table(b"DSDT", &mut mirar);
+    acpi::each_table(b"SSDT", &mut mirar);
+    let mut lista = alloc::string::String::new();
+    for id in &ids {
+        lista.push(' ');
+        lista.push_str(core::str::from_utf8(id).unwrap_or("?"));
+    }
+    crate::klogln!(
+        "hid-i2c: candidatos ACPI:{lista} | PNP0C50 cadena={pnp_cadena} eisaid={pnp_eisaid} | otros={otros:?}"
+    );
 }
 
 fn find_all(hay: &[u8], needle: &[u8]) -> Vec<(usize, usize)> {
