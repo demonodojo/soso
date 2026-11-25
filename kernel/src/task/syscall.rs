@@ -3533,7 +3533,9 @@ fn sys_input_poll(out: u64, max: u64) -> Result<u64, i64> {
     if !user_range_ok(out, bytes as u64, true) {
         return Err(-abi::EFAULT);
     }
+    crate::drivers::diag_entrada::suma(&crate::drivers::diag_entrada::INPUT_POLL);
     crate::drivers::kbd::poll_devices();
+    crate::drivers::diag_entrada::quizas_volcar();
     let mut kbuf = alloc::vec![abi::InputEvent::default(); n];
     let got = crate::drivers::input::poll(&mut kbuf);
     let slice = unsafe {

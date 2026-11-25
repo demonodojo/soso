@@ -509,6 +509,7 @@ fn xhci_irq_slot(i: usize) {
     if !fired {
         return;
     }
+    crate::drivers::diag_entrada::suma(&crate::drivers::diag_entrada::USB_IRQ);
     drain_keyboard_events(|evt| crate::drivers::kbd::deliver_usb_from_irq(evt));
 }
 

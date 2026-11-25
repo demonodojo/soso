@@ -11,6 +11,7 @@ static EVENTS: Mutex<VecDeque<InputEvent>> = Mutex::new(VecDeque::new());
 /// interrupciones cerradas: desde la IRQ un `try_lock` fallido tiraba el
 /// movimiento y el puntero se quedaba atrás.
 pub fn push(ev: InputEvent) {
+    super::diag_entrada::suma(&super::diag_entrada::EVT_DENTRO);
     without_interrupts(|| {
         let mut q = EVENTS.lock();
         if q.len() >= 256 {
@@ -34,6 +35,7 @@ pub fn poll(out: &mut [InputEvent]) -> usize {
                 out[i] = ev;
             }
         }
+        super::diag_entrada::EVT_FUERA.fetch_add(n as u32, core::sync::atomic::Ordering::Relaxed);
         n
     })
 }

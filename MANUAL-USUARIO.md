@@ -876,7 +876,7 @@ soso-wm --prueba-layout # mosaico, arrastre y geometría flotante; imprime `soso
 ```
 
 En modo gráfico el teclado lo consume el WM. **Ctrl+C** (y el resto de combinaciones con Ctrl que no son atajos del escritorio, como Ctrl+D o Ctrl+Z) va a la ventana con foco: en una terminal interrumpe el programa en marcha sin cerrar el escritorio.
-Salir: **Alt+Mayús+E** o **Salir del escritorio** en el menú (vuelta a consola); **Ctrl+Alt+Retroceso** si no responde. **Alt+Intro** abre una terminal.
+Salir: **Alt+Mayús+E** o **Salir del escritorio** en el menú (vuelta a consola); **Ctrl+Alt+Retroceso** (o **Ctrl+Alt+Supr**) si no responde. **Alt+Intro** abre una terminal.
 Un programa a pantalla completa sin escritorio (p. ej. `soso-web --grafico`) sí se cierra con **Ctrl+C**.
 
 Si el escritorio da problemas con la GPU (pantalla congelada o en negro, sólo en máquinas con NVIDIA), arráncalo con `soso-wm --sin-comp`: no lanza el compositor `soso-comp` ni se conecta a uno que ya esté en marcha, y pinta como en una máquina sin GPU. Ventanas, terminales y aplicaciones funcionan igual; sólo se pierde el dibujo acelerado.
@@ -896,7 +896,9 @@ sin tocar teclado ni ratón entra solo el mismo salvapantallas; cualquier entrad
 el botón **Aplicaciones** despliega un menú con **Terminal**, **Navegador web** y
 **Salir del escritorio**, y los accesos directos **Terminal** y **Web** abren lo mismo de
 un clic. Un clic fuera del menú lo cierra.
-**Ctrl+Alt+Retroceso** recupera la consola si el gestor deja de responder (PS/2 y teclado USB); el kernel mata al dueño de pantalla y repinta la consola de texto.
+**Ctrl+Alt+Retroceso** (o **Ctrl+Alt+Supr**) recupera la consola si el gestor deja de responder (PS/2 y teclado USB); el kernel mata al dueño de pantalla y repinta la consola de texto.
+
+Si ni eso responde, entra por SSH y mira el registro del kernel: mientras la pantalla está en modo gráfico, cada 5 s se apunta una línea `diag-entrada:` con lo que llega del teclado y del ratón (interrupciones, bytes del i8042, informes USB, eventos que entran y salen de la cola) y qué ejecuta cada CPU (`grep diag-entrada /var/log/kernel.log`).
 
 El escritorio además **se vigila solo**: mientras tiene la pantalla promete al kernel una señal de vida cada pocos milisegundos y, si pasa **5 s** sin darla (se quedó bloqueado con un cliente que no lee, o girando), el kernel mata **sólo su grupo de procesos** y vuelve la consola de texto con la shell intacta. Después se relanza `soso-wm` normalmente. Lo mismo vale para cualquier programa que tome la pantalla completa (`soso-web --grafico` sin gestor) si llama a la señal de vida.
 

@@ -378,6 +378,7 @@ pub fn note_framebuffer_sigint() {
 }
 
 pub fn note_framebuffer_cad() {
+    crate::drivers::diag_entrada::suma(&crate::drivers::diag_entrada::CAD);
     FB_CAD.store(true, core::sync::atomic::Ordering::Relaxed);
 }
 
@@ -1817,6 +1818,7 @@ extern "C" fn schedule_inner() -> ! {
         // procesos: es la consola local, y net::poll ya usa try_lock (un
         // AP que también llamara aquí solo desperdiciaría ciclos).
         let es_bsp = crate::arch::percpu::cpu_index() == 0;
+        crate::drivers::diag_entrada::pasada(crate::arch::percpu::cpu_index());
         if es_bsp {
             // Centinela: nadie debería escribir por encima de la cima de
             // KSTACK. Se comprueba aquí porque es el sitio por el que se pasa
@@ -1856,6 +1858,7 @@ extern "C" fn schedule_inner() -> ! {
             // que el candado del controlador falló y sosh está en WaitingTty.
             // PROCS aún no está cogido: poll_devices despierta con try_lock.
             crate::drivers::kbd::poll_devices();
+            crate::drivers::diag_entrada::quizas_volcar();
         }
         syscall::drenar_fds_aplazados();
         x86_64::instructions::interrupts::disable();

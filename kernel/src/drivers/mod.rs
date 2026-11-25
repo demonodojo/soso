@@ -5,6 +5,7 @@ pub mod e1000e;
 pub mod fb;
 pub mod scanout;
 pub mod input;
+pub mod diag_entrada;
 pub mod keymap;
 #[cfg(feature = "drv-gpu-nvidia")]
 pub mod gpu;

@@ -413,6 +413,7 @@ fn handle_make_scancode(sc: u8) {
 
 fn handle_make_scancode_try(sc: u8) {
     let Some(mut km) = KM.try_lock() else {
+        super::diag_entrada::suma(&super::diag_entrada::KM_OCUPADO);
         return;
     };
     let out = km.translate(sc);
@@ -466,7 +467,8 @@ fn handle_scancode(sc: u8) {
             km.super_left_press(true);
             return;
         }
-        0x0E if km.ctrl() && km.alt_left() => {
+        // Ctrl+Alt+Retroceso, y Ctrl+Alt+Supr como alias.
+        0x0E | 0x53 if km.ctrl() && km.alt_left() => {
             crate::task::note_framebuffer_cad();
             crate::task::kick_scheduler();
             return;
@@ -496,6 +498,7 @@ fn handle_scancode_try(sc: u8) {
     if sc & 0x80 != 0 {
         let code = sc & 0x7F;
         let Some(mut km) = KM.try_lock() else {
+            super::diag_entrada::suma(&super::diag_entrada::KM_OCUPADO);
             return;
         };
         match code {
@@ -510,6 +513,7 @@ fn handle_scancode_try(sc: u8) {
     }
 
     let Some(mut km) = KM.try_lock() else {
+        super::diag_entrada::suma(&super::diag_entrada::KM_OCUPADO);
         return;
     };
     match sc {
@@ -533,7 +537,8 @@ fn handle_scancode_try(sc: u8) {
             km.super_left_press(true);
             return;
         }
-        0x0E if km.ctrl() && km.alt_left() => {
+        // Ctrl+Alt+Retroceso, y Ctrl+Alt+Supr como alias.
+        0x0E | 0x53 if km.ctrl() && km.alt_left() => {
             crate::task::note_framebuffer_cad();
             crate::task::kick_scheduler();
             return;
@@ -552,7 +557,8 @@ fn handle_scancode_try(sc: u8) {
 #[cfg(feature = "drv-usb")]
 fn usb_cad(evt: &crate::drivers::usb_storage::UsbKbdEvent) -> bool {
     use xhci_nostd::hid::{MOD_LEFT_ALT, MOD_LEFT_CTRL, MOD_RIGHT_CTRL};
-    if !evt.pressed || evt.scancode != 0x2A {
+    // Retroceso (0x2A) y, como alias, Supr (0x4C).
+    if !evt.pressed || (evt.scancode != 0x2A && evt.scancode != 0x4C) {
         return false;
     }
     // Cualquiera de los dos Ctrl, como en PS/2 (`km.ctrl()`); el Alt derecho
@@ -565,6 +571,7 @@ fn handle_usb_event(evt: crate::drivers::usb_storage::UsbKbdEvent) {
     if evt.scancode == 0 && evt.usage_id < 0xE0 {
         return;
     }
+    super::diag_entrada::suma(&super::diag_entrada::USB_TECLA);
     log_scancode_raw(evt.scancode);
     let mut km = KM.lock();
 
@@ -599,8 +606,10 @@ fn handle_usb_event_try(evt: crate::drivers::usb_storage::UsbKbdEvent) -> bool {
         return true;
     }
     let Some(mut km) = KM.try_lock() else {
+        super::diag_entrada::suma(&super::diag_entrada::KM_OCUPADO);
         return false;
     };
+    super::diag_entrada::suma(&super::diag_entrada::USB_TECLA);
     log_scancode_raw(evt.scancode);
 
     if evt.usage_id >= 0xE0 && evt.usage_id <= 0xE7 {
@@ -645,10 +654,16 @@ fn poll_i8042(from_irq: bool) {
         let st = status();
         if st & ST_AUX_DATA != 0 {
             let b = read_data();
+            super::diag_entrada::suma(&super::diag_entrada::I8042_AUX);
             crate::drivers::mouse::on_byte(b);
             continue;
         }
         let sc = read_data();
+        super::diag_entrada::suma(if from_irq {
+            &super::diag_entrada::I8042_IRQ
+        } else {
+            &super::diag_entrada::I8042_SONDEO
+        });
         // En funcionamiento normal 0xAA libera Mayús izquierda (set 1).
         // La respuesta BAT del arranque ya se consumió al inicializar.
         if sc == PS2_ACK || sc == PS2_RESEND {
@@ -702,6 +717,7 @@ pub fn poll_hid_espera() {
 
 #[cfg(feature = "drv-usb")]
 fn dispatch_pointer_event(evt: xhci_nostd::PointerEvent) {
+    super::diag_entrada::suma(&super::diag_entrada::USB_PUNTERO);
     crate::drivers::mouse::apply_hid_pointer(evt);
 }
 
@@ -725,6 +741,7 @@ pub fn i8042_ready() -> bool {
 }
 
 pub fn handle_irq() {
+    super::diag_entrada::suma(&super::diag_entrada::IRQ_KBD);
     poll_hw(true);
 }
 

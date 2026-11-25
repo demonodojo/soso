@@ -50,7 +50,7 @@ Tests layout Rust: `cargo test -p soso-wm-proto`.
 ## Kernel / FB
 
 - Un proceso es **dueño** del modo gráfico (`SYS_FB_SET_MODE`, `fb_present` / rect).
-- `Ctrl+Alt+Retroceso` mata al grupo del dueño y vuelve la consola (PS/2 y USB, Alt izquierdo con cualquier Ctrl).
+- `Ctrl+Alt+Retroceso` (alias `Ctrl+Alt+Supr`) mata al grupo del dueño y vuelve la consola (PS/2 y USB, Alt izquierdo con cualquier Ctrl). Si el teclado no responde en modo gráfico, `grep diag-entrada /var/log/kernel.log` por SSH dice en qué tramo se pierde la entrada.
 - **Vigilante del dueño**: `wm_tick` llama a `fb_keepalive(5000)` (`SYS_FB_KEEPALIVE=104`).
   Si pasan 5 s sin señal, `poll_fb_watchdog` (scheduler) mata con `SIGKILL` **sólo el
   grupo del dueño** y `release_owner_if` devuelve la consola: un WM colgado no se lleva
