@@ -144,6 +144,21 @@ pub const SYS_WRITE_TIMEOUT: u64 = 113;
 /// maestro de PTY), `0` si no. Un fd cerrado o fuera de rango no es error:
 /// también devuelve `0`, como `isatty(3)`.
 pub const SYS_ISATTY: u64 = 114;
+/// `(lista, n, plazo_ms)`: duerme hasta que alguna de las `n` entradas `u32` de
+/// `lista` esté lista o venza el plazo (`0` = sólo mirar; `u64::MAX` = sin
+/// plazo). Cada entrada es un fd o [`ESPERAR_ENTRADA`] (la cola de
+/// `input_poll`). Listo = leer no se bloquearía: datos, fin de flujo, conexión
+/// pendiente en un listener, o un PTY sin nadie vivo al otro lado. Al volver,
+/// el kernel pone [`ESPERAR_LISTO`] en las entradas listas y devuelve cuántas
+/// hay (`0` = venció el plazo). Un fd que no sirve cuenta como listo. Syscall
+/// nuevo (no sube `ABI_VERSION`).
+pub const SYS_ESPERAR: u64 = 115;
+/// Entrada de `SYS_ESPERAR` que espera a la cola de entrada (teclado/ratón).
+pub const ESPERAR_ENTRADA: u32 = 0x7fff_ffff;
+/// Marca que el kernel pone en una entrada lista de `SYS_ESPERAR`.
+pub const ESPERAR_LISTO: u32 = 0x8000_0000;
+/// Máximo de entradas de `SYS_ESPERAR`.
+pub const ESPERAR_MAX: u64 = 64;
 /// Abre un pseudo-terminal: devuelve `(fd_maestro << 32) | ranura`.
 pub const SYS_PTY_OPEN: u64 = 98;
 /// Reserva memoria compartida (`len` alineado); devuelve `id`.
@@ -860,6 +875,8 @@ pub const PROC_STATE_WAIT_SOCKET: u8 = 7;
 pub const PROC_STATE_ZOMBIE: u8 = 8;
 /// Parado por SIGSTOP/SIGTSTP (hasta SIGCONT).
 pub const PROC_STATE_STOPPED: u8 = 9;
+/// Bloqueado en `SYS_ESPERAR`.
+pub const PROC_STATE_WAIT_EVENTOS: u8 = 10;
 
 pub const PROC_FLAG_THREAD: u8 = 1;
 

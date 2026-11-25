@@ -216,6 +216,20 @@ pub fn peer_closed(pair_id: usize, side: LoopSide) -> bool {
     }
 }
 
+/// ¿Leer de este lado devolvería algo ya (bytes o fin de flujo)? Con el
+/// candado ocupado contesta «no»: el planificador vuelve a mirar en la
+/// siguiente pasada.
+pub fn legible(pair_id: usize, side: LoopSide) -> bool {
+    let Some(st) = LOOP.try_lock() else { return false };
+    let Some(pair) = st.pairs.get(pair_id).and_then(|p| p.as_ref()) else {
+        return true;
+    };
+    match side {
+        LoopSide::Client => pair.s2c.len() > pair.s2c_read || pair.closed_server,
+        LoopSide::Server => pair.c2s.len() > pair.c2s_read || pair.closed_client,
+    }
+}
+
 /// ¿Quedan bytes por leer en este lado?
 pub fn has_unread(pair_id: usize, side: LoopSide) -> bool {
     let st = LOOP.lock();

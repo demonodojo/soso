@@ -1075,8 +1075,18 @@ fn ttf_glifo(h: Int, cp: Int, pix_ptr: Int, pix_len: Int, stride: Int, bpp: Int,
         hh = bytes_get_u32(&t, e + 12)
         xo = bytes_get_u32(&t, e + 16) - 32768
         yo = bytes_get_u32(&t, e + 20) - 32768
-        _p = ttf_pegar(bm, w, hh, pix_ptr, pix_len, stride, bpp, fmt, (pen + 128) / 256 + xo, base_y + yo, fg, bg)
+        _p = ttf_pegar(bm, w, hh, pix_ptr, pix_len, stride, bpp, fmt, ttf_pen_px(pen) + xo, base_y + yo, fg, bg)
     0
+
+# Píxel más cercano a `pen` (1/256 px). Redondea hacia abajo también con `pen`
+# negativo: un texto que empieza a la izquierda del búfer (una región de daño
+# que corta una pestaña) salía un píxel a la derecha, porque `/` trunca hacia 0.
+fn ttf_pen_px(pen: Int) -> Int
+    q = pen + 128
+    if q >= 0
+        q / 256
+    else
+        0 - ((255 - q) / 256)
 
 # Ancho en píxeles del texto UTF-8 `s`.
 fn ttf_texto_ancho(h: Int, s: &String) -> Int ! alloc

@@ -70,6 +70,21 @@ fn sig_int() -> Int
 fn sys_input_poll() -> Int
     65
 
+# SYS_ESPERAR (115): duerme hasta que alguna entrada de la lista (n × u32: un fd
+# o `esperar_entrada()`) tenga algo que leer o venza el plazo. Marca las listas
+# con `esperar_listo()` y devuelve cuántas; < 0 en un kernel que no lo tiene.
+fn sys_esperar() -> Int
+    115
+
+fn esperar_entrada() -> Int
+    2147483647
+
+fn esperar_listo() -> Int
+    2147483648
+
+fn esperar(lista_ptr: Int, n: Int, plazo_ms: Int) -> Int ! io
+    syscall(sys_esperar(), lista_ptr, n, plazo_ms, 0, 0, 0)
+
 fn sys_pty_open() -> Int
     98
 

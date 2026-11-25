@@ -181,6 +181,15 @@ pub fn close_master(slot: u8) {
     task::kill_console(Console::Pty(slot));
 }
 
+/// ¿Tiene el maestro algo que leer? Con el candado ocupado, «sí»: despertar de
+/// más sólo cuesta una lectura vacía.
+pub fn master_legible(slot: u8) -> bool {
+    let Some(c) = colas(slot as usize) else {
+        return true;
+    };
+    c.tx.try_lock().map_or(true, |tx| !tx.is_empty())
+}
+
 pub fn master_try_read(slot: u8, dst: &mut [u8]) -> usize {
     let Some(c) = colas(slot as usize) else {
         return 0;

@@ -273,6 +273,7 @@ pub fn interrumpir_bloqueo(p: &mut Process) {
         | State::WaitingTty { .. }
         | State::WaitingPipe { .. }
         | State::WaitingFutex { .. }
+        | State::WaitingEventos { .. }
         | State::WaitingChild { .. } => true,
         State::WaitingSocket {
             connect, result_fd, ..

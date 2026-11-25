@@ -1,0 +1,6 @@
+SOSOPKG v1
+nombre=soso-pkg
+version=0.4.5
+abi=1
+destino=sistema
+f 9e3a8c88369e07c753718567dfd62760b71cd388ed94e9fb163a01ebf135990a 1653488 bin/soso-pkg

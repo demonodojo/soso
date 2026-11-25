@@ -179,6 +179,9 @@ struct Estado
     g_pop: Int
     geo_buf: Int
     cur_ok: Int
+    esp_buf: Int
+    listo: Int
+    listo_lst: Int
 
 init Estado(evt_buf: Int, msg_buf: Int) ! alloc
     Estado(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -190,7 +193,8 @@ init Estado(evt_buf: Int, msg_buf: Int) ! alloc
            bytes_ptr(bytes_new(prims_fondo_buf_len())), 0, 0, 0, 0,
            bytes_ptr(bytes_new(tab_cap() * 4)),
            0, bytes_ptr(bytes_new(wm_reg_max() * 32)), 0, 0, -1,
-           0, 0, 0, 0, 0, bytes_ptr(bytes_new(wm_geo_bytes())), 0)
+           0, 0, 0, 0, 0, bytes_ptr(bytes_new(wm_geo_bytes())), 0,
+           bytes_ptr(bytes_new(wm_esp_bytes())), 65535, 1)
 
 fn wm_escena_cap() -> Int
     160
@@ -582,7 +586,18 @@ fn wm_estorba(st: &mut Estado, z: Int, x0: Int, y0: Int, x1: Int, y1: Int) -> In
                     wy = st.tab.wy(i)
                     r = wm_rects_cortan(wx - m, wy - m, wx + st.tab.ww(i) + m, wy + st.tab.wh(i) + m, x0, y0, x1, y1)
         k = k + 1
+    # El menú contextual va encima de todo y sólo se pinta sobre una región
+    # recién repintada (ver `wm_ctx_toca`): lo que pase por debajo, como región.
+    if r == 0
+        r = wm_ctx_toca(st, x0, y0, x1, y1)
     r
+
+# ¿Toca el rectángulo la caja del menú contextual abierto?
+fn wm_ctx_toca(st: &mut Estado, x0: Int, y0: Int, x1: Int, y1: Int) -> Int ! alloc
+    if st.ctx < 0
+        0
+    else
+        wm_rects_cortan(st.ctx_x - 2, st.ctx_y - 2, st.ctx_x + ctx_ancho(st) + 2, st.ctx_y + ctx_alto(st) + 2, x0, y0, x1, y1)
 
 # Cómo pintar un rectángulo de la ventana en la posición `z` (sólo CPU):
 # 0 = directo en `compos`, 1 = no se ve, 2 = ya va como daño de región.
@@ -634,8 +649,8 @@ fn wm_contenido_region(st: &mut Estado, i: Int, b: Int, bl: Int, rw: Int, rh: In
         gh = wm_tab_gh(st, a)
         if psf > 0
             grid = st.tab.shm_ptr(a)
-            cols = wm_term_cols(ww, gw)
-            rows = wm_term_rows(wh, gh, bh)
+            cols = st.tab.term_cols(a)
+            rows = st.tab.term_rows(a)
             dr = st.tab.term_dirty(a)
             _t = st.tab.term_pintar(a, grid, cols * rows * celda_bytes(), cols, rows, psf, plen, gw, gh, wm_tema_id(st), b, bl, rw, rh, rw, bpp, fmt, wx + 4 - rx0, wy + bh + 4 - ry0, 1)
             _d = st.tab.term_set_dirty(a, dr)
@@ -1696,8 +1711,10 @@ fn wm_repintar_slot_vis(st: &mut Estado, i: Int, compos: Int, clen: Int, sw: Int
                     if gmode == 0
                         _ti = wm_term_incremental(st, a, zix, wx, wy, ww, wh, gh, bh)
                 dr = st.tab.term_dirty(a)
-                cols = wm_term_cols(ww, gw)
-                rows = wm_term_rows(wh, gh, bh)
+                # La rejilla con su tamaño, no con el de la ventana: pueden
+                # diferir hasta que `wm_term_redimensionar_uno` la ajuste.
+                cols = st.tab.term_cols(a)
+                rows = st.tab.term_rows(a)
                 if dr != -2
                     _t = st.tab.term_pintar(a, grid, cols * rows * celda_bytes(), cols, rows, psf, plen, gw, gh, tema, c, cl, sw, sh, stride, bpp, fmt, px + 4, py + bh + 4, rep)
                 if dr == -1
@@ -1831,10 +1848,16 @@ fn wm_compose(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride:
         _r = wm_repintar_slot(st, i, compos, clen, sw, sh, stride, bpp, fmt, completo, k)
         k = k + 1
     # Regiones dañadas (ver `wm_danar`); con repintado completo sobran.
+    # El contextual mezcla sus esquinas con lo de debajo: pintarlo cada
+    # fotograma las iba oscureciendo. Sólo va sobre algo recién repintado: el
+    # repintado completo o una región, que siempre lo cubre entero.
+    ctx_pinta = completo
     if completo == 0
         if gmode == 0
             r = 0
             while r < st.reg_n
+                if wm_ctx_toca(st, wm_reg_get(st, r, 0), wm_reg_get(st, r, 1), wm_reg_get(st, r, 2), wm_reg_get(st, r, 3)) != 0
+                    ctx_pinta = 1
                 _rg = wm_repintar_region(st, r, compos, clen, sw, sh, stride, bpp, fmt)
                 r = r + 1
     st.reg_n = 0
@@ -1843,7 +1866,8 @@ fn wm_compose(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride:
             _men = wm_pintar_menu(st, compos, clen, sw, sh, stride, bpp, fmt)
         elsif st.menu != 0
             _men2 = wm_pintar_menu(st, compos, clen, sw, sh, stride, bpp, fmt)
-        _cxm = wm_pintar_ctx(st, compos, clen, sw, sh, stride, bpp, fmt)
+        if ctx_pinta != 0
+            _cxm = wm_pintar_ctx(st, compos, clen, sw, sh, stride, bpp, fmt)
         _cap = wm_cursor_capturar(st, compos, clen, stride, bpp, fmt)
         _cur = wm_pintar_cursor(st, compos, clen, sw, sh, stride, bpp, fmt)
         if cmov != 0
@@ -3204,21 +3228,34 @@ fn wm_dispatch_msg(st: &mut Estado, i: Int, compos: Int, clen: Int, stride: Int,
 
 fn wm_atender_cliente_tab(st: &mut Estado, i: Int, compos: Int, clen: Int, stride: Int, bpp: Int, fmt: Int, sw: Int, sh: Int) -> Int ! io, alloc
     fd = st.tab.fd(i)
-    if fd > 0
-        m = st.msg_buf
-        n = read_timeout_fd(fd, m, msg_len(), 1)
-        if n == 0
-            _c = wm_cerrar_indice(st, i)
-        if n > 0
-            j = 0
-            while j < n
-                bb = bytes_view_mem(m, msg_len())
-                ch = bytes_get_u8(bb, j)
-                al = st.tab.acc_push_byte(i, ch)
-                if al == 32
-                    _cp = st.tab.acc_copiar_msg(i, m)
-                    _d = wm_dispatch_msg(st, i, compos, clen, stride, bpp, fmt, sw, sh, m)
-                j = j + 1
+    tandas = 0
+    while tandas < wm_cli_tandas()
+        tandas = tandas + 1
+        seguir = 0
+        # El mensaje puede haber cerrado o reasignado la ranura.
+        if fd > 0
+            if st.tab.slot_activo(i) != 0
+                if st.tab.fd(i) == fd
+                    seguir = 1
+        if seguir == 0
+            tandas = wm_cli_tandas()
+        else
+            m = st.msg_buf
+            n = read_timeout_fd(fd, m, msg_len(), 1)
+            if n == 0
+                _c = wm_cerrar_indice(st, i)
+            if n > 0
+                j = 0
+                while j < n
+                    bb = bytes_view_mem(m, msg_len())
+                    ch = bytes_get_u8(bb, j)
+                    al = st.tab.acc_push_byte(i, ch)
+                    if al == 32
+                        _cp = st.tab.acc_copiar_msg(i, m)
+                        _d = wm_dispatch_msg(st, i, compos, clen, stride, bpp, fmt, sw, sh, m)
+                    j = j + 1
+            if n != msg_len()
+                tandas = wm_cli_tandas()
     0
 
 fn wm_reenviar_raton_slot(st: &mut Estado, i0: Int, x: Int, y: Int, botones: Int) -> Int ! io, alloc
@@ -3773,6 +3810,8 @@ fn wm_raton_btn(st: &mut Estado, x: Int, y: Int, botones: Int, compos: Int, clen
                 dst = wm_destino_soltar(st, x, y, dix)
                 if dst >= 0
                     _ig = wm_integrar(st, dix, dst)
+                    # Toma el tamaño del grupo nuevo (como `wm_nueva_pestana`).
+                    _tr = wm_term_redimensionar_si(st, dix)
         _dd = wm_drop_fijar(st, -1)
         st.drag_ix = -1
         st.drag_kind = 0
@@ -4162,16 +4201,17 @@ fn wm_slot_atender_term(st: &mut Estado, i: Int, compos: Int, clen: Int, stride:
             _c = wm_cerrar_indice(st, i)
         if vivo >= 0
             buf = st.msg_buf
-            n = read_timeout_fd(fd, buf, msg_len(), 1)
-            if n > 0
+            n = 0
+            if wm_listo(st, i) != 0
+                n = read_timeout_fd(fd, buf, msg_len(), 1)
+            tandas = 0
+            while n > 0
+                # Con el tamaño de la rejilla, no el de la ventana: una
+                # terminal metida en otro grupo lee el ww/wh de la cabecera, y
+                # su cursor podía quedar fuera de la rejilla vieja.
                 grid = st.tab.shm_ptr(i)
-                ww = st.tab.ww(i)
-                wh = st.tab.wh(i)
-                gw = wm_tab_gw(st, i)
-                gh = wm_tab_gh(st, i)
-                bh = wm_bar_h(st)
-                cols = wm_term_cols(ww, gw)
-                rows = wm_term_rows(wh, gh, bh)
+                cols = st.tab.term_cols(i)
+                rows = st.tab.term_rows(i)
                 glen = cols * rows * celda_bytes()
                 antes = st.tab.term_cursor(i)
                 j = 0
@@ -4191,7 +4231,25 @@ fn wm_slot_atender_term(st: &mut Estado, i: Int, compos: Int, clen: Int, stride:
                     if st.tab.pend(i) == 0
                         _a = st.tab.set_pend(i, 1)
                         _rp = wm_danar_cabecera(st, st.tab.grupo_cab(i))
+                # Seguir leyendo mientras llegue lleno: se compone una vez por
+                # tanda y no cada 32 bytes.
+                tandas = tandas + 1
+                if n == msg_len()
+                    if tandas < wm_term_tandas()
+                        n = read_timeout_fd(fd, buf, msg_len(), 1)
+                    else
+                        n = 0
+                else
+                    n = 0
     0
+
+# Lecturas de 32 bytes por terminal y vuelta (2 KiB).
+fn wm_term_tandas() -> Int
+    64
+
+# Mensajes por cliente y vuelta.
+fn wm_cli_tandas() -> Int
+    16
 
 # La «q» llega como 113, o 81 con Mayús.
 fn wm_tecla_es_q(key: Int) -> Int
@@ -4323,7 +4381,8 @@ fn wm_slot_atender(st: &mut Estado, i: Int, compos: Int, clen: Int, stride: Int,
                 _m = wm_cli_marcar(st, i, 0)
                 _x = wm_cerrar_indice(st, i)
             else
-                _a = wm_atender_cliente_tab(st, i, compos, clen, stride, bpp, fmt, sw, sh)
+                if wm_listo(st, i) != 0
+                    _a = wm_atender_cliente_tab(st, i, compos, clen, stride, bpp, fmt, sw, sh)
                 if st.tab.fase(i) == 0
                     if st.tab.fd(i) <= 0
                         _c = wm_cerrar_indice(st, i)
@@ -4535,13 +4594,86 @@ fn wm_tick(st: &mut Estado, listener: Int, compos: Int, clen: Int, sw: Int, sh: 
     evt = st.evt_buf
     _in = wm_drenar_input(st, evt, 24 * 8, compos, clen, sw, sh, stride, bpp, fmt)
     _ss = wm_ss_idle(st, compos, clen, sw, sh, stride, bpp, fmt)
-    acc = tcp_accept(listener, 1)
-    if acc > 0
-        if acc != listener
-            _ac = wm_aceptar_cliente(st, acc)
+    if st.listo_lst != 0
+        acc = tcp_accept(listener, 1)
+        if acc > 0
+            if acc != listener
+                _ac = wm_aceptar_cliente(st, acc)
     _c = wm_atender_todos(st, compos, clen, stride, bpp, fmt, sw, sh)
     _sv = wm_sync_visibilidad(st)
     _p = wm_compose(st, compos, clen, sw, sh, stride, bpp, fmt)
     _f = wm_flush_dirty(st, compos, clen)
-    sleep_ms(10)
+    _e = wm_esperar(st, listener)
     0
+
+# ---- espera por eventos (F4) ---------------------------------------------------
+# En vez de girar cada 10 ms, el WM duerme en `SYS_ESPERAR` sobre la entrada, el
+# listener, cada cliente y cada PTY, y en la vuelta siguiente sólo lee los que
+# tienen algo (antes cada lectura vacía esperaba 1 ms). Sin el syscall (kernel
+# viejo) vuelve al tick fijo de 10 ms.
+
+fn wm_esp_bytes() -> Int
+    (2 + tab_cap()) * 4
+
+fn wm_listo(st: &mut Estado, i: Int) -> Int
+    (st.listo >> i) & 1
+
+# ¿Se espera a esta ranura? Las que no, se atienden en cada vuelta como antes.
+fn wm_esp_slot(st: &mut Estado, i: Int) -> Int
+    r = 0
+    if st.tab.slot_activo(i) != 0
+        if st.tab.fd(i) > 0
+            if st.tab.tipo(i) == tab_tipo_term()
+                r = 1
+            if st.tab.tipo(i) == tab_tipo_cli()
+                r = 1
+    r
+
+# Lo único que depende del reloj: el vigilante (5 s), el salvapantallas y el
+# corte de un cliente atascado, que se mira a menudo mientras dure.
+fn wm_plazo_espera(st: &mut Estado) -> Int ! alloc
+    p = 1000
+    i = 0
+    while i < tab_cap()
+        if st.tab.slot_activo(i) != 0
+            if st.tab.tipo(i) == tab_tipo_cli()
+                if wm_cli_atasco(st, i) != 0
+                    p = 10
+        i = i + 1
+    p
+
+fn wm_esperar(st: &mut Estado, listener: Int) -> Int ! io, alloc
+    plazo = wm_plazo_espera(st)
+    b = bytes_view_mem(st.esp_buf, wm_esp_bytes())
+    _e0 = bytes_set_u32(b, 0, esperar_entrada())
+    _e1 = bytes_set_u32(b, 4, listener)
+    n = 2
+    i = 0
+    while i < tab_cap()
+        if wm_esp_slot(st, i) != 0
+            _e = bytes_set_u32(b, n * 4, st.tab.fd(i))
+            n = n + 1
+        i = i + 1
+    r = esperar(st.esp_buf, n, plazo)
+    if r < 0
+        st.listo = 65535
+        st.listo_lst = 1
+        sleep_ms(10)
+        0
+    else
+        st.listo_lst = 0
+        if (bytes_get_u32(b, 4) & esperar_listo()) != 0
+            st.listo_lst = 1
+        listo = 0
+        k = 2
+        i = 0
+        while i < tab_cap()
+            if wm_esp_slot(st, i) != 0
+                if (bytes_get_u32(b, k * 4) & esperar_listo()) != 0
+                    listo = listo | (1 << i)
+                k = k + 1
+            else
+                listo = listo | (1 << i)
+            i = i + 1
+        st.listo = listo
+        r

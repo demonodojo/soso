@@ -176,7 +176,10 @@ pantalla entera. Así lo hacen wlroots, KWin y Mutter.
   filas sucias (se guarda y restaura).
 - Una región que toca la barra se amplía a la franja completa de arriba
   (`0,0,sw,…`): la barra se pinta a coordenadas absolutas. Una que toca el menú
-  contextual lo cubre entero (sus esquinas se mezclan y se repinta cada fotograma).
+  contextual lo cubre entero. El ctx mezcla sus esquinas con lo de debajo, así que **sólo
+  se pinta sobre algo recién repintado**: el repintado completo o una región que lo toca
+  (`wm_ctx_toca`). Pintarlo en cada fotograma oscurecía las esquinas. Por lo mismo,
+  `wm_estorba` cuenta su caja: un pintado directo que la roce va como región.
 - En modo escena GPU los mismos `wm_danar_*` marcan qué superficies repintar (ver
   «Repintado con escena GPU»). Con salvapantallas, `wm_danar` cae al repintado completo.
 - Comprobar un cambio: captura tras la acción, `Alt+D` dos veces (repintado
@@ -206,6 +209,31 @@ su sombra**, lo roza.
   `wm_slot_atender_term` marca la fila vieja y la nueva; `Term.pintar` sólo pinta el
   cursor si su fila se ha pintado.
 - `wm_repintar_ventana` (crear cliente, título) es un daño de ventana con sombra.
+
+### Espera por eventos (F4)
+
+`wm_tick` no duerme 10 ms: acaba en `wm_esperar`, que llama a `SYS_ESPERAR` con la
+entrada, el listener, y el fd de cada terminal y cada cliente (`wm_esp_slot`). En la
+vuelta siguiente sólo se leen los listos (`st.listo`, bit por ranura; `listo_lst` para el
+`accept`): antes cada lectura vacía esperaba 1 ms. Las terminales leen hasta 2 KiB por
+vuelta (`wm_term_tandas`) y los clientes hasta 16 mensajes (`wm_cli_tandas`), así que
+se compone una vez por tanda. El plazo es 1 s (vigilante de 5 s, salvapantallas) y 10 ms
+mientras haya un cliente atascado. Con un kernel sin el syscall vuelve al tick fijo. La
+muerte del shell se sigue sondeando con `kill_pid` en cada despertar; el PTY sin nadie
+vivo al otro lado cuenta como listo.
+
+**La rejilla de una terminal se recorre con su tamaño** (`st.tab.term_cols/term_rows`),
+nunca con `wm_term_cols(ww, gw)`. `ww`/`wh` se leen de la cabecera del grupo, y una
+terminal que entra en otro grupo (`wm_integrar`) conserva su rejilla hasta que
+`wm_term_redimensionar_si` la ajusta. Si se calcula con la ventana y la nueva es más
+pequeña, el cursor queda fuera y el siguiente byte del PTY es `bytes: out of bounds`.
+Quien llame a `wm_integrar` con una terminal debe redimensionarla después. Con F4 se
+veía en `soso-wm --prueba` (1 de cada 3): el prompt y el CREAR de `demo-cliente`
+llegaban en el mismo despertar.
+
+Texto con TrueType que empieza a la izquierda del búfer (una región que corta una
+pestaña): `ttf_pen_px` redondea hacia abajo. Con `/`, que trunca hacia 0, salía 1 px a la
+derecha y sólo se veía a través de las esquinas del ctx.
 
 ### Repintado con escena GPU
 

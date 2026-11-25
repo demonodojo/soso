@@ -1547,6 +1547,33 @@ pub fn ip_cmd(args: &[&str]) {
     }
 }
 
+/// Para `SYS_ESPERAR`: ¿un `read` (o un `accept`, si es un listener) del slot
+/// volvería ya? Datos, fin de flujo o conexión pendiente. Un slot que no existe
+/// cuenta como listo; con el candado de red ocupado, como no listo (se vuelve a
+/// mirar en la pasada siguiente).
+pub fn tcp_legible(slot: usize) -> bool {
+    let Some(net) = NET.get() else { return true };
+    let Some(n) = net.try_lock() else { return false };
+    let Some(entry) = n.user_tcp.entries.get(slot).and_then(|e| e.as_ref()) else {
+        return true;
+    };
+    if entry.closed {
+        return true;
+    }
+    if entry.loop_listener || entry.role == tcp_user::TcpRole::Listening {
+        return (entry.loop_listener && loopback::has_pending(slot))
+            || tcp_user::tiene_conexion(&n.sockets, entry.handle);
+    }
+    if entry.loopback {
+        return match entry.loop_pair {
+            Some(pair) => loopback::legible(pair, entry.loop_side),
+            None => true,
+        };
+    }
+    let s = n.sockets.get::<tcp::Socket>(entry.handle);
+    s.can_recv() || !s.may_recv()
+}
+
 pub fn tcp_listener_ready(slot: usize) -> bool {
     let Some(net) = NET.get() else { return false };
     // Ver la nota de `tcp_is_connected`.

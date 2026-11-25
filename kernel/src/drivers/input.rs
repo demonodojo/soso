@@ -20,6 +20,11 @@ pub fn push(ev: InputEvent) {
     });
 }
 
+/// ¿Hay eventos en cola? Para `SYS_ESPERAR`; con el candado ocupado, «sí».
+pub fn hay_eventos() -> bool {
+    without_interrupts(|| EVENTS.try_lock().map_or(true, |q| !q.is_empty()))
+}
+
 pub fn poll(out: &mut [InputEvent]) -> usize {
     without_interrupts(|| {
         let mut q = EVENTS.lock();

@@ -11,6 +11,7 @@
 pub mod addrspace;
 pub mod argv;
 pub mod elf;
+pub mod espera;
 pub mod fcache;
 pub mod futex;
 pub mod mmap;
@@ -93,6 +94,10 @@ pub enum State {
         /// 0 = sin límite; si no, uptime_ms al que expira con -EAGAIN.
         deadline_ms: u64,
     },
+    /// `SYS_ESPERAR`: las fuentes van en `Process::espera`; `lista` es el
+    /// puntero de usuario donde se marcan las listas al despertar.
+    /// `deadline_ms` = 0 sin plazo.
+    WaitingEventos { lista: u64, deadline_ms: u64 },
     Zombie(u8),
 }
 
@@ -290,6 +295,8 @@ pub struct Process {
     pub is_thread: bool,
     /// Dirección de usuario (futex) para `join`; 0 si no aplica.
     pub join_uaddr: u64,
+    /// Fuentes de `SYS_ESPERAR` mientras está en `WaitingEventos`.
+    pub espera: Vec<(u32, espera::Fuente)>,
 }
 
 pub static PROCS: Mutex<Vec<Process>> = Mutex::new(Vec::new());
@@ -1420,6 +1427,7 @@ pub fn spawn_console_io_cwd(
         env: env_block,
         is_thread: false,
         join_uaddr: 0,
+        espera: Vec::new(),
     });
     // Sesión nueva sólo al **entrar** en el PTY (el WM lanza la shell de una
     // terminal). Lo que esa shell lanza dentro del mismo PTY sigue en su
@@ -1527,6 +1535,7 @@ pub fn thread_spawn(entry: u64, arg: u64, stack_top: u64, join_uaddr: u64) -> Re
         env,
         is_thread: true,
         join_uaddr,
+        espera: Vec::new(),
     });
     crate::arch::apic::kick_idle_cpus();
     Ok(tid)
@@ -2041,6 +2050,7 @@ extern "C" fn schedule_inner() -> ! {
         for pid in sigpipe {
             signal_one(&mut procs, pid, soso_abi::SIGPIPE as u8);
         }
+        espera::despertar(&mut procs, now);
         // Despertar operaciones TCP bloqueantes.
         for i in 0..procs.len() {
             if let State::WaitingSocket {

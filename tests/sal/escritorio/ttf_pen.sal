@@ -1,0 +1,21 @@
+import "../../../user/sal/escritorio/ttf.sal"
+
+# El glifo cae en el píxel más cercano también a la izquierda del búfer: con
+# `/` (trunca hacia 0) un texto cortado por una región salía 1 px a la derecha.
+fn main() -> Int ! alloc
+    if ttf_pen_px(0) != 0
+        1
+    elsif ttf_pen_px(127) != 0
+        2
+    elsif ttf_pen_px(128) != 1
+        3
+    elsif ttf_pen_px(-129) != -1
+        4
+    elsif ttf_pen_px(-128) != 0
+        5
+    elsif ttf_pen_px(-23 * 256) != -23
+        6
+    elsif ttf_pen_px(-23 * 256 + 200) != -22
+        7
+    else
+        0

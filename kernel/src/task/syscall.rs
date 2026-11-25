@@ -393,6 +393,7 @@ extern "C" fn dispatch(f: &mut SyscallFrame) -> i64 {
         abi::SYS_PTY_RESIZE => sys_pty_resize(a1, a2, a3),
         abi::SYS_TTY_SIZE => sys_tty_size(),
         abi::SYS_ISATTY => sys_isatty(a1),
+        abi::SYS_ESPERAR => sys_esperar(f, a1, a2, a3),
         abi::SYS_SIGACTION => sys_sigaction(a1, a2, a3, a4),
         abi::SYS_SIGRETURN => sys_sigreturn(f),
         abi::SYS_SIGPROCMASK => sys_sigprocmask(a1, a2),
@@ -2395,6 +2396,7 @@ fn proc_state_abi(s: super::State) -> u8 {
         State::WaitingPipe { .. } => PROC_STATE_WAIT_PIPE,
         State::WaitingFutex { .. } => PROC_STATE_WAIT_FUTEX,
         State::WaitingSocket { .. } => PROC_STATE_WAIT_SOCKET,
+        State::WaitingEventos { .. } => abi::PROC_STATE_WAIT_EVENTOS,
         State::Zombie(_) => PROC_STATE_ZOMBIE,
     }
 }
@@ -3434,6 +3436,59 @@ fn sys_tty_size() -> Result<u64, i64> {
 /// `isatty(3)`: `Fd::Tty` es la consola del proceso y `PtyMaster` el maestro
 /// de un pseudo-terminal; un fd cerrado o fuera de rango también da 0, no
 /// `EBADF`, que es lo que espera `isatty`.
+/// `SYS_ESPERAR` (contrato en `soso_abi::SYS_ESPERAR`). Mira las fuentes una
+/// vez; si nada está listo y hay plazo, bloquea en `WaitingEventos` y el
+/// planificador las vuelve a mirar en cada pasada (`espera::despertar`).
+fn sys_esperar(f: &mut SyscallFrame, lista: u64, n: u64, plazo_ms: u64) -> Result<u64, i64> {
+    if n == 0 || n > abi::ESPERAR_MAX {
+        return Err(-abi::EINVAL);
+    }
+    let bytes = n * 4;
+    if !user_range_ok(lista, bytes, true) {
+        return Err(-abi::EFAULT);
+    }
+    let mut raw = alloc::vec![0u8; bytes as usize];
+    let pid = super::current_pid();
+    let (marcada, listos) = {
+        let mut procs = super::PROCS.lock();
+        let idx = procs.iter().position(|p| p.pid == pid).ok_or(-abi::ESRCH)?;
+        procs[idx]
+            .space
+            .as_ref()
+            .ok_or(-abi::EFAULT)?
+            .read(lista, &mut raw)
+            .ok_or(-abi::EFAULT)?;
+        let fuentes: Vec<(u32, super::espera::Fuente)> = raw
+            .chunks_exact(4)
+            .map(|c| {
+                let e = u32::from_le_bytes([c[0], c[1], c[2], c[3]]) & !abi::ESPERAR_LISTO;
+                (e, super::espera::resolver(&procs[idx], e))
+            })
+            .collect();
+        let (m, k) = super::espera::marcar(&fuentes, &procs);
+        if k == 0 && plazo_ms != 0 {
+            procs[idx].espera = fuentes;
+        }
+        (m, k)
+    };
+    if listos > 0 || plazo_ms == 0 {
+        super::with_current(|p| {
+            p.space
+                .as_ref()
+                .ok_or(-abi::EFAULT)?
+                .write(lista, &marcada)
+                .ok_or(-abi::EFAULT)
+        })?;
+        return Ok(listos);
+    }
+    let deadline_ms = if plazo_ms == u64::MAX {
+        0
+    } else {
+        crate::arch::pit::uptime_ms().saturating_add(plazo_ms).max(1)
+    };
+    super::block_current(ctx_from_frame(f), State::WaitingEventos { lista, deadline_ms });
+}
+
 fn sys_isatty(fd: u64) -> Result<u64, i64> {
     let es_tty = with_fd(fd, |slot| Ok(matches!(slot, Fd::Tty | Fd::PtyMaster(_))))
         .unwrap_or(false);

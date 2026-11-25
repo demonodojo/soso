@@ -50,12 +50,8 @@ fn prueba_term_echo(st: &mut Estado, i: Int, cp: Int) -> Int ! alloc
         0
     else
         grid = st.tab.shm_ptr(i)
-        ww = st.tab.ww(i)
-        wh = st.tab.wh(i)
-        gw = wm_tab_gw(st, i)
-        gh = wm_tab_gh(st, i)
-        cols = wm_term_cols(ww, gw)
-        rows = wm_term_rows(wh, gh, wm_bar_h(st))
+        cols = st.tab.term_cols(i)
+        rows = st.tab.term_rows(i)
         term_busca_cp(grid, cols * rows * celda_bytes(), cols, rows, cp)
 
 fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
@@ -117,6 +113,7 @@ fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, 
                         if demo != 0
                             if vstage == 0
                                 _ig = wm_integrar(&mut st, t1i, demo_i)
+                                _tr = wm_term_redimensionar_si(&mut st, t1i)
                                 _ac = st.tab.grupo_activar(t1i)
                                 vstage = 1
                             elsif vstage == 1
