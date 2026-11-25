@@ -39,19 +39,24 @@ pub fn discover() -> Vec<HidI2cBinding> {
         informar_candidatos();
         return Vec::new();
     }
-    let (i2c_mmio, i2c_len) = mmios[0];
+    // No se sabe de qué controlador cuelga cada touchpad (el descriptor I2C
+    // lo nombra por ruta ACPI): se ofrece cada esclavo en cada controlador y
+    // `hid_i2c::init` se queda con el primero que responde con su descriptor.
     let mut out = Vec::new();
     for &(slave, gsi, gsi_flags, gpio_pin) in &slaves {
-        out.push(HidI2cBinding {
-            i2c_mmio,
-            i2c_len,
-            slave,
-            gsi,
-            gsi_flags,
-            gpio_pin,
-        });
+        for &(i2c_mmio, i2c_len) in &mmios {
+            out.push(HidI2cBinding {
+                i2c_mmio,
+                i2c_len,
+                slave,
+                gsi,
+                gsi_flags,
+                gpio_pin,
+            });
+        }
         crate::println!(
-            "hid-i2c: PNP0C50 esclavo {slave:#04x} bus mmio={i2c_mmio:#x} len={i2c_len} gsi={gsi:?} gpio={gpio_pin:?}"
+            "hid-i2c: PNP0C50 esclavo {slave:#04x} gsi={gsi:?} gpio={gpio_pin:?}; {} controlador(es) I2C",
+            mmios.len()
         );
     }
     out
@@ -96,6 +101,9 @@ fn scan_amd_gpio(aml: &[u8]) -> Option<AmdGpioBlock> {
     None
 }
 
+/// `EISAID("PNP0C50")` en AML: DWordConst (0x0C) + 0x41 0xD0 0x0C 0x50.
+const PNP0C50_EISAID: [u8; 5] = [0x0C, 0x41, 0xD0, 0x0C, 0x50];
+
 fn scan_aml(
     aml: &[u8],
     mmios: &mut Vec<(u64, u32)>,
@@ -108,7 +116,11 @@ fn scan_aml(
             }
         }
     }
-    for (off, _) in find_all(aml, b"PNP0C50") {
+    // El touchpad suele llevar un `_HID` del fabricante (ELAN…, ASUE…) y
+    // `PNP0C50` sólo en `_CID`, como cadena o como `EISAID` (DWordConst).
+    let cadenas = find_all(aml, b"PNP0C50");
+    let eisaid = find_all(aml, &PNP0C50_EISAID);
+    for (off, _) in cadenas.into_iter().chain(eisaid) {
         if let Some(slave) = scan_i2c_slave(aml, off) {
             let (gsi, gsi_flags) = scan_extended_interrupt(aml, off)
                 .map(|(g, f)| (Some(g), f))
@@ -129,8 +141,6 @@ fn informar_candidatos() {
     let mut pnp_cadena = 0usize;
     let mut pnp_eisaid = 0usize;
     let mut otros: Vec<&'static str> = Vec::new();
-    // `EISAID("PNP0C50")` en AML: DWordConst (0x0C) + 0x41 0xD0 0x0C 0x50.
-    const PNP0C50_EISAID: [u8; 5] = [0x0C, 0x41, 0xD0, 0x0C, 0x50];
     const PREFIJOS: [&[u8]; 3] = [b"AMDI", b"AMD0", b"INT3"];
     const NOMBRES: [&str; 8] = ["ACPI0C50", "MSFT0001", "ELAN", "SYNA", "ASUE", "FTCS", "PIXA", "GXTP"];
     let mut mirar = |aml: &[u8]| {
@@ -184,92 +194,110 @@ fn find_all(hay: &[u8], needle: &[u8]) -> Vec<(usize, usize)> {
     out
 }
 
+/// Tramo del `Device` de AML que contiene `off`: de su `DeviceOp` al final
+/// del paquete. Los recursos de un dispositivo (`_CRS`) están dentro de él, y
+/// buscarlos en una ventana fija a partir del `_HID` acababa leyendo los del
+/// dispositivo siguiente. Si no se encuentra, una ventana de respaldo.
+fn rango_device(aml: &[u8], off: usize) -> (usize, usize) {
+    let tope = off.saturating_sub(256 * 1024);
+    let mut i = off.min(aml.len().saturating_sub(2));
+    while i > tope {
+        i -= 1;
+        // DeviceOp = ExtOpPrefix (0x5B) + 0x82, PkgLength, NameString.
+        if aml[i] != 0x5B || aml.get(i + 1) != Some(&0x82) {
+            continue;
+        }
+        let Some((len, n)) = pkg_length(aml, i + 2) else {
+            continue;
+        };
+        let fin = i + 2 + len;
+        let nombre = i + 2 + n;
+        let nombre_ok = aml
+            .get(nombre..nombre + 4)
+            .is_some_and(|s| s.iter().all(|&c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_'));
+        if nombre_ok && fin > off && fin <= aml.len() {
+            return (i, fin);
+        }
+    }
+    (off, (off + 2048).min(aml.len()))
+}
+
+/// PkgLength de AML en `at`: (longitud, bytes que ocupa la propia codificación).
+/// La longitud cuenta desde el primer byte de la codificación.
+fn pkg_length(aml: &[u8], at: usize) -> Option<(usize, usize)> {
+    let b0 = *aml.get(at)? as usize;
+    let extra = b0 >> 6;
+    if extra == 0 {
+        return Some((b0 & 0x3F, 1));
+    }
+    let mut len = b0 & 0x0F;
+    for k in 0..extra {
+        len |= (*aml.get(at + 1 + k)? as usize) << (4 + 8 * k);
+    }
+    Some((len, 1 + extra))
+}
+
+/// Descriptores grandes de recursos (ACPI 6.4 §6.4.3) con etiqueta `tag`
+/// dentro del `Device` que contiene `from`: `(inicio, longitud del cuerpo)`.
+fn descriptores(aml: &[u8], from: usize, tag: u8) -> impl Iterator<Item = (usize, usize)> + '_ {
+    let (ini, fin) = rango_device(aml, from);
+    (ini..fin.saturating_sub(3)).filter_map(move |i| {
+        if aml[i] != tag {
+            return None;
+        }
+        let len = u16::from_le_bytes([aml[i + 1], aml[i + 2]]) as usize;
+        (i + 3 + len <= fin).then_some((i, len))
+    })
+}
+
+/// Memory32Fixed (0x86, longitud 9): información, base y tamaño.
 fn scan_memory32fixed(aml: &[u8], from: usize) -> Option<(u64, u32)> {
-    let end = (from + 800).min(aml.len());
-    let mut i = from;
-    while i + 11 <= end {
-        if aml[i] == 0x86 && aml[i + 1] == 0x09 {
-            let addr = u32::from_le_bytes(aml[i + 3..i + 7].try_into().ok()?);
-            let len = u32::from_le_bytes(aml[i + 7..i + 11].try_into().ok()?);
-            if addr != 0 && len >= 0x1000 {
-                return Some((u64::from(addr), len));
-            }
-        }
-        i += 1;
-    }
-    None
+    descriptores(aml, from, 0x86)
+        .filter(|&(_, len)| len == 9)
+        .find_map(|(i, _)| {
+            let addr = u32::from_le_bytes(aml[i + 4..i + 8].try_into().ok()?);
+            let len = u32::from_le_bytes(aml[i + 8..i + 12].try_into().ok()?);
+            (addr != 0 && len >= 0x1000).then_some((u64::from(addr), len))
+        })
 }
 
-/// Interrupt extendido (0x89): primer GSI de la tabla.
+/// Interrupt extendido (0x89): flags en el byte 3, nº de entradas en el 4 y
+/// el primer GSI en el 5.
 fn scan_extended_interrupt(aml: &[u8], from: usize) -> Option<(u32, u16)> {
-    let end = (from + 800).min(aml.len());
-    let mut i = from;
-    while i + 9 <= end {
-        if aml[i] == 0x89 {
-            let len = u16::from_le_bytes([aml[i + 1], aml[i + 2]]) as usize;
-            if len >= 6 && i + 3 + len <= aml.len() {
-                let flags = aml[i + 3] as u16;
-                let table_len = aml[i + 4] as usize;
-                if table_len >= 1 && len >= 5 + 4 {
-                    let gsi = u32::from_le_bytes(aml[i + 5..i + 9].try_into().ok()?);
-                    if gsi != 0 && gsi < 4096 {
-                        return Some((gsi, flags));
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    None
+    descriptores(aml, from, 0x89)
+        .filter(|&(i, len)| len >= 6 && aml[i + 4] >= 1)
+        .find_map(|(i, _)| {
+            let flags = aml[i + 3] as u16;
+            let gsi = u32::from_le_bytes(aml[i + 5..i + 9].try_into().ok()?);
+            (gsi != 0 && gsi < 4096).then_some((gsi, flags))
+        })
 }
 
-/// GpioInt (0x8C): primer pin de la tabla de pines.
+/// GpioInt (0x8C, tipo de conexión 0 en el byte 4): primer pin. El
+/// desplazamiento de la tabla de pines (bytes 14-15) cuenta desde el inicio
+/// del descriptor.
 fn scan_gpio_int_pin(aml: &[u8], from: usize) -> Option<u16> {
-    let end = (from + 800).min(aml.len());
-    let mut i = from;
-    while i + 16 <= end {
-        if aml[i] == 0x8c {
-            let len = u16::from_le_bytes([aml[i + 1], aml[i + 2]]) as usize;
-            if len < 12 || i + 3 + len > aml.len() {
-                i += 1;
-                continue;
+    descriptores(aml, from, 0x8C)
+        .filter(|&(i, len)| len >= 20 && aml[i + 4] == 0)
+        .find_map(|(i, len)| {
+            let tabla = u16::from_le_bytes([aml[i + 14], aml[i + 15]]) as usize;
+            if tabla < 23 || tabla + 2 > len + 3 {
+                return None;
             }
-            // Byte 4: Connection Type — 0 = Interrupt.
-            if aml[i + 4] != 0 {
-                i += 1;
-                continue;
-            }
-            let pin_table_off = u16::from_le_bytes([aml[i + 10], aml[i + 11]]) as usize;
-            let pin_at = i + pin_table_off;
-            if pin_at + 2 <= aml.len() && pin_table_off >= 12 {
-                let pin = u16::from_le_bytes([aml[pin_at], aml[pin_at + 1]]);
-                if pin < 512 {
-                    return Some(pin);
-                }
-            }
-        }
-        i += 1;
-    }
-    None
+            let pin = u16::from_le_bytes([aml[i + tabla], aml[i + tabla + 1]]);
+            (pin < 512).then_some(pin)
+        })
 }
 
-/// I2CSerialBusV2 en `_CRS` (tipo I2C = 0, esclavo 7 bits).
+/// I2cSerialBus (0x8E, tipo de bus 1 en el byte 5): la dirección del esclavo
+/// va en los bytes 16-17 (7 bits salvo el modo de 10, que no se admite).
 fn scan_i2c_slave(aml: &[u8], from: usize) -> Option<u8> {
-    let end = (from + 800).min(aml.len());
-    let mut i = from;
-    while i + 8 <= end {
-        if aml[i] & 0x80 != 0 {
-            let len = (aml[i] & 0x7f) as usize;
-            if i + 1 < end && aml[i + 1] == 0x01 && len >= 8 && i + len + 1 <= end {
-                if aml[i + 4] == 0 {
-                    let raw = u16::from_le_bytes([aml[i + 6], aml[i + 7]]);
-                    return Some((raw >> 1) as u8);
-                }
-            }
-            i += len.saturating_add(1).max(1);
-        } else {
-            i += 1;
-        }
-    }
-    None
+    descriptores(aml, from, 0x8E)
+        .filter(|&(i, len)| len >= 15 && aml[i + 5] == 1)
+        .find_map(|(i, _)| {
+            let diez_bits = aml[i + 7] & 1 != 0;
+            let tipo_len = u16::from_le_bytes([aml[i + 10], aml[i + 11]]);
+            let slave = u16::from_le_bytes([aml[i + 16], aml[i + 17]]);
+            (!diez_bits && tipo_len >= 6 && (0x08..0x78).contains(&slave)).then_some(slave as u8)
+        })
 }

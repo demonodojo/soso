@@ -161,10 +161,28 @@ fn find_table(rsdp_phys: u64, sig: &[u8; 4]) -> Option<u64> {
 
 /// `true` si el RSDP es válido. `f` devuelve `true` para dejar de recorrer.
 /// Invoca `visit` por cada tabla ACPI con la firma dada (DSDT, SSDT, …).
+///
+/// La DSDT no figura en el XSDT/RSDT: se llega a ella por la FADT (`X_DSDT` o
+/// `DSDT`). Buscarla en la lista no la encontraba nunca, y el touchpad I2C y
+/// su controlador, que suelen declararse ahí, no aparecían en ninguna placa.
 pub fn each_table(sig: &[u8; 4], mut visit: impl FnMut(&[u8])) {
     let Some(rsdp_phys) = RSDP.get().copied() else {
         return;
     };
+    if sig == b"DSDT" {
+        let mut dsdt = None;
+        let _ = visitar_tablas(rsdp_phys, b"FACP", |fadt| {
+            dsdt = dsdt_phys(fadt, leer::<u32>(fadt + 4) as usize);
+            true
+        });
+        if let Some(p) = dsdt {
+            let len = leer::<u32>(p + 4) as usize;
+            if bytes(p, 4) == b"DSDT" && (36..16 * 1024 * 1024).contains(&len) {
+                visit(bytes(p, len));
+            }
+        }
+        return;
+    }
     let _ = visitar_tablas(rsdp_phys, sig, |table| {
         let len = leer::<u32>(table + 4) as usize;
         if len >= 36 {

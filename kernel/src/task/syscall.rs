@@ -1072,15 +1072,21 @@ static HAY_FDS_APLAZADOS: core::sync::atomic::AtomicBool =
 /// sobreviviera al cierre de la sesión un proceso con un socket y fuera de la
 /// CPU — `soso-wm --prueba-web` o `--prueba-layout` desde SSH.
 pub fn aplazar_cierre_fds(fds: &mut Vec<Option<Fd>>) {
-    let mut lista = FDS_APLAZADOS.lock();
     for slot in fds.iter_mut() {
         if let Some(fd) = slot.take() {
-            lista.push(fd);
+            aplazar_cierre(fd);
         }
     }
-    if !lista.is_empty() {
+}
+
+/// Encola un descriptor para [`drenar_fds_aplazados`]. Con las interrupciones
+/// cerradas: también se llega aquí desde el temporizador (un proceso muerto
+/// que se desaloja), y la lista la vacía el planificador en el mismo core.
+fn aplazar_cierre(fd: Fd) {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        FDS_APLAZADOS.lock().push(fd);
         HAY_FDS_APLAZADOS.store(true, core::sync::atomic::Ordering::Release);
-    }
+    });
 }
 
 /// Cierra lo aplazado por [`aplazar_cierre_fds`]. Sin el candado de la red
@@ -1089,21 +1095,37 @@ pub fn drenar_fds_aplazados() {
     if !HAY_FDS_APLAZADOS.swap(false, core::sync::atomic::Ordering::AcqRel) {
         return;
     }
-    let mut lista = core::mem::take(&mut *FDS_APLAZADOS.lock());
-    let mut tabla: Vec<Option<Fd>> = lista.drain(..).map(Some).collect();
-    close_all_fds(&mut tabla);
+    let lista = x86_64::instructions::interrupts::without_interrupts(|| {
+        core::mem::take(&mut *FDS_APLAZADOS.lock())
+    });
+    for fd in lista {
+        if let Fd::PtyMaster(pty) = fd {
+            super::pty::cerrar_master_diferido(pty);
+            continue;
+        }
+        let _ = drop_fd(fd);
+    }
 }
 
+/// Cierra los fds de un proceso que muere. Los llamadores tienen `PROCS`
+/// cogido, así que lo que pediría otro candado se aplaza:
+/// - el maestro de un pty volvería a pedir `PROCS` (se cierra en
+///   `pty::drenar_cierres`);
+/// - un socket TCP pide el candado de la red, y el servicio SSH lo tiene
+///   mientras pide `PROCS`: matar a un proceso con sockets (el escritorio, con
+///   Ctrl+Alt+Retroceso o el vigilante) con una sesión SSH viva colgaba la
+///   máquina entera. Se cierra en [`drenar_fds_aplazados`], al principio de la
+///   siguiente vuelta del planificador.
 pub fn close_all_fds(fds: &mut Vec<Option<Fd>>) {
     for slot in fds.iter_mut() {
         if let Some(fd) = slot.take() {
-            // Los llamadores tienen `PROCS` cogido: el maestro de un pty lo
-            // volvería a pedir. Se cierra luego, en `pty::drenar_cierres`.
-            if let Fd::PtyMaster(pty) = fd {
-                super::pty::cerrar_master_diferido(pty);
-                continue;
+            match fd {
+                Fd::PtyMaster(pty) => super::pty::cerrar_master_diferido(pty),
+                Fd::Tcp { .. } => aplazar_cierre(fd),
+                fd => {
+                    let _ = drop_fd(fd);
+                }
             }
-            let _ = drop_fd(fd);
         }
     }
 }

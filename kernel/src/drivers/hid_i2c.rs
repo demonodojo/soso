@@ -44,7 +44,11 @@ pub fn init() {
     let bindings = acpi_hid_i2c::discover();
     let mut devs = DEVICES.lock();
     for b in bindings.iter().copied() {
+        if devs.iter().any(|d| d.slave == b.slave) {
+            continue;
+        }
         if let Some(d) = probe_binding(b) {
+            crate::println!("hid-i2c: esclavo {:#04x} responde en mmio={:#x}", b.slave, b.i2c_mmio);
             arm_attention(b);
             devs.push(d);
         }
