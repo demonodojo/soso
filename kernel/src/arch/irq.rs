@@ -181,7 +181,7 @@ extern "sysv64" fn soft_poll_shim(flags: u64, _b: u64) -> u64 {
         crate::net::poll();
     }
     if flags & SOFT_HID != 0 {
-        crate::drivers::hid_i2c::poll();
+        crate::drivers::hid_i2c::poll_por_irq();
     }
     if flags & SOFT_HDA != 0 {
         crate::drivers::hda::service_soft();
