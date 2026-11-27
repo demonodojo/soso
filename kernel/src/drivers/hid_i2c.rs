@@ -32,6 +32,8 @@ static ULTIMO_SONDEO: AtomicU64 = AtomicU64::new(0);
 /// la lectura la dispara la interrupción y esto es sólo de respaldo.
 const SONDEO_SIN_IRQ_MS: u64 = 25;
 const SONDEO_CON_IRQ_MS: u64 = 250;
+/// Tope de `wMaxInputLength` que se lee de una vez (pila del planificador).
+const MAX_INFORME: usize = 256;
 /// Diagnóstico: lecturas hechas, saltadas por la línea inactiva, vacías
 /// (longitud ≤ 2) y con datos. Se vuelcan cuando cambian, como mucho cada
 /// [`DIAG_MS`] y [`DIAG_MAX`] veces.
@@ -73,7 +75,6 @@ const MAX_FALLOS: u32 = 50;
 struct HidI2cDevice {
     bus: DesignWareI2c,
     slave: u8,
-    input_reg: u16,
     max_input: u16,
     state: PointerState,
     fallos: u32,
@@ -184,10 +185,18 @@ fn sondear(por_irq: bool) {
         return;
     }
     let ahora = crate::arch::pit::uptime_ms();
-    if !por_irq {
+    // El camino blando de IRQ sólo corre si la interrupción cortó a ring 3;
+    // si cortó al kernel, la marca se queda puesta y la recoge el
+    // planificador aquí, sin esperar al periodo de respaldo. Linux lee en
+    // cada interrupción.
+    let irq_pendiente = !por_irq && tomar_irq_pendiente();
+    if !por_irq && !irq_pendiente {
         let gpio_caido =
             POR_GPIO.load(Ordering::Relaxed) && super::amd_gpio::atencion_activa().is_none();
-        let periodo = if CON_ATENCION.load(Ordering::Relaxed) && !gpio_caido {
+        // Con la línea activa hay informe esperando: no esperar al respaldo
+        // lento aunque la IRQ no haya llegado.
+        let activa = super::amd_gpio::atencion_activa() == Some(true);
+        let periodo = if CON_ATENCION.load(Ordering::Relaxed) && !gpio_caido && !activa {
             SONDEO_CON_IRQ_MS
         } else {
             SONDEO_SIN_IRQ_MS
@@ -217,12 +226,11 @@ fn sondear(por_irq: bool) {
         if dev.fallos >= MAX_FALLOS {
             continue;
         }
-        let mut buf = [0u8; 64];
-        let len = dev.max_input.min(64) as usize;
-        if !dev
-            .bus
-            .read_reg16(dev.slave, dev.input_reg, &mut buf[..len])
-        {
+        // Linux lee `wMaxInputLength` entero; cortar antes puede dejar al
+        // dispositivo con el informe a medias y la línea activa.
+        let mut buf = [0u8; MAX_INFORME];
+        let len = (dev.max_input as usize).clamp(4, MAX_INFORME);
+        if !dev.bus.read(dev.slave, &mut buf[..len]) {
             dev.fallos += 1;
             if dev.fallos == MAX_FALLOS && !por_irq {
                 crate::klogln!(
@@ -312,9 +320,9 @@ fn probe_binding(b: HidI2cBinding) -> Option<HidI2cDevice> {
     // de longitud 0 y levanta la atención; hasta leerlo, algunos la retienen.
     if bus.write(b.slave, &[cmd as u8, (cmd >> 8) as u8, 0x00, OP_RESET]) {
         crate::arch::tsc::delay_ms(100);
-        let mut r = [0u8; 4];
-        let ok = bus.read_reg16(b.slave, hd.input_reg, &mut r);
-        crate::klogln!("hid-i2c: esclavo {:#04x} RESET → {ok} {:02x?}", b.slave, r);
+        let mut r = vec![0u8; (hd.max_input as usize).clamp(4, MAX_INFORME)];
+        let ok = bus.read(b.slave, &mut r);
+        crate::klogln!("hid-i2c: esclavo {:#04x} RESET → {ok} {:02x?}", b.slave, &r[..r.len().min(8)]);
     } else {
         crate::klogln!("hid-i2c: esclavo {:#04x} no aceptó RESET", b.slave);
     }
@@ -335,11 +343,10 @@ fn probe_binding(b: HidI2cBinding) -> Option<HidI2cDevice> {
         crate::klogln!("hid-i2c: descriptor sin puntero; boot fallback");
         PointerReportLayout::boot()
     });
-    crate::klogln!("hid-i2c: formato {:?}", layout);
+    crate::klogln!("hid-i2c: formato {:?} max_input={}", layout, { hd.max_input });
     Some(HidI2cDevice {
         bus,
         slave: b.slave,
-        input_reg: hd.input_reg,
         max_input: hd.max_input.max(8),
         state: PointerState::new(layout),
         fallos: 0,

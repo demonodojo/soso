@@ -145,6 +145,33 @@ impl DesignWareI2c {
         ok
     }
 
+    /// Lectura directa de `out.len()` bytes, sin escribir registro antes.
+    /// Es como se lee un informe de entrada de HID-over-I2C (Linux hace
+    /// `i2c_master_recv`): escribir antes el registro de entrada lo toma
+    /// como comando y el informe pendiente no sale.
+    pub fn read(&self, slave: u8, out: &mut [u8]) -> bool {
+        if out.is_empty() {
+            return false;
+        }
+        self.enable(slave);
+        let n = out.len();
+        for (i, slot) in out.iter_mut().enumerate() {
+            let mut cmd = CMD_READ;
+            if i + 1 == n {
+                cmd |= CMD_STOP;
+            }
+            self.wr32(IC_DATA_CMD, cmd);
+            if !self.wait_rx() {
+                self.disable();
+                return false;
+            }
+            *slot = (self.rd32(IC_DATA_CMD) & 0xff) as u8;
+        }
+        let ok = self.wait_tx_empty() && !self.abortada();
+        self.disable();
+        ok
+    }
+
     /// Escribe registro de 16 bits (HID-over-I2C) y lee `len` bytes.
     pub fn read_reg16(&self, slave: u8, reg: u16, out: &mut [u8]) -> bool {
         if out.is_empty() {
