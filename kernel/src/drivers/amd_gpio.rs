@@ -31,6 +31,9 @@ static BASE: AtomicU64 = AtomicU64::new(0);
 static PIN: AtomicU16 = AtomicU16::new(0xffff);
 static LEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static GSI: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static ACTIVO_ALTO: AtomicBool = AtomicBool::new(false);
+/// Interrupciones atendidas (diagnóstico).
+pub static IRQS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 /// Freno contra una tormenta: interrupciones desde la última marca de tiempo.
 static RAFAGA: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static RAFAGA_DESDE: AtomicU64 = AtomicU64::new(0);
@@ -50,7 +53,15 @@ fn rw(base: u64, off: u64, v: u32) {
 }
 
 /// Habilita IRQ de flanco en `pin` y enruta el GSI del bloque GPIO.
-pub fn arm_pin(mmio: u64, mmio_len: u32, pin: u16, gsi: u32, gsi_flags: u16) -> Result<(), &'static str> {
+pub fn arm_pin(
+    mmio: u64,
+    mmio_len: u32,
+    pin: u16,
+    gsi: u32,
+    gsi_flags: u16,
+    activo_alto: bool,
+) -> Result<(), &'static str> {
+    ACTIVO_ALTO.store(activo_alto, Ordering::Release);
     if mmio == 0 || mmio_len < 0x300 {
         return Err("mmio gpio corto");
     }
@@ -109,6 +120,7 @@ fn gpio_irq() {
     if tormenta() {
         return;
     }
+    IRQS.fetch_add(1, Ordering::Relaxed);
     // Todos los pendientes, no sólo el nuestro: si quedara uno, la línea no
     // bajaría nunca.
     let len = LEN.load(Ordering::Acquire);
@@ -131,16 +143,21 @@ fn gpio_irq() {
 /// Bit de nivel del pin (`PIN_STS_OFF` en `pinctrl-amd`).
 const PIN_STS_OFF: u32 = 16;
 
-/// `Some(true)` si la línea de atención está activa (nivel bajo: la de
-/// HID-over-I2C lo es, y se queda así mientras haya un informe sin leer).
-/// `None` si no hay pin armado.
-pub fn atencion_activa() -> Option<bool> {
+/// Nivel eléctrico del pin armado (`true` = alto), o `None` sin pin.
+pub fn nivel() -> Option<bool> {
     if !LISTO.load(Ordering::Acquire) {
         return None;
     }
     let base = BASE.load(Ordering::Acquire);
     let pin = PIN.load(Ordering::Acquire);
-    Some(rr(base, pin as u64 * 4) & (1 << PIN_STS_OFF) == 0)
+    Some(rr(base, pin as u64 * 4) & (1 << PIN_STS_OFF) != 0)
+}
+
+/// `Some(true)` si la línea de atención está activa, con la polaridad que
+/// declara ACPI (en HID-over-I2C suele ser baja, y se queda así mientras haya
+/// un informe sin leer). `None` si no hay pin armado.
+pub fn atencion_activa() -> Option<bool> {
+    nivel().map(|alto| alto == ACTIVO_ALTO.load(Ordering::Acquire))
 }
 
 /// `true` (y la línea queda enmascarada) si llegan interrupciones sin parar:

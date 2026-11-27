@@ -14,6 +14,9 @@ pub struct HidI2cBinding {
     pub gsi_flags: u16,
     /// Pin GpioInt (AMDI0030), si no hay GSI directo.
     pub gpio_pin: Option<u16>,
+    /// Polaridad del GpioInt según ACPI: `true` = activa en alto. HID-over-I2C
+    /// la pide en bajo, pero manda lo que declara la placa.
+    pub gpio_activo_alto: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -26,7 +29,7 @@ pub struct AmdGpioBlock {
 
 pub fn discover() -> Vec<HidI2cBinding> {
     let mut mmios: Vec<(u64, u32)> = Vec::new();
-    let mut slaves: Vec<(u8, Option<u32>, u16, Option<u16>)> = Vec::new();
+    let mut slaves: Vec<Esclavo> = Vec::new();
     acpi::each_table(b"DSDT", |aml| scan_aml(aml, &mut mmios, &mut slaves));
     acpi::each_table(b"SSDT", |aml| scan_aml(aml, &mut mmios, &mut slaves));
     if mmios.is_empty() {
@@ -43,7 +46,9 @@ pub fn discover() -> Vec<HidI2cBinding> {
     // lo nombra por ruta ACPI): se ofrece cada esclavo en cada controlador y
     // `hid_i2c::init` se queda con el primero que responde con su descriptor.
     let mut out = Vec::new();
-    for &(slave, gsi, gsi_flags, gpio_pin) in &slaves {
+    for &(slave, gsi, gsi_flags, gpio) in &slaves {
+        let gpio_pin = gpio.map(|g| g.0);
+        let gpio_activo_alto = gpio.is_some_and(|g| g.1);
         for &(i2c_mmio, i2c_len) in &mmios {
             out.push(HidI2cBinding {
                 i2c_mmio,
@@ -52,10 +57,11 @@ pub fn discover() -> Vec<HidI2cBinding> {
                 gsi,
                 gsi_flags,
                 gpio_pin,
+                gpio_activo_alto,
             });
         }
         crate::println!(
-            "hid-i2c: PNP0C50 esclavo {slave:#04x} gsi={gsi:?} gpio={gpio_pin:?}; {} controlador(es) I2C",
+            "hid-i2c: PNP0C50 esclavo {slave:#04x} gsi={gsi:?} gpio={gpio:?} (pin, activo en alto); {} controlador(es) I2C",
             mmios.len()
         );
     }
@@ -110,11 +116,10 @@ fn scan_amd_gpio(aml: &[u8]) -> Option<AmdGpioBlock> {
 /// `EISAID("PNP0C50")` en AML: DWordConst (0x0C) + 0x41 0xD0 0x0C 0x50.
 const PNP0C50_EISAID: [u8; 5] = [0x0C, 0x41, 0xD0, 0x0C, 0x50];
 
-fn scan_aml(
-    aml: &[u8],
-    mmios: &mut Vec<(u64, u32)>,
-    slaves: &mut Vec<(u8, Option<u32>, u16, Option<u16>)>,
-) {
+/// (esclavo, GSI, flags del GSI, (pin GpioInt, activo en alto)).
+type Esclavo = (u8, Option<u32>, u16, Option<(u16, bool)>);
+
+fn scan_aml(aml: &[u8], mmios: &mut Vec<(u64, u32)>, slaves: &mut Vec<Esclavo>) {
     for (off, _) in find_all(aml, b"AMDI0010") {
         if let Some(pair) = scan_memory32fixed(aml, off, 0x1000) {
             if !mmios.iter().any(|m| m.0 == pair.0) {
@@ -293,10 +298,11 @@ fn flags_madt(recurso: u8) -> u16 {
     polaridad | (disparo << 2)
 }
 
-/// GpioInt (0x8C, tipo de conexión 0 en el byte 4): primer pin. El
-/// desplazamiento de la tabla de pines (bytes 14-15) cuenta desde el inicio
-/// del descriptor.
-fn scan_gpio_int_pin(aml: &[u8], from: usize) -> Option<u16> {
+/// GpioInt (0x8C, tipo de conexión 0 en el byte 4): primer pin y si es activo
+/// en alto. El desplazamiento de la tabla de pines (bytes 14-15) cuenta desde
+/// el inicio del descriptor; la polaridad va en los bits 1-2 de los flags de
+/// interrupción (bytes 7-8): 0 = alto, 1 = bajo, 2 = ambos.
+fn scan_gpio_int_pin(aml: &[u8], from: usize) -> Option<(u16, bool)> {
     descriptores(aml, from, 0x8C)
         .filter(|&(i, len)| len >= 20 && aml[i + 4] == 0)
         .find_map(|(i, len)| {
@@ -305,7 +311,8 @@ fn scan_gpio_int_pin(aml: &[u8], from: usize) -> Option<u16> {
                 return None;
             }
             let pin = u16::from_le_bytes([aml[i + tabla], aml[i + tabla + 1]]);
-            (pin < 512).then_some(pin)
+            let polaridad = (aml[i + 7] >> 1) & 0b11;
+            (pin < 512).then_some((pin, polaridad == 0))
         })
 }
 

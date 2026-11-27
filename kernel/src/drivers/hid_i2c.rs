@@ -32,6 +32,41 @@ static ULTIMO_SONDEO: AtomicU64 = AtomicU64::new(0);
 /// la lectura la dispara la interrupción y esto es sólo de respaldo.
 const SONDEO_SIN_IRQ_MS: u64 = 25;
 const SONDEO_CON_IRQ_MS: u64 = 250;
+/// Diagnóstico: lecturas hechas, saltadas por la línea inactiva, vacías
+/// (longitud ≤ 2) y con datos. Se vuelcan cuando cambian, como mucho cada
+/// [`DIAG_MS`] y [`DIAG_MAX`] veces.
+static LECTURAS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static SALTADAS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static VACIAS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static CON_DATOS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static DIAG_ULTIMO: AtomicU64 = AtomicU64::new(0);
+static DIAG_FIRMA: AtomicU64 = AtomicU64::new(0);
+static DIAG_VECES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+const DIAG_MS: u64 = 2000;
+const DIAG_MAX: u32 = 40;
+
+fn quizas_diag(ahora: u64) {
+    if ahora.saturating_sub(DIAG_ULTIMO.load(Ordering::Relaxed)) < DIAG_MS
+        || DIAG_VECES.load(Ordering::Relaxed) >= DIAG_MAX
+    {
+        return;
+    }
+    let r = |c: &core::sync::atomic::AtomicU32| c.load(Ordering::Relaxed);
+    let irqs = r(&super::amd_gpio::IRQS);
+    let (l, s, v, d) = (r(&LECTURAS), r(&SALTADAS), r(&VACIAS), r(&CON_DATOS));
+    let nivel = super::amd_gpio::nivel();
+    let firma = (irqs as u64) ^ ((l as u64) << 12) ^ ((v as u64) << 24) ^ ((d as u64) << 36)
+        ^ ((nivel == Some(true)) as u64) << 63;
+    DIAG_ULTIMO.store(ahora, Ordering::Relaxed);
+    if DIAG_FIRMA.swap(firma, Ordering::Relaxed) == firma {
+        return;
+    }
+    DIAG_VECES.fetch_add(1, Ordering::Relaxed);
+    crate::klogln!(
+        "hid-i2c: diag t={ahora} irq={irqs} lecturas={l} saltadas={s} vacias={v} con_datos={d} nivel_alto={nivel:?}"
+    );
+}
+
 /// Lecturas fallidas seguidas antes de dejar de hablarle a un touchpad.
 const MAX_FALLOS: u32 = 50;
 
@@ -63,6 +98,8 @@ struct HidDesc {
 
 /// Opcode HID-over-I2C `SET_POWER` (estado 0 = encendido).
 const OP_SET_POWER: u8 = 0x08;
+/// Opcode HID-over-I2C `RESET`.
+const OP_RESET: u8 = 0x01;
 
 pub fn init() {
     let bindings = acpi_hid_i2c::discover();
@@ -114,11 +151,13 @@ fn arm_attention(b: HidI2cBinding) -> bool {
         crate::klogln!("hid-i2c: AMDI0030 sin Interrupt");
         return false;
     };
-    match super::amd_gpio::arm_pin(gpio.mmio, gpio.len, pin, gsi, gpio.gsi_flags) {
+    match super::amd_gpio::arm_pin(gpio.mmio, gpio.len, pin, gsi, gpio.gsi_flags, b.gpio_activo_alto) {
         Ok(()) => {
             POR_GPIO.store(true, Ordering::Relaxed);
             crate::println!(
-                "hid-i2c: atención por amd-gpio pin={pin} gsi={gsi} (activa ahora: {:?}; en reposo debe ser false)",
+                "hid-i2c: atención por amd-gpio pin={pin} gsi={gsi} activo_alto={} nivel_alto={:?} activa={:?}",
+                b.gpio_activo_alto,
+                super::amd_gpio::nivel(),
                 super::amd_gpio::atencion_activa()
             );
             true
@@ -158,6 +197,10 @@ fn sondear(por_irq: bool) {
         }
     }
     ULTIMO_SONDEO.store(ahora, Ordering::Relaxed);
+    // Nada de registro desde el camino de IRQ: `klogln!` coge un candado.
+    if !por_irq {
+        quizas_diag(ahora);
+    }
     // Nunca esperar: lo llaman el planificador y el camino blando de IRQ.
     let Some(mut devs) = DEVICES.try_lock() else {
         return;
@@ -167,6 +210,7 @@ fn sondear(por_irq: bool) {
     // sondeo de respaldo) devolvía otra vez el último informe: el puntero
     // se movía solo.
     if super::amd_gpio::atencion_activa() == Some(false) {
+        SALTADAS.fetch_add(1, Ordering::Relaxed);
         return;
     }
     for dev in devs.iter_mut() {
@@ -180,7 +224,7 @@ fn sondear(por_irq: bool) {
             .read_reg16(dev.slave, dev.input_reg, &mut buf[..len])
         {
             dev.fallos += 1;
-            if dev.fallos == MAX_FALLOS {
+            if dev.fallos == MAX_FALLOS && !por_irq {
                 crate::klogln!(
                     "hid-i2c: esclavo {:#04x}: {MAX_FALLOS} lecturas fallidas seguidas; lo dejo",
                     dev.slave
@@ -191,12 +235,15 @@ fn sondear(por_irq: bool) {
         dev.fallos = 0;
         // El informe de HID-over-I2C empieza con su longitud (2 bytes, que se
         // cuentan). 0 o 2 = no hay nada; lo que sigue es Report ID + datos.
+        LECTURAS.fetch_add(1, Ordering::Relaxed);
         let total = u16::from_le_bytes([buf[0], buf[1]]) as usize;
         if total <= 2 {
+            VACIAS.fetch_add(1, Ordering::Relaxed);
             continue;
         }
+        CON_DATOS.fetch_add(1, Ordering::Relaxed);
         let informe = &buf[2..total.min(len)];
-        if dev.volcar > 0 {
+        if dev.volcar > 0 && !por_irq {
             dev.volcar -= 1;
             crate::klogln!("hid-i2c: informe {:02x?}", informe);
         }
@@ -259,6 +306,17 @@ fn probe_binding(b: HidI2cBinding) -> Option<HidI2cDevice> {
     let cmd = hd.command_reg;
     if !bus.write(b.slave, &[cmd as u8, (cmd >> 8) as u8, 0x00, OP_SET_POWER]) {
         crate::klogln!("hid-i2c: esclavo {:#04x} no aceptó SET_POWER", b.slave);
+    }
+    crate::arch::tsc::delay_ms(10);
+    // RESET, como Linux tras encender: el dispositivo contesta con un informe
+    // de longitud 0 y levanta la atención; hasta leerlo, algunos la retienen.
+    if bus.write(b.slave, &[cmd as u8, (cmd >> 8) as u8, 0x00, OP_RESET]) {
+        crate::arch::tsc::delay_ms(100);
+        let mut r = [0u8; 4];
+        let ok = bus.read_reg16(b.slave, hd.input_reg, &mut r);
+        crate::klogln!("hid-i2c: esclavo {:#04x} RESET → {ok} {:02x?}", b.slave, r);
+    } else {
+        crate::klogln!("hid-i2c: esclavo {:#04x} no aceptó RESET", b.slave);
     }
     let rdesc_len = hd.rdesc_len as usize;
     if rdesc_len == 0 || rdesc_len > 4096 {
