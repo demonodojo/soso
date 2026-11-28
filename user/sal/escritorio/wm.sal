@@ -3832,6 +3832,14 @@ fn wm_raton_mover(st: &mut Estado, x: Int, y: Int, botones: Int, sw: Int, sh: In
                 _a = st.tab.set_wx(dix, nx2)
                 _a = st.tab.set_ww(dix, nw)
                 _a = st.tab.set_wh(dix, nh)
+                # La terminal sigue el borde en vivo: rejilla y tamaño del PTY
+                # (SIGWINCH) cambian con la ventana, no sólo al soltar. Si no,
+                # un programa a pantalla completa (salvi) se queda con el
+                # tamaño viejo hasta que se recalcula al final del arrastre.
+                if nw != ww
+                    _trl = wm_term_redimensionar_si(st, dix)
+                elsif nh != wh
+                    _trl = wm_term_redimensionar_si(st, dix)
             if dk == 10
                 _d = wm_marcar_dirty(st, 0, wm_bar_h(st), sw, sh)
                 _rp = wm_pedir_repintar(st)
