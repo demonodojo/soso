@@ -20,6 +20,7 @@ members = [
     "tools/convert-whisper",
     "crates/soso-http",
     "crates/soso-web-core",
+    "crates/soso-fondo",
     "crates/soso-update-core",
     "crates/soso-pkg-core",
     "crates/soso-std",

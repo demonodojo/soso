@@ -1,5 +1,12 @@
 import "ventanas.sal"
 import "fuentes.sal"
+import "iconos.sal"
+
+# Lanzador: botones de la barra superior y panel «Aplicaciones».
+#
+# Barra: «Aplicaciones» (rejilla + texto) y accesos directos de sólo icono.
+# Panel: rejilla de 3 columnas con baldosas (icono grande y nombre); la
+# primera fila son aplicaciones y la segunda, acciones del sistema.
 
 fn lanz_nada() -> Int
     0
@@ -22,73 +29,125 @@ fn lanz_tema() -> Int
 fn lanz_salir() -> Int
     4
 
+fn lanz_fondo() -> Int
+    7
+
 fn lanz_margen(gw: Int) -> Int
     metrica_margen(gw)
 
 fn lanz_separacion() -> Int
     4
 
+# ---- barra ------------------------------------------------------------------
+
 fn lanz_n_botones() -> Int
-    3
+    4
 
 fn lanz_boton_texto(i: Int) -> String ! alloc
     if i == 0
         d"Aplicaciones"
     elsif i == 1
         d"Terminal"
+    elsif i == 2
+        d"Navegador web"
     else
-        d"Web"
+        d"Archivos"
 
 fn lanz_boton_accion(i: Int) -> Int
     if i == 0
         lanz_menu()
     elsif i == 1
         lanz_terminal()
-    else
+    elsif i == 2
         lanz_web()
+    else
+        lanz_ficheros()
 
-fn lanz_boton_ancho(i: Int, gw: Int) -> Int ! alloc
-    str_len(lanz_boton_texto(i)) * gw + 2 * lanz_margen(gw)
+# Icono de un botón de la barra (0 = la rejilla de «Aplicaciones»).
+fn lanz_boton_icono(i: Int) -> Int
+    if i == 1
+        icono_terminal()
+    elsif i == 2
+        icono_web()
+    elsif i == 3
+        icono_archivos()
+    else
+        0
 
-fn lanz_boton_x0(i: Int, gw: Int) -> Int ! alloc
-    x = 0
+fn lanz_boton_alto(gh: Int) -> Int
+    gh + 4
+
+# Lado del icono dentro de un botón de la barra: casi el alto de la barra.
+fn lanz_boton_icono_lado(gh: Int) -> Int
+    max(gh, barra_alto(gh) - 6)
+
+fn lanz_boton_ancho(i: Int, gw: Int, gh: Int) -> Int ! alloc
+    if i == 0
+        gh * 8 / 10 + gw + str_len(lanz_boton_texto(i)) * gw + 2 * lanz_margen(gw)
+    else
+        lanz_boton_icono_lado(gh) + 10
+
+fn lanz_boton_x0(i: Int, gw: Int, gh: Int) -> Int ! alloc
+    x = 4
     k = 0
     while k < i
-        x = x + lanz_boton_ancho(k, gw) + lanz_separacion()
+        x = x + lanz_boton_ancho(k, gw, gh) + lanz_separacion()
+        # Un respiro entre «Aplicaciones» y los accesos directos.
+        if k == 0
+            x = x + 6
         k = k + 1
     x
 
-fn lanz_hit_barra(x: Int, y: Int, gw: Int, gh: Int) -> Int ! alloc
-    acc = lanz_nada()
-    bh = barra_alto(gh)
+# Índice del botón de la barra bajo (x, y), o -1.
+fn lanz_boton_en(x: Int, y: Int, gw: Int, gh: Int) -> Int ! alloc
+    r = -1
     if y >= 0
-        if y < bh
+        if y < barra_alto(gh)
             i = 0
             while i < lanz_n_botones()
-                x0 = lanz_boton_x0(i, gw)
+                x0 = lanz_boton_x0(i, gw, gh)
                 if x >= x0
-                    if x < x0 + lanz_boton_ancho(i, gw)
-                        acc = lanz_boton_accion(i)
+                    if x < x0 + lanz_boton_ancho(i, gw, gh)
+                        r = i
                 i = i + 1
-    acc
+    r
+
+fn lanz_hit_barra(x: Int, y: Int, gw: Int, gh: Int) -> Int ! alloc
+    i = lanz_boton_en(x, y, gw, gh)
+    if i < 0
+        lanz_nada()
+    else
+        lanz_boton_accion(i)
+
+# Final del último botón (donde empieza la lista de ventanas).
+fn lanz_barra_fin(gw: Int, gh: Int) -> Int ! alloc
+    u = lanz_n_botones() - 1
+    lanz_boton_x0(u, gw, gh) + lanz_boton_ancho(u, gw, gh)
+
+# ---- panel «Aplicaciones» ---------------------------------------------------
 
 fn lanz_menu_n() -> Int
-    5
+    6
+
+fn lanz_menu_cols() -> Int
+    3
 
 fn lanz_menu_texto(k: Int, tema: Int) -> String ! alloc
     if k == 0
         d"Terminal"
     elsif k == 1
-        d"Navegador web"
+        d"Navegador"
     elsif k == 2
         d"Archivos"
     elsif k == 3
+        d"Fondo"
+    elsif k == 4
         if tema == 1
             d"Modo oscuro"
         else
             d"Modo claro"
     else
-        d"Salir del escritorio"
+        d"Salir"
 
 fn lanz_menu_accion(k: Int) -> Int
     if k == 0
@@ -98,35 +157,85 @@ fn lanz_menu_accion(k: Int) -> Int
     elsif k == 2
         lanz_ficheros()
     elsif k == 3
+        lanz_fondo()
+    elsif k == 4
         lanz_tema()
     else
         lanz_salir()
 
-fn lanz_menu_item_alto(gh: Int) -> Int
-    metrica_menu_item_alto(gh)
+# Con el tema claro el botón lleva al oscuro (luna), y al revés (sol).
+fn lanz_menu_icono(k: Int, tema: Int) -> Int
+    if k == 0
+        icono_terminal()
+    elsif k == 1
+        icono_web()
+    elsif k == 2
+        icono_archivos()
+    elsif k == 3
+        icono_fondo()
+    elsif k == 4
+        if tema == 1
+            icono_luna()
+        else
+            icono_sol()
+    else
+        icono_salir()
 
-fn lanz_menu_x0(gw: Int) -> Int ! alloc
-    lanz_boton_x0(0, gw)
+fn lanz_menu_icono_lado(gh: Int) -> Int
+    gh * 3
+
+fn lanz_menu_pad(gh: Int) -> Int
+    gh * 2 / 3
+
+fn lanz_menu_sep(gh: Int) -> Int
+    gh * 2 / 3
+
+fn lanz_menu_celda_w(gw: Int, gh: Int) -> Int
+    max(lanz_menu_icono_lado(gh) + 2 * gh, 13 * gw)
+
+# Margen, icono, hueco, nombre y margen.
+fn lanz_menu_celda_h(gh: Int) -> Int
+    lanz_menu_icono_lado(gh) + gh * 2 + gh / 2
+
+fn lanz_menu_filas() -> Int
+    (lanz_menu_n() + lanz_menu_cols() - 1) / lanz_menu_cols()
+
+fn lanz_menu_x0(gw: Int, gh: Int) -> Int
+    6
 
 fn lanz_menu_y0(gh: Int) -> Int
-    barra_alto(gh)
+    barra_alto(gh) + 6
 
-fn lanz_menu_ancho(gw: Int, gh: Int, tema: Int) -> Int ! alloc
-    w = 0
-    k = 0
-    while k < lanz_menu_n()
-        w = max(w, str_len(lanz_menu_texto(k, tema)) * gw)
-        k = k + 1
-    w + 2 * lanz_margen(gw)
+fn lanz_menu_ancho(gw: Int, gh: Int, tema: Int) -> Int
+    2 * lanz_menu_pad(gh) + lanz_menu_cols() * lanz_menu_celda_w(gw, gh)
 
 fn lanz_menu_alto(gh: Int) -> Int
-    lanz_menu_n() * lanz_menu_item_alto(gh)
+    2 * lanz_menu_pad(gh) + lanz_menu_filas() * lanz_menu_celda_h(gh) + (lanz_menu_filas() - 1) * lanz_menu_sep(gh)
+
+# Esquina de la celda k (relativa al panel).
+fn lanz_menu_celda_dx(k: Int, gw: Int, gh: Int) -> Int
+    lanz_menu_pad(gh) + (k % lanz_menu_cols()) * lanz_menu_celda_w(gw, gh)
+
+fn lanz_menu_celda_dy(k: Int, gh: Int) -> Int
+    lanz_menu_pad(gh) + (k / lanz_menu_cols()) * (lanz_menu_celda_h(gh) + lanz_menu_sep(gh))
 
 fn lanz_menu_item(x: Int, y: Int, gw: Int, gh: Int, tema: Int) -> Int ! alloc
-    if ventana_contiene(x, y, lanz_menu_x0(gw), lanz_menu_y0(gh), lanz_menu_ancho(gw, gh, tema), lanz_menu_alto(gh)) == 0
-        -1
-    else
-        (y - lanz_menu_y0(gh)) / lanz_menu_item_alto(gh)
+    x0 = lanz_menu_x0(gw, gh)
+    y0 = lanz_menu_y0(gh)
+    r = -1
+    if ventana_contiene(x, y, x0, y0, lanz_menu_ancho(gw, gh, tema), lanz_menu_alto(gh)) != 0
+        k = 0
+        while k < lanz_menu_n()
+            cx = x0 + lanz_menu_celda_dx(k, gw, gh)
+            cy = y0 + lanz_menu_celda_dy(k, gh)
+            if ventana_contiene(x, y, cx, cy, lanz_menu_celda_w(gw, gh), lanz_menu_celda_h(gh)) != 0
+                r = k
+            k = k + 1
+    r
+
+# ¿Está (x, y) dentro del panel (aunque no sobre una baldosa)?
+fn lanz_en_menu(x: Int, y: Int, gw: Int, gh: Int, tema: Int) -> Int
+    ventana_contiene(x, y, lanz_menu_x0(gw, gh), lanz_menu_y0(gh), lanz_menu_ancho(gw, gh, tema), lanz_menu_alto(gh))
 
 fn lanz_hit_menu(x: Int, y: Int, gw: Int, gh: Int, tema: Int) -> Int ! alloc
     k = lanz_menu_item(x, y, gw, gh, tema)

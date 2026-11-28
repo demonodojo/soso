@@ -301,6 +301,8 @@ fn bucle_grafico(ejecutar: String) -> Int ! io, alloc
                 _ic = wm_iniciar_cursor(&mut st, sw, sh)
                 _d0 = wm_marcar_dirty(&mut st, 0, 0, sw, sh)
                 _sp = lanzar_ejecutar()
+                st.fondo_auto = 1
+                _zh = wm_zona_cargar(&mut st)
                 _loop = bucle_wm(&mut st, listener, compos, plen, sw, sh, stride, bpp, fmt)
                 close_fd(listener)
             # En todos los caminos, también sin puerto (rc 4): salir dejando la

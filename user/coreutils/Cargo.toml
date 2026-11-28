@@ -16,3 +16,4 @@ sosomfs = { path = "../../crates/sosomfs" }
 sosofs = { path = "../../crates/sosofs" }
 espfat-core = { path = "../../crates/espfat-core" }
 soso-update-core = { path = "../../crates/soso-update-core" }
+soso-fondo = { path = "../../crates/soso-fondo" }

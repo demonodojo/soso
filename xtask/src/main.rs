@@ -995,6 +995,7 @@ pub(crate) fn build_user() -> bool {
         "head",
         "tail",
         "stat",
+        "fondo",
         "hola-std",
         "soso-std-test",
         "soso-git",

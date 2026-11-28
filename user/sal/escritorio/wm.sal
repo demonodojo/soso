@@ -182,6 +182,26 @@ struct Estado
     esp_buf: Int
     listo: Int
     listo_lst: Int
+    # Fondo de pantalla (`/var/fondo/fondo.sfi`, ver `wm_fondo_vigilar`): sólo
+    # en el escritorio normal (`fondo_auto`), no en los modos de prueba. El
+    # búfer guarda los píxeles en formato del framebuffer y detrás el color
+    # medio de cada fila; `fondo_ok` dice si vale.
+    fondo_auto: Int
+    fondo_buf: Int
+    fondo_cap: Int
+    fondo_ok: Int
+    fondo_filas: Int
+    fondo_gen: Int
+    fondo_chk: Int
+    fondo_pedido: Int
+    # Botón de la barra bajo el puntero (-1 ninguno).
+    lanz_hov: Int
+    # Reloj de la barra: minuto pintado, búfer de `clock_gettime` y zona
+    # horaria (minutos sobre UTC y si sigue el horario de verano de la UE).
+    reloj_min: Int
+    reloj_buf: Int
+    zona_min: Int
+    zona_ue: Int
 
 init Estado(evt_buf: Int, msg_buf: Int) ! alloc
     Estado(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -194,7 +214,8 @@ init Estado(evt_buf: Int, msg_buf: Int) ! alloc
            bytes_ptr(bytes_new(tab_cap() * 4)),
            0, bytes_ptr(bytes_new(wm_reg_max() * 32)), 0, 0, -1,
            0, 0, 0, 0, 0, bytes_ptr(bytes_new(wm_geo_bytes())), 0,
-           bytes_ptr(bytes_new(wm_esp_bytes())), 65535, 1)
+           bytes_ptr(bytes_new(wm_esp_bytes())), 65535, 1,
+           0, 0, 0, 0, 0, 0, -100000, 0, -1, -1, bytes_ptr(bytes_new(64)), 60, 1)
 
 fn wm_escena_cap() -> Int
     160
@@ -502,7 +523,7 @@ fn wm_danar_menu(st: &mut Estado) -> Int ! alloc
         return 0
     gw = wm_gw_wm(st)
     gh = wm_gh_wm(st)
-    x0 = lanz_menu_x0(gw)
+    x0 = lanz_menu_x0(gw, gh)
     y0 = lanz_menu_y0(gh)
     _b = wm_danar_barra(st)
     wm_danar(st, x0 - 2, y0, x0 + lanz_menu_ancho(gw, gh, wm_tema_id(st)) + 2, y0 + lanz_menu_alto(gh) + 2)
@@ -620,9 +641,18 @@ fn wm_scr(st: &mut Estado, n: Int) -> Int ! alloc
         st.scr_cap = n
     st.scr_ptr
 
-# Fondo (el mismo degradado que `wm_pintar_fondo`) de la región, trasladado.
+# Fondo (el mismo que `wm_pintar_fondo`) de la región, trasladado.
 fn wm_fondo_region(st: &mut Estado, b: Int, bl: Int, rw: Int, rh: Int, bpp: Int, fmt: Int, rx0: Int, ry0: Int, sh: Int) -> Int ! alloc
     bh = wm_bar_h(st)
+    if st.fondo_ok != 0
+        ya = max(ry0, bh)
+        yb = min(ry0 + rh, sh)
+        xa = max(rx0, 0)
+        xb = min(rx0 + rw, st.pw)
+        if yb > ya
+            if xb > xa
+                _c = copiar_rect(b, bl, rw, st.fondo_buf, st.fondo_cap, st.pw, bpp, fmt, xa - rx0, ya - ry0, xa, ya, xb - xa, yb - ya)
+        return 0
     t = wm_tema_id(st)
     ar = tema_fondo_arriba(t)
     ab = tema_fondo_abajo(t)
@@ -950,7 +980,7 @@ fn wm_ss_capturar_gpu(st: &mut Estado, cap: Int, cap_len: Int, sw: Int, sh: Int,
     if st.menu != 0
         mw = lanz_menu_ancho(gw, gh, tema)
         mh = lanz_menu_alto(gh)
-        mx0 = lanz_menu_x0(gw)
+        mx0 = lanz_menu_x0(gw, gh)
         my0 = lanz_menu_y0(gh)
         men = st.surfs.get_ptr(wm_surf_menu())
         if men > 0
@@ -1074,7 +1104,113 @@ fn wm_init_escala(st: &mut Estado, sw: Int) -> Int ! io, alloc
 fn wm_cargar_psf(st: &mut Estado, sw: Int) -> Int ! io, alloc
     wm_init_escala(st, sw)
 
+# ---- fondo de pantalla ------------------------------------------------------
+# `fondo` (coreutils) deja en `/var/fondo/fondo.sfi` la imagen ya al tamaño y
+# en el formato del framebuffer (formato en `crates/soso-fondo`). El WM mira la
+# cabecera cada segundo y, si cambió la generación, la carga entera: pintar el
+# fondo es copiar filas. Sin fichero vuelve al degradado del tema.
+
+fn wm_fondo_ruta() -> String ! alloc
+    d"/var/fondo/fondo.sfi"
+
+# Lee hasta `n` bytes de `fd` en `ptr` (un `read` puede devolver menos).
+fn wm_leer_todo(fd: Int, ptr: Int, n: Int) -> Int ! io
+    hecho = 0
+    seguir = 1
+    while seguir != 0
+        if hecho >= n
+            seguir = 0
+        else
+            r = read_fd(fd, ptr + hecho, n - hecho)
+            if r <= 0
+                seguir = 0
+            else
+                hecho = hecho + r
+    hecho
+
+fn wm_abrir_ruta(ruta: String) -> Int ! io, alloc
+    pb = spawn_string_buf(&ruta)
+    open_path_ptr(bytes_ptr(pb), str_len(ruta))
+
+fn wm_fondo_cambiado(st: &mut Estado) -> Int ! alloc
+    st.fondo = 0
+    wm_pedir_repintar(st)
+
+fn wm_fondo_lanzar(arg: String) -> Int ! io, alloc
+    spawn_io_argv(d"/bin/fondo", arg, d"", d"", d"", d"", 2, fd_tty_heredado(), fd_tty_heredado(), fd_tty_heredado(), fd_kernel_log())
+
+# Carga los píxeles (y las medias por fila) que siguen a la cabecera.
+fn wm_fondo_leer(st: &mut Estado, fd: Int, w: Int, h: Int, gen: Int) -> Int ! io, alloc
+    n = w * h * 4 + h * 4
+    if n > st.fondo_cap
+        st.fondo_ok = 0
+        st.fondo_buf = bytes_ptr(bytes_new(n))
+        st.fondo_cap = n
+    leido = wm_leer_todo(fd, st.fondo_buf, n)
+    if leido == n
+        st.fondo_ok = 1
+        st.fondo_filas = st.fondo_buf + w * h * 4
+        st.fondo_gen = gen
+    else
+        # A medias el búfer ya no vale: degradado hasta el próximo intento.
+        st.fondo_ok = 0
+    wm_fondo_cambiado(st)
+
+fn wm_fondo_vigilar(st: &mut Estado, sw: Int, sh: Int, fmt: Int) -> Int ! io, alloc
+    if st.fondo_auto == 0
+        return 0
+    ahora = uptime_ms()
+    if ahora - st.fondo_chk < 1000
+        return 0
+    st.fondo_chk = ahora
+    fd = wm_abrir_ruta(wm_fondo_ruta())
+    if fd < 0
+        # Sin fichero: si había fondo, se quita (`fondo ninguno`); la primera
+        # vez se pide el predeterminado.
+        if st.fondo_ok != 0
+            st.fondo_ok = 0
+            st.fondo_gen = 0
+            _c = wm_fondo_cambiado(st)
+        if st.fondo_pedido == 0
+            st.fondo_pedido = -1
+            _s = wm_fondo_lanzar(d"--inicial")
+        return 0
+    cab_own = bytes_new(32)
+    cab = bytes_ptr(cab_own)
+    r = wm_leer_todo(fd, cab, 32)
+    b = bytes_view_mem(cab, 32)
+    magia = 0
+    if r == 32
+        if bytes_get_u32(b, 0) == 1145980499
+            if bytes_get_u32(b, 4) == 1
+                magia = 1
+    if magia != 0
+        w = bytes_get_u32(b, 8)
+        h = bytes_get_u32(b, 12)
+        f = bytes_get_u32(b, 16)
+        gen = bytes_get_i64(b, 24)
+        if gen != st.fondo_gen
+            if w == sw
+                if h == sh
+                    if f == fmt
+                        _l = wm_fondo_leer(st, fd, w, h, gen)
+            # Otro tamaño o formato (otra pantalla): que `fondo` lo rehaga,
+            # una vez por generación.
+            if gen != st.fondo_gen
+                if st.fondo_pedido != gen
+                    st.fondo_pedido = gen
+                    _s2 = wm_fondo_lanzar(d"--regenerar")
+    _cf = close_fd(fd)
+    0
+
+# Color medio de la fila `y` de la imagen de fondo.
+fn wm_fondo_fila_img(st: &mut Estado, y: Int, sh: Int) -> Int ! alloc
+    yy = max(0, min(y, sh - 1))
+    bytes_get_u32(bytes_view_mem(st.fondo_filas, sh * 4), yy * 4) & 16777215
+
 fn wm_fondo_rgb_fila(st: &mut Estado, y: Int, sh: Int) -> Int ! alloc
+    if st.fondo_ok != 0
+        return wm_fondo_fila_img(st, y, sh)
     t = wm_tema_id(st)
     ar = tema_fondo_arriba(t)
     ab = tema_fondo_abajo(t)
@@ -1100,6 +1236,9 @@ fn wm_menu_rgb_fila(st: &mut Estado, y: Int, sh: Int, my: Int) -> Int ! alloc
 
 fn wm_pintar_fondo(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
     bh = wm_bar_h(st)
+    if st.fondo_ok != 0
+        _c = copiar_rect(compos, clen, stride, st.fondo_buf, st.fondo_cap, sw, bpp, fmt, 0, bh, 0, bh, sw, sh - bh)
+        return 0
     _g = degradado_vertical(compos, clen, sw, sh, stride, bpp, fmt, 0, bh, sw, sh, tema_fondo_arriba(wm_tema_id(st)), tema_fondo_abajo(wm_tema_id(st)))
     0
 
@@ -1331,77 +1470,161 @@ fn wm_esc_rr(st: &mut Estado, compos: Int, clen: Int, w: Int, h: Int, stride: In
     n = esc_rrect(e, cap, 0, x0, y0, x1, y1, rs, rgb, 255, 0, 0)
     esc_cpu_ejecutar(compos, clen, w, h, stride, bpp, fmt, e, cap, n)
 
+# Rectángulo redondeado con alfa (resaltes sobre la barra o el panel).
+fn wm_esc_rr_alfa(st: &mut Estado, compos: Int, clen: Int, w: Int, h: Int, stride: Int, bpp: Int, fmt: Int, x0: Int, y0: Int, x1: Int, y1: Int, rs: Int, rgb: Int, alfa: Int) -> Int ! alloc
+    e = st.escena
+    cap = wm_escena_cap()
+    n = esc_rrect(e, cap, 0, x0, y0, x1, y1, rs, rgb, alfa, 0, 0)
+    esc_cpu_ejecutar(compos, clen, w, h, stride, bpp, fmt, e, cap, n)
+
+# Icono `tipo` (iconos.sal) de lado `s` en (x, y).
+fn wm_icono(st: &mut Estado, compos: Int, clen: Int, w: Int, h: Int, stride: Int, bpp: Int, fmt: Int, tipo: Int, x: Int, y: Int, s: Int) -> Int ! alloc
+    e = st.escena
+    cap = wm_escena_cap()
+    n = icono_escena(e, cap, 0, tipo, x, y, s)
+    esc_cpu_ejecutar(compos, clen, w, h, stride, bpp, fmt, e, cap, n)
+
+# Icono con sombra suave debajo (baldosas del panel).
+fn wm_icono_sombra(st: &mut Estado, compos: Int, clen: Int, w: Int, h: Int, stride: Int, bpp: Int, fmt: Int, tipo: Int, x: Int, y: Int, s: Int, alfa: Int) -> Int ! alloc
+    e = st.escena
+    cap = wm_escena_cap()
+    n = esc_sombra(e, cap, 0, x, y, x + s, y + s, s * 24 / 100, max(2, s / 16), max(4, s / 6), color_rgb(0, 0, 0), alfa)
+    _s = esc_cpu_ejecutar(compos, clen, w, h, stride, bpp, fmt, e, cap, n)
+    wm_icono(st, compos, clen, w, h, stride, bpp, fmt, tipo, x, y, s)
+
+# Icono de la aplicación de una ranura (0 si no tiene).
+fn wm_icono_de(st: &mut Estado, m: Int) -> Int ! alloc
+    if st.tab.tipo(m) == tab_tipo_term()
+        icono_terminal()
+    elsif st.tab.app(m) == app_ficheros()
+        icono_archivos()
+    elsif st.tab.app(m) == app_web()
+        icono_web()
+    else
+        0
+
+# Resalte bajo el puntero: el color del texto con poca opacidad, que sirve
+# igual sobre barra clara u oscura.
+fn wm_alfa_hover(st: &mut Estado) -> Int ! alloc
+    if wm_tema_id(st) == tema_claro()
+        26
+    else
+        34
+
+fn wm_pintar_boton_barra(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, i: Int, x0: Int, ty: Int, bw: Int) -> Int ! io, alloc
+    gw = wm_gw_wm(st)
+    gh = wm_gh_wm(st)
+    tema = wm_tema_id(st)
+    bt = lanz_boton_alto(gh)
+    radio = metrica_radio(gh)
+    rs = esc_radios(radio, radio, radio, radio)
+    fg = wm_color_texto_barra(st)
+    if i == 0
+        if st.menu != 0
+            _a = wm_esc_rr(st, compos, clen, sw, sh, stride, bpp, fmt, x0, ty, x0 + bw, ty + bt, rs, tema_acento(tema))
+            fg = color_rgb(255, 255, 255)
+        elsif st.lanz_hov == 0
+            _h = wm_esc_rr_alfa(st, compos, clen, sw, sh, stride, bpp, fmt, x0, ty, x0 + bw, ty + bt, rs, tema_texto(tema), wm_alfa_hover(st))
+        s = gh * 8 / 10
+        ix = x0 + lanz_margen(gw)
+        e = st.escena
+        cap = wm_escena_cap()
+        n = icono_rejilla(e, cap, 0, ix, ty + (bt - s) / 2, s, fg)
+        _g = esc_cpu_ejecutar(compos, clen, sw, sh, stride, bpp, fmt, e, cap, n)
+        _t = wm_texto(st, compos, clen, stride, bpp, fmt, lanz_boton_texto(0), ix + s + gw, ty + 2, fg, wm_color_boton(st))
+    else
+        if st.lanz_hov == i
+            _h2 = wm_esc_rr_alfa(st, compos, clen, sw, sh, stride, bpp, fmt, x0, ty, x0 + bw, ty + bt, rs, tema_texto(tema), wm_alfa_hover(st) + 10)
+        s2 = lanz_boton_icono_lado(gh)
+        # Al pasar por encima el icono sube un píxel.
+        sube = 0
+        if st.lanz_hov == i
+            sube = 1
+        _ic = wm_icono(st, compos, clen, sw, sh, stride, bpp, fmt, lanz_boton_icono(i), x0 + (bw - s2) / 2, (wm_bar_h(st) - s2) / 2 - sube, s2)
+    0
+
 fn wm_pintar_barra(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     gw = wm_gw_wm(st)
     gh = wm_gh_wm(st)
     bh = wm_bar_h(st)
-    gmode = wm_comp_gpu_mode(st)
     y = 0
     while y < bh
         col = wm_barra_rgb_fila(st, y, sh)
         _r = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, 0, y, sw, y + 1, col)
         y = y + 1
-    radio = metrica_radio(gh)
+    # Un filo abajo que separa la barra del fondo.
+    _fl = rellenar_rect_alfa(compos, clen, sw, sh, stride, bpp, fmt, 0, bh - 1, sw, bh, tema_texto(wm_tema_id(st)), 24)
+    ty = (bh - lanz_boton_alto(gh)) / 2
+    if ty < 1
+        ty = 1
     i = 0
     while i < lanz_n_botones()
-        x0 = lanz_boton_x0(i, gw)
-        bw = lanz_boton_ancho(i, gw)
-        activo = 0
-        bg = wm_color_boton(st)
-        if i == 0
-            if st.menu != 0
-                activo = 1
-        if activo != 0
-            bg = wm_color_boton_activo(st)
-        ty = (bh - gh) / 2
-        if ty < 2
-            ty = 2
-        _b = wm_esc_rr(st, compos, clen, sw, sh, stride, bpp, fmt, x0, ty, x0 + bw, ty + gh + 4, esc_radios(radio, radio, 0, 0), bg)
-        if gmode != 0
-            ly = 0
-            while ly < gh + 4
-                col = wm_barra_rgb_fila(st, ty + ly, sh)
-                _m = rellenar_rect(compos, clen, sw, sh, stride, bpp, fmt, x0, ty + ly, x0 + bw, ty + ly + 1, col)
-                ly = ly + 1
-            _b2 = wm_esc_rr(st, compos, clen, sw, sh, stride, bpp, fmt, x0, ty, x0 + bw, ty + gh + 4, esc_radios(radio, radio, 0, 0), bg)
-        txt = lanz_boton_texto(i)
-        # Centrado en el botón: con letra proporcional el texto ocupa menos que sus celdas.
-        tx = x0 + (bw - wm_texto_ancho(st, &txt)) / 2
-        _t = wm_texto(st, compos, clen, stride, bpp, fmt, txt, tx, ty + 2, wm_color_texto_barra(st), bg)
+        _b = wm_pintar_boton_barra(st, compos, clen, sw, sh, stride, bpp, fmt, i, lanz_boton_x0(i, gw, gh), ty, lanz_boton_ancho(i, gw, gh))
         i = i + 1
     _lv = wm_pintar_lista_ventanas(st, compos, clen, sw, sh, stride, bpp, fmt)
+    _rl = wm_pintar_reloj(st, compos, clen, sw, sh, stride, bpp, fmt)
     _d = wm_marcar_dirty(st, 0, 0, sw, bh)
     0
 
+# Fila `y` del panel: el color del panel mezclado con lo que hay detrás.
+fn wm_panel_fila(st: &mut Estado, y: Int, sh: Int) -> Int ! alloc
+    mezclar_rgb(tema_menu(wm_tema_id(st)), wm_fondo_rgb_fila(st, y, sh), tema_menu_alfa(wm_tema_id(st)))
+
+# Panel «Aplicaciones»: cristal con esquinas redondeadas y una rejilla de
+# baldosas (icono con sombra y nombre). La de debajo del puntero se resalta y
+# su icono sube un poco. Se pinta entero cada vez (sin mezclar con lo pintado
+# antes), así que repetirlo no oscurece nada.
 fn wm_pintar_menu_cuerpo(st: &mut Estado, compos: Int, clen: Int, buf_w: Int, buf_h: Int, stride: Int, bpp: Int, fmt: Int, ox: Int, oy: Int, sw: Int, sh: Int, gmode: Int) -> Int ! io, alloc
     gw = wm_gw_wm(st)
     gh = wm_gh_wm(st)
     tema = wm_tema_id(st)
     mw = lanz_menu_ancho(gw, gh, tema)
     mh = lanz_menu_alto(gh)
-    alto = lanz_menu_item_alto(gh)
-    radio = metrica_radio(gh)
-    sel = lanz_menu_item(st.mx, st.my, gw, gh, tema)
+    sy = lanz_menu_y0(gh)
+    r = metrica_radio(gh) * 2
+    # Fondo fila a fila. Fuera de las esquinas redondeadas, en CPU no se pinta
+    # nada (queda lo compuesto debajo); la superficie de la escena GPU es un
+    # rectángulo opaco y ahí va el color del fondo de esa fila.
     y = 0
     while y < mh
-        col = wm_menu_rgb_fila(st, oy + y, sh, oy)
         if gmode != 0
-            col = wm_menu_rgb_fila(st, y, sh, oy)
-        _f = rellenar_rect(compos, clen, buf_w, buf_h, stride, bpp, fmt, ox, oy + y, ox + mw, oy + y + 1, col)
+            atras = wm_fondo_rgb_fila(st, sy + y, sh)
+            _f = rellenar_rect(compos, clen, buf_w, buf_h, stride, bpp, fmt, ox, oy + y, ox + mw, oy + y + 1, atras)
+        dentro = 0
+        if y < r
+            dentro = r - y
+        if y >= mh - r
+            dentro = y - (mh - r) + 1
+        hueco = 0
+        if dentro > 0
+            hueco = r - rr_isqrt(r * r - dentro * dentro)
+        _g = rellenar_rect(compos, clen, buf_w, buf_h, stride, bpp, fmt, ox + hueco, oy + y, ox + mw - hueco, oy + y + 1, wm_panel_fila(st, sy + y, sh))
         y = y + 1
-    _r = wm_esc_rr(st, compos, clen, buf_w, buf_h, stride, bpp, fmt, ox, oy, ox + mw, oy + mh, esc_radios(radio, radio, 0, 0), wm_color_menu(st))
+    # Separador entre aplicaciones y sistema.
+    pad = lanz_menu_pad(gh)
+    yl = oy + lanz_menu_celda_dy(lanz_menu_cols(), gh) - lanz_menu_sep(gh) / 2
+    _sl = rellenar_rect_alfa(compos, clen, buf_w, buf_h, stride, bpp, fmt, ox + pad + gh, yl, ox + mw - pad - gh, yl + 1, tema_texto(tema), 40)
+    sel = lanz_menu_item(st.mx, st.my, gw, gh, tema)
+    cw = lanz_menu_celda_w(gw, gh)
+    ch = lanz_menu_celda_h(gh)
+    s = lanz_menu_icono_lado(gh)
     k = 0
     while k < lanz_menu_n()
-        iy = oy + k * alto + 2
-        bg = wm_color_menu(st)
+        cx = ox + lanz_menu_celda_dx(k, gw, gh)
+        cy = oy + lanz_menu_celda_dy(k, gh)
+        bg = wm_panel_fila(st, sy + lanz_menu_celda_dy(k, gh) + ch - gh, sh)
+        sube = 0
         if k == sel
-            cap_x0 = ox + lanz_margen(gw) / 2
-            cap_x1 = ox + mw - lanz_margen(gw) / 2
-            cap_y0 = iy
-            cap_y1 = iy + alto - 4
-            _c = wm_esc_rr(st, compos, clen, buf_w, buf_h, stride, bpp, fmt, cap_x0, cap_y0, cap_x1, cap_y1, esc_radios(radio, radio, radio, radio), wm_color_menu_sel(st))
+            rc = metrica_radio(gh) + 4
+            _c = wm_esc_rr_alfa(st, compos, clen, buf_w, buf_h, stride, bpp, fmt, cx + 3, cy + 2, cx + cw - 3, cy + ch - 2, esc_radios(rc, rc, rc, rc), tema_acento(tema), 56)
             bg = wm_color_menu_sel(st)
-        _t = wm_texto(st, compos, clen, stride, bpp, fmt, lanz_menu_texto(k, tema), ox + lanz_margen(gw), iy + 2, wm_color_texto_barra(st), bg)
+            sube = 2
+        ix = cx + (cw - s) / 2
+        iy = cy + gh / 2 + 2 - sube
+        _i = wm_icono_sombra(st, compos, clen, buf_w, buf_h, stride, bpp, fmt, lanz_menu_icono(k, tema), ix, iy, s, 70 + sube * 20)
+        txt = lanz_menu_texto(k, tema)
+        tx = cx + (cw - wm_texto_ancho(st, &txt)) / 2
+        _t = wm_texto(st, compos, clen, stride, bpp, fmt, txt, tx, cy + gh / 2 + s + gh / 2, wm_color_texto_barra(st), bg)
         k = k + 1
     0
 
@@ -1410,7 +1633,7 @@ fn wm_pintar_menu(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, str
         gw = wm_gw_wm(st)
         gh = wm_gh_wm(st)
         tema = wm_tema_id(st)
-        x0 = lanz_menu_x0(gw)
+        x0 = lanz_menu_x0(gw, gh)
         y0 = lanz_menu_y0(gh)
         x1 = x0 + lanz_menu_ancho(gw, gh, tema)
         y1 = y0 + lanz_menu_alto(gh)
@@ -1425,7 +1648,7 @@ fn wm_pintar_menu_local(st: &mut Estado, compos: Int, clen: Int, stride: Int, bp
         tema = wm_tema_id(st)
         mw = lanz_menu_ancho(gw, gh, tema)
         mh = lanz_menu_alto(gh)
-        x0 = lanz_menu_x0(gw)
+        x0 = lanz_menu_x0(gw, gh)
         y0 = lanz_menu_y0(gh)
         _p = wm_pintar_menu_cuerpo(st, compos, clen, mw, mh, stride, bpp, fmt, 0, 0, sw, sh, 1)
         _d = wm_marcar_dirty(st, x0, y0, x0 + mw, y0 + mh)
@@ -1450,6 +1673,10 @@ fn wm_ejecutar(st: &mut Estado, accion: Int, sw: Int, sh: Int) -> Int ! io, allo
             _f = wm_abrir_app(st, app_ficheros(), 0)
         if accion == lanz_tema()
             _tm = wm_cambiar_tema(st)
+        if accion == lanz_fondo()
+            # `fondo` escribe el siguiente y `wm_fondo_vigilar` lo ve en <1 s.
+            _fs = wm_fondo_lanzar(d"siguiente")
+            st.fondo_auto = 1
         if accion == lanz_salir()
             st.salir = 1
     0
@@ -1942,7 +2169,7 @@ fn wm_gpu_emergente(st: &mut Estado, compos: Int, sw: Int, sh: Int, stride: Int,
         gh = wm_gh_wm(st)
         mw = lanz_menu_ancho(gw, gh, wm_tema_id(st))
         mh = lanz_menu_alto(gh)
-        mx0 = lanz_menu_x0(gw)
+        mx0 = lanz_menu_x0(gw, gh)
         my0 = lanz_menu_y0(gh)
         if wm_surf_ensure_cambia(st, fd, sid, mw, mh, stride) != 0
             pinta = 1
@@ -2741,7 +2968,10 @@ fn wm_comp_sync_win_geom(st: &mut Estado, fd: Int, i: Int, z: Int) -> Int ! io, 
 fn wm_prims_fondo(st: &mut Estado, fd: Int, x0: Int, y0: Int, x1: Int, y1: Int) -> Int ! io, alloc
     bh = wm_bar_h(st)
     ya = max(y0, bh)
-    if y1 <= ya
+    if st.fondo_ok != 0
+        # GPRIM sólo sabe el degradado: con imagen, la superficie de fondo.
+        0
+    elsif y1 <= ya
         2
     else
         tema = wm_tema_id(st)
@@ -3383,8 +3613,7 @@ fn wm_minimizar(st: &mut Estado, i: Int) -> Int ! alloc
 
 # Lista de ventanas en la barra superior, a la derecha de los lanzadores.
 fn wm_barra_lista_x0(st: &mut Estado) -> Int ! alloc
-    gw = wm_gw_wm(st)
-    lanz_boton_x0(lanz_n_botones() - 1, gw) + lanz_boton_ancho(lanz_n_botones() - 1, gw) + 24
+    lanz_barra_fin(wm_gw_wm(st), wm_gh_wm(st)) + 16
 
 fn wm_barra_ent_ancho(st: &mut Estado) -> Int ! alloc
     wm_gw_wm(st) * 14 + 2 * lanz_margen(wm_gw_wm(st))
@@ -3448,23 +3677,211 @@ fn wm_pintar_lista_ventanas(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh
                 act = st.tab.grupo_panel_activo(i)
                 x0 = wm_barra_ent_x0(st, n)
                 ew = wm_barra_ent_ancho(st)
-                if x0 + ew <= sw - 8
-                    bg = wm_color_boton(st)
+                if x0 + ew <= sw - wm_reloj_ancho(st) - 16
+                    rs = esc_radios(radio, radio, radio, radio)
+                    bg = wm_barra_rgb_fila(st, ty + gh / 2, sh)
                     fg = wm_color_texto_barra(st)
                     if wm_oculta(st, i) != 0
                         fg = tema_texto_tenue(tema)
+                        _bo = wm_esc_rr_alfa(st, compos, clen, sw, sh, stride, bpp, fmt, x0, ty, x0 + ew, ty + gh + 4, rs, tema_texto(tema), 10)
+                    elsif st.focus == i
+                        # La que tiene el foco: píldora de acento suave y una raya abajo.
+                        _bf = wm_esc_rr_alfa(st, compos, clen, sw, sh, stride, bpp, fmt, x0, ty, x0 + ew, ty + gh + 4, rs, tema_acento(tema), 90)
+                        _bl = wm_esc_rr(st, compos, clen, sw, sh, stride, bpp, fmt, x0 + ew / 2 - gh, ty + gh + 2, x0 + ew / 2 + gh, ty + gh + 4, esc_radios(1, 1, 1, 1), tema_acento(tema))
+                        bg = mezclar_rgb(tema_acento(tema), bg, 90)
                     else
-                        if st.focus == i
-                            bg = wm_color_boton_activo(st)
-                    _b = wm_esc_rr(st, compos, clen, sw, sh, stride, bpp, fmt, x0, ty, x0 + ew, ty + gh + 4, esc_radios(radio, radio, radio, radio), bg)
-                    np = st.tab.grupo_n(i)
+                        _bn = wm_esc_rr_alfa(st, compos, clen, sw, sh, stride, bpp, fmt, x0, ty, x0 + ew, ty + gh + 4, rs, tema_texto(tema), 22)
+                    tx = x0 + lanz_margen(gw)
+                    ico = wm_icono_de(st, act)
                     maxc = 14
+                    if ico != 0
+                        si = gh - 2
+                        _ic = wm_icono(st, compos, clen, sw, sh, stride, bpp, fmt, ico, tx - 2, ty + 3, si)
+                        tx = tx + si + 4
+                        maxc = 12
+                    np = st.tab.grupo_n(i)
                     if np > 1
-                        maxc = 11
+                        maxc = maxc - 3
                         _cn = wm_texto_num(st, compos, clen, stride, bpp, fmt, x0 + ew - lanz_margen(gw) - 2 * gw, ty + 2, np, fg, bg)
-                    _t = wm_texto_titulo(st, act, compos, clen, stride, bpp, fmt, x0 + lanz_margen(gw), ty + 2, maxc, fg, bg)
+                    _t = wm_texto_titulo(st, act, compos, clen, stride, bpp, fmt, tx, ty + 2, maxc, fg, bg)
                 n = n + 1
         i = i + 1
+    0
+
+# ---- reloj de la barra ------------------------------------------------------
+# La hora del sistema es UTC. La zona sale de `/etc/hora.conf` («+1 ue»: una
+# hora sobre UTC con el horario de verano de la UE, que es lo predeterminado,
+# como la península; «+0», «-5», «+5:30»…).
+
+fn wm_zona_cargar(st: &mut Estado) -> Int ! io, alloc
+    fd = wm_abrir_ruta(d"/etc/hora.conf")
+    if fd >= 0
+        buf_own = bytes_new(64)
+        buf = bytes_ptr(buf_own)
+        n = wm_leer_todo(fd, buf, 63)
+        _c = close_fd(fd)
+        b = bytes_view_mem(buf, 64)
+        signo = 1
+        h = 0
+        m = 0
+        en_min = 0
+        ue = 0
+        i = 0
+        while i < n
+            c = bytes_get_u8(b, i)
+            if c == 45
+                signo = -1
+            if c == 58
+                en_min = 1
+            if c >= 48
+                if c <= 57
+                    if en_min != 0
+                        m = m * 10 + c - 48
+                    else
+                        h = h * 10 + c - 48
+            if c == 117
+                ue = 1
+            i = i + 1
+        st.zona_min = signo * (h * 60 + m)
+        st.zona_ue = ue
+    0
+
+# Días desde 1970-01-01 de una fecha civil (algoritmo de H. Hinnant).
+fn wm_dias_de(y0: Int, m: Int, d: Int) -> Int
+    y = y0
+    if m <= 2
+        y = y - 1
+    era = y / 400
+    yoe = y - era * 400
+    mp = (m + 9) % 12
+    doy = (153 * mp + 2) / 5 + d - 1
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    era * 146097 + doe - 719468
+
+# Fecha civil de un día desde 1970: año * 10000 + mes * 100 + día.
+fn wm_fecha_de(z0: Int) -> Int
+    z = z0 + 719468
+    era = z / 146097
+    doe = z - era * 146097
+    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    y = yoe + era * 400
+    doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    mp = (5 * doy + 2) / 153
+    d = doy - (153 * mp + 2) / 5 + 1
+    m = mp + 3
+    if mp >= 10
+        m = mp - 9
+    if m <= 2
+        y = y + 1
+    y * 10000 + m * 100 + d
+
+# Día (desde 1970) del último domingo del mes `m` (de 31 días) del año `y`.
+fn wm_ultimo_domingo(y: Int, m: Int) -> Int
+    d31 = wm_dias_de(y, m, 31)
+    d31 - (d31 + 4) % 7
+
+# Segundos de hora local para `t` segundos UTC.
+fn wm_local(st: &mut Estado, t: Int) -> Int
+    l = t + st.zona_min * 60
+    if st.zona_ue != 0
+        y = wm_fecha_de(t / 86400) / 10000
+        ini = wm_ultimo_domingo(y, 3) * 86400 + 3600
+        fin = wm_ultimo_domingo(y, 10) * 86400 + 3600
+        if t >= ini
+            if t < fin
+                l = l + 3600
+    l
+
+fn wm_ahora_utc(st: &mut Estado) -> Int ! io, alloc
+    r = syscall(72, 0, st.reloj_buf, 0, 0, 0, 0)
+    if r < 0
+        0
+    else
+        bytes_get_i64(bytes_view_mem(st.reloj_buf, 16), 0)
+
+fn wm_dos_cifras(v: Int) -> String ! alloc
+    if v < 10
+        d"0" + int_to_str(v)
+    else
+        int_to_str(v)
+
+fn wm_dia_semana(i: Int) -> String ! alloc
+    if i == 0
+        d"dom"
+    elsif i == 1
+        d"lun"
+    elsif i == 2
+        d"mar"
+    elsif i == 3
+        d"mié"
+    elsif i == 4
+        d"jue"
+    elsif i == 5
+        d"vie"
+    else
+        d"sáb"
+
+fn wm_mes(m: Int) -> String ! alloc
+    if m == 1
+        d"ene"
+    elsif m == 2
+        d"feb"
+    elsif m == 3
+        d"mar"
+    elsif m == 4
+        d"abr"
+    elsif m == 5
+        d"may"
+    elsif m == 6
+        d"jun"
+    elsif m == 7
+        d"jul"
+    elsif m == 8
+        d"ago"
+    elsif m == 9
+        d"sep"
+    elsif m == 10
+        d"oct"
+    elsif m == 11
+        d"nov"
+    else
+        d"dic"
+
+# «sáb 28 nov  18:45», o vacío si el reloj del sistema no da hora.
+fn wm_reloj_texto(st: &mut Estado) -> String ! io, alloc
+    t = wm_ahora_utc(st)
+    if t <= 0
+        d""
+    else
+        l = wm_local(st, t)
+        dias = l / 86400
+        seg = l - dias * 86400
+        f = wm_fecha_de(dias)
+        wm_dia_semana((dias + 4) % 7) + d" " + int_to_str(f % 100) + d" " + wm_mes((f / 100) % 100) + d"   " + wm_dos_cifras(seg / 3600) + d":" + wm_dos_cifras((seg / 60) % 60)
+
+fn wm_reloj_ancho(st: &mut Estado) -> Int ! io, alloc
+    wm_gw_wm(st) * 18
+
+fn wm_pintar_reloj(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
+    txt = wm_reloj_texto(st)
+    if str_len(txt) > 0
+        gh = wm_gh_wm(st)
+        bh = wm_bar_h(st)
+        ty = (bh - lanz_boton_alto(gh)) / 2
+        if ty < 1
+            ty = 1
+        x = sw - wm_texto_ancho(st, &txt) - 2 * lanz_margen(wm_gw_wm(st))
+        _t = wm_texto(st, compos, clen, stride, bpp, fmt, txt, x, ty + 2, wm_color_texto_barra(st), wm_barra_rgb_fila(st, ty + gh / 2, sh))
+    0
+
+# Repinta la barra cuando cambia el minuto.
+fn wm_reloj_tick(st: &mut Estado) -> Int ! io, alloc
+    t = wm_ahora_utc(st)
+    if t > 0
+        mn = t / 60
+        if mn != st.reloj_min
+            st.reloj_min = mn
+            _b = wm_danar_barra(st)
     0
 
 # Número de 1 o 2 cifras (contador de pestañas en la lista de ventanas).
@@ -3636,7 +4053,7 @@ fn ctx_ancho(st: &mut Estado) -> Int ! alloc
     w + 2 * lanz_margen(gw)
 
 fn ctx_item_alto(st: &mut Estado) -> Int ! alloc
-    lanz_menu_item_alto(wm_gh_wm(st))
+    metrica_menu_item_alto(wm_gh_wm(st))
 
 fn ctx_alto(st: &mut Estado) -> Int ! alloc
     ctx_cuenta(st) * ctx_item_alto(st)
@@ -3773,6 +4190,11 @@ fn wm_raton_mover(st: &mut Estado, x: Int, y: Int, botones: Int, sw: Int, sh: In
         if cs != st.ctx_sel
             st.ctx_sel = cs
             _hx = wm_danar_ctx(st)
+    # Los botones de la barra se resaltan al pasar por encima.
+    lh = lanz_boton_en(st.mx, st.my, wm_gw_wm(st), wm_gh_wm(st))
+    if lh != st.lanz_hov
+        st.lanz_hov = lh
+        _hl = wm_danar_barra(st)
     # El menú de aplicaciones resalta lo que hay bajo el puntero.
     if st.menu != 0
         if wm_gpu_parcial(st) != 0
@@ -3889,6 +4311,10 @@ fn wm_raton_btn(st: &mut Estado, x: Int, y: Int, botones: Int, compos: Int, clen
             acc = lanz_hit_menu(x, y, gw, gh, tema)
             if acc == lanz_nada()
                 acc = lanz_hit_barra(x, y, gw, gh)
+            # Un clic en el margen del panel no lo cierra.
+            if acc == lanz_nada()
+                if lanz_en_menu(x, y, gw, gh, tema) != 0
+                    return 0
             _em = wm_ejecutar(st, acc, sw, sh)
             return 0
         if y < wm_bar_h(st)
@@ -4649,6 +5075,8 @@ fn wm_tick(st: &mut Estado, listener: Int, compos: Int, clen: Int, sw: Int, sh: 
     evt = st.evt_buf
     _in = wm_drenar_input(st, evt, 24 * 8, compos, clen, sw, sh, stride, bpp, fmt)
     _ss = wm_ss_idle(st, compos, clen, sw, sh, stride, bpp, fmt)
+    _fv = wm_fondo_vigilar(st, sw, sh, fmt)
+    _rt = wm_reloj_tick(st)
     if st.listo_lst != 0
         acc = tcp_accept(listener, 1)
         if acc > 0

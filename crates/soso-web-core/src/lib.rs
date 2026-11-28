@@ -10,3 +10,4 @@ pub mod css;
 pub mod decode;
 pub mod gfx_layout;
 pub mod html;
+pub mod png;

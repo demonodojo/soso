@@ -1528,6 +1528,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "soso-fondo"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "soso-web-core",
+]
+
+[[package]]
 name = "soso-forja-server"
 version = "0.1.0"
 dependencies = [

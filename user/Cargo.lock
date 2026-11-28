@@ -83,6 +83,7 @@ dependencies = [
  "espfat-core",
  "gptdisk",
  "libsoso",
+ "soso-fondo",
  "soso-update-core",
  "sosofs",
  "sosomfs",
@@ -718,6 +719,14 @@ name = "soso-ed"
 version = "0.1.0"
 dependencies = [
  "libsoso",
+]
+
+[[package]]
+name = "soso-fondo"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "soso-web-core",
 ]
 
 [[package]]

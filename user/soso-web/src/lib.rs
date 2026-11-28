@@ -7,5 +7,6 @@ extern crate alloc;
 pub use soso_web_core::{decode, html};
 
 pub mod gui;
-pub mod png;
+// El decodificador vive en soso-web-core: lo comparte `fondo`.
+pub use soso_web_core::png;
 pub mod rutas;

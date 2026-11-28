@@ -1,0 +1,203 @@
+import "escena.sal"
+
+# Iconos del lanzador como primitivas de escena, a cualquier tamaño: una losa
+# cuadrada redondeada de color plano y un glifo blanco encima. Cada icono cabe
+# en una tanda de escena (`wm_escena_cap`), así que se ejecutan de uno en uno.
+
+fn icono_terminal() -> Int
+    1
+
+fn icono_web() -> Int
+    2
+
+fn icono_archivos() -> Int
+    3
+
+fn icono_fondo() -> Int
+    4
+
+fn icono_luna() -> Int
+    5
+
+fn icono_sol() -> Int
+    6
+
+fn icono_salir() -> Int
+    7
+
+fn icono_color(tipo: Int) -> Int
+    if tipo == icono_terminal()
+        color_rgb(44, 50, 70)
+    elsif tipo == icono_web()
+        color_rgb(52, 128, 246)
+    elsif tipo == icono_archivos()
+        color_rgb(242, 166, 38)
+    elsif tipo == icono_fondo()
+        color_rgb(166, 90, 230)
+    elsif tipo == icono_sol()
+        color_rgb(64, 156, 236)
+    elsif tipo == icono_salir()
+        color_rgb(230, 76, 92)
+    else
+        color_rgb(70, 78, 150)
+
+fn icono_blanco() -> Int
+    color_rgb(255, 255, 255)
+
+# Círculo de radio `r` centrado en (cx, cy).
+fn icono_circulo(e: Int, cap: Int, n: Int, cx: Int, cy: Int, r: Int, rgb: Int) -> Int ! alloc
+    esc_rrect(e, cap, n, cx - r, cy - r, cx + r, cy + r, esc_radios(r, r, r, r), rgb, 255, 0, 0)
+
+# % de `s` (los glifos se dibujan en proporciones del lado).
+fn icono_p(s: Int, pct: Int) -> Int
+    s * pct / 100
+
+fn icono_grosor(s: Int, div: Int) -> Int
+    max(1, s / div)
+
+# Icono `tipo` de lado `s` en (x, y). Devuelve el número de primitivas.
+fn icono_escena(e: Int, cap: Int, n0: Int, tipo: Int, x: Int, y: Int, s: Int) -> Int ! alloc
+    r = icono_p(s, 24)
+    fondo = icono_color(tipo)
+    n = esc_rrect(e, cap, n0, x, y, x + s, y + s, esc_radios(r, r, r, r), fondo, 255, 0, 0)
+    if tipo == icono_terminal()
+        n = icono_g_terminal(e, cap, n, x, y, s)
+    elsif tipo == icono_web()
+        n = icono_g_web(e, cap, n, x, y, s, fondo)
+    elsif tipo == icono_archivos()
+        n = icono_g_carpeta(e, cap, n, x, y, s)
+    elsif tipo == icono_fondo()
+        n = icono_g_cuadro(e, cap, n, x, y, s)
+    elsif tipo == icono_luna()
+        n = icono_g_luna(e, cap, n, x, y, s, fondo)
+    elsif tipo == icono_sol()
+        n = icono_g_sol(e, cap, n, x, y, s)
+    elsif tipo == icono_salir()
+        n = icono_g_encendido(e, cap, n, x, y, s, fondo)
+    n
+
+# «>_» en verde: el galón es una escalera de tramos horizontales de una fila.
+fn icono_g_terminal(e: Int, cap: Int, n0: Int, x: Int, y: Int, s: Int) -> Int ! alloc
+    n = n0
+    verde = color_rgb(128, 232, 160)
+    k = max(2, s / 6)
+    tw = max(2, s / 9)
+    ax = x + icono_p(s, 24)
+    ay = y + s / 2 - k
+    f = 0
+    while f <= 2 * k
+        off = f
+        if f > k
+            off = 2 * k - f
+        n = esc_solido(e, cap, n, ax + off, ay + f, ax + off + tw, ay + f + 1, verde, 255)
+        f = f + 1
+    ux = ax + k + tw + max(1, s / 12)
+    n = esc_solido(e, cap, n, ux, ay + 2 * k - icono_grosor(s, 14) + 1, ux + max(3, s / 4), ay + 2 * k + 1, verde, 255)
+    n
+
+# Globo: circunferencia, meridiano en óvalo, ecuador y dos paralelos.
+fn icono_g_web(e: Int, cap: Int, n0: Int, x: Int, y: Int, s: Int, fondo: Int) -> Int ! alloc
+    b = icono_blanco()
+    cx = x + s / 2
+    cy = y + s / 2
+    rr = icono_p(s, 30)
+    lw = icono_grosor(s, 18)
+    n = icono_circulo(e, cap, n0, cx, cy, rr, b)
+    n = icono_circulo(e, cap, n, cx, cy, rr - lw, fondo)
+    m = rr / 2
+    n = esc_rrect(e, cap, n, cx - m, cy - rr, cx + m, cy + rr, esc_radios(m, m, m, m), b, 255, 0, 0)
+    mi = max(0, m - lw)
+    n = esc_rrect(e, cap, n, cx - m + lw, cy - rr + lw, cx + m - lw, cy + rr - lw, esc_radios(mi, mi, mi, mi), fondo, 255, 0, 0)
+    n = esc_solido(e, cap, n, cx - rr + lw, cy - lw / 2, cx + rr - lw, cy - lw / 2 + lw, b, 255)
+    cu = rr * 84 / 100
+    n = esc_solido(e, cap, n, cx - cu, cy - rr / 2, cx + cu, cy - rr / 2 + lw, b, 255)
+    n = esc_solido(e, cap, n, cx - cu, cy + rr / 2 - lw + 1, cx + cu, cy + rr / 2 + 1, b, 255)
+    n = esc_solido(e, cap, n, cx - lw / 2, cy - rr + lw, cx - lw / 2 + lw, cy + rr - lw, b, 255)
+    n
+
+# Carpeta: pestaña y cuerpo trasero en crema, frente blanco.
+fn icono_g_carpeta(e: Int, cap: Int, n0: Int, x: Int, y: Int, s: Int) -> Int ! alloc
+    crema = color_rgb(255, 232, 186)
+    r = max(1, s / 14)
+    x0 = x + icono_p(s, 20)
+    x1 = x + icono_p(s, 80)
+    n = esc_rrect(e, cap, n0, x0, y + icono_p(s, 27), x + icono_p(s, 46), y + icono_p(s, 40), esc_radios(r, r, 0, 0), crema, 255, 0, 0)
+    n = esc_rrect(e, cap, n, x0, y + icono_p(s, 33), x1, y + icono_p(s, 74), esc_radios(0, r, r, r), crema, 255, 0, 0)
+    n = esc_rrect(e, cap, n, x0, y + icono_p(s, 42), x1, y + icono_p(s, 74), esc_radios(r, r, r, r), icono_blanco(), 255, 0, 0)
+    n
+
+# Cuadro: marco blanco, cielo, sol y dos colinas.
+fn icono_g_cuadro(e: Int, cap: Int, n0: Int, x: Int, y: Int, s: Int) -> Int ! alloc
+    r = max(1, s / 12)
+    ri = max(1, s / 18)
+    n = esc_rrect(e, cap, n0, x + icono_p(s, 19), y + icono_p(s, 25), x + icono_p(s, 81), y + icono_p(s, 75), esc_radios(r, r, r, r), icono_blanco(), 255, 0, 0)
+    ix0 = x + icono_p(s, 24)
+    iy0 = y + icono_p(s, 30)
+    ix1 = x + icono_p(s, 76)
+    iy1 = y + icono_p(s, 70)
+    n = esc_rrect(e, cap, n, ix0, iy0, ix1, iy1, esc_radios(ri, ri, ri, ri), color_rgb(196, 222, 255), 255, 0, 0)
+    n = icono_circulo(e, cap, n, x + icono_p(s, 63), y + icono_p(s, 42), max(2, s / 13), color_rgb(255, 208, 72))
+    h1 = icono_p(s, 18)
+    n = esc_rrect(e, cap, n, ix0, y + icono_p(s, 50), x + icono_p(s, 60), iy1, esc_radios(h1, h1, 0, ri), color_rgb(70, 186, 118), 255, 0, 0)
+    h2 = icono_p(s, 15)
+    n = esc_rrect(e, cap, n, x + icono_p(s, 42), y + icono_p(s, 55), ix1, iy1, esc_radios(h2, h2, ri, 0), color_rgb(36, 146, 98), 255, 0, 0)
+    n
+
+# Luna creciente: un círculo claro mordido por otro del color de la losa.
+fn icono_g_luna(e: Int, cap: Int, n0: Int, x: Int, y: Int, s: Int, fondo: Int) -> Int ! alloc
+    cx = x + s / 2 - s / 24
+    cy = y + s / 2
+    n = icono_circulo(e, cap, n0, cx, cy, icono_p(s, 27), color_rgb(252, 244, 214))
+    n = icono_circulo(e, cap, n, cx + icono_p(s, 11), cy - icono_p(s, 9), icono_p(s, 23), fondo)
+    n
+
+# Sol: disco y ocho rayos.
+fn icono_g_sol(e: Int, cap: Int, n0: Int, x: Int, y: Int, s: Int) -> Int ! alloc
+    am = color_rgb(255, 222, 86)
+    cx = x + s / 2
+    cy = y + s / 2
+    n = icono_circulo(e, cap, n0, cx, cy, icono_p(s, 17), am)
+    d = icono_p(s, 31)
+    dd = d * 70 / 100
+    rr = max(1, s / 22)
+    n = icono_circulo(e, cap, n, cx + d, cy, rr, am)
+    n = icono_circulo(e, cap, n, cx - d, cy, rr, am)
+    n = icono_circulo(e, cap, n, cx, cy + d, rr, am)
+    n = icono_circulo(e, cap, n, cx, cy - d, rr, am)
+    n = icono_circulo(e, cap, n, cx + dd, cy + dd, rr, am)
+    n = icono_circulo(e, cap, n, cx - dd, cy + dd, rr, am)
+    n = icono_circulo(e, cap, n, cx + dd, cy - dd, rr, am)
+    n = icono_circulo(e, cap, n, cx - dd, cy - dd, rr, am)
+    n
+
+# Símbolo de encendido: anillo abierto arriba y una barra.
+fn icono_g_encendido(e: Int, cap: Int, n0: Int, x: Int, y: Int, s: Int, fondo: Int) -> Int ! alloc
+    b = icono_blanco()
+    cx = x + s / 2
+    cy = y + icono_p(s, 54)
+    rr = icono_p(s, 26)
+    lw = max(2, s / 11)
+    n = icono_circulo(e, cap, n0, cx, cy, rr, b)
+    n = icono_circulo(e, cap, n, cx, cy, rr - lw, fondo)
+    hueco = rr * 48 / 100
+    n = esc_solido(e, cap, n, cx - hueco, cy - rr - 1, cx + hueco, cy - rr / 4, fondo, 255)
+    rb = lw / 2
+    n = esc_rrect(e, cap, n, cx - lw / 2, y + icono_p(s, 17), cx - lw / 2 + lw, cy + 1, esc_radios(rb, rb, rb, rb), b, 255, 0, 0)
+    n
+
+# Rejilla de 3×3 puntos (botón «Aplicaciones»), de lado `s`, en `rgb`.
+fn icono_rejilla(e: Int, cap: Int, n0: Int, x: Int, y: Int, s: Int, rgb: Int) -> Int ! alloc
+    n = n0
+    d = max(2, s * 22 / 100)
+    paso = (s - d) / 2
+    r = d / 2
+    f = 0
+    while f < 3
+        c = 0
+        while c < 3
+            px = x + c * paso
+            py = y + f * paso
+            n = esc_rrect(e, cap, n, px, py, px + d, py + d, esc_radios(r, r, r, r), rgb, 255, 0, 0)
+            c = c + 1
+        f = f + 1
+    n

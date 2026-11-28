@@ -5,46 +5,53 @@ fn botones_ok(gw: Int, gh: Int) -> Int ! alloc
     i = 0
     while i < lanz_n_botones()
         if ok == 0
-            x0 = lanz_boton_x0(i, gw)
-            x1 = x0 + lanz_boton_ancho(i, gw)
+            x0 = lanz_boton_x0(i, gw, gh)
+            x1 = x0 + lanz_boton_ancho(i, gw, gh)
             cx = (x0 + x1) / 2
             cy = barra_alto(gh) / 2
             if lanz_hit_barra(cx, cy, gw, gh) != lanz_boton_accion(i)
                 ok = 10 + i
             if lanz_hit_barra(cx, barra_alto(gh), gw, gh) != lanz_nada()
                 ok = 20 + i
+            if lanz_boton_en(cx, cy, gw, gh) != i
+                ok = 25 + i
             if i > 0
-                if x0 < lanz_boton_x0(i - 1, gw) + lanz_boton_ancho(i - 1, gw)
+                if x0 < lanz_boton_x0(i - 1, gw, gh) + lanz_boton_ancho(i - 1, gw, gh)
                     ok = 30 + i
                 if lanz_hit_barra(x0 - 1, cy, gw, gh) != lanz_nada()
                     ok = 40 + i
         i = i + 1
     ok
 
+# Cada baldosa responde en su centro con su acción, y el nombre cabe.
 fn menu_ok(gw: Int, gh: Int, tema: Int) -> Int ! alloc
     ok = 0
     k = 0
     while k < lanz_menu_n()
         if ok == 0
-            cy = lanz_menu_y0(gh) + k * lanz_menu_item_alto(gh) + lanz_menu_item_alto(gh) / 2
-            cx = lanz_menu_x0(gw) + lanz_menu_ancho(gw, gh, tema) / 2
+            cx = lanz_menu_x0(gw, gh) + lanz_menu_celda_dx(k, gw, gh) + lanz_menu_celda_w(gw, gh) / 2
+            cy = lanz_menu_y0(gh) + lanz_menu_celda_dy(k, gh) + lanz_menu_celda_h(gh) / 2
             if lanz_hit_menu(cx, cy, gw, gh, tema) != lanz_menu_accion(k)
                 ok = 50 + k
-            if str_len(lanz_menu_texto(k, tema)) * gw + 2 * lanz_margen(gw) > lanz_menu_ancho(gw, gh, tema)
+            if str_len(lanz_menu_texto(k, tema)) * gw > lanz_menu_celda_w(gw, gh)
                 ok = 60 + k
+            if lanz_menu_celda_dx(k, gw, gh) + lanz_menu_celda_w(gw, gh) > lanz_menu_ancho(gw, gh, tema)
+                ok = 70 + k
+            if lanz_menu_celda_dy(k, gh) + lanz_menu_celda_h(gh) > lanz_menu_alto(gh)
+                ok = 80 + k
         k = k + 1
     ok
 
-# Los menus superiores tienen que tener hit-test acotado y una accion de salida
-# accesible. Esta regresion acompana a las pruebas guest de responsive/escape.
+# El panel tiene hit-test acotado y una acción de salida accesible. Esta
+# regresión acompaña a las pruebas guest de responsive/escape.
 fn menu_limites_ok(gw: Int, gh: Int, tema: Int) -> Int ! alloc
-    x0 = lanz_menu_x0(gw)
+    x0 = lanz_menu_x0(gw, gh)
     y0 = lanz_menu_y0(gh)
     x1 = x0 + lanz_menu_ancho(gw, gh, tema)
     y1 = y0 + lanz_menu_alto(gh)
-    if lanz_hit_menu(x0, y0, gw, gh, tema) == lanz_nada()
+    if lanz_en_menu(x0, y0, gw, gh, tema) == 0
         1
-    elsif lanz_hit_menu(x1 - 1, y1 - 1, gw, gh, tema) == lanz_nada()
+    elsif lanz_en_menu(x1 - 1, y1 - 1, gw, gh, tema) == 0
         2
     elsif lanz_hit_menu(x1, y0, gw, gh, tema) != lanz_nada()
         3
@@ -52,6 +59,9 @@ fn menu_limites_ok(gw: Int, gh: Int, tema: Int) -> Int ! alloc
         4
     elsif lanz_menu_accion(lanz_menu_n() - 1) != lanz_salir()
         5
+    elsif lanz_hit_menu(x0 + 1, y0 + 1, gw, gh, tema) != lanz_nada()
+        # El margen del panel no es ninguna baldosa.
+        6
     else
         0
 
@@ -59,31 +69,35 @@ fn main() -> Int ! alloc
     gw = 8
     gh = 16
     tema = 0
-    if lanz_menu_n() != 5
+    if lanz_menu_n() != 6
         9
-    elsif lanz_menu_accion(3) != lanz_tema()
+    elsif lanz_menu_accion(4) != lanz_tema()
         10
+    elsif lanz_menu_accion(3) != lanz_fondo()
+        11
     elsif lanz_boton_accion(0) != lanz_menu()
         1
-    elsif lanz_hit_barra(lanz_boton_x0(0, gw) + 2, 2, gw, gh) != lanz_menu()
+    elsif lanz_hit_barra(lanz_boton_x0(0, gw, gh) + 2, 2, gw, gh) != lanz_menu()
         2
     elsif botones_ok(gw, gh) != 0
         botones_ok(gw, gh)
+    elsif botones_ok(12, 24) != 0
+        100 + botones_ok(12, 24)
     elsif menu_ok(gw, gh, tema) != 0
         menu_ok(gw, gh, tema)
+    elsif menu_ok(gw, gh, 1) != 0
+        200 + menu_ok(gw, gh, 1)
     elsif menu_limites_ok(gw, gh, tema) != 0
         menu_limites_ok(gw, gh, tema)
-    elsif lanz_hit_menu(lanz_menu_x0(gw) + lanz_menu_ancho(gw, gh, tema), lanz_menu_y0(gh) + 2, gw, gh, tema) != lanz_nada()
-        3
-    elsif lanz_hit_menu(lanz_menu_x0(gw) + 2, lanz_menu_y0(gh) + lanz_menu_alto(gh), gw, gh, tema) != lanz_nada()
-        4
-    elsif lanz_hit_menu(lanz_menu_x0(gw) + 2, lanz_menu_y0(gh) - 1, gw, gh, tema) != lanz_nada()
+    elsif lanz_hit_menu(lanz_menu_x0(gw, gh) + 2, lanz_menu_y0(gh) - 1, gw, gh, tema) != lanz_nada()
         5
-    elsif lanz_menu_accion(lanz_menu_n() - 1) != lanz_salir()
-        6
     elsif lanz_menu_accion(2) != lanz_ficheros()
         7
     elsif str_eq(lanz_menu_texto(2, tema), d"Archivos") == 0
         8
+    elsif lanz_menu_icono(4, 1) != icono_luna()
+        12
+    elsif lanz_menu_icono(4, 0) != icono_sol()
+        13
     else
         0

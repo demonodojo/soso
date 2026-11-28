@@ -1,0 +1,10 @@
+# Fondos de escritorio: fondos generados, PNG/PPM y el formato `.sfi` que lee soso-wm.
+[package]
+name = "soso-fondo"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+
+[dependencies]
+libm = "0.2"
+soso-web-core = { path = "../soso-web-core" }

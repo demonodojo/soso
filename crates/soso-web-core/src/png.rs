@@ -16,6 +16,12 @@ pub struct DecodedImage {
 }
 
 pub fn decode_png(data: &[u8]) -> Result<DecodedImage, ()> {
+    decode_png_max(data, MAX_SIDE)
+}
+
+/// Igual que [`decode_png`], con otro tope de lado (los fondos de escritorio
+/// usan imágenes del tamaño de la pantalla).
+pub fn decode_png_max(data: &[u8], max_side: u32) -> Result<DecodedImage, ()> {
     if data.len() < 8 || &data[0..8] != [137, 80, 78, 71, 13, 10, 26, 10] {
         return Err(());
     }
@@ -44,7 +50,7 @@ pub fn decode_png(data: &[u8]) -> Result<DecodedImage, ()> {
             if bit_depth != 8 || (color_type != 2 && color_type != 6) {
                 return Err(());
             }
-            if width == 0 || height == 0 || width > MAX_SIDE || height > MAX_SIDE {
+            if width == 0 || height == 0 || width > max_side || height > max_side {
                 return Err(());
             }
         } else if typ == b"IDAT" {
