@@ -1019,9 +1019,11 @@ impl PointerState {
         let Some((buttons, dx, dy)) = self.layout.extract(data) else {
             return;
         };
+        // En HID la Y relativa positiva es hacia abajo, como en pantalla
+        // (sólo el PS/2 la da hacia arriba, y lo invierte `mouse.rs`).
         self.event_queue.push_back(PointerEvent {
             dx: dx as i32,
-            dy: -(dy as i32),
+            dy: dy as i32,
             buttons: pointer_buttons_mask(buttons),
             absolute: false,
             abs_x_max: 0,
@@ -1182,7 +1184,7 @@ mod tests {
         st.process_raw_report(&[0x00, 0x02, 0x01]);
         let ev = st.next_event().expect("event");
         assert_eq!(ev.dx, 2);
-        assert_eq!(ev.dy, -1);
+        assert_eq!(ev.dy, 1);
         assert_eq!(ev.buttons, 0);
         assert!(!ev.absolute);
     }
@@ -1319,7 +1321,7 @@ mod tests {
         let mut st = PointerState::new(l);
         st.process_raw_report(&[0x01, 0x00, 0xf5, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]);
         let e = st.next_event().expect("evento");
-        assert_eq!((e.dx, e.dy, e.buttons, e.absolute), (-11, -1, 0, false));
+        assert_eq!((e.dx, e.dy, e.buttons, e.absolute), (-11, 1, 0, false));
     }
 
     #[test]
@@ -1340,7 +1342,7 @@ mod tests {
         let mut st = PointerState::new(l);
         st.process_raw_report(&[0x01, 0x01, 0x05, 0xfd]);
         let e = st.next_event().expect("evento");
-        assert_eq!((e.dx, e.dy, e.buttons, e.absolute), (5, 3, 1, false));
+        assert_eq!((e.dx, e.dy, e.buttons, e.absolute), (5, -3, 1, false));
         // Un informe del pad (Report ID 4) no se toma por uno de ratón.
         st.process_raw_report(&[0x04, 0x03, 0x10, 0x00, 0x20, 0x00]);
         assert!(st.next_event().is_none());
