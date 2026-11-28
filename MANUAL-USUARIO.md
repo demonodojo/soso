@@ -1509,6 +1509,60 @@ Los ficheros bajo `/models/` viven en un disco aparte y no se modifican desde so
 
 ---
 
+## Dispositivos USB: enchufar y desenchufar
+
+Teclados, ratones, hubs y pendrives se pueden enchufar y desenchufar con soso
+en marcha. soso mira el bus cada cuarto de segundo; un dispositivo nuevo queda
+listo en menos de un segundo. El registro del kernel apunta cada cambio
+(`grep usb: /var/log/kernel.log`):
+
+```
+usb: teclado conectado 046d:c31c en puerto 3
+usb: pendrive montado en /media/usb0 (Fat32, etiqueta «DATOS»)
+usb: desmontado /media/usb0
+```
+
+### Pendrives de datos
+
+Un pendrive con **FAT12, FAT16 o FAT32** (lo normal de fábrica hasta 32 GB, con
+o sin tabla de particiones MBR/GPT) se monta solo en `/media/usb0`; el siguiente
+en `/media/usb1`, y así. Se lee y se escribe con los comandos de siempre:
+
+```sh
+ls /media/usb0
+cp /media/usb0/foto.jpg /tmp/
+echo hola > /media/usb0/nota.txt
+mkdir /media/usb0/copias
+mv /media/usb0/nota.txt /media/usb0/copias/
+```
+
+Los nombres largos y con tildes funcionan, y no se distinguen mayúsculas de
+minúsculas (`cat /media/usb0/LEEME.TXT` y `cat /media/usb0/leeme.txt` abren el
+mismo fichero), como en Windows.
+
+**Se puede sacar sin desmontar.** Cada operación que escribe deja el pendrive
+en orden antes de terminar, así que basta con que no haya una copia a medias.
+Un programa que tuviera un fichero abierto en él recibe un error de E/S.
+
+Lo que no se puede (todavía):
+
+- **exFAT y NTFS** no se montan (muchos pendrives de 64 GB o más vienen en
+  exFAT). El registro lo dice: `usb: el pendrive (disco 2) es exFAT; soso sólo
+  monta FAT12/16/32`. Formatéalo en FAT32 desde otro sistema.
+- `mv` entre el pendrive y el disco de soso no funciona: usa `cp` y luego `rm`.
+- Ficheros de más de 4 GiB (límite de FAT).
+
+### El pendrive del live
+
+Si arrancaste desde el **pendrive live**, ése no se monta en `/media`: es el
+disco del sistema. Si se sale, lo que se lea o escriba en el sistema falla
+hasta que vuelva a entrar; al volver, soso comprueba que es el mismo pendrive y
+sigue. Uno distinto se trata como pendrive de datos. En un soso **instalado**
+(arrancado desde el disco interno), un pendrive enchufado desde el principio
+también es de datos y se monta.
+
+---
+
 ## Kernel-shell de emergencia
 
 Si la shell de usuario no está disponible (por ejemplo, tras un `exit 0` de sosh),
@@ -1764,6 +1818,7 @@ soso es un sistema con alcance deliberadamente reducido en algunas áreas:
 | SSH | Sin SFTP, port forwarding ni múltiples sesiones |
 | Web | Sin JavaScript ni CSS avanzado; modo gráfico básico |
 | Ficheros | Sin permisos Unix, hardlinks ni snapshots |
+| USB | Pendrives FAT12/16/32 en `/media/usbN`; sin exFAT ni NTFS |
 | Comandos | Conjunto acotado de coreutils y utilidades propias |
 | Pantalla | Consola de texto sobre el framebuffer del firmware; sin cambio de resolución |
 

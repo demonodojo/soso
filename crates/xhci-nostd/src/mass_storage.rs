@@ -1,7 +1,7 @@
 //! USB mass storage (BOT / SCSI READ(10)) sobre xHCI.
 
 use crate::device::{
-    alloc_dma_buffer, read_dma_buffer, EndpointDescriptor, ParsedConfiguration, UsbSpeed,
+    read_dma_buffer, EndpointDescriptor, ParsedConfiguration, UsbSpeed,
 };
 use crate::dma::delay_us;
 use crate::driver::DevPath;
@@ -104,9 +104,9 @@ impl XhciController {
         slot_id: u8,
         config: &ParsedConfiguration,
     ) {
-        if self.mass_storage.is_some() {
-            return;
-        }
+        // El primero es el candidato a disco del arranque; los demás son
+        // pendrives de datos, para que el kernel los monte.
+        let primero = self.mass_storage.is_none();
         let (iface, bulk_out, bulk_in) = match config.find_mass_storage() {
             Some(t) => t,
             None => return,
@@ -127,14 +127,19 @@ impl XhciController {
         log::info!(
             "xhci: mass storage slot={slot_id} iface={iface} sectors={sectors} sync_cache={sync_cache}"
         );
-        self.mass_storage = Some(MassStorage {
+        let ms = MassStorage {
             slot_id,
             iface,
             bulk_out_dci: bulk_out.dci(),
             bulk_in_dci: bulk_in.dci(),
             sectors,
             sync_cache,
-        });
+        };
+        if primero {
+            self.mass_storage = Some(ms);
+        } else {
+            self.extra_ms.push(ms);
+        }
     }
 
     /// Escanea puertos root con BOT dedicado (legacy; preferir `enumerate_usb_devices`).
@@ -620,7 +625,8 @@ impl XhciController {
                 return (va, pa);
             }
         }
-        let (va, pa) = unsafe { alloc_dma_buffer(size) };
+        // Persistente: sobrevive al stick que lo pidió.
+        let (va, pa) = unsafe { crate::device::alloc_dma_buffer_persistent(size) };
         self.bounce = Some((va, pa, size));
         (va, pa)
     }

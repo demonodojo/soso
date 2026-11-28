@@ -150,6 +150,10 @@ fn som_errno(e: SomFsError) -> SosoFsError {
 }
 
 pub fn resolve(path: &str) -> Result<u64, SosoFsError> {
+    #[cfg(feature = "drv-usb")]
+    if crate::drivers::usbfs::es_ruta(path) {
+        return crate::drivers::usbfs::resolve(path);
+    }
     if is_models_path(path) {
         if !models_ready() {
             return Err(SosoFsError::NotFound);
@@ -219,6 +223,10 @@ pub fn fs_disponible() -> bool {
 }
 
 pub fn stat_inode(ino: u64) -> Result<InodeItem, SosoFsError> {
+    #[cfg(feature = "drv-usb")]
+    if crate::drivers::usbfs::es(ino) {
+        return crate::drivers::usbfs::stat(ino);
+    }
     if !is_sosomfs(ino) {
         let fs = crate::fs::FS.get().ok_or(SosoFsError::Io)?;
         return fs.lock().stat_inode(ino);
@@ -249,6 +257,10 @@ pub fn stat_inode(ino: u64) -> Result<InodeItem, SosoFsError> {
 }
 
 pub fn read_dir(ino: u64) -> Result<Vec<(String, u64)>, SosoFsError> {
+    #[cfg(feature = "drv-usb")]
+    if crate::drivers::usbfs::es(ino) {
+        return crate::drivers::usbfs::read_dir(ino);
+    }
     if !is_sosomfs(ino) {
         let fs = crate::fs::FS.get().ok_or(SosoFsError::Io)?;
         let mut entries = fs.lock().read_dir(ino)?;
@@ -256,6 +268,12 @@ pub fn read_dir(ino: u64) -> Result<Vec<(String, u64)>, SosoFsError> {
             if !entries.iter().any(|(n, _)| n == "models") {
                 entries.push((String::from("models"), encode(0, ENTRY_MODELS_ROOT)));
             }
+        }
+        // `/media` con los pendrives montados; tapa un /media de sosofs.
+        #[cfg(feature = "drv-usb")]
+        if ino == sosofs::layout::ROOT_INODE && crate::drivers::usbfs::hay_montajes() {
+            entries.retain(|(n, _)| n != "media");
+            entries.push((String::from("media"), crate::drivers::usbfs::RAIZ_MEDIA));
         }
         return Ok(entries);
     }
@@ -316,6 +334,10 @@ pub fn read_file(ino: u64) -> Result<Vec<u8>, SosoFsError> {
 }
 
 pub fn read_file_range(ino: u64, offset: usize, len: usize, out: &mut [u8]) -> Result<(), SosoFsError> {
+    #[cfg(feature = "drv-usb")]
+    if crate::drivers::usbfs::es(ino) {
+        return crate::drivers::usbfs::read_range(ino, offset, len, out);
+    }
     if !is_sosomfs(ino) {
         if let Some(r) = leer_huerfano(ino, offset, len, out) {
             return r;
@@ -404,6 +426,10 @@ pub fn read_file_range_direct(ino: u64, offset: usize, out: &mut [u8]) -> Result
 }
 
 pub fn create_file(dir: u64, name: &str, data: &[u8], mtime: u64) -> Result<u64, SosoFsError> {
+    #[cfg(feature = "drv-usb")]
+    if crate::drivers::usbfs::es(dir) {
+        return crate::drivers::usbfs::create_file(dir, name, data, mtime);
+    }
     if is_sosomfs(dir) {
         return Err(SosoFsError::Io);
     }
@@ -414,6 +440,10 @@ pub fn create_file(dir: u64, name: &str, data: &[u8], mtime: u64) -> Result<u64,
 }
 
 pub fn append_file(ino: u64, data: &[u8], mtime: u64) -> Result<(), SosoFsError> {
+    #[cfg(feature = "drv-usb")]
+    if crate::drivers::usbfs::es(ino) {
+        return crate::drivers::usbfs::append_file(ino, data, mtime);
+    }
     if is_sosomfs(ino) {
         return Err(SosoFsError::Io);
     }
@@ -422,6 +452,10 @@ pub fn append_file(ino: u64, data: &[u8], mtime: u64) -> Result<(), SosoFsError>
 }
 
 pub fn mkdir(dir: u64, name: &str, mtime: u64) -> Result<u64, SosoFsError> {
+    #[cfg(feature = "drv-usb")]
+    if crate::drivers::usbfs::es(dir) {
+        return crate::drivers::usbfs::mkdir(dir, name, mtime);
+    }
     if is_sosomfs(dir) {
         return Err(SosoFsError::Io);
     }
@@ -430,6 +464,10 @@ pub fn mkdir(dir: u64, name: &str, mtime: u64) -> Result<u64, SosoFsError> {
 }
 
 pub fn unlink(dir: u64, name: &str) -> Result<(), SosoFsError> {
+    #[cfg(feature = "drv-usb")]
+    if crate::drivers::usbfs::es(dir) {
+        return crate::drivers::usbfs::unlink(dir, name);
+    }
     if is_sosomfs(dir) {
         return Err(SosoFsError::Io);
     }
@@ -446,6 +484,17 @@ pub fn rename(
     new_name: &str,
     mtime: u64,
 ) -> Result<(), SosoFsError> {
+    #[cfg(feature = "drv-usb")]
+    {
+        let (a, b) = (crate::drivers::usbfs::es(old_dir), crate::drivers::usbfs::es(new_dir));
+        if a && b {
+            return crate::drivers::usbfs::rename(old_dir, old_name, new_dir, new_name);
+        }
+        if a || b {
+            // Entre un pendrive y sosofs habría que copiar.
+            return Err(SosoFsError::Io);
+        }
+    }
     if is_sosomfs(old_dir) || is_sosomfs(new_dir) {
         return Err(SosoFsError::Io);
     }
@@ -457,6 +506,10 @@ pub fn rename(
 
 pub fn truncate_path(path: &str, size: u64, mtime: u64) -> Result<(), SosoFsError> {
     let ino = resolve(path)?;
+    #[cfg(feature = "drv-usb")]
+    if crate::drivers::usbfs::es(ino) {
+        return crate::drivers::usbfs::truncate(ino, size, mtime);
+    }
     if is_sosomfs(ino) {
         return Err(SosoFsError::Io);
     }
@@ -466,6 +519,10 @@ pub fn truncate_path(path: &str, size: u64, mtime: u64) -> Result<(), SosoFsErro
 
 pub fn utime_path(path: &str, mtime: u64) -> Result<(), SosoFsError> {
     let ino = resolve(path)?;
+    #[cfg(feature = "drv-usb")]
+    if crate::drivers::usbfs::es(ino) {
+        return crate::drivers::usbfs::set_mtime(ino, mtime);
+    }
     if is_sosomfs(ino) {
         return Err(SosoFsError::Io);
     }

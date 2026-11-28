@@ -10,10 +10,12 @@ use crate::drivers::pci;
 use crate::mm;
 use crate::{klogln, println};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use spin::Mutex;
 use xhci_nostd::hid::{MOD_LEFT_SHIFT, MOD_RIGHT_ALT, MOD_RIGHT_SHIFT};
-use xhci_nostd::{set_allocator, set_delay_us, KeyEvent, MassStorage, XhciController};
+use xhci_nostd::{
+    set_allocator, set_delay_us, KeyEvent, MassStorage, UsbHotplugEvent, UsbKind, XhciController,
+};
 
 const SECTOR: usize = 512;
 const CLASS_SERIAL_USB: u8 = 0x0c;
@@ -27,6 +29,12 @@ struct UsbHost {
     /// otro hilo tenga cogido el vector `HOSTS` para un write BOT largo.
     ctrl: Mutex<XhciController>,
     ms: Option<MassStorage>,
+    /// LBA 0 y 1 del disco del arranque. Si se desenchufa y vuelve, sólo se
+    /// readopta si es el mismo: escribir el rootfs en otro pendrive lo
+    /// destrozaría.
+    ident: Option<alloc::boxed::Box<[u8; 2 * SECTOR]>>,
+    /// Pendrives de datos de este controlador, con su id de disco.
+    datos: Vec<(u32, MassStorage)>,
     bus: u8,
     device: u8,
     function: u8,
@@ -190,13 +198,31 @@ pub fn init() {
                 ms.sectors * SECTOR as u64 / (1024 * 1024)
             );
         }
+        let mut ctrl = ctrl;
+        let extras = ctrl.take_extra_mass_storage();
         hosts.push(UsbHost {
             ctrl: Mutex::new(ctrl),
             ms,
+            ident: None,
+            datos: extras.into_iter().map(|m| (nuevo_id_datos(), m)).collect(),
             bus: xdev.bus,
             device: xdev.device,
             function: xdev.function,
         });
+    }
+    elegir_disco_de_arranque(&mut hosts);
+    for host in hosts.iter_mut() {
+        if let Some(ms) = host.ms {
+            let mut ctrl = host.ctrl.lock();
+            host.ident = disk_ident(&mut ctrl, &ms);
+        }
+        for (id, ms) in &host.datos {
+            klogln!(
+                "usb: pendrive de datos {} MiB (disco {id})",
+                ms.sectors * SECTOR as u64 / (1024 * 1024)
+            );
+            CAMBIOS.lock().push(Cambio::Montar(*id, ms.sectors));
+        }
     }
 
     let n = hosts.len();
@@ -515,46 +541,55 @@ fn xhci_irq_slot(i: usize) {
 
 /// MSI-X del interrupter 0, como Linux `xhci_try_enable_msi` + `xhci_irq`.
 /// Solo en controladores con HID: el mass storage sigue en sondeo síncrono.
+/// Los que ganen un HID en caliente se arman desde `poll_hotplug`.
 pub fn arm_hid_irqs() {
-    let hosts = HOSTS.lock();
-    for (i, host) in hosts.iter().enumerate().take(MAX_XHCI) {
+    let n = HOSTS.lock().len().min(MAX_XHCI);
+    for i in 0..n {
         let hid = {
-            let ctrl = host.ctrl.lock();
+            let hosts = HOSTS.lock();
+            let ctrl = hosts[i].ctrl.lock();
             ctrl.has_keyboard() || ctrl.pointer_count() > 0
         };
-        if !hid {
-            continue;
+        if hid && !IRQ_ARMED[i].load(Ordering::Acquire) {
+            arm_hid_irq(i);
         }
-        let Some(vec) = irq::allocate(XHCI_IRQS[i]) else {
-            klogln!(
-                "usb: xHCI {:02x}:{:02x}.{} sin vector IRQ",
-                host.bus, host.device, host.function
-            );
-            continue;
+    }
+    IRQS_ARMED_ONCE.store(true, Ordering::Release);
+}
+
+fn arm_hid_irq(i: usize) {
+    let (bus, device, function) = {
+        let hosts = HOSTS.lock();
+        let Some(h) = hosts.get(i) else {
+            return;
         };
-        if let Some(msix) = pci::find_msix(host.bus, host.device, host.function) {
-            if pci::msix_setup(&msix, 0, vec, pci::msix_default_dest()).is_ok() {
-                klogln!(
-                    "usb: xHCI {:02x}:{:02x}.{} MSI-X vector={vec:#x}",
-                    host.bus, host.device, host.function
-                );
-                continue;
-            }
+        (h.bus, h.device, h.function)
+    };
+    // Se marca antes de intentarlo: un vector que no se pudo pedir no se
+    // vuelve a pedir en cada sondeo.
+    IRQ_ARMED[i].store(true, Ordering::Release);
+    let Some(vec) = irq::allocate(XHCI_IRQS[i]) else {
+        klogln!("usb: xHCI {:02x}:{:02x}.{} sin vector IRQ", bus, device, function);
+        return;
+    };
+    if let Some(msix) = pci::find_msix(bus, device, function) {
+        if pci::msix_setup(&msix, 0, vec, pci::msix_default_dest()).is_ok() {
+            klogln!("usb: xHCI {:02x}:{:02x}.{} MSI-X vector={vec:#x}", bus, device, function);
+            return;
         }
-        let line = pci::read8(host.bus, host.device, host.function, 0x3c);
-        let pin = pci::read8(host.bus, host.device, host.function, 0x3d);
-        if pin != 0 && crate::arch::ioapic::route_isa(line, vec, pci::msix_default_dest()).is_ok()
-        {
-            klogln!(
-                "usb: xHCI {:02x}:{:02x}.{} INTx IRQ{line} vector={vec:#x}",
-                host.bus, host.device, host.function
-            );
-        } else {
-            klogln!(
-                "usb: xHCI {:02x}:{:02x}.{} sin MSI-X ni INTx; solo sondeo",
-                host.bus, host.device, host.function
-            );
-        }
+    }
+    let line = pci::read8(bus, device, function, 0x3c);
+    let pin = pci::read8(bus, device, function, 0x3d);
+    if pin != 0 && crate::arch::ioapic::route_isa(line, vec, pci::msix_default_dest()).is_ok() {
+        klogln!(
+            "usb: xHCI {:02x}:{:02x}.{} INTx IRQ{line} vector={vec:#x}",
+            bus, device, function
+        );
+    } else {
+        klogln!(
+            "usb: xHCI {:02x}:{:02x}.{} sin MSI-X ni INTx; solo sondeo",
+            bus, device, function
+        );
     }
 }
 
@@ -614,7 +649,293 @@ pub fn rescan() {
                     ms.sectors,
                     ms.sectors * SECTOR as u64 / (1024 * 1024)
                 );
+                host.ident = disk_ident(&mut ctrl, &ms);
                 host.ms = Some(ms);
+            }
+        }
+        for ms in ctrl.take_extra_mass_storage() {
+            let id = nuevo_id_datos();
+            CAMBIOS.lock().push(Cambio::Montar(id, ms.sectors));
+            host.datos.push((id, ms));
+        }
+    }
+}
+
+/// Un solo disco del arranque entre todos los controladores: el primero con
+/// GPT (el live y una instalación de soso lo son; un pendrive de datos casi
+/// nunca). Los demás pasan a ser pendrives de datos. Antes se quedaba el
+/// primero que se enumeraba, y con dos pendrives podía tocarle al de datos.
+fn elegir_disco_de_arranque(hosts: &mut [UsbHost]) {
+    let mut cands: Vec<(usize, MassStorage, bool)> = Vec::new();
+    for (i, h) in hosts.iter_mut().enumerate() {
+        let mut todos: Vec<MassStorage> = h.ms.take().into_iter().collect();
+        todos.extend(h.datos.drain(..).map(|(_, m)| m));
+        let mut ctrl = h.ctrl.lock();
+        for m in todos {
+            let mut sec = [0u8; SECTOR];
+            let gpt = ctrl.read_sector10(&m, 1, &mut sec) && &sec[0..8] == b"EFI PART";
+            cands.push((i, m, gpt));
+        }
+    }
+    let elegido = cands
+        .iter()
+        .position(|c| c.2)
+        .or(if cands.is_empty() { None } else { Some(0) });
+    for (k, (i, m, _)) in cands.into_iter().enumerate() {
+        if Some(k) == elegido {
+            hosts[i].ms = Some(m);
+        } else {
+            hosts[i].datos.push((nuevo_id_datos(), m));
+        }
+    }
+}
+
+static SIGUIENTE_ID_DATOS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
+
+fn nuevo_id_datos() -> u32 {
+    SIGUIENTE_ID_DATOS.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Montajes y desmontajes pendientes. Se apuntan con `HOSTS` cogido y se
+/// atienden sin él: montar lee el disco, y eso vuelve a pedir `HOSTS`.
+enum Cambio {
+    Montar(u32, u64),
+    Desmontar(u32),
+}
+
+static CAMBIOS: Mutex<Vec<Cambio>> = Mutex::new(Vec::new());
+
+fn atender_cambios() {
+    let pendientes: Vec<Cambio> = core::mem::take(&mut *CAMBIOS.lock());
+    for c in pendientes {
+        match c {
+            Cambio::Montar(id, sectores) => crate::drivers::usbfs::montar(id, sectores),
+            Cambio::Desmontar(id) => crate::drivers::usbfs::desmontar(id),
+        }
+    }
+}
+
+fn con_datos<T>(id: u32, f: impl FnOnce(&mut XhciController, &MassStorage) -> T) -> Option<T> {
+    let hosts = HOSTS.lock();
+    for h in hosts.iter() {
+        if let Some((_, ms)) = h.datos.iter().find(|(i, _)| *i == id) {
+            let ms = *ms;
+            let mut ctrl = h.ctrl.lock();
+            return Some(f(&mut ctrl, &ms));
+        }
+    }
+    None
+}
+
+/// Lee `buf.len()/512` sectores de un pendrive de datos.
+pub fn datos_leer(id: u32, lba: u64, buf: &mut [u8]) -> bool {
+    con_datos(id, |ctrl, ms| {
+        lba + (buf.len() / SECTOR) as u64 <= ms.sectors && ctrl.read_sectors10(ms, lba as u32, buf)
+    })
+    .unwrap_or(false)
+}
+
+/// Escribe `buf.len()/512` sectores en un pendrive de datos.
+pub fn datos_escribir(id: u32, lba: u64, buf: &[u8]) -> bool {
+    con_datos(id, |ctrl, ms| {
+        lba + (buf.len() / SECTOR) as u64 <= ms.sectors && ctrl.write_sectors10(ms, lba as u32, buf)
+    })
+    .unwrap_or(false)
+}
+
+/// SYNCHRONIZE CACHE, si el pendrive lo admite.
+pub fn datos_flush(id: u32) -> bool {
+    con_datos(id, |ctrl, ms| !ms.sync_cache || ctrl.synchronize_cache10(ms)).unwrap_or(false)
+}
+
+/// Huella del disco: LBA 0 (MBR protector) y 1 (cabecera GPT con el GUID).
+fn disk_ident(
+    ctrl: &mut XhciController,
+    ms: &MassStorage,
+) -> Option<alloc::boxed::Box<[u8; 2 * SECTOR]>> {
+    let mut out = alloc::boxed::Box::new([0u8; 2 * SECTOR]);
+    for lba in 0..2u32 {
+        let mut sec = [0u8; SECTOR];
+        if !ctrl.read_sector10(ms, lba, &mut sec) {
+            return None;
+        }
+        out[lba as usize * SECTOR..(lba as usize + 1) * SECTOR].copy_from_slice(&sec);
+    }
+    Some(out)
+}
+
+/// Cada cuánto mira el bus. Sin cambios son unas lecturas de PORTSC.
+const HOTPLUG_PERIOD_MS: u64 = 250;
+static HOTPLUG_LAST_MS: AtomicU64 = AtomicU64::new(0);
+/// `arm_hid_irqs` ya corrió: los HID que lleguen después se arman aquí.
+static IRQS_ARMED_ONCE: AtomicBool = AtomicBool::new(false);
+static IRQ_ARMED: [AtomicBool; MAX_XHCI] = [
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+];
+
+fn kind_name(k: UsbKind) -> &'static str {
+    match k {
+        UsbKind::Keyboard => "teclado",
+        UsbKind::Pointer => "ratón",
+        UsbKind::MassStorage => "almacenamiento",
+        UsbKind::Hub => "hub",
+        UsbKind::Other => "dispositivo",
+    }
+}
+
+fn log_event(e: &UsbHotplugEvent) {
+    let donde = if e.hub_port != 0 {
+        alloc::format!("puerto {} (hub, puerto {})", e.root_port, e.hub_port)
+    } else {
+        alloc::format!("puerto {}", e.root_port)
+    };
+    klogln!(
+        "usb: {} {} {:04x}:{:04x} en {donde}",
+        kind_name(e.kind),
+        if e.connected { "conectado" } else { "desconectado" },
+        e.vendor_id,
+        e.product_id,
+    );
+}
+
+/// Corre `f` con las interrupciones abiertas y deja el estado como estaba.
+///
+/// Enumerar un dispositivo son cientos de ms de esperas activas. Con IF=0 en
+/// la BSP se perdían los ticks del PIT (el reloj se retrasaba) y los IPI de
+/// TLB shootdown de los otros núcleos se quedaban esperándola. Es seguro
+/// abrirlas: en ring 0 el temporizador sólo cuenta ticks, y los handlers que
+/// tocan el xHCI (IRQ del HID, teclado) usan `try_lock` y no esperan al
+/// candado que tenemos.
+fn con_interrupciones<T>(f: impl FnOnce() -> T) -> T {
+    let antes = x86_64::instructions::interrupts::are_enabled();
+    x86_64::instructions::interrupts::enable();
+    let r = f();
+    if !antes {
+        x86_64::instructions::interrupts::disable();
+    }
+    r
+}
+
+/// Una vez, ya arrancado: si el sistema no arrancó del USB (instalado en
+/// NVMe, virtio…), el pendrive que había enchufado no es el disco del
+/// arranque sino uno de datos, y se monta como tal.
+fn degradar_si_no_es_el_arranque(hosts: &mut [UsbHost]) {
+    static HECHO: AtomicBool = AtomicBool::new(false);
+    if HECHO.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    #[cfg(feature = "drv-live-disk")]
+    let del_usb = crate::drivers::live_disk::backend()
+        == Some(crate::drivers::live_disk::LiveBackend::Usb);
+    #[cfg(not(feature = "drv-live-disk"))]
+    let del_usb = false;
+    if del_usb {
+        return;
+    }
+    for h in hosts.iter_mut() {
+        if let Some(ms) = h.ms.take() {
+            h.ident = None;
+            let id = nuevo_id_datos();
+            klogln!("usb: el sistema no arrancó del USB; el pendrive pasa a ser de datos (disco {id})");
+            h.datos.push((id, ms));
+            CAMBIOS.lock().push(Cambio::Montar(id, ms.sectors));
+        }
+    }
+}
+
+/// Conexión y desconexión en caliente. La llama el bucle de la BSP.
+///
+/// Solo `try_lock`: si otro núcleo está en medio de un write BOT, se mira en
+/// la pasada siguiente. Una conexión enumera aquí mismo (cientos de ms).
+pub fn poll_hotplug() {
+    if !CTRLS_READY.load(Ordering::Acquire) {
+        return;
+    }
+    let now = crate::arch::pit::uptime_ms();
+    let last = HOTPLUG_LAST_MS.load(Ordering::Relaxed);
+    if now.wrapping_sub(last) < HOTPLUG_PERIOD_MS {
+        return;
+    }
+    HOTPLUG_LAST_MS.store(now, Ordering::Relaxed);
+
+    let Some(mut hosts) = HOSTS.try_lock() else {
+        return;
+    };
+    let mut nuevos: Vec<(usize, MassStorage)> = Vec::new();
+    let mut gana_hid: Vec<usize> = Vec::new();
+    for (i, host) in hosts.iter_mut().enumerate() {
+        let Some(mut ctrl) = host.ctrl.try_lock() else {
+            continue;
+        };
+        let eventos = con_interrupciones(|| ctrl.poll_hotplug());
+        for e in &eventos {
+            log_event(e);
+            if !e.connected && host.ms.as_ref().is_some_and(|m| m.slot_id == e.slot) {
+                klogln!(
+                    "usb: se ha retirado el disco del arranque; su E/S falla hasta que vuelva"
+                );
+                host.ms = None;
+            }
+            if !e.connected {
+                if let Some(k) = host.datos.iter().position(|(_, m)| m.slot_id == e.slot) {
+                    let (id, _) = host.datos.remove(k);
+                    CAMBIOS.lock().push(Cambio::Desmontar(id));
+                }
+            }
+            if e.connected && matches!(e.kind, UsbKind::Keyboard | UsbKind::Pointer) {
+                gana_hid.push(i);
+            }
+        }
+        for ms in ctrl.take_extra_mass_storage() {
+            nuevos.push((i, ms));
+        }
+    }
+
+    for (i, ms) in nuevos {
+        let ident = {
+            let mut ctrl = hosts[i].ctrl.lock();
+            con_interrupciones(|| disk_ident(&mut ctrl, &ms))
+        };
+        // ¿Es el disco del arranque que vuelve? Su huella quedó en el host
+        // donde estaba, que puede no ser éste (otro puerto, otro xHCI).
+        let dueño = hosts.iter().position(|h| {
+            h.ms.is_none()
+                && h.ident.is_some()
+                && ident.as_ref().is_some_and(|x| h.ident.as_ref() == Some(x))
+        });
+        let disco_activo = hosts.iter().any(|h| h.ms.is_some());
+        match dueño {
+            Some(j) if !disco_activo => {
+                klogln!(
+                    "usb: ha vuelto el disco del arranque ({} sectores); se reanuda su E/S",
+                    ms.sectors
+                );
+                let huella = hosts[j].ident.take();
+                hosts[i].ident = huella;
+                hosts[i].ms = Some(ms);
+            }
+            _ => {
+                let id = nuevo_id_datos();
+                klogln!(
+                    "usb: pendrive de datos {} MiB conectado (disco {id})",
+                    ms.sectors * SECTOR as u64 / (1024 * 1024)
+                );
+                hosts[i].datos.push((id, ms));
+                CAMBIOS.lock().push(Cambio::Montar(id, ms.sectors));
+            }
+        }
+    }
+    degradar_si_no_es_el_arranque(&mut hosts);
+    drop(hosts);
+    con_interrupciones(atender_cambios);
+
+    if IRQS_ARMED_ONCE.load(Ordering::Acquire) {
+        for i in gana_hid {
+            if i < MAX_XHCI && !IRQ_ARMED[i].load(Ordering::Acquire) {
+                arm_hid_irq(i);
             }
         }
     }

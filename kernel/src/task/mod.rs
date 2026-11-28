@@ -1858,6 +1858,10 @@ extern "C" fn schedule_inner() -> ! {
             // que el candado del controlador falló y sosh está en WaitingTty.
             // PROCS aún no está cogido: poll_devices despierta con try_lock.
             crate::drivers::kbd::poll_devices();
+            // Conexión y desconexión USB en caliente (cada 250 ms; enumerar
+            // un dispositivo recién enchufado sí tarda, cientos de ms).
+            #[cfg(feature = "drv-usb")]
+            crate::drivers::usb_storage::poll_hotplug();
             crate::drivers::diag_entrada::quizas_volcar();
         }
         syscall::drenar_fds_aplazados();

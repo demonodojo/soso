@@ -39,6 +39,7 @@ members = [
     "crates/soso-notify-core",
     "crates/soso-wm-proto",
     "crates/espfat-core",
+    "crates/usbfat",
     "tools/soso-improve",
 ]
 # El kernel y el userspace se compilan para x86_64-unknown-none (y el shim de

@@ -575,7 +575,19 @@ impl Dcbaa {
         assert!(slot_id >= 1 && slot_id <= self.max_slots, "xhci: invalid slot_id {}", slot_id);
 
         let total_size = 32 * ctx_size; // Slot + 31 EP contexts
-        let (va, phys) = dma::alloc_aligned(total_size, 64);
+
+        // El HC reparte los slot ID otra vez tras Disable Slot (desenchufe,
+        // reintento): reutilizar el contexto de antes, a cero, en vez de
+        // pedir uno nuevo en cada conexión.
+        if let Some(prev) = self.device_contexts[slot_id as usize].as_ref() {
+            if prev._size == total_size {
+                ptr::write_bytes(prev.va, 0, total_size);
+                ptr::write_volatile(self.buffer.add(slot_id as usize), prev.phys);
+                return prev.phys;
+            }
+        }
+
+        let (va, phys) = dma::alloc_persistent(total_size, 64);
 
         // Write the physical address into the DCBAA entry
         ptr::write_volatile(self.buffer.add(slot_id as usize), phys);

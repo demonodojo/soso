@@ -30,6 +30,8 @@ use crate::dma::delay_us;
 use crate::registers::*;
 use crate::ring::*;
 
+mod hotplug;
+
 /// Intervalo entre polls del event ring (µs).
 const EVENT_POLL_INTERVAL_US: u32 = 10;
 /// Timeout de comandos xHCI (Linux XHCI_CMD_DEFAULT_TIMEOUT ≈ 5 s).
@@ -124,6 +126,66 @@ pub struct XhciController {
     root_port_slot: Vec<u8>,
     /// Inventario de lo enumerado, para el informe de hardware.
     inventory: Vec<UsbDevInfo>,
+    /// Bit N = puerto root N+1 con CSC visto desde el último sondeo de
+    /// conexión en caliente. Lo apunta el despacho de eventos, que puede
+    /// correr dentro de la IRQ: ahí sólo se toca este campo, nunca el log.
+    port_csc: u64,
+    /// Hubs configurados, para sondear sus puertos downstream.
+    hubs: Vec<HubInfo>,
+    /// Búfer DMA de GET_PORT_STATUS de hub. El asignador no libera, y el
+    /// sondeo de hubs lo pide cada segundo.
+    hub_status_buf: Option<(*mut u8, u64)>,
+    /// Avisos del camino de la IRQ, que no puede escribir en el log.
+    irq_notes: IrqNotes,
+    /// Pasadas de `poll_hotplug`, para espaciar el sondeo de hubs.
+    hotplug_ticks: u32,
+    /// Bloques DMA de cada slot, para devolverlos al desenchufar.
+    slot_dma: Vec<Vec<crate::dma::Block>>,
+    /// Mass storage activadas además de la primera (pendrives de datos,
+    /// enchufados al arrancar o en caliente), a la espera de que el kernel
+    /// las recoja.
+    pub(crate) extra_ms: Vec<MassStorage>,
+    /// Bit N = puerto root N+1 conectado en la pasada anterior, a la espera
+    /// de confirmar que sigue estable antes de enumerarlo.
+    pending_connect: u64,
+}
+
+/// Contadores que el despacho de eventos deja para el sondeo de hotplug.
+#[derive(Default)]
+struct IrqNotes {
+    hid_errors: u32,
+    pending_dropped: u32,
+}
+
+/// Un hub configurado.
+#[derive(Clone, Copy, Debug)]
+struct HubInfo {
+    slot: u8,
+    root_port: u8,
+    n_ports: u8,
+}
+
+/// Qué tipo de dispositivo es, a grandes rasgos.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UsbKind {
+    Keyboard,
+    Pointer,
+    MassStorage,
+    Hub,
+    Other,
+}
+
+/// Cambio de topología que `poll_hotplug` devuelve.
+#[derive(Clone, Debug)]
+pub struct UsbHotplugEvent {
+    pub connected: bool,
+    pub slot: u8,
+    pub root_port: u8,
+    /// Puerto del hub padre (0 = puerto root).
+    pub hub_port: u8,
+    pub vendor_id: u16,
+    pub product_id: u16,
+    pub kind: UsbKind,
 }
 
 /// Una interfaz vista durante la enumeración.
@@ -220,6 +282,10 @@ const HUB_PORT_CONNECTED: u16 = 1 << 0;
 const HUB_PORT_LOW_SPEED: u16 = 1 << 9;
 const HUB_PORT_HIGH_SPEED: u16 = 1 << 10;
 const HUB_PORT_CHANGE_RESET: u16 = 1 << 4;
+const HUB_PORT_CHANGE_CONNECTION: u16 = 1 << 0;
+const HUB_PORT_CHANGE_ENABLE: u16 = 1 << 1;
+const HUB_FEATURE_C_PORT_CONNECTION: u16 = 16;
+const HUB_FEATURE_C_PORT_ENABLE: u16 = 17;
 
 fn usb_speed_from_hub_status(status: u16) -> UsbSpeed {
     if status & HUB_PORT_LOW_SPEED != 0 {
@@ -367,6 +433,14 @@ impl XhciController {
             timeout_ports_logged: false,
             ignored_ports: 0,
             root_port_slot: vec![0u8; max_ports as usize + 1],
+            port_csc: 0,
+            hubs: Vec::new(),
+            hub_status_buf: None,
+            irq_notes: IrqNotes::default(),
+            hotplug_ticks: 0,
+            slot_dma: Vec::new(),
+            extra_ms: Vec::new(),
+            pending_connect: 0,
         };
 
         ctrl.power_ports();
@@ -493,6 +567,9 @@ impl XhciController {
         }
         let portsc = self.op.portsc(port_id);
         let ch = portsc & PORTSC_CHANGE_BITS;
+        if ch & PORTSC_CSC != 0 && port_id <= 64 {
+            self.port_csc |= 1u64 << (port_id - 1);
+        }
         if ch != 0 {
             self.write_portsc_masked(port_id, portsc, ch);
         }
@@ -589,47 +666,9 @@ impl XhciController {
 
         let mut fallos_seguidos = 0u32;
         for port in 1..=self.max_ports() {
-            let portsc = self.op.portsc(port);
-            let connected = portsc & PORTSC_CCS != 0;
-            if !connected {
-                continue;
-            }
-            if self.ignored_ports & (1u32 << (port - 1)) != 0 {
-                continue;
-            }
-            if let Some(slot) = self.root_port_slot.get(port as usize).copied() {
-                if slot != 0
-                    && self
-                        .devices
-                        .get(slot as usize)
-                        .and_then(|d| d.as_ref())
-                        .is_some()
-                {
-                    continue;
-                }
-            }
-            let speed_code = (portsc & PORTSC_SPEED_MASK) >> PORTSC_SPEED_SHIFT;
-            let mut usb_speed = UsbSpeed::from_port_speed(speed_code);
-            log::info!(
-                "xhci: port {}: device connected PORTSC={portsc:#010x} speed={:?}",
-                port, usb_speed
-            );
-
-            // USB2: reset siempre aunque PED=1 (estado heredado del UEFI).
-            if speed_code < 4 {
-                self.reset_port(port);
-                let speed_code = self.op.port_speed(port);
-                usb_speed = UsbSpeed::from_port_speed(speed_code);
-            }
-
-            match self.enable_slot() {
-                Some(slot_id) => {
-                    fallos_seguidos = 0;
-                    if let Some(m) = self.root_port_slot.get_mut(port as usize) {
-                        *m = slot_id;
-                    }
-                    self.initialize_device(slot_id, DevPath::root(port), usb_speed);
-                }
+            match self.enumerate_root_port(port) {
+                Some(true) => fallos_seguidos = 0,
+                Some(false) => {}
                 None => {
                     // `None` incluye el timeout de comando de 5 s, no sólo «sin
                     // slots»: abortar aquí dejaba sin enumerar todos los puertos
@@ -647,6 +686,49 @@ impl XhciController {
         }
     }
 
+    /// ¿Hay algún slot vivo colgando de este puerto root?
+    fn root_port_has_device(&self, port: u8) -> bool {
+        self.devices
+            .iter()
+            .flatten()
+            .any(|d| d.port == port && d.route_string == 0)
+    }
+
+    /// Enumera lo que haya en un puerto root. `Some(true)`: se pidió slot;
+    /// `Some(false)`: nada que hacer; `None`: Enable Slot falló.
+    fn enumerate_root_port(&mut self, port: u8) -> Option<bool> {
+        let portsc = self.op.portsc(port);
+        if portsc & PORTSC_CCS == 0 {
+            return Some(false);
+        }
+        if port <= 32 && self.ignored_ports & (1u32 << (port - 1)) != 0 {
+            return Some(false);
+        }
+        if self.root_port_has_device(port) {
+            return Some(false);
+        }
+        let speed_code = (portsc & PORTSC_SPEED_MASK) >> PORTSC_SPEED_SHIFT;
+        let mut usb_speed = UsbSpeed::from_port_speed(speed_code);
+        log::info!(
+            "xhci: port {}: device connected PORTSC={portsc:#010x} speed={:?}",
+            port, usb_speed
+        );
+
+        // USB2: reset siempre aunque PED=1 (estado heredado del UEFI).
+        if speed_code < 4 {
+            self.reset_port(port);
+            let speed_code = self.op.port_speed(port);
+            usb_speed = UsbSpeed::from_port_speed(speed_code);
+        }
+
+        let slot_id = self.enable_slot()?;
+        if let Some(m) = self.root_port_slot.get_mut(port as usize) {
+            *m = slot_id;
+        }
+        self.initialize_device(slot_id, DevPath::root(port), usb_speed);
+        Some(true)
+    }
+
     /// Una pasada unificada: HID, hubs y mass storage BOT (root o detrás de hub).
     /// Devuelve el primer BOT con capacidad válida; no para al encontrarlo.
     pub fn enumerate_usb_devices(&mut self) -> Option<MassStorage> {
@@ -654,6 +736,10 @@ impl XhciController {
         self.drain_port_events();
         self.wait_polling_ports();
         self.enumerate_ports();
+        // Lo que había al arrancar ya está enumerado: los CSC que dejaron el
+        // encendido y los resets no son conexiones nuevas.
+        self.drain_hw_events();
+        self.port_csc = 0;
         self.mass_storage
     }
 
@@ -781,7 +867,7 @@ impl XhciController {
                     return Some(evt);
                 } else if evt_type == TRB_TYPE_PORT_STATUS_CHANGE {
                     let port_id = (evt.parameter() >> 24) as u8;
-                    log::info!("xhci: port status change event: port={}", port_id);
+                    log::debug!("xhci: port status change event: port={}", port_id);
                     self.ack_port_status_change(port_id);
                     continue;
                 } else if evt_type == TRB_TYPE_TRANSFER_EVENT {
@@ -864,7 +950,37 @@ impl XhciController {
     }
 
     /// Initialize a device: Address Device, Get Descriptors, Configure.
-    fn initialize_device(&mut self, mut slot_id: u8, path: DevPath, speed: UsbSpeed) {
+    ///
+    /// La memoria DMA que se pida por el camino queda apuntada al slot que
+    /// sobreviva (los reintentos pueden cambiar de slot) y vuelve a la reserva
+    /// cuando se desenchufa; si no sobrevive ninguno, vuelve ya.
+    fn initialize_device(&mut self, slot_id: u8, path: DevPath, speed: UsbSpeed) {
+        crate::dma::track_begin();
+        self.initialize_device_inner(slot_id, path, speed);
+        let blocks = crate::dma::track_end();
+        match self.slot_at_path(path) {
+            Some(s) => {
+                if self.slot_dma.len() <= s as usize {
+                    self.slot_dma.resize_with(s as usize + 1, Vec::new);
+                }
+                self.slot_dma[s as usize].extend(blocks);
+            }
+            None => crate::dma::release(blocks),
+        }
+    }
+
+    /// Slot vivo en esa ruta (puerto root + hub padre + puerto del hub).
+    fn slot_at_path(&self, path: DevPath) -> Option<u8> {
+        self.devices.iter().flatten().find_map(|d| {
+            (d.port == path.root_port
+                && d.route_string == path.route
+                && d.tt_hub_slot == path.tt_hub_slot
+                && d.tt_port == path.tt_port)
+                .then_some(d.slot_id)
+        })
+    }
+
+    fn initialize_device_inner(&mut self, mut slot_id: u8, path: DevPath, speed: UsbSpeed) {
         log::info!(
             "xhci: initializing device slot={} root_port={} route={:#x} speed={:?}",
             slot_id, path.root_port, path.route, speed
@@ -2275,11 +2391,8 @@ impl XhciController {
 
     fn queue_pending(&mut self, evt: Trb) {
         if self.pending_transfers.len() >= MAX_PENDING_TRANSFERS {
-            log::warn!(
-                "xhci: cola de transferencias llena; descarto slot={} ep={}",
-                evt.slot_id(),
-                evt.endpoint_id()
-            );
+            // Camino de la IRQ: se cuenta y lo cuenta `poll_hotplug`.
+            self.irq_notes.pending_dropped += 1;
             return;
         }
         self.pending_transfers.push(evt);
@@ -2309,7 +2422,12 @@ impl XhciController {
             let report_data = unsafe { read_dma_buffer(report_va, report_len) };
             self.keyboards[idx].state.process_raw_report(&report_data);
         } else {
-            log::warn!("xhci: keyboard transfer error: code={}", code);
+            // Lo normal al desenchufar: Transaction Error y el EP en Halted.
+            // Rearmar aquí no sirve (el EP no corre hasta un Reset Endpoint)
+            // y loguear desde la IRQ clava la máquina: lo resuelve el sondeo.
+            self.irq_notes.hid_errors += 1;
+            self.keyboards[idx].transfer_pending = false;
+            return;
         }
 
         if let Some(ring) = self.transfer_rings[slot_id as usize]
@@ -2339,7 +2457,10 @@ impl XhciController {
             let report_data = unsafe { read_dma_buffer(report_va, report_len) };
             self.pointers[idx].state.process_raw_report(&report_data);
         } else {
-            log::warn!("xhci: pointer transfer error: code={}", code);
+            // Ver `handle_keyboard_transfer`.
+            self.irq_notes.hid_errors += 1;
+            self.pointers[idx].transfer_pending = false;
+            return;
         }
 
         if let Some(ring) = self.transfer_rings[slot_id as usize]
@@ -2366,8 +2487,8 @@ impl XhciController {
                 self.queue_pending(evt);
             }
         } else if evt_type == TRB_TYPE_PORT_STATUS_CHANGE {
+            // Puede correr en la IRQ: nada de log (clavaría la máquina).
             let port_id = (evt.parameter() >> 24) as u8;
-            log::info!("xhci: port status change event: port={}", port_id);
             self.ack_port_status_change(port_id);
         } else {
             log::trace!("xhci: unhandled event type {}", evt_type);
@@ -2740,7 +2861,14 @@ impl XhciController {
     }
 
     fn hub_get_port_status(&mut self, hub_slot: u8, port: u8) -> Option<(u16, u16)> {
-        let (va, phys) = unsafe { alloc_dma_buffer(4) };
+        let (va, phys) = match self.hub_status_buf {
+            Some(b) => b,
+            None => {
+                let b = unsafe { crate::device::alloc_dma_buffer_persistent(4) };
+                self.hub_status_buf = Some(b);
+                b
+            }
+        };
         let ring = self.transfer_rings[hub_slot as usize][1].as_mut()?;
         let handles = ring.enqueue_control_transfer(
             USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_OTHER,
@@ -2801,34 +2929,58 @@ impl XhciController {
             return;
         };
         log::info!("xhci: hub slot={hub_slot} {n_ports} puertos downstream");
+        self.hubs.retain(|h| h.slot != hub_slot);
+        self.hubs.push(HubInfo {
+            slot: hub_slot,
+            root_port,
+            n_ports,
+        });
         for hp in 1..=n_ports {
             if !self.hub_set_port_feature(hub_slot, hp, HUB_FEATURE_PORT_POWER) {
                 continue;
             }
             delay_us(HUB_POWER_ON_US);
-            let (status, _change) = match self.hub_get_port_status(hub_slot, hp) {
-                Some(s) => s,
-                None => continue,
-            };
-            if status & HUB_PORT_CONNECTED == 0 {
-                continue;
+            self.attach_hub_port(hub_slot, root_port, hp);
+        }
+        // El encendido y los resets dejan C_PORT_CONNECTION puesto: no son
+        // conexiones nuevas para el sondeo de hotplug.
+        for hp in 1..=n_ports {
+            if let Some((_, change)) = self.hub_get_port_status(hub_slot, hp) {
+                if change & HUB_PORT_CHANGE_CONNECTION != 0 {
+                    let _ = self.hub_clear_port_feature(
+                        hub_slot,
+                        hp,
+                        HUB_FEATURE_C_PORT_CONNECTION,
+                    );
+                }
             }
-            log::info!("xhci: hub puerto {hp} conectado status={status:#06x}");
-            if !self.hub_set_port_feature(hub_slot, hp, HUB_FEATURE_PORT_RESET) {
-                continue;
-            }
-            if !self.hub_wait_port_reset_complete(hub_slot, hp) {
-                log::warn!("xhci: hub puerto {hp} reset timeout");
-                continue;
-            }
-            let (status, _) = self
-                .hub_get_port_status(hub_slot, hp)
-                .unwrap_or((0, 0));
-            let child_speed = usb_speed_from_hub_status(status);
-            let path = DevPath::behind_hub(root_port, hp, hub_slot);
-            if let Some(slot) = self.enable_slot() {
-                self.initialize_device(slot, path, child_speed);
-            }
+        }
+    }
+
+    /// Resetea y enumera lo que haya en el puerto `hp` de un hub.
+    fn attach_hub_port(&mut self, hub_slot: u8, root_port: u8, hp: u8) {
+        let (status, _change) = match self.hub_get_port_status(hub_slot, hp) {
+            Some(s) => s,
+            None => return,
+        };
+        if status & HUB_PORT_CONNECTED == 0 {
+            return;
+        }
+        log::info!("xhci: hub puerto {hp} conectado status={status:#06x}");
+        if !self.hub_set_port_feature(hub_slot, hp, HUB_FEATURE_PORT_RESET) {
+            return;
+        }
+        if !self.hub_wait_port_reset_complete(hub_slot, hp) {
+            log::warn!("xhci: hub puerto {hp} reset timeout");
+            return;
+        }
+        let (status, _) = self
+            .hub_get_port_status(hub_slot, hp)
+            .unwrap_or((0, 0));
+        let child_speed = usb_speed_from_hub_status(status);
+        let path = DevPath::behind_hub(root_port, hp, hub_slot);
+        if let Some(slot) = self.enable_slot() {
+            self.initialize_device(slot, path, child_speed);
         }
     }
 

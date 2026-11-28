@@ -3889,6 +3889,8 @@ struct UsbTestScenario {
     usb_kbd: bool,
     usb_hub: bool,
     extra_serial: Option<&'static str>,
+    /// Enchufa y desenchufa por el monitor tras arrancar.
+    hotplug: bool,
 }
 
 
@@ -4014,6 +4016,7 @@ pub fn run_usb() {
             usb_kbd: false,
             usb_hub: false,
             extra_serial: None,
+            hotplug: false,
         },
         UsbTestScenario {
             id: "nec",
@@ -4024,6 +4027,7 @@ pub fn run_usb() {
             usb_kbd: false,
             usb_hub: false,
             extra_serial: None,
+            hotplug: false,
         },
         UsbTestScenario {
             id: "kbd",
@@ -4034,6 +4038,7 @@ pub fn run_usb() {
             usb_kbd: true,
             usb_hub: false,
             extra_serial: Some("kbd=true"),
+            hotplug: false,
         },
         UsbTestScenario {
             id: "hub",
@@ -4044,8 +4049,31 @@ pub fn run_usb() {
             usb_kbd: true,
             usb_hub: true,
             extra_serial: None,
+            hotplug: false,
+        },
+        UsbTestScenario {
+            id: "hotplug",
+            name: "conexión y desconexión en caliente",
+            log: "target/test-usb-hotplug.log",
+            index: 4,
+            xhci: None,
+            usb_kbd: false,
+            usb_hub: false,
+            extra_serial: None,
+            hotplug: true,
         },
     ];
+
+    // `cargo xtask test-usb <id>`: sólo ese escenario (qemu, nec, kbd, hub, hotplug).
+    let filtro = std::env::args().nth(2);
+    let escenarios: Vec<UsbTestScenario> = escenarios
+        .into_iter()
+        .filter(|e| filtro.as_deref().is_none_or(|f| f == e.id))
+        .collect();
+    if escenarios.is_empty() {
+        eprintln!("test-usb: ningún escenario se llama {filtro:?}");
+        std::process::exit(2);
+    }
 
     let jobs = test_jobs();
     let accel = super::qemu_accel_mode();
@@ -4115,7 +4143,7 @@ fn run_usb_scenario(
     };
 
     let root = super::project_root();
-    let monitor = if esc.usb_kbd {
+    let monitor = if esc.usb_kbd || esc.hotplug {
         Some(root.join(format!("target/test-usb-{}-mon.sock", esc.id)))
     } else {
         None
@@ -4161,9 +4189,354 @@ fn run_usb_scenario(
         }
     }
 
+    if esc.hotplug {
+        let key = root.join("target/soso_test_key");
+        let res = match monitor {
+            Some(ref mon) => usb_hotplug(&key, ssh_port, serial, mon, live, esc.id),
+            None => Err("sin monitor".into()),
+        };
+        if res.is_err() {
+            let _ = qemu.kill();
+            let _ = qemu.wait();
+            return res;
+        }
+    }
+
     let _ = qemu.kill();
     let _ = qemu.wait();
     Ok(())
+}
+
+fn ocurrencias(serial: &Path, patron: &str) -> usize {
+    std::fs::read_to_string(serial)
+        .map(|s| s.matches(patron).count())
+        .unwrap_or(0)
+}
+
+/// Espera a que `patron` aparezca más de `antes` veces en la serie.
+fn esperar_mas(serial: &Path, patron: &str, antes: usize, limite: Duration) -> Result<(), String> {
+    let fin = Instant::now() + limite;
+    while Instant::now() < fin {
+        if ocurrencias(serial, patron) > antes {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Err(format!("no apareció otra vez «{patron}» en {limite:?}"))
+}
+
+/// Un comando HMP y luego esperar su efecto en la serie.
+/// `rip`/`rsp`/`cs` de cada CPU por el monitor: un guest que se calla deja
+/// así dónde está cada núcleo (luego, `addr2line` sobre el kernel de la imagen).
+fn volcar_cpus(mon: &mut std::os::unix::net::UnixStream) -> String {
+    let mut todo = Vec::new();
+    let _ = mon.set_read_timeout(Some(Duration::from_millis(300)));
+    let mut buf = [0u8; 8192];
+    while mon.read(&mut buf).map(|n| n > 0).unwrap_or(false) {}
+    if mon.write_all(b"info registers -a\n").is_err() {
+        return "cpus: el monitor no contesta".into();
+    }
+    let fin = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < fin {
+        match mon.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => todo.extend_from_slice(&buf[..n]),
+            Err(_) if !todo.is_empty() => break,
+            Err(_) => {}
+        }
+    }
+    let texto = String::from_utf8_lossy(&todo);
+    let mut out = String::from("cpus:\n");
+    for l in texto.lines() {
+        if l.starts_with("CPU#") || l.starts_with("RIP=") || l.starts_with("RSP=") || l.starts_with("CS =") {
+            out.push_str("  ");
+            out.push_str(l.trim_end());
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn hmp_y_esperar(
+    mon: &mut std::os::unix::net::UnixStream,
+    cmd: &str,
+    serial: &Path,
+    patron: &str,
+) -> Result<(), String> {
+    let antes = ocurrencias(serial, patron);
+    println!("      hotplug: {cmd}");
+    qemu_monitor_cmd(mon, cmd)?;
+    esperar_mas(serial, patron, antes, Duration::from_secs(60))
+        .map_err(|e| format!("tras «{cmd}»: {e}"))
+}
+
+/// Un fichero de imagen como disco para `usbfat`.
+struct DiscoFichero(std::fs::File);
+
+impl usbfat::Disco for DiscoFichero {
+    fn leer(&mut self, lba: u64, buf: &mut [u8]) -> bool {
+        use std::os::unix::fs::FileExt;
+        self.0.read_exact_at(buf, lba * 512).is_ok()
+    }
+    fn escribir(&mut self, lba: u64, buf: &[u8]) -> bool {
+        use std::os::unix::fs::FileExt;
+        self.0.write_all_at(buf, lba * 512).is_ok()
+    }
+}
+
+fn abrir_pendrive(img: &Path) -> Result<usbfat::Fat<DiscoFichero>, String> {
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(img)
+        .map_err(|e| format!("{}: {e}", img.display()))?;
+    let total = f.metadata().map_err(|e| e.to_string())?.len() / 512;
+    let mut d = DiscoFichero(f);
+    let usbfat::Hallazgo::Fat { inicio, .. } = usbfat::buscar_volumen(&mut d, total) else {
+        return Err("la imagen no tiene FAT".into());
+    };
+    usbfat::Fat::montar(d, inicio).map_err(|e| format!("{e:?}"))
+}
+
+fn grande() -> Vec<u8> {
+    (0..300_000u32).map(|i| (i * 7 + i / 251) as u8).collect()
+}
+
+/// 64 MiB, MBR con una partición FAT32 LBA (0x0C) en el sector 2048.
+fn pendrive_de_datos(img: &Path) -> Result<(), String> {
+    let _ = std::fs::remove_file(img);
+    std::fs::File::create(img)
+        .and_then(|f| f.set_len(64 * 1024 * 1024))
+        .map_err(|e| format!("{}: {e}", img.display()))?;
+    let mut h = Command::new("sfdisk")
+        .arg("-q")
+        .arg(img)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("sfdisk: {e}"))?;
+    h.stdin
+        .take()
+        .unwrap()
+        .write_all(b"label: dos\nstart=2048, type=c\n")
+        .map_err(|e| e.to_string())?;
+    if !h.wait().map_err(|e| e.to_string())?.success() {
+        return Err("sfdisk falló".into());
+    }
+    let ok = Command::new("mkfs.fat")
+        .args(["-F", "32", "-s", "1", "-n", "DATOS", "--offset", "2048"])
+        .arg(img)
+        .arg(((64 * 1024 * 1024 / 1024) - 1024).to_string())
+        .stdout(Stdio::null())
+        .status()
+        .map_err(|e| format!("mkfs.fat: {e}"))?
+        .success();
+    if !ok {
+        return Err("mkfs.fat falló".into());
+    }
+    let mut fat = abrir_pendrive(img)?;
+    let t = 1_764_201_600;
+    for (n, d) in [
+        ("desde-el-host.txt", b"hola desde el host\n".to_vec()),
+        ("Un fichero con un nombre largo.txt", b"largo".to_vec()),
+        ("borrame.txt", b"x".to_vec()),
+        ("grande.bin", grande()),
+    ] {
+        fat.escribir_fichero(usbfat::RAIZ, n, &d, t)
+            .map_err(|e| format!("preparando {n}: {e:?}"))?;
+    }
+    Ok(())
+}
+
+/// Lo que soso escribió está en la imagen, y el volumen pasa fsck.
+fn comprobar_pendrive_de_datos(img: &Path) -> Result<(), String> {
+    let mut fat = abrir_pendrive(img)?;
+    let leer = |fat: &mut usbfat::Fat<DiscoFichero>, ruta: &[&str]| -> Result<Vec<u8>, String> {
+        let mut n = usbfat::RAIZ;
+        for p in ruta {
+            n = fat.buscar_en(n, p).map_err(|e| format!("{ruta:?}: {e:?}"))?;
+        }
+        let tam = fat.info(n).map_err(|e| format!("{e:?}"))?.tam as usize;
+        let mut b = vec![0u8; tam];
+        fat.leer_fichero(n, 0, &mut b).map_err(|e| format!("{e:?}"))?;
+        Ok(b)
+    };
+    let nota = leer(&mut fat, &["carpeta-de-soso", "nota-desde-soso.txt"])?;
+    if !String::from_utf8_lossy(&nota).contains("escrito desde soso") {
+        return Err(format!("nota-desde-soso.txt = {:?}", String::from_utf8_lossy(&nota)));
+    }
+    if leer(&mut fat, &["carpeta-de-soso", "copia-movida.bin"])? != grande() {
+        return Err("copia-movida.bin no es igual a grande.bin".into());
+    }
+    if fat.buscar_en(usbfat::RAIZ, "borrame.txt").is_ok() {
+        return Err("borrame.txt sigue en el pendrive".into());
+    }
+    drop(fat);
+    // fsck.fat no sabe de particiones: el volumen va desde el sector 2048.
+    let datos = std::fs::read(img).map_err(|e| e.to_string())?;
+    let vol = img.with_extension("vol");
+    std::fs::write(&vol, &datos[2048 * 512..]).map_err(|e| e.to_string())?;
+    let out = Command::new("fsck.fat")
+        .arg("-n")
+        .arg(&vol)
+        .output()
+        .map_err(|e| format!("fsck.fat: {e}"))?;
+    let texto =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    // Primera línea: versión; última: el resumen. FSInfo «desconocido» es a propósito.
+    let quejas: Vec<&str> = texto
+        .lines()
+        .skip(1)
+        .filter(|l| !l.contains("summary uninitialized") && !l.contains(" files, ") && !l.trim().is_empty())
+        .collect();
+    if !out.status.success() || !quejas.is_empty() {
+        return Err(format!("fsck.fat sobre el pendrive:\n{texto}"));
+    }
+    Ok(())
+}
+
+/// Teclado, ratón, hub con un teclado detrás, un pendrive de datos y el propio
+/// disco del arranque: todos se enchufan y desenchufan con el sistema en marcha.
+fn usb_hotplug(
+    key: &Path,
+    ssh_port: u16,
+    serial: &Path,
+    monitor: &Path,
+    live: &Path,
+    id: &str,
+) -> Result<(), String> {
+    let root = super::project_root();
+    let mut mon = qemu_monitor_session(monitor)?;
+
+    // Teclado: enchufar, escribir con él, desenchufar. Varias veces, para que
+    // el slot y la memoria DMA se reutilicen.
+    for vuelta in 0..3 {
+        hmp_y_esperar(
+            &mut mon,
+            "device_add usb-kbd,id=hk,bus=xhci.0",
+            serial,
+            "usb: teclado conectado",
+        )?;
+        if vuelta == 0 {
+            // QEMU activa el usb-kbd recién creado: las teclas van por USB.
+            let antes = ocurrencias(serial, "builtins:");
+            for k in ["ret", "h", "e", "l", "p", "ret"] {
+                qemu_monitor_cmd(&mut mon, &format!("sendkey {k}"))?;
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            esperar_mas(serial, "builtins:", antes, Duration::from_secs(45))
+                .map_err(|e| format!("teclado enchufado en caliente: {e}"))?;
+        }
+        hmp_y_esperar(&mut mon, "device_del hk", serial, "usb: teclado desconectado")?;
+        // device_del es asíncrono: que QEMU suelte el id antes de reusarlo.
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
+    hmp_y_esperar(
+        &mut mon,
+        "device_add usb-mouse,id=hm,bus=xhci.0",
+        serial,
+        "usb: ratón conectado",
+    )?;
+    hmp_y_esperar(&mut mon, "device_del hm", serial, "usb: ratón desconectado")?;
+
+    // Hub con un teclado detrás: el teclado se enchufa y desenchufa por el
+    // sondeo del hub; luego se va el hub entero con otro teclado colgando.
+    hmp_y_esperar(
+        &mut mon,
+        "device_add usb-hub,id=hb,bus=xhci.0,port=3",
+        serial,
+        "usb: hub conectado",
+    )?;
+    hmp_y_esperar(
+        &mut mon,
+        "device_add usb-kbd,id=hk2,bus=xhci.0,port=3.1",
+        serial,
+        "usb: teclado conectado",
+    )?;
+    hmp_y_esperar(&mut mon, "device_del hk2", serial, "usb: teclado desconectado")?;
+    std::thread::sleep(Duration::from_secs(1));
+    hmp_y_esperar(
+        &mut mon,
+        "device_add usb-kbd,id=hk3,bus=xhci.0,port=3.2",
+        serial,
+        "usb: teclado conectado",
+    )?;
+    let antes = ocurrencias(serial, "usb: teclado desconectado");
+    hmp_y_esperar(&mut mon, "device_del hb", serial, "usb: hub desconectado")?;
+    esperar_mas(serial, "usb: teclado desconectado", antes, Duration::from_secs(20))
+        .map_err(|e| format!("el teclado detrás del hub retirado: {e}"))?;
+    std::thread::sleep(Duration::from_secs(1));
+
+    // Pendrive de datos con MBR + FAT, como viene de fábrica: se monta en
+    // /media/usb0, soso lee lo que puso el host y escribe; al sacarlo, lo
+    // escrito está en la imagen y el volumen pasa fsck.
+    let extra = root.join(format!("target/test-usb-{id}-extra.img"));
+    pendrive_de_datos(&extra)?;
+    qemu_monitor_cmd(
+        &mut mon,
+        &format!("drive_add 0 if=none,id=extra0,file={},format=raw", extra.display()),
+    )?;
+    hmp_y_esperar(
+        &mut mon,
+        "device_add usb-storage,id=ms2,bus=xhci.0,drive=extra0",
+        serial,
+        "pendrive montado en /media/usb0",
+    )?;
+    let guion = "ls /media\n\
+                 ls /media/usb0\n\
+                 cat /media/usb0/desde-el-host.txt\n\
+                 wc -c /media/usb0/grande.bin\n\
+                 mkdir /media/usb0/carpeta-de-soso\n\
+                 echo escrito desde soso > /media/usb0/carpeta-de-soso/nota-desde-soso.txt\n\
+                 cp /media/usb0/grande.bin /media/usb0/copia.bin\n\
+                 mv /media/usb0/copia.bin /media/usb0/carpeta-de-soso/copia-movida.bin\n\
+                 rm /media/usb0/borrame.txt\n\
+                 ls /media/usb0/carpeta-de-soso\n\
+                 exit\n";
+    let salida = ssh_guion(key, ssh_port, guion, Duration::from_secs(180))
+        .map_err(|e| format!("{e}\n{}", volcar_cpus(&mut mon)))?;
+    for esperado in [
+        "usb0",
+        "Un fichero con un nombre largo.txt",
+        "hola desde el host",
+        "300000",
+        "nota-desde-soso.txt",
+        "copia-movida.bin",
+    ] {
+        if !salida.contains(esperado) {
+            return Err(format!(
+                "el pendrive montado: falta «{esperado}» en:\n{salida}\n{}",
+                volcar_cpus(&mut mon)
+            ));
+        }
+    }
+    hmp_y_esperar(&mut mon, "device_del ms2", serial, "desmontado /media/usb0")?;
+    std::thread::sleep(Duration::from_secs(1));
+    comprobar_pendrive_de_datos(&extra)?;
+
+    // El propio disco del arranque: fuera y de vuelta; su E/S se reanuda.
+    hmp_y_esperar(
+        &mut mon,
+        "device_del livestick",
+        serial,
+        "se ha retirado el disco del arranque",
+    )?;
+    std::thread::sleep(Duration::from_secs(1));
+    qemu_monitor_cmd(
+        &mut mon,
+        &format!("drive_add 0 if=none,id=live1,file={},format=raw", live.display()),
+    )?;
+    hmp_y_esperar(
+        &mut mon,
+        "device_add usb-storage,id=live1dev,bus=xhci.0,port=1,drive=live1",
+        serial,
+        "ha vuelto el disco del arranque",
+    )?;
+    drop(mon);
+
+    // Y el sistema sigue entero: SSH y lectura de disco.
+    ssh_guion(key, ssh_port, "ls /models\nhalt\n", Duration::from_secs(120)).map(|_| ())
 }
 
 #[cfg(test)]

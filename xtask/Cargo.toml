@@ -14,6 +14,7 @@ sosomodel = { path = "../crates/sosomodel", features = ["std"] }
 soso-update-core = { path = "../crates/soso-update-core", features = ["std"] }
 soso-pkg-core = { path = "../crates/soso-pkg-core", features = ["std"] }
 espfat-core = { path = "../crates/espfat-core", features = ["std"] }
+usbfat = { path = "../crates/usbfat" }
 # Para inyectar averías dentro del sosofs de una imagen en las pruebas.
 sosofs = { path = "../crates/sosofs", features = ["std"] }
 block-dev = { path = "../crates/block-dev" }

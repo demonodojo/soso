@@ -41,6 +41,8 @@ pub mod txnaplica;
 pub mod txnlock;
 #[cfg(feature = "drv-usb")]
 pub mod usb_storage;
+#[cfg(feature = "drv-usb")]
+pub mod usbfs;
 #[cfg(feature = "drv-hda")]
 pub mod hda;
 #[cfg(feature = "drv-gpu-nvidia")]

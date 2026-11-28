@@ -2034,7 +2034,9 @@ pub(crate) fn apply_qemu_usb(qemu: &mut Command, cfg: &QemuGuestConfig) {
         if live_storage {
             qemu.args([
                 "-device",
-                &format!("usb-storage,bus={storage_bus},port={storage_port},drive=live0"),
+                &format!(
+                    "usb-storage,id=livestick,bus={storage_bus},port={storage_port},drive=live0"
+                ),
             ]);
             let live = cfg
                 .live_path

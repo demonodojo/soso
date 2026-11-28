@@ -1240,7 +1240,24 @@ pub fn ensure_live_image() {
     static CERROJO: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guarda = CERROJO.lock().unwrap_or_else(|e| e.into_inner());
     let p = live_image_path();
-    if !p.exists() {
+    // El guest arranca el kernel que va DENTRO de la imagen live: si es más
+    // vieja que el kernel recién compilado, la prueba corría código de ayer
+    // (y daba verde o rojo por cosas que ya no existen).
+    let mtime = |q: &Path| std::fs::metadata(q).and_then(|m| m.modified()).ok();
+    // El ELF, no `soso-uefi.img`: ésa se reescribe en cada build aunque el
+    // kernel no cambie, y la imagen live (13 GB) se reempaquetaba siempre.
+    let kernel = std::env::var_os("SOSO_KERNEL_ELF")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| super::project_root().join("target/kernel/x86_64-soso/debug/kernel"));
+    let vieja = match (mtime(&p), mtime(&kernel)) {
+        (None, _) => true,
+        (Some(img), Some(k)) => k > img,
+        (Some(_), None) => false,
+    };
+    if vieja {
+        if p.exists() {
+            println!("xtask: la imagen live es anterior al kernel; se regenera");
+        }
         run();
     }
 }

@@ -718,6 +718,14 @@ pub unsafe fn alloc_dma_buffer(size: usize) -> (*mut u8, u64) {
     dma::alloc_aligned(len, align)
 }
 
+/// Como `alloc_dma_buffer`, pero el bloque no es de ningún slot: no vuelve a
+/// la reserva cuando se desenchufa el dispositivo que estaba enumerándose.
+pub(crate) unsafe fn alloc_dma_buffer_persistent(size: usize) -> (*mut u8, u64) {
+    let align = if size >= 4096 { 4096 } else { 64 };
+    let len = size.next_multiple_of(align);
+    dma::alloc_persistent(len, align)
+}
+
 /// Read bytes from a DMA buffer.
 pub unsafe fn read_dma_buffer(va: *const u8, len: usize) -> Vec<u8> {
     // Una copia en bloque: el bucle byte a byte con `read_volatile` + `push` costaba

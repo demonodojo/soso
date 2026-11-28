@@ -1868,6 +1868,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "usbfat"
+version = "0.1.0"
+
+[[package]]
 name = "uuid"
 version = "1.23.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2144,6 +2148,7 @@ dependencies = [
  "soso-update-core",
  "sosofs",
  "sosomodel",
+ "usbfat",
 ]
 
 [[package]]
