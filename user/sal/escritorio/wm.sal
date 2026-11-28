@@ -202,6 +202,16 @@ struct Estado
     reloj_buf: Int
     zona_min: Int
     zona_ue: Int
+    # Encaje a media pantalla durante un arrastre (`encaje_zona`) y posición
+    # de la ventana al empezar a arrastrarla.
+    encaje: Int
+    drag_ox: Int
+    drag_oy: Int
+    desencajada: Int
+    # Indicador de red de la barra: estado pintado, último sondeo y búfer.
+    red_est: Int
+    red_chk: Int
+    red_buf: Int
 
 init Estado(evt_buf: Int, msg_buf: Int) ! alloc
     Estado(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -215,7 +225,7 @@ init Estado(evt_buf: Int, msg_buf: Int) ! alloc
            0, bytes_ptr(bytes_new(wm_reg_max() * 32)), 0, 0, -1,
            0, 0, 0, 0, 0, bytes_ptr(bytes_new(wm_geo_bytes())), 0,
            bytes_ptr(bytes_new(wm_esp_bytes())), 65535, 1,
-           0, 0, 0, 0, 0, 0, -100000, 0, -1, -1, bytes_ptr(bytes_new(64)), 60, 1)
+           0, 0, 0, 0, 0, 0, -100000, 0, -1, -1, bytes_ptr(bytes_new(64)), 60, 1, 0, 0, 0, 0, -1, -100000, bytes_ptr(bytes_new(64)))
 
 fn wm_escena_cap() -> Int
     160
@@ -2093,6 +2103,7 @@ fn wm_compose(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride:
     st.reg_n = 0
     if gmode == 0
         if completo != 0
+            _enc = wm_pintar_encaje(st, compos, clen, sw, sh, stride, bpp, fmt)
             _men = wm_pintar_menu(st, compos, clen, sw, sh, stride, bpp, fmt)
         elsif st.menu != 0
             _men2 = wm_pintar_menu(st, compos, clen, sw, sh, stride, bpp, fmt)
@@ -3557,6 +3568,95 @@ fn wm_reenviar_raton_slot(st: &mut Estado, i0: Int, x: Int, y: Int, botones: Int
                             _w = wm_cli_enviar(st, fd, msg)
     0
 
+# ---- encaje a media pantalla -------------------------------------------------------
+# Arrastrar por la barra de título contra el borde izquierdo o derecho encaja la
+# ventana en esa mitad; contra la barra superior, la maximiza. Mientras el
+# puntero está en la zona se ve dónde quedará (sólo en CPU: en la escena GPU no
+# hay capa para ello y el encaje funciona igual, sin vista previa).
+
+fn wm_encaje_seguir(st: &mut Estado, x: Int, y: Int, sw: Int) -> Int ! alloc
+    z = 0
+    if st.mosaic == 0
+        if st.drop < 0
+            z = encaje_zona(x, y, sw, wm_bar_h(st))
+    en_cpu = 0
+    if wm_comp_gpu_mode(st) == 0
+        en_cpu = 1
+    if z != st.encaje
+        st.encaje = z
+        if en_cpu != 0
+            _r = wm_pedir_repintar(st)
+    elsif z != 0
+        # La vista previa va encima de todo: se repinta entera mientras dure.
+        if en_cpu != 0
+            _r2 = wm_pedir_repintar(st)
+    0
+
+# Vuelve a su tamaño de antes una ventana encajada al empezar a moverla, con el
+# puntero en el mismo sitio relativo de la barra.
+fn wm_desencajar(st: &mut Estado, i: Int, x: Int) -> Int ! io, alloc
+    est = st.tab.estado(i)
+    if (est & estado_encajada()) != 0
+        ww = st.tab.ww(i)
+        nw = max(ventana_min_ancho(), st.tab.sw(i))
+        nh = st.tab.sh(i)
+        gx = st.grab_x * nw / max(1, ww)
+        st.grab_x = gx
+        _a = st.tab.set_ww(i, nw)
+        _b = st.tab.set_wh(i, nh)
+        _c = st.tab.set_wx(i, x - gx)
+        _e = st.tab.set_estado(i, est - estado_encajada())
+        st.desencajada = 1
+        _t = wm_term_redimensionar_si(st, i)
+        _r = wm_pedir_repintar(st)
+    0
+
+fn wm_encajar(st: &mut Estado, i: Int, z: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
+    # Se guarda dónde estaba antes de arrastrarla, no dónde se soltó.
+    _p = st.tab.set_wx(i, st.drag_ox)
+    _q = st.tab.set_wy(i, st.drag_oy)
+    if z == encaje_max()
+        return wm_alternar_max(st, i, compos, clen, sw, sh, stride, bpp, fmt)
+    est = st.tab.estado(i)
+    _a = st.tab.set_sx(i, st.drag_ox)
+    _b = st.tab.set_sy(i, st.drag_oy)
+    _c = st.tab.set_sw(i, st.tab.ww(i))
+    _d = st.tab.set_sh(i, st.tab.wh(i))
+    bh = wm_bar_h(st)
+    _e = st.tab.set_wx(i, encaje_x(z, sw))
+    _f = st.tab.set_wy(i, bh)
+    _g = st.tab.set_ww(i, encaje_w(z, sw))
+    _h = st.tab.set_wh(i, sh - bh)
+    if (est & estado_encajada()) == 0
+        _s = st.tab.set_estado(i, est + estado_encajada())
+    _r = wm_redim_slot(st, i, fmt, compos, clen, sw, sh, stride, bpp)
+    _tr = wm_term_redimensionar_si(st, i)
+    _dd = wm_marcar_dirty(st, 0, 0, sw, sh)
+    wm_pedir_repintar(st)
+
+fn wm_pintar_encaje(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! alloc
+    z = st.encaje
+    if z == 0
+        return 0
+    if st.drag_ix < 0
+        return 0
+    bh = wm_bar_h(st)
+    m = 8
+    x0 = encaje_x(z, sw) + m
+    x1 = encaje_x(z, sw) + encaje_w(z, sw) - m
+    y0 = bh + m
+    y1 = sh - m
+    r = metrica_radio(wm_gh_wm(st)) * 2
+    ac = tema_acento(wm_tema_id(st))
+    e = st.escena
+    cap = wm_escena_cap()
+    n = esc_rrect(e, cap, 0, x0, y0, x1, y1, esc_radios(r, r, r, r), ac, 56, 0, 0)
+    n = esc_rrect(e, cap, n, x0, y0, x1, y0 + 2, esc_radios(1, 1, 1, 1), ac, 200, 0, 0)
+    n = esc_rrect(e, cap, n, x0, y1 - 2, x1, y1, esc_radios(1, 1, 1, 1), ac, 200, 0, 0)
+    n = esc_rrect(e, cap, n, x0, y0, x0 + 2, y1, esc_radios(1, 1, 1, 1), ac, 200, 0, 0)
+    n = esc_rrect(e, cap, n, x1 - 2, y0, x1, y1, esc_radios(1, 1, 1, 1), ac, 200, 0, 0)
+    esc_cpu_ejecutar(compos, clen, sw, sh, stride, bpp, fmt, e, cap, n)
+
 # Maximiza o restaura. Maximizada ocupa todo salvo la barra superior; la geometría
 # anterior se guarda en la propia ranura para poder volver.
 fn wm_alternar_max(st: &mut Estado, i: Int, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
@@ -3572,6 +3672,8 @@ fn wm_alternar_max(st: &mut Estado, i: Int, compos: Int, clen: Int, sw: Int, sh:
         _a = st.tab.set_wh(i, st.tab.sh(i))
         _a = st.tab.set_estado(i, est - estado_max())
     else
+        if (est & estado_encajada()) != 0
+            est = est - estado_encajada()
         _a = st.tab.set_sx(i, wx0)
         _a = st.tab.set_sy(i, wy0)
         _a = st.tab.set_sw(i, ww0)
@@ -3860,7 +3962,7 @@ fn wm_reloj_texto(st: &mut Estado) -> String ! io, alloc
         wm_dia_semana((dias + 4) % 7) + d" " + int_to_str(f % 100) + d" " + wm_mes((f / 100) % 100) + d"   " + wm_dos_cifras(seg / 3600) + d":" + wm_dos_cifras((seg / 60) % 60)
 
 fn wm_reloj_ancho(st: &mut Estado) -> Int ! io, alloc
-    wm_gw_wm(st) * 18
+    wm_gw_wm(st) * 18 + wm_gh_wm(st) + 16
 
 fn wm_pintar_reloj(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     txt = wm_reloj_texto(st)
@@ -3872,7 +3974,45 @@ fn wm_pintar_reloj(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, st
             ty = 1
         x = sw - wm_texto_ancho(st, &txt) - 2 * lanz_margen(wm_gw_wm(st))
         _t = wm_texto(st, compos, clen, stride, bpp, fmt, txt, x, ty + 2, wm_color_texto_barra(st), wm_barra_rgb_fila(st, ty + gh / 2, sh))
+        _r = wm_pintar_red(st, compos, clen, sw, sh, stride, bpp, fmt, x - 14)
+    else
+        _r2 = wm_pintar_red(st, compos, clen, sw, sh, stride, bpp, fmt, sw - 2 * lanz_margen(wm_gw_wm(st)))
     0
+
+# ---- indicador de red ----------------------------------------------------------
+
+fn wm_red_sondear(st: &mut Estado) -> Int ! io, alloc
+    ahora = uptime_ms()
+    if ahora - st.red_chk < 2000
+        return 0
+    st.red_chk = ahora
+    b = st.red_buf
+    v = bytes_view_mem(b, 64)
+    k = 0
+    while k < 64
+        _z = bytes_set_u32(v, k, 0)
+        k = k + 4
+    r1 = syscall(87, b, 0, 0, 0, 0, 0)
+    r2 = syscall(96, 0, b + 32, 0, 0, 0, 0)
+    est = red_estado(r1, bytes_get_u32(v, 0), bytes_get_u8(v, 5), r2, bytes_get_u32(v, 32))
+    if est != st.red_est
+        st.red_est = est
+        _d = wm_danar_barra(st)
+    0
+
+# Icono de red con su borde derecho en `x1`.
+fn wm_pintar_red(st: &mut Estado, compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int, x1: Int) -> Int ! alloc
+    if st.red_est <= 0
+        return 0
+    gh = wm_gh_wm(st)
+    s = max(8, gh - 4)
+    y = (wm_bar_h(st) - s) / 2
+    bg = wm_barra_rgb_fila(st, y + s / 2, sh)
+    tema = wm_tema_id(st)
+    e = st.escena
+    cap = wm_escena_cap()
+    n = icono_red_escena(e, cap, 0, st.red_est, x1 - s, y, s, wm_color_texto_barra(st), tema_texto_tenue(tema), bg)
+    esc_cpu_ejecutar(compos, clen, sw, sh, stride, bpp, fmt, e, cap, n)
 
 # Repinta la barra cuando cambia el minuto.
 fn wm_reloj_tick(st: &mut Estado) -> Int ! io, alloc
@@ -4218,7 +4358,10 @@ fn wm_raton_mover(st: &mut Estado, x: Int, y: Int, botones: Int, sw: Int, sh: In
                 if solo_geom == 0
                     _dv = wm_danar_ventana(st, dix)
             if dk == 1
+                _dq = wm_desencajar(st, dix, x)
+                ww = st.tab.ww(dix)
                 _dr = wm_drop_fijar(st, wm_destino_soltar(st, x, y, dix))
+                _ez = wm_encaje_seguir(st, x, y, sw)
                 nx = x - st.grab_x
                 ny = y - st.grab_y
                 if ny < wm_bar_h(st)
@@ -4289,6 +4432,15 @@ fn wm_raton_btn(st: &mut Estado, x: Int, y: Int, botones: Int, compos: Int, clen
                     _ig = wm_integrar(st, dix, dst)
                     # Toma el tamaño del grupo nuevo (como `wm_nueva_pestana`).
                     _tr = wm_term_redimensionar_si(st, dix)
+                elsif st.encaje != 0
+                    _en = wm_encajar(st, dix, st.encaje, compos, clen, sw, sh, stride, bpp, fmt)
+                elsif st.desencajada != 0
+                    # Al despegar una encajada cambió de tamaño: el cliente también.
+                    _rd = wm_redim_slot(st, dix, fmt, compos, clen, sw, sh, stride, bpp)
+                st.desencajada = 0
+                if st.encaje != 0
+                    st.encaje = 0
+                    _rq = wm_pedir_repintar(st)
         _dd = wm_drop_fijar(st, -1)
         st.drag_ix = -1
         st.drag_kind = 0
@@ -4385,6 +4537,9 @@ fn wm_raton_btn(st: &mut Estado, x: Int, y: Int, botones: Int, compos: Int, clen
                                 st.drag_kind = 1
                                 st.grab_x = x - wx
                                 st.grab_y = y - wy
+                                st.drag_ox = wx
+                                st.drag_oy = wy
+                                st.encaje = 0
                     else
                         _r = wm_reenviar_raton_slot(st, i, x, y, botones)
     0
@@ -5077,6 +5232,7 @@ fn wm_tick(st: &mut Estado, listener: Int, compos: Int, clen: Int, sw: Int, sh: 
     _ss = wm_ss_idle(st, compos, clen, sw, sh, stride, bpp, fmt)
     _fv = wm_fondo_vigilar(st, sw, sh, fmt)
     _rt = wm_reloj_tick(st)
+    _rs = wm_red_sondear(st)
     if st.listo_lst != 0
         acc = tcp_accept(listener, 1)
         if acc > 0

@@ -100,6 +100,51 @@ redimensiona. Las minimizadas siguen en la lista de ventanas de la barra superio
 restaurar (o minimizar si ya tiene el foco). Estado por ventana en `tab_estado()` + geometría
 guardada `tab_sx/sy/sw/sh`; la ranura mide 272 B.
 
+**Encaje a media pantalla:** arrastrar por el título con el puntero contra el borde izquierdo o
+derecho (≤ 3 px) encaja en esa mitad; contra la barra superior, maximiza (`encaje_zona`,
+`encaje_x/w` en `ventanas.sal`). La zona viva va en `st.encaje`; `wm_pintar_encaje` dibuja la
+vista previa con el acento **sólo en CPU** (en escena GPU el encaje funciona sin vista previa).
+Encajada = `estado_encajada()` (4) con la geometría previa en `sx..sh` (la de **antes** del
+arrastre, `drag_ox/oy`); al volver a arrastrarla `wm_desencajar` recupera el tamaño con el
+puntero en el mismo sitio relativo y `desencajada` pide `wm_redim_slot` al soltar. No se encaja
+en mosaico ni sobre un destino de pestaña (`st.drop`).
+
+**Indicador de red (barra, junto al reloj):** `wm_red_sondear` cada 2 s lee `SYS_NETINFO` (87) y
+`SYS_NETCFG`/`NETCFG_ESTADO` (96) y `red_estado` (`iconos.sal`) lo reduce a `medio*10+nivel`
+(1 cable / 2 WiFi; 0 sin enlace, 1 esperando DHCP, 2 conectado; 0 = sin adaptador, no se
+pinta). `icono_red_escena`: símbolo de red o barras de señal, con punto ámbar/rojo. No hay
+indicador de batería: el kernel no interpreta AML (`_BST`).
+
+**Encaje a media pantalla:** arrastrar por el título con el puntero contra el borde izquierdo o
+derecho (≤ 3 px) encaja en esa mitad; contra la barra superior, maximiza (`encaje_zona`,
+`encaje_x/w` en `ventanas.sal`). La zona viva va en `st.encaje`; `wm_pintar_encaje` dibuja la
+vista previa con el acento **sólo en CPU** (en escena GPU el encaje funciona sin vista previa).
+Encajada = `estado_encajada()` (4) con la geometría previa en `sx..sh` (la de **antes** del
+arrastre, `drag_ox/oy`); al volver a arrastrarla `wm_desencajar` recupera el tamaño con el
+puntero en el mismo sitio relativo y `desencajada` pide `wm_redim_slot` al soltar. No se encaja
+en mosaico ni sobre un destino de pestaña (`st.drop`).
+
+**Indicador de red (barra, junto al reloj):** `wm_red_sondear` cada 2 s lee `SYS_NETINFO` (87) y
+`SYS_NETCFG`/`NETCFG_ESTADO` (96) y `red_estado` (`iconos.sal`) lo reduce a `medio*10+nivel`
+(1 cable / 2 WiFi; 0 sin enlace, 1 esperando DHCP, 2 conectado; 0 = sin adaptador, no se
+pinta). `icono_red_escena`: símbolo de red o barras de señal, con punto ámbar/rojo. No hay
+indicador de batería: el kernel no interpreta AML (`_BST`).
+
+**Encaje a media pantalla:** arrastrar por el título con el puntero contra el borde izquierdo o
+derecho (≤ 3 px) encaja en esa mitad; contra la barra superior, maximiza (`encaje_zona`,
+`encaje_x/w` en `ventanas.sal`). La zona viva va en `st.encaje`; `wm_pintar_encaje` dibuja la
+vista previa con el acento **sólo en CPU** (en escena GPU el encaje funciona sin vista previa).
+Encajada = `estado_encajada()` (4) con la geometría previa en `sx..sh` (la de **antes** del
+arrastre, `drag_ox/oy`); al volver a arrastrarla `wm_desencajar` recupera el tamaño con el
+puntero en el mismo sitio relativo y `desencajada` pide `wm_redim_slot` al soltar. No se encaja
+en mosaico ni sobre un destino de pestaña (`st.drop`).
+
+**Indicador de red (barra, junto al reloj):** `wm_red_sondear` cada 2 s lee `SYS_NETINFO` (87) y
+`SYS_NETCFG`/`NETCFG_ESTADO` (96) y `red_estado` (`iconos.sal`) lo reduce a `medio*10+nivel`
+(1 cable / 2 WiFi; 0 sin enlace, 1 esperando DHCP, 2 conectado; 0 = sin adaptador, no se
+pinta). `icono_red_escena`: símbolo de red o barras de señal, con punto ámbar/rojo. No hay
+indicador de batería: el kernel no interpreta AML (`_BST`).
+
 ## Pestañas (grupo/panel)
 
 Una ventana es un **grupo** (`tabla.sal`: `grupo_cab`, `grupo_integrar`, `grupo_separar`,

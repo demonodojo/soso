@@ -891,11 +891,47 @@ Atajos habituales: **Alt+Intro** (terminal nueva), **Alt+Tab** (cambiar ventana)
 **Alt+Q** (cerrar), **Alt+T** (flotante / mosaico), **Alt+W** (abrir **soso-web** en ventana),
 **Alt+M** (salvapantallas del mono), **Alt+Mayús+E** (volver a consola).
 
-**Pestañas:** una ventana puede tener varias pestañas. **Ctrl+Mayús+T** (o el botón «+») abre otra con la misma aplicación; **Ctrl+Tab / Ctrl+Mayús+Tab** y **Alt+1…9** cambian de pestaña; **Alt+Q** cierra la pestaña y **Alt+Mayús+Q** la ventana entera. Arrastra una pestaña para reordenarla; sácala de la barra para convertirla en ventana, y suéltala sobre la barra de otra ventana para unirla. **Alt+Mayús+D** saca la pestaña activa, **Alt+Mayús+H / L** la mueve a izquierda o derecha, y el clic derecho sobre una pestaña abre su menú (duplicar, sacar, cerrar otras, cerrar a la derecha, cerrar). Tras **10 minutos**
-sin tocar teclado ni ratón entra solo el mismo salvapantallas; cualquier entrada lo cierra. La barra superior del escritorio tiene un lanzador:
-el botón **Aplicaciones** despliega un menú con **Terminal**, **Navegador web** y
-**Salir del escritorio**, y los accesos directos **Terminal** y **Web** abren lo mismo de
-un clic. Un clic fuera del menú lo cierra.
+**Pestañas:** una ventana puede tener varias pestañas. **Ctrl+Mayús+T** (o el botón «+») abre otra con la misma aplicación; **Ctrl+Tab / Ctrl+Mayús+Tab** y **Alt+1…9** cambian de pestaña; **Alt+Q** cierra la pestaña y **Alt+Mayús+Q** la ventana entera. Arrastra una pestaña para reordenarla; sácala de la barra para convertirla en ventana, y suéltala sobre la barra de otra ventana para unirla. **Alt+Mayús+D** saca la pestaña activa, **Alt+Mayús+H / L** la mueve a izquierda o derecha, y el clic derecho sobre una pestaña abre su menú (duplicar, sacar, cerrar otras, cerrar a la derecha, cerrar). 
+
+**Encajar ventanas:** arrastra una ventana por su barra de título contra el borde
+izquierdo o derecho de la pantalla y ocupará esa mitad; contra la barra superior, se
+maximiza. Mientras el puntero está en la zona se ve un recuadro del color de acento
+con el sitio donde quedará. Para soltarla, vuelve a arrastrarla: recupera el tamaño
+que tenía.
+
+**Salvapantallas:** con **Alt+M**, o tras **10 minutos** sin tocar teclado ni ratón,
+el escritorio se oscurece y sale un mono de pixel art que lo cruza, saluda y la emprende
+a martillazos con la pantalla: cada golpe deja una grieta. Cualquier tecla o
+movimiento del ratón lo cierra y el escritorio vuelve intacto.
+
+**La barra superior** tiene, de izquierda a derecha:
+
+- **Aplicaciones** (o un clic en la rejilla): un panel con Terminal, Navegador y
+  Archivos, y debajo **Fondo** (pasa al siguiente fondo de pantalla), **Modo
+  claro/oscuro** y **Salir**. Un clic fuera del panel lo cierra.
+- Accesos directos de un clic a **Terminal**, **Navegador** y **Archivos**.
+- Las ventanas abiertas, con el icono de su aplicación; la que tiene el foco va
+  resaltada. Un clic restaura o minimiza.
+- El **indicador de red**: el símbolo de red si vas por cable y barras de señal si
+  vas por WiFi. Un punto ámbar quiere decir que hay enlace pero todavía no
+  dirección (DHCP), y uno rojo, que no hay enlace.
+- **Fecha y hora**, en hora peninsular (UTC+1 con horario de verano). Para otra
+  zona, escribe en `/etc/hora.conf` el desfase sobre UTC, por ejemplo `+0`, `-5` o
+  `+5:30`; añade `ue` si sigue el horario de verano europeo (`+1 ue` es lo
+  predeterminado).
+
+**Fondo de pantalla:** el comando `fondo` lo cambia y el escritorio lo recoge solo
+en un segundo, sin reiniciarse:
+
+```sh
+fondo                    # lista los fondos y marca el puesto
+fondo ocaso              # incluidos: aurora, ocaso, oceano, bosque, grafito
+fondo /ruta/foto.png     # una imagen PNG o PPM (se recorta para cubrir la pantalla)
+fondo siguiente          # el siguiente (incluidos e imágenes de /share/fondos)
+fondo ninguno            # sin fondo: el degradado del tema
+```
+
+JPEG no está soportado todavía; conviértela antes a PNG.
 **Ctrl+Alt+Retroceso** (o **Ctrl+Alt+Supr**) recupera la consola si el gestor deja de responder (PS/2 y teclado USB); el kernel mata al dueño de pantalla y repinta la consola de texto.
 
 Si ni eso responde, entra por SSH y mira el registro del kernel: mientras la pantalla está en modo gráfico, cada 5 s se apunta una línea `diag-entrada:` con lo que llega del teclado y del ratón (interrupciones, bytes del i8042, informes USB, eventos que entran y salen de la cola) y qué ejecuta cada CPU (`grep diag-entrada /var/log/kernel.log`).

@@ -65,6 +65,46 @@ fn menu_limites_ok(gw: Int, gh: Int, tema: Int) -> Int ! alloc
     else
         0
 
+# Zonas de encaje a media pantalla y su geometría (pantalla 1280, barra 24).
+fn encaje_ok() -> Int
+    if encaje_zona(0, 400, 1280, 24) != encaje_izq()
+        1
+    elsif encaje_zona(1279, 400, 1280, 24) != encaje_der()
+        2
+    elsif encaje_zona(600, 10, 1280, 24) != encaje_max()
+        3
+    elsif encaje_zona(600, 400, 1280, 24) != encaje_ninguno()
+        4
+    elsif encaje_zona(0, 5, 1280, 24) != encaje_max()
+        5
+    elsif encaje_x(encaje_der(), 1281) + encaje_w(encaje_der(), 1281) != 1281
+        6
+    elsif encaje_w(encaje_izq(), 1281) + encaje_w(encaje_der(), 1281) != 1281
+        7
+    elsif encaje_x(encaje_izq(), 1280) != 0
+        8
+    else
+        0
+
+# Lo que devuelve el kernel → estado del indicador.
+fn red_ok() -> Int
+    if red_estado(-38, 0, 0, -38, 0) != 0
+        1
+    elsif red_estado(0, 0, 1, 0, 0) != 0
+        2
+    elsif red_estado(0, 3, 1, 0, 1) != 12
+        3
+    elsif red_estado(0, 1, 2, 0, 1) != 21
+        4
+    elsif red_estado(0, 1, 2, 0, 0) != 20
+        5
+    elsif red_estado(0, 3, 2, -38, 0) != 22
+        6
+    elsif red_estado(0, 3, 1, 0, 0) != 10
+        7
+    else
+        0
+
 fn main() -> Int ! alloc
     gw = 8
     gh = 16
@@ -99,5 +139,9 @@ fn main() -> Int ! alloc
         12
     elsif lanz_menu_icono(4, 0) != icono_sol()
         13
+    elsif encaje_ok() != 0
+        300 + encaje_ok()
+    elsif red_ok() != 0
+        400 + red_ok()
     else
         0

@@ -298,3 +298,43 @@ fn pest_hit(x: Int, y: Int, wx: Int, wy: Int, ww: Int, gh: Int, n: Int, act: Int
                                             r = 100 + k + 1
                         k = k + 1
     r
+
+# ---- encaje a media pantalla ---------------------------------------------------
+# Arrastrar una ventana con el puntero contra un borde: izquierda (1) y
+# derecha (2) la encajan en esa mitad; arriba (3), maximizada.
+
+fn encaje_ninguno() -> Int
+    0
+
+fn encaje_izq() -> Int
+    1
+
+fn encaje_der() -> Int
+    2
+
+fn encaje_max() -> Int
+    3
+
+fn encaje_zona(x: Int, y: Int, sw: Int, bar_h: Int) -> Int
+    if y <= bar_h + 1
+        encaje_max()
+    elsif x <= 3
+        encaje_izq()
+    elsif x >= sw - 4
+        encaje_der()
+    else
+        encaje_ninguno()
+
+fn encaje_x(z: Int, sw: Int) -> Int
+    if z == encaje_der()
+        sw / 2
+    else
+        0
+
+fn encaje_w(z: Int, sw: Int) -> Int
+    if z == encaje_izq()
+        sw / 2
+    elsif z == encaje_der()
+        sw - sw / 2
+    else
+        sw

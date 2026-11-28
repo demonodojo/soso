@@ -201,3 +201,86 @@ fn icono_rejilla(e: Int, cap: Int, n0: Int, x: Int, y: Int, s: Int, rgb: Int) ->
             c = c + 1
         f = f + 1
     n
+
+# ---- indicador de red de la barra ------------------------------------------------
+# Estado: 0 sin indicador (no hay adaptador); si no, medio * 10 + nivel, con
+# medio 1 cable o 2 WiFi y nivel 0 sin enlace, 1 enlace sin dirección todavía y
+# 2 conectado.
+
+fn red_nivel_sin_enlace() -> Int
+    0
+
+fn red_nivel_esperando() -> Int
+    1
+
+fn red_nivel_conectado() -> Int
+    2
+
+# Con lo que devuelven `SYS_NETINFO` (`rinfo`, flags, backend) y `SYS_NETCFG`
+# estado (`rdet`, flags): NET_FLAG_PRESENT 1, NET_FLAG_CONFIGURED 2,
+# NETDET_ENLACE 1; backend 1 cable, 2 WiFi.
+fn red_estado(rinfo: Int, flags: Int, backend: Int, rdet: Int, dflags: Int) -> Int
+    if rinfo < 0
+        0
+    elsif (flags & 1) == 0
+        0
+    elsif backend < 1
+        0
+    elsif backend > 2
+        0
+    else
+        nivel = red_nivel_sin_enlace()
+        if rdet >= 0
+            if (dflags & 1) != 0
+                nivel = red_nivel_esperando()
+        if (flags & 2) != 0
+            if nivel == red_nivel_esperando()
+                nivel = red_nivel_conectado()
+            elsif rdet < 0
+                nivel = red_nivel_conectado()
+        backend * 10 + nivel
+
+# Icono del estado `est` de lado `s` en (x, y), sobre la barra (`bg`).
+fn icono_red_escena(e: Int, cap: Int, n0: Int, est: Int, x: Int, y: Int, s: Int, fg: Int, tenue: Int, bg: Int) -> Int ! alloc
+    medio = est / 10
+    nivel = est - medio * 10
+    col = fg
+    if nivel != red_nivel_conectado()
+        col = tenue
+    n = n0
+    if medio == 2
+        # Barras de señal de menor a mayor.
+        bw = max(2, s / 6)
+        hueco = max(1, s / 10)
+        k = 0
+        while k < 4
+            bx = x + k * (bw + hueco)
+            alto = s * (k + 1) / 4
+            r = max(1, bw / 3)
+            n = esc_rrect(e, cap, n, bx, y + s - alto, bx + bw, y + s, esc_radios(r, r, r, r), col, 255, 0, 0)
+            k = k + 1
+    else
+        # Cable: una caja arriba unida a dos abajo (el símbolo de red).
+        bw = max(4, s * 4 / 10)
+        bh = max(3, s * 3 / 10)
+        lw = max(1, s / 10)
+        r = max(1, s / 12)
+        cx = x + s / 2
+        my = y + s / 2
+        rs = esc_radios(r, r, r, r)
+        n = esc_rrect(e, cap, n, cx - bw / 2, y, cx - bw / 2 + bw, y + bh, rs, col, 255, 0, 0)
+        n = esc_rrect(e, cap, n, cx - lw / 2, y + bh, cx - lw / 2 + lw, my + lw, esc_radios(0, 0, 0, 0), col, 255, 0, 0)
+        n = esc_rrect(e, cap, n, x + bw / 2, my, x + s - bw / 2, my + lw, esc_radios(0, 0, 0, 0), col, 255, 0, 0)
+        n = esc_rrect(e, cap, n, x + bw / 2 - lw / 2, my, x + bw / 2 - lw / 2 + lw, y + s - bh, esc_radios(0, 0, 0, 0), col, 255, 0, 0)
+        n = esc_rrect(e, cap, n, x + s - bw / 2 - lw / 2, my, x + s - bw / 2 - lw / 2 + lw, y + s - bh, esc_radios(0, 0, 0, 0), col, 255, 0, 0)
+        n = esc_rrect(e, cap, n, x, y + s - bh, x + bw, y + s, rs, col, 255, 0, 0)
+        n = esc_rrect(e, cap, n, x + s - bw, y + s - bh, x + s, y + s, rs, col, 255, 0, 0)
+    # Aviso: ámbar esperando dirección, rojo sin enlace.
+    if nivel != red_nivel_conectado()
+        aviso = color_rgb(232, 72, 72)
+        if nivel == red_nivel_esperando()
+            aviso = color_rgb(240, 176, 48)
+        d = max(3, s / 3)
+        n = esc_rrect(e, cap, n, x + s - d + 1, y - 1, x + s + 1, y + d - 1, esc_radios(d / 2, d / 2, d / 2, d / 2), aviso, 255, bg, 1)
+    n
+

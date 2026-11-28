@@ -21,6 +21,11 @@ fn estado_max() -> Int
 fn estado_min() -> Int
     2
 
+# Encajada a media pantalla (arrastrada al borde); `sx..sh` guardan la
+# geometría de antes para volver al despegarla.
+fn estado_encajada() -> Int
+    4
+
 fn tab_tipo_libre() -> Int
     0
 
