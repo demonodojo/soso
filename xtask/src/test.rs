@@ -4143,14 +4143,20 @@ fn run_usb_scenario(
     };
 
     let root = super::project_root();
-    let monitor = if esc.usb_kbd || esc.hotplug {
+    // Monitor en todos: si el arranque no llega a sosh, dice dónde está cada CPU.
+    let monitor = if true {
         Some(root.join(format!("target/test-usb-{}-mon.sock", esc.id)))
     } else {
         None
     };
 
     let slot = QemuSlot {
-        id: "usb",
+        // Uno por escenario: `limpiar_huérfanos_shard` hace
+        // `pkill -f 'qemu…test-<id>'`, y con un «usb» común cada escenario que
+        // arrancaba mataba al que corría en paralelo (todos llevan su serial en
+        // `target/test-usb-<esc>.log`). Parecía un cuelgue del guest: serial
+        // mudo, SSH cerrado a mitad, arranques «parados» en el shim.
+        id: Box::leak(format!("usb-{}", esc.id).into_boxed_str()),
         ssh_port,
         echo_port,
         llm_host_port: None,
@@ -4167,7 +4173,16 @@ fn run_usb_scenario(
 
     let mut qemu = lanzar_qemu(&slot).map_err(|e| e.to_string())?;
 
-    esperar_en_fichero(serial, "sosh —", Duration::from_secs(180))?;
+    if let Err(e) = esperar_en_fichero(serial, "sosh —", Duration::from_secs(180)) {
+        let cpus = monitor
+            .as_ref()
+            .and_then(|m| std::os::unix::net::UnixStream::connect(m).ok())
+            .map(|mut m| volcar_cpus(&mut m))
+            .unwrap_or_else(|| "cpus: sin monitor".into());
+        let _ = qemu.kill();
+        let _ = qemu.wait();
+        return Err(format!("{e}\n{cpus}"));
+    }
     let serie = std::fs::read_to_string(serial).map_err(|e| e.to_string())?;
     if !serie.contains("sync_cache=true") {
         return Err("USB sin SYNCHRONIZE CACHE(10) (falta sync_cache=true)".into());
@@ -4244,6 +4259,11 @@ fn volcar_cpus(mon: &mut std::os::unix::net::UnixStream) -> String {
             Err(_) if !todo.is_empty() => break,
             Err(_) => {}
         }
+    }
+    if todo.is_empty() {
+        // El monitor lo atiende el hilo principal de QEMU: si no contesta,
+        // lo congelado es QEMU (p. ej. un fsync del host), no el guest.
+        return "cpus: el monitor no contestó en 5 s (QEMU bloqueado, no el guest)".into();
     }
     let texto = String::from_utf8_lossy(&todo);
     let mut out = String::from("cpus:\n");
@@ -4510,6 +4530,30 @@ fn usb_hotplug(
                 volcar_cpus(&mut mon)
             ));
         }
+    }
+    // Estrés opcional (SOSO_USB_ESTRES=N vueltas): muchas escrituras FAT
+    // seguidas, cada comando cargándose del disco del arranque a la vez.
+    if let Some(n) = std::env::var("SOSO_USB_ESTRES").ok().and_then(|v| v.parse::<u32>().ok()) {
+        let mut g = String::new();
+        for i in 0..n {
+            g += &format!(
+                "mkdir /media/usb0/e{i}\n\
+                 echo vuelta {i} > /media/usb0/e{i}/f.txt\n\
+                 cat /media/usb0/e{i}/f.txt\n\
+                 rm /media/usb0/e{i}/f.txt\n\
+                 rm /media/usb0/e{i}\n"
+            );
+        }
+        g += "echo FIN-ESTRES\nexit\n";
+        println!("      hotplug: estrés FAT, {n} vueltas");
+        let t0 = Instant::now();
+        let out = ssh_guion(key, ssh_port, &g, Duration::from_secs(60 + 6 * n as u64))
+            .map_err(|e| format!("estrés: {e}\n{}", volcar_cpus(&mut mon)))?;
+        if !out.contains("\nFIN-ESTRES") {
+            let cola: String = out.lines().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+            return Err(format!("estrés FAT colgado tras {:?}; cola:\n{cola}\n{}", t0.elapsed(), volcar_cpus(&mut mon)));
+        }
+        println!("      hotplug: estrés FAT OK en {:?}", t0.elapsed());
     }
     hmp_y_esperar(&mut mon, "device_del ms2", serial, "desmontado /media/usb0")?;
     std::thread::sleep(Duration::from_secs(1));
