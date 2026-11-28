@@ -147,31 +147,16 @@ fn prueba_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, 
             ok = 0
     ok
 
-fn prueba_mono_shm_ok(ptr: Int, slen: Int, cw: Int, ch: Int, fmt: Int, paso: Int) -> Int ! alloc
-    mx = mono_paso_x(paso, cw, mono_ancho())
-    my = mono_paso_y(paso, ch, mono_alto())
-    fotograma = mono_fotograma(paso)
-    lx = 15
-    ly = 9
-    exp = mono_pixel_rgb(lx, ly, fotograma)
-    if exp == 0
-        0
-    else
-        got = pixel_leer(ptr, slen, cw, 4, fmt, mx + lx, my + ly)
-        if got == exp
-            1
-        else
-            0
-
+# El mono de `soso-mono --once` está quieto en un sitio fijo: un píxel de su
+# barriga tiene que ser del color de la piel.
 fn prueba_mono_shm_cualquier_paso(ptr: Int, slen: Int, cw: Int, ch: Int, fmt: Int) -> Int ! alloc
-    paso = 0
-    ok = 0
-    while paso < 24
-        if ok == 0
-            if prueba_mono_shm_ok(ptr, slen, cw, ch, fmt, paso) != 0
-                ok = 1
-        paso = paso + 1
-    ok
+    s = mono_lado(ch)
+    x = mono_once_x(cw, s) + mono_prueba_dx(s)
+    y = mono_once_y(ch, s) + mono_prueba_dy(s)
+    if pixel_leer(ptr, slen, cw, 4, fmt, x, y) == mono_piel()
+        1
+    else
+        0
 
 fn prueba_mono_modo(compos: Int, clen: Int, sw: Int, sh: Int, stride: Int, bpp: Int, fmt: Int) -> Int ! io, alloc
     listener = tcp_listen(puerto_wm())

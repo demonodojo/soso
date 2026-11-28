@@ -347,28 +347,28 @@ fn empaquetar_salvi(
     .map_err(|e| format!("{e}"))
 }
 
-fn leer_bin_sistema(root: &Path, binario: &str) -> Result<Vec<u8>, String> {
-    let elf = if binario == "soso-wm" {
-        root.join("rootfs/bin/soso-wm")
-    } else {
-        root.join("target/user/x86_64-soso-user/release")
-            .join(binario)
-    };
-    fs::read(&elf).map_err(|_| format!("no hay {elf:?}; ejecuta build_user"))
+/// Ficheros (`bin/…`) de un paquete del sistema. El de `soso-wm` lleva también
+/// `soso-mono`, el salvapantallas que lanza el WM: sin él, un cambio del
+/// salvapantallas sólo llegaría con una release.
+fn leer_bin_sistema(root: &Path, binario: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let leer = |elf: PathBuf| fs::read(&elf).map_err(|_| format!("no hay {elf:?}; ejecuta build_user"));
+    if binario == "soso-wm" {
+        return Ok(vec![
+            ("bin/soso-wm".into(), leer(root.join("rootfs/bin/soso-wm"))?),
+            ("bin/soso-mono".into(), leer(root.join("rootfs/bin/soso-mono"))?),
+        ]);
+    }
+    let elf = root.join("target/user/x86_64-soso-user/release").join(binario);
+    Ok(vec![(format!("bin/{binario}"), leer(elf)?)])
 }
 
 fn empaquetar_bin_sistema(
     nombre: &str,
     version: &str,
-    data: &[u8],
+    files: &[(String, Vec<u8>)],
 ) -> Result<(String, Vec<u8>, soso_pkg_core::Manifest), String> {
-    let (_, pack, mut man) = empaquetar::empaquetar(
-        nombre,
-        version,
-        Some(ABI_VERSION),
-        vec![(format!("bin/{nombre}"), data.to_vec())],
-    )
-    .map_err(|e| format!("{e}"))?;
+    let (_, pack, mut man) = empaquetar::empaquetar(nombre, version, Some(ABI_VERSION), files.to_vec())
+        .map_err(|e| format!("{e}"))?;
     man.destino_sistema = true;
     Ok((man.format(), pack, man))
 }

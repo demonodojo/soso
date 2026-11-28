@@ -43,39 +43,145 @@ fn mono_cliente_crear(sock: Int, w: Int, h: Int, once: Int) -> Int ! io, alloc
             else
                 slen = cw * ch * 4
                 fmt = msg_get_u32(rep, 20)
-                paso = 0
-                while paso >= 0
-                    mx = mono_paso_x(paso, cw, mono_ancho())
-                    my = mono_paso_y(paso, ch, mono_alto())
-                    fotograma = mono_fotograma(paso)
-                    if mono_golpe_activo(paso) != 0
-                        gx0 = mono_golpe_x0(mx, my, fotograma)
-                        gy0 = mono_golpe_y0(my, fotograma)
-                        gx1 = gx0 + mono_golpe_w()
-                        gy1 = gy0 + mono_golpe_h()
-                        _r = mono_romper_rect(ptr, slen, cw, 4, fmt, cw, ch, gx0, gy0, gx1, gy1, paso + 99)
-                    _d = mono_dibujar(ptr, slen, cw, 4, fmt, cw, ch, mx, my, fotograma)
-                    dx0 = mono_danio_x0(mx, my, paso, cw, ch)
-                    dy0 = mono_danio_y0(mx, my, paso, cw, ch)
-                    dx1 = mono_danio_x1(mx, my, paso, cw, ch)
-                    dy1 = mono_danio_y1(mx, my, paso, cw, ch)
-                    md = msg_nuevo()
-                    _dm = msg_encode_danio(md, dx0, dy0, dx1 - dx0, dy1 - dy0)
-                    wn = write_fd(sock, md, msg_len())
-                    if wn <= 0
-                        paso = -1
-                    rn = read_timeout_fd(sock, rep, msg_len(), 1)
-                    if rn > 0
-                        if msg_get_op(rep) == op_cerrar_wm()
-                            paso = -1
-                    if paso >= 0
-                        _s = sleep_ms(mono_frame_ms())
-                        paso = paso + 1
-                        if once != 0
-                            if paso >= 1
-                                paso = -1
+                _a = mono_animar(sock, ptr, slen, cw, ch, fmt, once)
                 _x = close_fd(sock)
                 0
+
+fn mono_danio(sock: Int, md: Int, x0: Int, y0: Int, x1: Int, y1: Int, w: Int, h: Int) -> Int ! io, alloc
+    xa = max(0, x0)
+    ya = max(0, y0)
+    xb = min(w, x1)
+    yb = min(h, y1)
+    if xb > xa
+        if yb > ya
+            _dm = msg_encode_danio(md, xa, ya, xb - xa, yb - ya)
+            return write_fd(sock, md, msg_len())
+    1
+
+# Bucle del salvapantallas sobre la superficie (que llega con el escritorio
+# capturado): la oscurece, guarda esa copia limpia y en cada fotograma
+# restaura el cuadro anterior del mono y lo pinta en el nuevo.
+fn mono_animar(sock: Int, ptr: Int, slen: Int, cw: Int, ch: Int, fmt: Int, once: Int) -> Int ! io, alloc
+    s = mono_lado(ch)
+    _o = mono_oscurecer(ptr, slen, 110)
+    limpio_own = bytes_new(slen)
+    limpio = bytes_ptr(limpio_own)
+    _c = copiar_rect(limpio, slen, cw, ptr, slen, cw, 4, fmt, 0, 0, 0, 0, cw, ch)
+    md_own = bytes_new(msg_len())
+    md = bytes_ptr(md_own)
+    rep_own = bytes_new(msg_len())
+    rep = bytes_ptr(rep_own)
+    tam = s * s * 4
+    cache_own = bytes_new(tam * mono_n_fotogramas())
+    cache = bytes_ptr(cache_own)
+    hecho_own = bytes_new(mono_n_fotogramas())
+    hecho = bytes_view_mem(bytes_ptr(hecho_own), mono_n_fotogramas())
+    k0 = 0
+    while k0 < mono_n_fotogramas()
+        _h0 = bytes_set_u8(hecho, k0, 0)
+        k0 = k0 + 1
+    semilla = mono_lcg(uptime_ms() + 7)
+    dir = 1
+    x = 0 - s
+    y = mono_suelo(ch, s, semilla)
+    fase = 0
+    pausa = -1
+    golpe = -1
+    proxima = 40 + mod_pos(semilla, 60)
+    if once != 0
+        x = mono_once_x(cw, s)
+        y = mono_once_y(ch, s)
+    ox = x
+    oy = y
+    primero = 1
+    seguir = 1
+    while seguir != 0
+        f = mono_f_andar(fase)
+        fuerza = 0
+        if once != 0
+            f = mono_f_quieto()
+        elsif golpe >= 0
+            f = mono_f_golpe_tick(golpe)
+            fuerza = mono_golpe_en(golpe)
+            golpe = golpe + 1
+            if golpe >= mono_golpe_ticks()
+                golpe = -1
+        elsif pausa >= 0
+            f = mono_f_pausa(pausa)
+            pausa = pausa + 1
+            if pausa >= mono_pausa_ticks()
+                pausa = -1
+        else
+            fase = mod_pos(fase + 1, 8)
+            x = x + dir * mono_paso_px(s)
+            proxima = proxima - 1
+            if proxima <= 0
+                # Se para sólo donde se le ve entero.
+                if x >= 0
+                    if x + s <= cw
+                        # Casi siempre a martillazos; a veces saluda.
+                        semilla = mono_lcg(semilla)
+                        if mod_pos(semilla, 10) < 7
+                            golpe = 0
+                        else
+                            pausa = 0
+                        semilla = mono_lcg(semilla)
+                        proxima = 60 + mod_pos(semilla, 100)
+            if dir > 0
+                if x > cw
+                    dir = -1
+                    semilla = mono_lcg(semilla)
+                    y = mono_suelo(ch, s, semilla)
+            else
+                if x < 0 - s
+                    dir = 1
+                    semilla = mono_lcg(semilla)
+                    y = mono_suelo(ch, s, semilla)
+        spr = bytes_view_mem(cache + f * tam, tam)
+        if bytes_get_u8(hecho, f) == 0
+            _pf = mono_pintar_fotograma(&mut spr, s, f)
+            _hf = bytes_set_u8(hecho, f, 1)
+        espejo = 0
+        if dir < 0
+            espejo = 1
+        dx0 = min(ox, x)
+        dy0 = min(oy, y)
+        dx1 = max(ox, x) + s
+        dy1 = max(oy, y) + s
+        if fuerza > 0
+            # El golpe rompe la copia limpia: la grieta se queda aunque el mono
+            # se vaya. Se pasa a la pantalla y entra en el daño.
+            k = s / mono_arte()
+            gx = mono_impacto_x(x, s, espejo)
+            gy = mono_impacto_y(y, s)
+            semilla = mono_lcg(semilla)
+            rc = mono_grieta(limpio, slen, cw, ch, fmt, gx, gy, k, semilla, fuerza) * k
+            _cg = mono_restaurar(ptr, limpio, slen, cw, ch, fmt, 2 * rc, gx - rc, gy - rc)
+            dx0 = min(dx0, gx - rc)
+            dy0 = min(dy0, gy - rc)
+            dx1 = max(dx1, gx + rc)
+            dy1 = max(dy1, gy + rc)
+        _r = mono_restaurar(ptr, limpio, slen, cw, ch, fmt, s, ox, oy)
+        _b = mono_blit(ptr, slen, cw, ch, fmt, &spr, s, x, y, espejo)
+        wn = 0
+        if primero != 0
+            wn = mono_danio(sock, md, 0, 0, cw, ch, cw, ch)
+            primero = 0
+        else
+            wn = mono_danio(sock, md, dx0, dy0, dx1, dy1, cw, ch)
+        ox = x
+        oy = y
+        if wn <= 0
+            seguir = 0
+        rn = read_timeout_fd(sock, rep, msg_len(), 1)
+        if rn > 0
+            if msg_get_op(rep) == op_cerrar_wm()
+                seguir = 0
+        if once != 0
+            seguir = 0
+        if seguir != 0
+            _s = sleep_ms(mono_frame_ms())
+    0
 
 fn mono_arg_once() -> Int ! io, alloc
     a = 1

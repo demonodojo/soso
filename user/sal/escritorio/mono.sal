@@ -1,17 +1,17 @@
 import "mate.sal"
 import "superficie.sal"
 
+# Salvapantallas: un mono de pixel art que pasea por el escritorio oscurecido,
+# se para, parpadea y saluda. El dibujo es de 32×32 y se escala por un entero
+# (cada píxel del dibujo, un bloque k×k). Cada fotograma se pasa una sola vez a
+# un sprite de s×s píxeles u32 (alfa << 24 | rgb) y luego sólo se copia. Mira
+# hacia la derecha; hacia la izquierda se pinta en espejo.
+
 fn mono_umbral_ms() -> Int
     600000
 
 fn mono_frame_ms() -> Int
-    80
-
-fn mono_ancho() -> Int
-    32
-
-fn mono_alto() -> Int
-    32
+    50
 
 fn mono_lcg(seed: Int) -> Int
     mod_pos(seed * 1103515245 + 12345, 2147483647)
@@ -25,276 +25,364 @@ fn mono_ocioso(last_ms: Int, now_ms: Int, inited: Int) -> Int
         else
             0
 
-fn mono_paso_x(paso: Int, ancho: Int, mono_w: Int) -> Int
-    if ancho <= mono_w
-        0
-    else
-        mod_pos(paso * 17 + 11, ancho - mono_w)
+# ---- sprite ------------------------------------------------------------------
+# Pixel art de 32×32, una cadena por fotograma (fila a fila). Generado y
+# retocado con scripts/mono-pixel.py; la paleta está en `mono_color`.
+# 0..3 andar, 4 quieto, 5 parpadeo, 6 y 7 saludo, 8 martillo arriba y 9
+# martillazo.
 
-fn mono_paso_y(paso: Int, alto: Int, mono_h: Int) -> Int
-    if alto <= mono_h
-        0
-    else
-        t = paso / 3
-        mod_pos(t * 23 + 7, alto - mono_h)
+fn mono_arte() -> Int
+    32
 
-fn mono_fotograma(paso: Int) -> Int
-    mod_pos(paso, 2)
+fn mono_n_fotogramas() -> Int
+    10
 
-fn mono_golpe_activo(paso: Int) -> Int
-    if mono_fotograma(paso) == 1
-        1
-    else
-        0
+fn mono_f_arriba() -> Int
+    8
 
-fn mono_cuerpo_ok(lx: Int, ly: Int) -> Int
-    ok = 0
-    if lx >= 10
-        if lx < 22
-            if ly >= 8
-                if ly < 24
-                    ok = 1
-    if lx >= 12
-        if lx < 20
-            if ly >= 4
-                if ly < 12
-                    ok = 1
-    ok
+fn mono_f_golpe() -> Int
+    9
 
-fn mono_cara_ok(lx: Int, ly: Int) -> Int
-    if lx >= 13
-        if lx < 19
-            if ly >= 5
-                if ly < 11
-                    1
-                else
-                    0
-            else
-                0
-        else
-            0
-    else
-        0
+# Dónde pega el martillo (píxel del dibujo, mirando a la derecha).
+fn mono_impacto_ax() -> Int
+    27
 
-fn mono_ojo(lx: Int, ly: Int) -> Int
-    if ly == 7
-        if lx == 14
-            1
-        elsif lx == 17
-            1
-        else
-            0
-    else
-        0
+fn mono_impacto_ay() -> Int
+    30
 
-fn mono_brazo_izq(lx: Int, ly: Int, fotograma: Int) -> Int
-    ok = 0
-    if fotograma == 0
-        if lx >= 4
-            if lx < 10
-                if ly >= 12
-                    if ly < 20
-                        ok = 1
-    if fotograma == 1
-        if lx >= 2
-            if lx < 12
-                if ly >= 6
-                    if ly < 14
-                        ok = 1
-    ok
+fn mono_f_quieto() -> Int
+    4
 
-fn mono_brazo_der(lx: Int, ly: Int, fotograma: Int) -> Int
-    ok = 0
-    if fotograma == 0
-        if lx >= 22
-            if lx < 28
-                if ly >= 14
-                    if ly < 22
-                        ok = 1
-    if fotograma == 1
-        if lx >= 24
-            if lx < 30
-                if ly >= 8
-                    if ly < 18
-                        ok = 1
-    ok
+fn mono_f_parpadeo() -> Int
+    5
 
-fn mono_pixel_rgb(lx: Int, ly: Int, fotograma: Int) -> Int
-    if lx < 0
-        0
-    elsif lx >= mono_ancho()
-        0
-    elsif ly < 0
-        0
-    elsif ly >= mono_alto()
-        0
-    elsif mono_ojo(lx, ly) != 0
-        color_rgb(20, 20, 20)
-    elsif mono_cara_ok(lx, ly) != 0
-        color_rgb(220, 180, 140)
-    elsif mono_brazo_izq(lx, ly, fotograma) != 0
-        color_rgb(120, 80, 40)
-    elsif mono_brazo_der(lx, ly, fotograma) != 0
-        color_rgb(120, 80, 40)
-    elsif mono_cuerpo_ok(lx, ly) != 0
-        color_rgb(90, 60, 30)
+fn mono_f_saludo() -> Int
+    6
+
+fn mono_f_andar(fase: Int) -> Int
+    mod_pos(fase / 2, 4)
+
+# Escala entera: el mono mide un cuarto del alto de la pantalla.
+fn mono_escala(alto: Int) -> Int
+    max(2, alto / 4 / mono_arte())
+
+fn mono_lado(alto: Int) -> Int
+    mono_arte() * mono_escala(alto)
+
+# Píxeles que avanza por tick de andar: un píxel del dibujo.
+fn mono_paso_px(s: Int) -> Int
+    s / mono_arte()
+
+fn mono_piel() -> Int
+    color_rgb(246, 208, 158)
+
+# Color (alfa << 24 | rgb) de un carácter del dibujo; 0 transparente.
+fn mono_color(c: Int) -> Int
+    if c == 107
+        (255 << 24) + color_rgb(44, 26, 18)
+    elsif c == 68
+        (255 << 24) + color_rgb(96, 54, 30)
+    elsif c == 66
+        (255 << 24) + color_rgb(140, 84, 44)
+    elsif c == 76
+        (255 << 24) + color_rgb(178, 116, 66)
+    elsif c == 83
+        (255 << 24) + color_rgb(246, 208, 158)
+    elsif c == 115
+        (255 << 24) + color_rgb(214, 166, 116)
+    elsif c == 112
+        (255 << 24) + color_rgb(230, 140, 124)
+    elsif c == 87
+        (255 << 24) + color_rgb(255, 255, 255)
+    elsif c == 71
+        (255 << 24) + color_rgb(168, 176, 190)
+    elsif c == 103
+        (255 << 24) + color_rgb(104, 110, 124)
+    elsif c == 104
+        (255 << 24) + color_rgb(196, 138, 76)
+    elsif c == 111
+        70 << 24
     else
         0
 
-fn mono_sprite_opaco(fotograma: Int) -> Int
-    n = 0
-    ly = 0
-    while ly < mono_alto()
-        lx = 0
-        while lx < mono_ancho()
-            if mono_pixel_rgb(lx, ly, fotograma) != 0
-                n = n + 1
-            lx = lx + 1
-        ly = ly + 1
-    n
-
-fn mono_sprite_cambia(f0: Int, f1: Int) -> Int
-    if mono_sprite_opaco(f0) != mono_sprite_opaco(f1)
-        1
+fn mono_datos(f: Int) -> String ! alloc
+    if f == 0
+        d"................kDk...........................kkDkkk........................kkLLBLLDkk.....................kLLBBBBBBLDk...................kLBBBBBBBBBBDk..................kLBSSBBBSSBBDk.................kLBSSSSBSSSSBBDk..............kkkLBSWWkSSWWkSBDkkk...........kLLLBBSWWkSSWWkSBBLLDk.........kLBBBBBSSSSSSSSSSSBBBBDk........kLBpBBSSSSSkSkSSSSBBpBDk........kDBpBBpSSSSSSSSSSpBBpBDk.........kDDDDSSkSSSSSSkSSDDDDk...........kkkkSSSkkkkkkSSSkkkk.............k.kDSSSSSSSSSSDk..............kkDk.kDDssssssDDk..............kBDkDk.kkLBBBBDkk...............kDkkDkkBBBBBBBDkkk.............kDk.kDDBBBBBBBBBDBDk............kDk..kDBBBBSSSSBDBDk............kDk..kDBBBSSSSSSDBDk............kDk..kBBBBSSSSSSDBDk.............kDk.kDBBBSSSSSSDBDk.............kDkkkDBBBSSSSSSDBDk..............kDDDsDBBSSSSSSDSSSk..............kkkkkDDBSSBBDkSSSk...................kkBBDBDk.kkk.....................kDDkBDk.........................kDDkBDkk.......................kssssSSSSk.......................kkkkkkkk....................oooooooooooooo........."
+    elsif f == 1
+        d"..............kkDkkk........................kkLLBLLDkk.....................kLLBBBBBBLDk...................kLBBBBBBBBBBDk..................kLBSSBBBSSBBDk.................kLBSSSSBSSSSBBDk..............kkkLBSWWkSSWWkSBDkkk...........kLLLBBSWWkSSWWkSBBLLDk.........kLBBBBBSSSSSSSSSSSBBBBDk........kLBpBBSSSSSkSkSSSSBBpBDk........kDBpBBpSSSSSSSSSSpBBpBDk.........kDDDDSSkSSSSSSkSSDDDDk...........kkkkSSSkkkkkkSSSkkkk...............kDSSSSSSSSSSDk...................kDDssssssDDk................kk...kkLBBBBDkk................kDDk.kBBBBBBBDk................kDkkDkBBBBBBBBBDkk.............kDk.kBDBBBBSSSSBDBDk............kDk.kDDBBBSSSSSSDBDk............kDk..kDBBBSSSSSsBBDk............kDk...kBBBSSSSSsBDk..............kDk..kBBBSSSSSsBDk..............kDkkkDDBBSSSSSsBDk...............kDDDkkDDBSSSSDSSSk...............kkk..kkBBDBDkSSSk....................kDDDkDBDkkk.....................kDDk.kBDk......................kDDDk.kDBDkk...................kssssk..kSSSSk...................kkkk....kkkk..................oooooooooooooo........."
+    elsif f == 2
+        d"................kDk...........................kkDkkk........................kkLLBLLDkk.....................kLLBBBBBBLDk...................kLBBBBBBBBBBDk..................kLBSSBBBSSBBDk.................kLBSSSSBSSSSBBDk..............kkkLBSWWkSSWWkSBDkkk...........kLLLBBSWWkSSWWkSBBLLDk.........kLBBBBBSSSSSSSSSSSBBBBDk........kLBpBBSSSSSkSkSSSSBBpBDk........kDBpBBpSSSSSSSSSSpBBpBDk.........kDDDDSSkSSSSSSkSSDDDDk...........kkkkSSSkkkkkkSSSkkkk.............k.kDSSSSSSSSSSDk..............kkDk.kDDssssssDDk..............kBDkDk.kkLBBBBDkk...............kDkkDkkBBBBBBBDkkk.............kDk.kDDBBBBBBBBBDBDk............kDk..kDBBBBSSSSBDBDk............kDk..kDBBBSSSSSSDBDk............kDk..kBBBBSSSSSSDBDk.............kDk.kDBBBSSSSSSDBDk.............kDkkkDBBBSSSSSSDBDk..............kDDDsDBBSSSSSSDSSSk..............kkkkkDDBSSBBDkSSSk...................kkBBDBDk.kkk.....................kDDkBDk.........................kDDkBDkk.......................kssssSSSSk.......................kkkkkkkk....................oooooooooooooo........."
+    elsif f == 3
+        d"..............kkDkkk........................kkLLBLLDkk.....................kLLBBBBBBLDk...................kLBBBBBBBBBBDk..................kLBSSBBBSSBBDk.................kLBSSSSBSSSSBBDk..............kkkLBSWWkSSWWkSBDkkk...........kLLLBBSWWkSSWWkSBBLLDk.........kLBBBBBSSSSSSSSSSSBBBBDk........kLBpBBSSSSSkSkSSSSBBpBDk........kDBpBBpSSSSSSSSSSpBBpBDk.........kDDDDSSkSSSSSSkSSDDDDk...........kkkkSSSkkkkkkSSSkkkk............kk.kDSSSSSSSSSSDk..............kDDk.kDDssssssDDk..............kDkkDk.kkLBBBBDkk...............kDkkDkkBBBBBBBDk...............kDk.kDkBBBBBBBBBDkk.............kDk..kDBBBBSSSSBDBDk............kDk.kDDBBBSSSSSSDBBDk...........kDk.kDBBBBSSSSSSBDDBDk..........kDkkDDDBBBSSSSSSDkkDBDk..........kDkDDkBBBSSSSSSDk.kBDk..........kDkssDDBBSSSSSSDk.kSSSk..........kDDDkkDDBSSSSDk..kSSSk...........kkk..kkBBBBDk....kkk..................kDDBBDk..........................kDBDk...........................kBBDk...........................kSSSSk...........................kkkk......................oooooooooooooo........."
+    elsif f == 4
+        d"................kDk...........................kkDkkk........................kkLLBLLDkk.....................kLLBBBBBBLDk...................kLBBBBBBBBBBDk..................kLBSSBBBSSBBDk.................kLBSSSSBSSSSBBDk..............kkkLBSWWkSSWWkSBDkkk...........kLLLBBSWWkSSWWkSBBLLDk.........kLBBBBBSSSSSSSSSSSBBBBDk........kLBpBBSSSSSkSkSSSSBBpBDk........kDBpBBpSSSSSSSSSSpBBpBDk.........kDDDDSSkSSSSSSkSSDDDDk...........kkkkSSSkkkkkkSSSkkkk.............k.kDSSSSSSSSSSDk..............kkDk.kDDssssssDDk..............kBDkDk.kkLBBBBDkk...............kDkkDkkBBBBBBBDkkk.............kDk.kDDBBBBBBBBBDBDk............kDk..kDBBBBSSSSBDBDk............kDk..kDBBBSSSSSSDBDk............kDk..kBBBBSSSSSSDBDk.............kDk.kDBBBSSSSSSDBDk.............kDkkkDBBBSSSSSSDBDk..............kDDDsDBBSSSSSSDSSSk..............kkkkkDDBSSBBDkSSSk...................kkBBDBDk.kkk.....................kDDkBDk.........................kDDkBDkk.......................kssssSSSSk.......................kkkkkkkk....................oooooooooooooo........."
+    elsif f == 5
+        d"................kDk...........................kkDkkk........................kkLLBLLDkk.....................kLLBBBBBBLDk...................kLBBBBBBBBBBDk..................kLBSSBBBSSBBDk.................kLBSSSSBSSSSBBDk..............kkkLBSSSSSSSSSSBDkkk...........kLLLBBkkkSSSkkkSBBLLDk.........kLBBBBBSSSSSSSSSSSBBBBDk........kLBpBBSSSSSkSkSSSSBBpBDk........kDBpBBpSSSSSSSSSSpBBpBDk.........kDDDDSSkSSSSSSkSSDDDDk...........kkkkSSSkkkkkkSSSkkkk.............k.kDSSSSSSSSSSDk..............kkDk.kDDssssssDDk..............kBDkDk.kkLBBBBDkk...............kDkkDkkBBBBBBBDkkk.............kDk.kDDBBBBBBBBBDBDk............kDk..kDBBBBSSSSBDBDk............kDk..kDBBBSSSSSSDBDk............kDk..kBBBBSSSSSSDBDk.............kDk.kDBBBSSSSSSDBDk.............kDkkkDBBBSSSSSSDBDk..............kDDDsDBBSSSSSSDSSSk..............kkkkkDDBSSBBDkSSSk...................kkBBDBDk.kkk.....................kDDkBDk.........................kDDkBDkk.......................kssssSSSSk.......................kkkkkkkk....................oooooooooooooo........."
+    elsif f == 6
+        d"................kDk...........................kkDkkk........................kkLLBLLDkk.....................kLLBBBBBBLDk...................kLBBBBBBBBBBDk..................kLBSSBBBSSBBDk.................kLBSSSSBSSSSBBDk..............kkkLBSWWkSSWWkSBDkkk...........kLLLBBSWWkSSWWkSBBLLDk.........kLBBBBBSSSSSSSSSSSBBBBDk........kLBpBBSSSSSkSkSSSSBBpBDkk.......kDBpBBpSSSSSSSSSSpBBpDSSSk.......kDDDDSSkSSSSSSkSSDDDDSSSk........kkkkSSSkkkkkkSSSkkkkBDk..........k.kDSSSSSSSSSSDk.kBBDk........kkDk.kDDssssssDDk.kkBDk........kBDkDk.kkLBBBBDkk.kBBBDk........kDkkDkkBBBBBBBDkkkBBDDk........kDk.kDDBBBBBBBBBDBBBDkk.........kDk..kDBBBBSSSSBDDDDk...........kDk..kDBBBSSSSSSDkkk............kDk..kBBBBSSSSSSBDk..............kDk.kDBBBSSSSSSDk...............kDkkkDBBBSSSSSSDk................kDDDsDBBSSSSSSDk.................kkkkkDDBSSBBDk.......................kkBBDBDk.........................kDDkBDk.........................kDDkBDkk.......................kssssSSSSk.......................kkkkkkkk....................oooooooooooooo........."
+    elsif f == 7
+        d"................kDk...........................kkDkkk........................kkLLBLLDkk.....................kLLBBBBBBLDk...................kLBBBBBBBBBBDk..................kLBSSBBBSSBBDk.................kLBSSSSBSSSSBBDk..............kkkLBSWWkSSWWkSBDkkk...........kLLLBBSWWkSSWWkSBBLLDk.........kLBBBBBSSSSSSSSSSSBBDDDk........kLBpBBSSSSSkSkSSSSBDSSSk........kDBpBBpSSSSSSSSSSpBDSSSk.........kDDDDSSkSSSSSSkSSDDBDk...........kkkkSSSkkkkkkSSSkkBDk............k.kDSSSSSSSSSSDkBBDk..........kkDk.kDDssssssDDkkBDk..........kBDkDk.kkLBBBBDkkkBBDk..........kDkkDkkBBBBBBBDkkBBDk..........kDk.kDDBBBBBBBBBDBBDk...........kDk..kDBBBBSSSSBDDDk............kDk..kDBBBSSSSSSDkk.............kDk..kBBBBSSSSSSBDk..............kDk.kDBBBSSSSSSDk...............kDkkkDBBBSSSSSSDk................kDDDsDBBSSSSSSDk.................kkkkkDDBSSBBDk.......................kkBBDBDk.........................kDDkBDk.........................kDDkBDkk.......................kssssSSSSk.......................kkkkkkkk....................oooooooooooooo........."
+    elsif f == 8
+        d"................kDk.....kkkkkkk...............kkDkkk...kGGGGGGGk............kkLLBLLDkk.kGGGGGGGk...........kLLBBBBBBLDkkgggggggk..........kLBBBBBBBBBBDkkkkhkkk...........kLBSSBBBSSBBDk..khk............kLBSSSSBSSSSBBDk.khk..........kkkLBSWWkSSWWkSBDkkkhk.........kLLLBBSWWkSSWWkSBBLLDhk........kLBBBBBSSSSSSSSSSSBBDSSSk.......kLBpBBSSSSSkSkSSSSBBpSSSk.......kDBpBBpSSSSSSSSSSpBBpBDk.........kDDDDSSkSSSSSSkSSDDDBDk..........kkkkSSSkkkkkkSSSkkkBDk...........k.kDSSSSSSSSSSDkkBBDk.........kkDk.kDDssssssDDkkkBDk.........kBDkDk.kkLBBBBDkkkBBBDk.........kDkkDkkBBBBBBBDkkBBDDk.........kDk.kDDBBBBBBBBBDBBDkk..........kDk..kDBBBBSSSSBDDDk............kDk.kDDBBBSSSSSSDkk.............kDk.kDBBBBSSSSSSBDk..............kDkkDDBBBSSSSSSDk...............kDkkssBBBSSSSSSDk................kDDDkDBBSSSSSSDk.................kkk.kDDBSSBBDk.......................kkBBDBDk.........................kDDkBDk.........................kDDkBDkk.......................kssssSSSSk.......................kkkkkkkk....................oooooooooooooo........."
     else
-        ly = 0
-        dif = 0
-        while ly < mono_alto()
-            if dif == 0
-                lx = 0
-                while lx < mono_ancho()
-                    if dif == 0
-                        a = mono_pixel_rgb(lx, ly, f0)
-                        b = mono_pixel_rgb(lx, ly, f1)
-                        if a != b
-                            dif = 1
-                    lx = lx + 1
-            ly = ly + 1
-        dif
+        d"................kDk...........................kkDkkk........................kkLLBLLDkk.....................kLLBBBBBBLDk...................kLBBBBBBBBBBDk..................kLBSSBBBSSBBDk.................kLBSSSSBSSSSBBDk..............kkkLBSSSSSSSSSSBDkkk...........kLLLBBkkkSSSkkkSBBLLDk.........kLBBBBBSSSSSSSSSSSBBBBDk........kLBpBBSSSSSkSkSSSSBBpBDk........kDBpBBpSSSSSSSSSSpBBpBDk.........kDDDDSSkSSSSSSkSSDDDDk...........kkkkSSSkkkkkkSSSkkkk.............k.kDSSSSSSSSSSDk..............kkDk.kDDssssssDDk..............kBDkDk.kkLBBBBDkk...............kDkkDkkBBBBBBBDkkk.............kDk.kDDBBBBBBBBBDBDkk...........kDk..kDBBBBSSSSBDDBBDk..........kDk...kBBBSSSSSSDkDDBDk.........kDk..kDBBBSSSSSSBDkkDBDk.........kDk..kBBBSSSSSSDk..kBDkk........kDkkkDBBBSSSSSSDk..kDSSSk........kDDDkDBBSSSSSSDk...kSSSk.........kkk.kDDBSSBBDk.....khk..W............kkBBDBDk..W.kkkhkkk..............kDDkBDk...kGGGGGGGk.............kDDkBDkk..kGGGGGGGk............kssssSSSSk.kgggggggk.............kkkkkkkk.W.kkkkkkk..........ooooooooooooo.........."
 
-fn mono_golpe_x0(mx: Int, my: Int, fotograma: Int) -> Int
-    if fotograma == 1
-        mx + 22
-    else
-        mx + 8
-
-fn mono_golpe_y0(my: Int, fotograma: Int) -> Int
-    if fotograma == 1
-        my + 10
-    else
-        my + 14
-
-fn mono_golpe_w() -> Int
-    28
-
-fn mono_golpe_h() -> Int
-    24
-
-fn mono_romper_rect(ptr: Int, len: Int, stride: Int, bpp: Int, fmt: Int, w: Int, h: Int, x0: Int, y0: Int, x1: Int, y1: Int, seed: Int) -> Int ! alloc
-    ya = max(0, y0)
-    yb = min(h, y1)
-    xa = max(0, x0)
-    xb = min(w, x1)
-    if xb <= xa
-        0
-    else
-        if yb <= ya
-            0
-        else
-            s = seed
-            y = ya
-            while y < yb
-                x = xa
-                while x < xb
-                    s = mono_lcg(s + x * 3 + y * 5)
-                    v = mod_pos(s, 4)
-                    px = pixel_leer(ptr, len, stride, bpp, fmt, x, y)
-                    px = mezclar_rgb(color_rgb(0, 0, 0), px, 80 + v * 20)
-                    if v == 1
-                        nx = x + 2
-                        ny = y + 1
-                        if nx >= 0
-                            if nx < w
-                                if ny >= 0
-                                    if ny < h
-                                        p2 = pixel_leer(ptr, len, stride, bpp, fmt, nx, ny)
-                                        _w = pixel_escribir(ptr, len, stride, bpp, fmt, nx, ny, px)
-                                        px = p2
-                    if v == 2
-                        px = mezclar_rgb(color_rgb(40, 30, 20), px, 140)
-                    _p = pixel_escribir(ptr, len, stride, bpp, fmt, x, y, px)
-                    x = x + 1
-                y = y + 1
-            0
-
-fn mono_dibujar(ptr: Int, len: Int, stride: Int, bpp: Int, fmt: Int, w: Int, h: Int, mx: Int, my: Int, fotograma: Int) -> Int ! alloc
-    ly = 0
-    while ly < mono_alto()
-        lx = 0
-        while lx < mono_ancho()
-            col = mono_pixel_rgb(lx, ly, fotograma)
-            if col != 0
-                px = mx + lx
-                py = my + ly
-                if px >= 0
-                    if py >= 0
-                        if px < w
-                            if py < h
-                                _p = pixel_escribir(ptr, len, stride, bpp, fmt, px, py, col)
-            lx = lx + 1
-        ly = ly + 1
+# Pinta el fotograma `f` en el sprite `b` (s×s): cada píxel del dibujo es un
+# bloque de k×k, sin suavizar.
+fn mono_pintar_fotograma(b: &mut Bytes, s: Int, f: Int) -> Int ! alloc
+    a = mono_arte()
+    k = s / a
+    datos = mono_datos(f)
+    y = 0
+    while y < s
+        ay = y / k
+        x = 0
+        while x < s
+            v = mono_color(str_char(datos, ay * a + x / k))
+            _w = bytes_set_u32(b, (y * s + x) * 4, v)
+            x = x + 1
+        y = y + 1
     0
 
-fn mono_danio_x0(mx: Int, my: Int, paso: Int, w: Int, h: Int) -> Int ! alloc
-    fotograma = mono_fotograma(paso)
-    x0 = mono_golpe_x0(mx, my, fotograma)
-    y0 = mono_golpe_y0(my, fotograma)
-    x1 = x0 + mono_golpe_w()
-    y1 = y0 + mono_golpe_h()
-    gx0 = mx
-    if x0 < gx0
-        gx0 = x0
-    gy0 = my
-    if y0 < gy0
-        gy0 = y0
-    if gx0 < 0
-        gx0 = 0
-    if gy0 < 0
-        gy0 = 0
-    gx0
+# ---- pintar en la pantalla ----------------------------------------------------
 
-fn mono_danio_y0(mx: Int, my: Int, paso: Int, w: Int, h: Int) -> Int ! alloc
-    fotograma = mono_fotograma(paso)
-    x0 = mono_golpe_x0(mx, my, fotograma)
-    y0 = mono_golpe_y0(my, fotograma)
-    gy0 = my
-    if y0 < gy0
-        gy0 = y0
-    if gy0 < 0
-        gy0 = 0
-    gy0
+# Píxel rgb → u32 en memoria del framebuffer (fmt 1 BGR: [b,g,r,255]).
+fn mono_px_mem(rgb: Int, fmt: Int) -> Int
+    if fmt == fmt_bgr()
+        (255 << 24) + rgb
+    else
+        (255 << 24) + ((rgb & 255) << 16) + (rgb & 65280) + ((rgb >> 16) & 255)
 
-fn mono_danio_x1(mx: Int, my: Int, paso: Int, w: Int, h: Int) -> Int ! alloc
-    fotograma = mono_fotograma(paso)
-    x0 = mono_golpe_x0(mx, my, fotograma)
-    y0 = mono_golpe_y0(my, fotograma)
-    x1 = x0 + mono_golpe_w()
-    y1 = y0 + mono_golpe_h()
-    gx1 = mx + mono_ancho()
-    if x1 > gx1
-        gx1 = x1
-    if gx1 > w
-        gx1 = w
-    gx1
+fn mono_px_rgb(v: Int, fmt: Int) -> Int
+    if fmt == fmt_bgr()
+        v & 16777215
+    else
+        ((v & 255) << 16) + (v & 65280) + ((v >> 16) & 255)
 
-fn mono_danio_y1(mx: Int, my: Int, paso: Int, w: Int, h: Int) -> Int ! alloc
-    fotograma = mono_fotograma(paso)
-    x0 = mono_golpe_x0(mx, my, fotograma)
-    y0 = mono_golpe_y0(my, fotograma)
-    y1 = y0 + mono_golpe_h()
-    gy1 = my + mono_alto()
-    if y1 > gy1
-        gy1 = y1
-    if gy1 > h
-        gy1 = h
-    gy1
+# Oscurece toda la superficie (el escritorio queda detrás, en penumbra).
+fn mono_oscurecer(ptr: Int, len: Int, k: Int) -> Int ! alloc
+    b = bytes_view_mem(ptr, len)
+    i = 0
+    while i + 4 <= len
+        v = bytes_get_u32(b, i)
+        r = (((v >> 16) & 255) * k) >> 8
+        g = (((v >> 8) & 255) * k) >> 8
+        bl = ((v & 255) * k) >> 8
+        _w = bytes_set_u32(b, i, (255 << 24) + (r << 16) + (g << 8) + bl)
+        i = i + 4
+    0
+
+# Copia el sprite en (x, y) de la superficie dw×dh, mezclando los bordes.
+fn mono_blit(dptr: Int, dlen: Int, dw: Int, dh: Int, fmt: Int, spr: &Bytes, s: Int, x: Int, y: Int, espejo: Int) -> Int ! alloc
+    d = bytes_view_mem(dptr, dlen)
+    ya = max(0, 0 - y)
+    yb = min(s, dh - y)
+    xa = max(0, 0 - x)
+    xb = min(s, dw - x)
+    sy = ya
+    while sy < yb
+        fila = (y + sy) * dw
+        sx = xa
+        while sx < xb
+            fx = sx
+            if espejo != 0
+                fx = s - 1 - sx
+            v = bytes_get_u32(spr, (sy * s + fx) * 4)
+            a = (v >> 24) & 255
+            if a > 0
+                o = (fila + x + sx) * 4
+                rgb = v & 16777215
+                if a < 255
+                    rgb = mezclar_rgb(rgb, mono_px_rgb(bytes_get_u32(d, o), fmt), a)
+                _w = bytes_set_u32(d, o, mono_px_mem(rgb, fmt))
+            sx = sx + 1
+        sy = sy + 1
+    0
+
+# Restaura desde `limpio` el cuadro s×s en (x, y), recortado a la superficie.
+fn mono_restaurar(dptr: Int, limpio: Int, len: Int, dw: Int, dh: Int, fmt: Int, s: Int, x: Int, y: Int) -> Int ! alloc
+    xa = max(0, x)
+    ya = max(0, y)
+    xb = min(dw, x + s)
+    yb = min(dh, y + s)
+    if xb > xa
+        if yb > ya
+            _c = copiar_rect(dptr, len, dw, limpio, len, dw, 4, fmt, xa, ya, xa, ya, xb - xa, yb - ya)
+    0
+
+# Posición del mono en `--once` (la prueba del WM mira un píxel de la barriga).
+fn mono_once_x(w: Int, s: Int) -> Int
+    w / 2 - s / 2
+
+fn mono_once_y(h: Int, s: Int) -> Int
+    h - s - h / 30
+
+# Centro del píxel (16, 22) del dibujo: la barriga.
+fn mono_prueba_dx(s: Int) -> Int
+    16 * (s / mono_arte()) + s / mono_arte() / 2
+
+fn mono_prueba_dy(s: Int) -> Int
+    22 * (s / mono_arte()) + s / mono_arte() / 2
+
+# Altura (y de arriba del sprite) por la que cruza la pantalla.
+fn mono_suelo(h: Int, s: Int, semilla: Int) -> Int
+    lo = h * 40 / 100
+    hi = max(lo + 1, h - s - h / 30)
+    lo + mod_pos(semilla, hi - lo)
+
+# Fotograma de la pausa en el tick `k` (parpadea, saluda y sigue).
+fn mono_pausa_ticks() -> Int
+    56
+
+fn mono_f_pausa(k: Int) -> Int
+    if k < 10
+        mono_f_quieto()
+    elsif k < 13
+        mono_f_parpadeo()
+    elsif k < 20
+        mono_f_quieto()
+    elsif k < 44
+        mono_f_saludo() + mod_pos(k / 3, 2)
+    elsif k < 47
+        mono_f_parpadeo()
+    else
+        mono_f_quieto()
+
+# ---- martillazos ---------------------------------------------------------------
+# Tres golpes seguidos: martillo arriba 4 ticks, abajo 3; pega al bajar.
+
+fn mono_golpe_ticks() -> Int
+    21
+
+fn mono_f_golpe_tick(k: Int) -> Int
+    if mod_pos(k, 7) < 4
+        mono_f_arriba()
+    else
+        mono_f_golpe()
+
+# Número de golpe (1..3) si en el tick `k` baja el martillo; 0 si no.
+fn mono_golpe_en(k: Int) -> Int
+    if mod_pos(k, 7) == 4
+        k / 7 + 1
+    else
+        0
+
+# Punto de la pantalla donde pega, con el mono en (x, y) y lado s.
+fn mono_impacto_x(x: Int, s: Int, espejo: Int) -> Int
+    k = s / mono_arte()
+    ax = mono_impacto_ax()
+    if espejo != 0
+        ax = mono_arte() - 1 - ax
+    x + ax * k + k / 2
+
+fn mono_impacto_y(y: Int, s: Int) -> Int
+    k = s / mono_arte()
+    y + mono_impacto_ay() * k + k / 2
+
+fn mono_dir_dx(d: Int) -> Int
+    if d == 0
+        1
+    elsif d == 1
+        1
+    elsif d == 2
+        0
+    elsif d == 3
+        -1
+    elsif d == 4
+        -1
+    elsif d == 5
+        -1
+    elsif d == 6
+        0
+    else
+        1
+
+fn mono_dir_dy(d: Int) -> Int
+    if d == 0
+        0
+    elsif d == 1
+        1
+    elsif d == 2
+        1
+    elsif d == 3
+        1
+    elsif d == 4
+        0
+    elsif d == 5
+        -1
+    elsif d == 6
+        -1
+    else
+        -1
+
+# Celda (gx, gy) de k×k píxeles.
+fn mono_celda(ptr: Int, len: Int, w: Int, h: Int, fmt: Int, k: Int, gx: Int, gy: Int, rgb: Int) -> Int ! alloc
+    rellenar_rect(ptr, len, w, h, w, 4, fmt, gx * k, gy * k, gx * k + k, gy * k + k, rgb)
+
+fn mono_celda_alfa(ptr: Int, len: Int, w: Int, h: Int, fmt: Int, k: Int, gx: Int, gy: Int, rgb: Int, alfa: Int) -> Int ! alloc
+    rellenar_rect_alfa(ptr, len, w, h, w, 4, fmt, gx * k, gy * k, gx * k + k, gy * k + k, rgb, alfa)
+
+# Una rama de grieta desde la celda (gx, gy): avanza torciendo al azar, con un
+# filo claro al lado de cada celda rota. Devuelve la semilla.
+fn mono_rama(ptr: Int, len: Int, w: Int, h: Int, fmt: Int, k: Int, gx0: Int, gy0: Int, d0: Int, largo: Int, semilla: Int, hijas: Int) -> Int ! alloc
+    sem = semilla
+    d = d0
+    gx = gx0
+    gy = gy0
+    i = 0
+    while i < largo
+        sem = mono_lcg(sem)
+        t = mod_pos(sem, 10)
+        if t < 2
+            d = mod_pos(d + 1, 8)
+        elsif t < 4
+            d = mod_pos(d + 7, 8)
+        gx = gx + mono_dir_dx(d)
+        gy = gy + mono_dir_dy(d)
+        _l = mono_celda_alfa(ptr, len, w, h, fmt, k, gx - mono_dir_dy(d), gy + mono_dir_dx(d), color_rgb(235, 240, 250), 70)
+        _o = mono_celda(ptr, len, w, h, fmt, k, gx, gy, color_rgb(12, 12, 16))
+        if t == 9
+            if hijas > 0
+                sem = mono_rama(ptr, len, w, h, fmt, k, gx, gy, mod_pos(d + 2, 8), largo / 2, sem, hijas - 1)
+        i = i + 1
+    sem
+
+# Rompe la pantalla en (cx, cy): agujero, grietas y trozos desplazados. Cuanto
+# más `fuerza` (1..3), más grande. Devuelve el radio en celdas que pudo tocar.
+fn mono_grieta(ptr: Int, len: Int, w: Int, h: Int, fmt: Int, cx: Int, cy: Int, k: Int, semilla: Int, fuerza: Int) -> Int ! alloc
+    gx = cx / k
+    gy = cy / k
+    sem = mono_lcg(semilla + gx * 31 + gy * 17)
+    # Trozos sueltos alrededor: celdas que se corren una posición.
+    j = 0
+    while j < 3 + fuerza * 2
+        sem = mono_lcg(sem)
+        ox = gx + mod_pos(sem, 7) - 3
+        sem = mono_lcg(sem)
+        oy = gy + mod_pos(sem, 5) - 3
+        # `copiar_rect` no recorta: sólo trozos enteros dentro de la pantalla.
+        if ox >= 0
+            if oy >= 0
+                if ox * k + 2 * k <= w
+                    if oy * k + k <= h
+                        _c = copiar_rect(ptr, len, w, ptr, len, w, 4, fmt, ox * k + k, oy * k, ox * k, oy * k, k, k)
+        _s = mono_celda_alfa(ptr, len, w, h, fmt, k, ox, oy, color_rgb(0, 0, 0), 90)
+        j = j + 1
+    # Ramas.
+    r = 0
+    n = 3 + fuerza * 2
+    while r < n
+        sem = mono_lcg(sem)
+        d = mod_pos(sem, 8)
+        sem = mono_lcg(sem)
+        largo = 3 + mod_pos(sem, 3 + 3 * fuerza)
+        sem = mono_rama(ptr, len, w, h, fmt, k, gx, gy, d, largo, sem, 1)
+        r = r + 1
+    # Agujero del golpe.
+    a = 0
+    while a < fuerza
+        _h1 = mono_celda(ptr, len, w, h, fmt, k, gx - a, gy, color_rgb(6, 6, 8))
+        _h2 = mono_celda(ptr, len, w, h, fmt, k, gx + a, gy, color_rgb(6, 6, 8))
+        _h3 = mono_celda(ptr, len, w, h, fmt, k, gx, gy - a, color_rgb(6, 6, 8))
+        a = a + 1
+    6 + 6 * fuerza + 3

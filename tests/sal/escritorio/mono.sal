@@ -1,27 +1,126 @@
 import "../../../user/sal/escritorio/mono.sal"
 
+# Rasteriza el fotograma `f` a lado `s` y devuelve el píxel (sx, sy) del sprite.
+fn sprite_px(s: Int, f: Int, sx: Int, sy: Int) -> Int ! alloc
+    own = bytes_new(s * s * 4)
+    b = bytes_view_mem(bytes_ptr(own), s * s * 4)
+    _p = mono_pintar_fotograma(&mut b, s, f)
+    bytes_get_u32(b, (sy * s + sx) * 4)
+
+# Dos fotogramas del ciclo de andar son distintos.
+fn fotogramas_distintos(s: Int, f0: Int, f1: Int) -> Int ! alloc
+    n = s * s * 4
+    a_own = bytes_new(n)
+    b_own = bytes_new(n)
+    a = bytes_view_mem(bytes_ptr(a_own), n)
+    b = bytes_view_mem(bytes_ptr(b_own), n)
+    _p0 = mono_pintar_fotograma(&mut a, s, f0)
+    _p1 = mono_pintar_fotograma(&mut b, s, f1)
+    dif = 0
+    i = 0
+    while i < n
+        if bytes_get_u32(a, i) != bytes_get_u32(b, i)
+            dif = dif + 1
+        i = i + 4
+    dif
+
+# Pintar, restaurar y volver a pintar en otro sitio no deja rastro.
+fn sin_rastro() -> Int ! alloc
+    w = 300
+    h = 200
+    len = w * h * 4
+    pant_own = bytes_new(len)
+    limpio_own = bytes_new(len)
+    pant = bytes_ptr(pant_own)
+    limpio = bytes_ptr(limpio_own)
+    fondo = color_rgb(10, 20, 30)
+    _f = rellenar_rect(pant, len, w, h, w, 4, fmt_bgr(), 0, 0, w, h, fondo)
+    _c = copiar_rect(limpio, len, w, pant, len, w, 4, fmt_bgr(), 0, 0, 0, 0, w, h)
+    s = 100
+    spr_own = bytes_new(s * s * 4)
+    spr = bytes_view_mem(bytes_ptr(spr_own), s * s * 4)
+    _p = mono_pintar_fotograma(&mut spr, s, mono_f_quieto())
+    _b1 = mono_blit(pant, len, w, h, fmt_bgr(), &spr, s, -20, 30, 0)
+    _r = mono_restaurar(pant, limpio, len, w, h, fmt_bgr(), s, -20, 30)
+    _b2 = mono_blit(pant, len, w, h, fmt_bgr(), &spr, s, 180, 90, 1)
+    if pixel_leer(pant, len, w, 4, fmt_bgr(), 30, 30 + mono_prueba_dy(s)) != fondo
+        1
+    elsif pixel_leer(pant, len, w, 4, fmt_bgr(), 180 + s - 1 - mono_prueba_dx(s), 90 + mono_prueba_dy(s)) != mono_piel()
+        2
+    else
+        0
+
+# Un golpe rompe alrededor del impacto y no toca lo lejano.
+fn grieta_ok() -> Int ! alloc
+    w = 400
+    h = 300
+    len = w * h * 4
+    own = bytes_new(len)
+    p = bytes_ptr(own)
+    fondo = color_rgb(90, 120, 160)
+    _f = rellenar_rect(p, len, w, h, w, 4, fmt_bgr(), 0, 0, w, h, fondo)
+    r = mono_grieta(p, len, w, h, fmt_bgr(), 200, 150, 4, 12345, 3)
+    cambiados = 0
+    y = 150 - 40
+    while y < 150 + 40
+        x = 200 - 40
+        while x < 200 + 40
+            if pixel_leer(p, len, w, 4, fmt_bgr(), x, y) != fondo
+                cambiados = cambiados + 1
+            x = x + 1
+        y = y + 1
+    if pixel_leer(p, len, w, 4, fmt_bgr(), 200, 150) == fondo
+        1
+    elsif cambiados < 200
+        2
+    elsif pixel_leer(p, len, w, 4, fmt_bgr(), 5, 5) != fondo
+        3
+    elsif r * 4 > 150
+        4
+    elsif mono_grieta(p, len, w, h, fmt_bgr(), 1, 1, 4, 777, 3) < 0
+        5
+    elsif mono_grieta(p, len, w, h, fmt_bgr(), w - 2, h - 2, 4, 778, 3) < 0
+        6
+    else
+        0
+
 fn main() -> Int ! alloc
+    s = 96
     if mono_umbral_ms() != 600000
         1
     elsif mono_ocioso(1000, 1000 + 599999, 1) != 0
         2
     elsif mono_ocioso(1000, 1000 + 600000, 1) == 0
         3
-    elsif mono_sprite_opaco(0) == 0
+    elsif mono_lado(1080) != 256
         4
-    elsif mono_sprite_cambia(0, 1) == 0
+    elsif mono_lado(480) != 96
         5
+    elsif str_len(mono_datos(7)) != 1024
+        6
+    elsif sprite_px(s, mono_f_quieto(), mono_prueba_dx(s), mono_prueba_dy(s)) != (255 << 24) + mono_piel()
+        7
+    elsif sprite_px(s, mono_f_quieto(), 0, 0) != 0
+        8
+    elsif fotogramas_distintos(s, 0, 1) == 0
+        9
+    elsif fotogramas_distintos(s, mono_f_quieto(), mono_f_parpadeo()) == 0
+        10
+    elsif fotogramas_distintos(s, mono_f_saludo(), mono_f_saludo() + 1) == 0
+        11
+    elsif sin_rastro() != 0
+        20 + sin_rastro()
+    elsif str_len(mono_datos(mono_f_golpe())) != 1024
+        12
+    elsif fotogramas_distintos(s, mono_f_arriba(), mono_f_golpe()) == 0
+        13
+    elsif mono_golpe_en(4) != 1
+        14
+    elsif mono_golpe_en(18) != 3
+        15
+    elsif mono_golpe_en(5) != 0
+        16
+    elsif grieta_ok() != 0
+        30 + grieta_ok()
     else
-        buf = bytes_new(4 * 4 * 4)
-        ptr = bytes_ptr(buf)
-        _f = rellenar_rect(ptr, 64, 4, 4, 4, 4, fmt_bgr(), 0, 0, 4, 4, color_rgb(100, 120, 140))
-        px0 = pixel_leer(ptr, 64, 4, 4, fmt_bgr(), 1, 1)
-        px3 = pixel_leer(ptr, 64, 4, 4, fmt_bgr(), 3, 3)
-        _r = mono_romper_rect(ptr, 64, 4, 4, fmt_bgr(), 4, 4, 0, 0, 2, 2, 42)
-        px1 = pixel_leer(ptr, 64, 4, 4, fmt_bgr(), 1, 1)
-        if px0 == px1
-            6
-        elsif px3 != px0
-            7
-        else
-            0
+        0
